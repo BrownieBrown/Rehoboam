@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  rehoboam:
+    build: .
+    container_name: rehoboam-trading-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount .env for easy credential updates without rebuilding
+      - ./.env:/app/.env:ro
+      # Persist logs
+      - ./logs:/var/log/rehoboam
+    environment:
+      - TZ=Europe/Berlin  # Set your timezone
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-off service for manual trading runs
+  manual:
+    build: .
+    container_name: rehoboam-manual
+    env_file:
+      - .env
+    volumes:
+      - ./.env:/app/.env:ro
+    profiles:
+      - manual
+    entrypoint: ["/usr/local/bin/rehoboam"]
+    # Usage: docker-compose run manual analyze
+    #        docker-compose run manual trade --max 3
