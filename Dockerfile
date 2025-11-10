@@ -4,12 +4,6 @@ FROM python:3.14-slim
 # Set working directory
 WORKDIR /app
 
-# Install cron and other dependencies
-RUN apt-get update && \
-    apt-get install -y cron && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
 # Copy project files
 COPY pyproject.toml ./
 COPY README.md ./
@@ -18,24 +12,11 @@ COPY rehoboam/ ./rehoboam/
 # Install the bot
 RUN pip install --no-cache-dir -e .
 
-# Create log directory
-RUN mkdir -p /var/log/rehoboam
+# Create log directory (daemon writes to ~/.rehoboam/logs)
+RUN mkdir -p /root/.rehoboam/logs
 
-# Copy cron configuration
-COPY docker/crontab /etc/cron.d/rehoboam-cron
+# Set the entrypoint to rehoboam CLI
+ENTRYPOINT ["/usr/local/bin/rehoboam"]
 
-# Give execution rights on the cron job
-RUN chmod 0644 /etc/cron.d/rehoboam-cron
-
-# Apply cron job
-RUN crontab /etc/cron.d/rehoboam-cron
-
-# Create the log file to be able to run tail
-RUN touch /var/log/rehoboam/trade.log
-
-# Copy entrypoint script
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Run the command on container startup
-ENTRYPOINT ["/entrypoint.sh"]
+# Default command (can be overridden in docker-compose.yml)
+CMD ["daemon", "--help"]

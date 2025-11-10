@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rehoboam.trading</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_USERNAME/dev/rehoboam/venv/bin/python</string>
+        <string>-m</string>
+        <string>rehoboam.scheduler</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/dev/rehoboam</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/dev/rehoboam/venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/.rehoboam/logs/daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/.rehoboam/logs/daemon-error.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+</dict>
+</plist>
+
+<!-- Installation:
+1. Edit this file with your actual paths
+2. cp setup/com.rehoboam.trading.plist ~/Library/LaunchAgents/
+3. launchctl load ~/Library/LaunchAgents/com.rehoboam.trading.plist
+4. launchctl start com.rehoboam.trading
+
+View logs:
+tail -f ~/.rehoboam/logs/daemon.log
+
+Stop:
+launchctl stop com.rehoboam.trading
+launchctl unload ~/Library/LaunchAgents/com.rehoboam.trading.plist
+-->

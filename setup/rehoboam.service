@@ -1,0 +1,37 @@
+# Systemd service for Rehoboam automated trading (Linux)
+# Installation:
+# 1. Edit this file with your paths and settings
+# 2. sudo cp setup/rehoboam.service /etc/systemd/system/
+# 3. sudo systemctl daemon-reload
+# 4. sudo systemctl enable rehoboam
+# 5. sudo systemctl start rehoboam
+# 6. sudo systemctl status rehoboam
+#
+# View logs: sudo journalctl -u rehoboam -f
+
+[Unit]
+Description=Rehoboam KICKBASE Automated Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/rehoboam
+Environment="PATH=/path/to/rehoboam/venv/bin"
+
+# Run daemon with default settings
+ExecStart=/path/to/rehoboam/venv/bin/python -m rehoboam.scheduler
+
+# Adjust these for your preferences:
+# ExecStart=/path/to/rehoboam/venv/bin/rehoboam daemon --interval 120 --start-hour 8 --end-hour 22 --max-trades 3 --max-spend 50000000
+
+# Restart on failure
+Restart=on-failure
+RestartSec=300
+
+# Logging
+StandardOutput=append:/var/log/rehoboam.log
+StandardError=append:/var/log/rehoboam-error.log
+
+[Install]
+WantedBy=multi-user.target

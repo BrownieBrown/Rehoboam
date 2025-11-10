@@ -1,8 +1,10 @@
 """Configuration management for Rehoboam"""
 
 from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 # Find .env file - look in current directory first, then in home directory
 def find_env_file() -> Path:
@@ -48,6 +50,10 @@ class Settings(BaseSettings):
         default=10.0,
         description="Minimum market value increase to consider buying",
     )
+    min_value_score_to_buy: float = Field(
+        default=40.0,
+        description="Minimum value score (0-100) to consider buying a player",
+    )
 
     # Budget Management
     max_player_cost: int = Field(
@@ -58,19 +64,31 @@ class Settings(BaseSettings):
         default=1_000_000,
         description="Always keep this much in reserve",
     )
+    max_debt_pct_of_team_value: float = Field(
+        default=60.0,
+        description="Maximum debt allowed as % of team value (can go negative up to this)",
+    )
 
     # Squad Management Safeguards
     min_squad_size: int = Field(
-        default=11,
-        description="Minimum squad size to maintain (must be able to field a lineup)",
+        default=10,
+        description="Minimum squad size to maintain on match day (enforced only within 2 days of next match)",
     )
     never_sell_starters: bool = Field(
+        default=False,
+        description="DEPRECATED - Bot now recommends sales based on value, not lineup position",
+    )
+    allow_starter_upgrades: bool = Field(
         default=True,
-        description="Never sell players in your current starting eleven",
+        description="DEPRECATED - Bot always recommends sales to improve team value",
+    )
+    min_upgrade_value_score_diff: float = Field(
+        default=15.0,
+        description="Minimum value score difference to consider a replacement an upgrade",
     )
     min_points_to_keep: int = Field(
         default=50,
-        description="Don't sell high-performing players above this points threshold",
+        description="DEPRECATED - Bot now recommends sales based on value analysis, not raw points",
     )
 
     # Safety Settings

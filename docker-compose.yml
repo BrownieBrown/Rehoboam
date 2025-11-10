@@ -10,10 +10,17 @@ services:
     volumes:
       # Mount .env for easy credential updates without rebuilding
       - ./.env:/app/.env:ro
-      # Persist logs
-      - ./logs:/var/log/rehoboam
+      # Persist logs to home directory (daemon logs here)
+      - ~/.rehoboam/logs:/root/.rehoboam/logs
     environment:
       - TZ=Europe/Berlin  # Set your timezone
+    command: >
+      daemon
+      --interval 180
+      --max-trades 3
+      --max-spend 30000000
+      --start-hour 8
+      --end-hour 22
     logging:
       driver: "json-file"
       options:

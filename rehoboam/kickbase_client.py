@@ -3,15 +3,16 @@ Custom Kickbase API v4 client based on official API documentation
 https://share.apidog.com/fe2420a6-d929-409f-9b1d-35122923316d
 """
 
-import requests
-from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
-from datetime import datetime
+from typing import Any
+
+import requests
 
 
 @dataclass
 class User:
     """User information"""
+
     id: str
     name: str
     email: str
@@ -19,7 +20,7 @@ class User:
     verified_email: bool
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "User":
+    def from_dict(cls, data: dict[str, Any]) -> "User":
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
@@ -32,12 +33,13 @@ class User:
 @dataclass
 class League:
     """League/Server information"""
+
     id: str
     name: str
     creator_id: str
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "League":
+    def from_dict(cls, data: dict[str, Any]) -> "League":
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
@@ -48,6 +50,7 @@ class League:
 @dataclass
 class MarketPlayer:
     """Player on the market"""
+
     id: str
     first_name: str
     last_name: str
@@ -58,10 +61,19 @@ class MarketPlayer:
     points: int
     average_points: float
     status: int
-    seller_user_id: Optional[str] = None  # None if KICKBASE is selling
+    seller_user_id: str | None = None  # None if KICKBASE is selling
+    offer_count: int = 0  # Number of offers on player
+    user_offer_price: int | None = None  # Your bid if you made one
+    user_offer_id: str | None = None  # Your user ID if you're highest bidder
+    listed_at: str | None = None  # When player was listed (ISO datetime)
+    offers: list = None  # List of all offers
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MarketPlayer":
+    def from_dict(cls, data: dict[str, Any]) -> "MarketPlayer":
+        # Extract user info (seller)
+        user_data = data.get("u")
+        seller_user_id = user_data.get("i") if isinstance(user_data, dict) else None
+
         return cls(
             id=data.get("i", ""),
             first_name=data.get("fn", ""),
@@ -70,15 +82,34 @@ class MarketPlayer:
             team_id=data.get("tid", ""),
             price=data.get("prc", 0),
             market_value=data.get("mv", 0),
-            points=data.get("pts", 0),
+            points=data.get("p", data.get("pts", 0)),  # 'p' in market, 'pts' elsewhere
             average_points=data.get("ap", 0.0),
             status=data.get("st", 0),
-            seller_user_id=data.get("u"),  # User ID of seller, None/empty if KICKBASE
+            seller_user_id=seller_user_id,
+            offer_count=data.get("ofc", 0),
+            user_offer_price=data.get("uop"),
+            user_offer_id=data.get("uoid"),
+            listed_at=data.get("dt"),
+            offers=data.get("ofs", []),
         )
 
     def is_kickbase_seller(self) -> bool:
         """Check if KICKBASE is the seller (not another user)"""
         return self.seller_user_id is None or self.seller_user_id == ""
+
+    def has_user_offer(self, user_id: str) -> bool:
+        """Check if specific user has made an offer on this player"""
+        return self.user_offer_id == user_id
+
+    def get_user_offer_amount(self, user_id: str) -> int | None:
+        """Get the offer amount from a specific user"""
+        if self.has_user_offer(user_id):
+            return self.user_offer_price
+        # Check in offers list
+        for offer in self.offers or []:
+            if offer.get("u") == user_id or offer.get("uoid") == user_id:
+                return offer.get("uop")
+        return None
 
     @staticmethod
     def _parse_position(pos: int) -> str:
@@ -95,6 +126,7 @@ class MarketPlayer:
 @dataclass
 class Player:
     """Player in a team"""
+
     id: str
     first_name: str
     last_name: str
@@ -104,7 +136,7 @@ class Player:
     average_points: float
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Player":
+    def from_dict(cls, data: dict[str, Any]) -> "Player":
         # Squad endpoint uses 'n' for name, 'pos' for position, 'p' for points
         return cls(
             id=data.get("i", ""),
@@ -123,15 +155,17 @@ class KickbaseV4Client:
     BASE_URL = "https://api.kickbase.com"
 
     def __init__(self):
-        self.token: Optional[str] = None
-        self.token_expire: Optional[str] = None
-        self.user: Optional[User] = None
-        self.leagues: List[League] = []
+        self.token: str | None = None
+        self.token_expire: str | None = None
+        self.user: User | None = None
+        self.leagues: list[League] = []
         self.session = requests.Session()
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        })
+        self.session.headers.update(
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        )
 
     def login(self, email: str, password: str) -> bool:
         """
@@ -140,12 +174,7 @@ class KickbaseV4Client:
         """
         url = f"{self.BASE_URL}/v4/user/login"
 
-        payload = {
-            "em": email,
-            "pass": password,
-            "loy": False,
-            "rep": {}
-        }
+        payload = {"em": email, "pass": password, "loy": False, "rep": {}}
 
         response = self.session.post(url, json=payload)
 
@@ -158,9 +187,7 @@ class KickbaseV4Client:
 
             # Update session headers with token
             if self.token:
-                self.session.headers.update({
-                    "Authorization": f"Bearer {self.token}"
-                })
+                self.session.headers.update({"Authorization": f"Bearer {self.token}"})
 
             # Parse user data
             user_data = data.get("u", {})
@@ -176,7 +203,7 @@ class KickbaseV4Client:
         else:
             raise Exception(f"Login failed with status {response.status_code}: {response.text}")
 
-    def get_market(self, league_id: str) -> List[MarketPlayer]:
+    def get_market(self, league_id: str) -> list[MarketPlayer]:
         """
         Get market players
         GET /v4/leagues/{league_id}/market
@@ -192,10 +219,31 @@ class KickbaseV4Client:
         else:
             raise Exception(f"Failed to fetch market: {response.status_code} - {response.text}")
 
-    def get_team_info(self, league_id: str) -> Dict[str, Any]:
+    def get_my_bids(self, league_id: str) -> list[MarketPlayer]:
         """
-        Get your team budget information
-        GET /v4/leagues/{league_id}/me
+        Get only players where you have active bids
+
+        Note: The API doesn't have a dedicated "my bids only" endpoint.
+        This fetches all market players and filters for players where you have an offer.
+
+        Args:
+            league_id: League ID
+
+        Returns:
+            List of MarketPlayer objects where you have active bids
+        """
+        if not self.user:
+            raise Exception("Not logged in. Call login() first.")
+
+        all_market = self.get_market(league_id)
+        return [p for p in all_market if p.has_user_offer(self.user.id)]
+
+    def get_team_info(self, league_id: str) -> dict[str, Any]:
+        """
+        Get your team budget and value
+
+        Note: The /me endpoint only returns budget, not team value.
+        We calculate team value by summing squad player market values.
         """
         url = f"{self.BASE_URL}/v4/leagues/{league_id}/me"
 
@@ -203,14 +251,20 @@ class KickbaseV4Client:
 
         if response.status_code == 200:
             data = response.json()
+            budget = data.get("b", data.get("budget", 0))
+
+            # Calculate team value from squad
+            squad = self.get_squad(league_id)
+            team_value = sum(player.market_value for player in squad)
+
             return {
-                "budget": data.get("b", data.get("budget", 0)),
-                "team_value": data.get("tv", data.get("teamValue", 0)),
+                "budget": budget,
+                "team_value": team_value,
             }
         else:
             raise Exception(f"Failed to fetch team info: {response.status_code} - {response.text}")
 
-    def get_squad(self, league_id: str) -> List[Player]:
+    def get_squad(self, league_id: str) -> list[Player]:
         """
         Get your squad players
         GET /v4/leagues/{league_id}/squad
@@ -227,7 +281,7 @@ class KickbaseV4Client:
         else:
             raise Exception(f"Failed to fetch squad: {response.status_code} - {response.text}")
 
-    def get_lineup(self, league_id: str) -> Dict[str, Any]:
+    def get_lineup(self, league_id: str) -> dict[str, Any]:
         """
         Get your current lineup
         GET /v4/leagues/{league_id}/lineup
@@ -242,7 +296,7 @@ class KickbaseV4Client:
         else:
             raise Exception(f"Failed to fetch lineup: {response.status_code} - {response.text}")
 
-    def get_starting_eleven(self, league_id: str) -> Dict[str, Any]:
+    def get_starting_eleven(self, league_id: str) -> dict[str, Any]:
         """
         Get your current starting eleven (always 11 players)
         GET /v4/leagues/{league_id}/teamcenter/myeleven
@@ -255,41 +309,318 @@ class KickbaseV4Client:
             data = response.json()
             return data
         else:
-            raise Exception(f"Failed to fetch starting eleven: {response.status_code} - {response.text}")
+            raise Exception(
+                f"Failed to fetch starting eleven: {response.status_code} - {response.text}"
+            )
 
-    def make_offer(self, league_id: str, player_id: str, price: int) -> bool:
+    def make_offer(self, league_id: str, player_id: str, price: int) -> dict[str, Any]:
         """
         Make an offer for a player
         POST /v4/leagues/{league_id}/market/{player_id}/offers
         """
         url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/offers"
 
-        payload = {
-            "pr": price
-        }
+        payload = {"price": price}  # Use "price" not "pr"
 
         response = self.session.post(url, json=payload)
 
         if response.status_code in [200, 201]:
-            return True
+            return response.json()  # Returns offer ID
         else:
             raise Exception(f"Failed to make offer: {response.status_code} - {response.text}")
 
-    def add_to_market(self, league_id: str, player_id: str, price: int) -> bool:
+    def add_to_market(self, league_id: str, player_id: str, price: int) -> dict[str, Any]:
         """
-        Add player to market
+        Add player to market (list for sale)
         POST /v4/leagues/{league_id}/market
+
+        Note: KICKBASE instantly matches market value, so setting price above
+        market value forces other managers to bid high, but you can still
+        sell to KICKBASE at market value anytime.
+
+        Args:
+            league_id: League ID
+            player_id: Player ID to list
+            price: Asking price (can be above market value)
+
+        Returns:
+            Response data from listing
         """
         url = f"{self.BASE_URL}/v4/leagues/{league_id}/market"
 
-        payload = {
-            "pi": player_id,
-            "pr": price
-        }
+        payload = {"pi": player_id, "prc": price}  # Use 'prc' not 'pr' for market listing
 
         response = self.session.post(url, json=payload)
 
         if response.status_code in [200, 201]:
-            return True
+            return response.json()
         else:
             raise Exception(f"Failed to add to market: {response.status_code} - {response.text}")
+
+    def sell_to_kickbase(self, league_id: str, player_id: str) -> dict[str, Any]:
+        """
+        Sell player directly to KICKBASE at market value
+        POST /v4/leagues/{league_id}/market/{player_id}/sell
+
+        Args:
+            league_id: League ID
+            player_id: Player ID to sell
+
+        Returns:
+            Response data from sale
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/sell"
+
+        response = self.session.post(url, json={})
+
+        if response.status_code in [200, 201]:
+            return response.json()
+        else:
+            raise Exception(f"Failed to sell to KICKBASE: {response.status_code} - {response.text}")
+
+    def accept_offer(self, league_id: str, player_id: str, offer_id: str) -> dict[str, Any]:
+        """
+        Accept an offer from another manager
+        POST /v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}/accept
+
+        Args:
+            league_id: League ID
+            player_id: Player ID
+            offer_id: Offer ID to accept
+
+        Returns:
+            Response data from acceptance
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}/accept"
+
+        response = self.session.post(url, json={})
+
+        if response.status_code in [200, 201]:
+            return response.json()
+        else:
+            raise Exception(f"Failed to accept offer: {response.status_code} - {response.text}")
+
+    def get_player_offers(self, league_id: str, player_id: str) -> list[dict[str, Any]]:
+        """
+        Get all offers for a player on the market
+        GET /v4/leagues/{league_id}/market/{player_id}/offers
+
+        Args:
+            league_id: League ID
+            player_id: Player ID
+
+        Returns:
+            List of offers
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/offers"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("it", [])  # Offers likely in 'it' field
+        else:
+            raise Exception(f"Failed to get offers: {response.status_code} - {response.text}")
+
+    def get_player_market_value_history(
+        self, league_id: str, player_id: str, timeframe: int = 30
+    ) -> dict[str, Any]:
+        """
+        Get player's market value history
+        GET /v4/leagues/{league_id}/players/{player_id}/marketvalue/{timeframe}
+
+        Args:
+            league_id: League ID
+            player_id: Player ID
+            timeframe: Number of days to look back (default: 30)
+
+        Returns:
+            dict with market value history including min/max values
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/players/{player_id}/marketvalue/{timeframe}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch market value history: {response.status_code} - {response.text}"
+            )
+
+    def get_player_performance(self, league_id: str, player_id: str) -> dict[str, Any]:
+        """
+        Get player's detailed performance data including all matches and points
+        GET /v4/leagues/{league_id}/players/{player_id}/performance
+
+        Args:
+            league_id: League ID
+            player_id: Player ID
+
+        Returns:
+            dict with detailed performance data including match history
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/players/{player_id}/performance"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch player performance: {response.status_code} - {response.text}"
+            )
+
+    def get_player_details(self, league_id: str, player_id: str) -> dict[str, Any]:
+        """
+        Get player's full details including team, matchups, and status
+        GET /v4/leagues/{league_id}/players/{player_id}
+
+        Args:
+            league_id: League ID
+            player_id: Player ID
+
+        Returns:
+            dict with:
+            - Team info: tid, tn (team name)
+            - Status: st (0=healthy, 2/4/256=injured/unavailable)
+            - Lineup probability: prob (1=starter, 2-4=rotation, 5=unlikely)
+            - Matchups: mdsum (past, current, future matches)
+            - Performance: ph (recent match points)
+            - Goals/assists: g, a
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/players/{player_id}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch player details: {response.status_code} - {response.text}"
+            )
+
+    def get_team_profile(self, league_id: str, team_id: str) -> dict[str, Any]:
+        """
+        Get team profile including standings and all players
+        GET /v4/leagues/{league_id}/teams/{team_id}/teamprofile
+
+        Args:
+            league_id: League ID
+            team_id: Team ID
+
+        Returns:
+            dict with:
+            - Standings: pl (place), tw (wins), td (draws), tl (losses)
+            - Team value: tv
+            - Players: it (all players on team with status)
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/teams/{team_id}/teamprofile"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch team profile: {response.status_code} - {response.text}"
+            )
+
+    def get_activities_feed(self, league_id: str, start: int = 0) -> dict[str, Any]:
+        """
+        Get activities feed - shows all trades, offers, transfers
+        GET /v4/leagues/{league_id}/activitiesFeed?start={start}
+
+        Shows recent activities like:
+        - Players bought/sold
+        - Auction wins/losses
+        - Market listings
+        - Offers made/received
+
+        Args:
+            league_id: League ID
+            start: Pagination offset (default: 0)
+
+        Returns:
+            dict with:
+            - items: List of activity items
+            - meta: Pagination metadata
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/activitiesFeed"
+
+        params = {"start": start}
+        response = self.session.get(url, params=params)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch activities feed: {response.status_code} - {response.text}"
+            )
+
+    def get_player_statistics(self, player_id: str, league_id: str) -> dict[str, Any]:
+        """
+        Get detailed player statistics (competition-based endpoint)
+        GET /v4/competitions/1/players/{player_id}?leagueId={league_id}
+
+        Returns rich player data including:
+        - Current market value (mv)
+        - Total points (tp), Average points (ap)
+        - Status (st): 0=Fit, others=injured/etc
+        - Performance history (ph): Recent match points
+        - Match data (mdsum): Past and upcoming fixtures
+        - Position, team, etc.
+
+        Args:
+            player_id: Player ID
+            league_id: League ID (as query parameter)
+
+        Returns:
+            dict with comprehensive player statistics
+        """
+        url = f"{self.BASE_URL}/v4/competitions/1/players/{player_id}"
+        params = {"leagueId": league_id}
+
+        response = self.session.get(url, params=params)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch player statistics: {response.status_code} - {response.text}"
+            )
+
+    def get_player_market_value_history_v2(
+        self, player_id: str, timeframe: int = 92
+    ) -> dict[str, Any]:
+        """
+        Get player market value history (competition-based endpoint)
+        GET /v4/competitions/1/players/{player_id}/marketValue/{timeframe}
+
+        BETTER than the league-based endpoint - returns complete historical data!
+
+        Returns:
+            dict with:
+            - it: Array of daily values [{"dt": days_since_epoch, "mv": market_value}]
+            - trp: Transfer price (0 if KICKBASE-owned)
+            - lmv: Lowest market value in timeframe
+            - hmv: Highest market value in timeframe (PEAK!)
+            - idp: Boolean flag
+
+        Args:
+            player_id: Player ID
+            timeframe: Days to look back (92=3mo, 365=1yr)
+
+        Returns:
+            Market value history with peak/low values
+        """
+        url = f"{self.BASE_URL}/v4/competitions/1/players/{player_id}/marketValue/{timeframe}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch player market value history: {response.status_code} - {response.text}"
+            )
