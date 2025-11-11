@@ -41,6 +41,11 @@ dev = [
 [project.scripts]
 rehoboam = "rehoboam.cli:app"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rehoboam*"]
+exclude = ["tests*", "setup*", "docs*", "docker*"]
+
 [tool.black]
 line-length = 100
 target-version = ['py310']
