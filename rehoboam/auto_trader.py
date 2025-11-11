@@ -87,6 +87,30 @@ class AutoTrader:
 
         console.print("\n[bold cyan]🤖 Auto-Trading: Profit Opportunities[/bold cyan]")
 
+        # Step 1: Re-evaluate active bids FIRST
+        from .bid_evaluator import BidEvaluator
+
+        bid_evaluator = BidEvaluator(self.api, self.settings)
+
+        # Get trend data for bid evaluation
+        market = self.api.get_market(league)
+        kickbase_market = [p for p in market if p.is_kickbase_seller()]
+        player_trends = trader._fetch_player_trends(kickbase_market, limit=50)
+
+        bid_evaluations = bid_evaluator.evaluate_active_bids(
+            league, player_trends=player_trends, for_profit=True
+        )
+
+        if bid_evaluations:
+            bid_evaluator.display_bid_evaluations(bid_evaluations)
+
+            # Cancel bad bids automatically
+            canceled = bid_evaluator.cancel_bad_bids(league, bid_evaluations, dry_run=self.dry_run)
+            if canceled > 0:
+                console.print(
+                    f"\n[yellow]Canceled {canceled} bid(s) that no longer make sense[/yellow]"
+                )
+
         # Check daily limits
         self._reset_daily_limits_if_needed()
         if self.daily_spend >= self.max_daily_spend:

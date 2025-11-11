@@ -367,9 +367,21 @@ class Trader:
                     if first_value > 0:
                         trend_pct = ((last_value - first_value) / first_value) * 100
 
+                        # Also check longer-term trend (30 days if available)
+                        longer_term_falling = False
+                        if len(it_array) >= 30:
+                            month_ago_value = it_array[-30].get("mv", 0)
+                            if month_ago_value > 0:
+                                month_trend_pct = (
+                                    (last_value - month_ago_value) / month_ago_value
+                                ) * 100
+                                # If down >5% over 30 days, consider it falling
+                                if month_trend_pct < -5:
+                                    longer_term_falling = True
+
                         if trend_pct > 5:
                             trend_direction = "rising"
-                        elif trend_pct < -5:
+                        elif trend_pct < -5 or longer_term_falling:
                             trend_direction = "falling"
                         else:
                             trend_direction = "stable"

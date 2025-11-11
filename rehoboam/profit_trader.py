@@ -71,12 +71,21 @@ class ProfitTrader:
         """
         opportunities = []
         checked = 0
+        healthy = 0
         affordable = 0
         has_trend_data = 0
         meets_threshold = 0
 
         for player in market_players:
             checked += 1
+
+            # Skip injured/unavailable players
+            # Status codes: 0=healthy, 2/4/256=injured/unavailable
+            if player.status != 0:
+                continue
+
+            healthy += 1
+
             # Must be affordable
             if player.price > current_budget:
                 continue
@@ -217,6 +226,7 @@ class ProfitTrader:
         # Debug: Print filtering statistics
         print("\n[DEBUG] Profit Opportunity Filtering:")
         print(f"  Checked: {checked} players")
+        print(f"  Healthy: {healthy} (not injured)")
         print(f"  Affordable: {affordable} (budget limit)")
         print(f"  Has trend data: {has_trend_data} (92-day history)")
         print(f"  Meets threshold: {meets_threshold} (>= {self.min_profit_pct}% expected profit)")

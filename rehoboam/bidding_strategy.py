@@ -29,12 +29,16 @@ class SmartBidding:
         default_overbid_pct: float = 5.0,  # Default overbid %
         max_overbid_pct: float = 15.0,  # Never exceed this overbid
         high_value_threshold: float = 70.0,  # Value score for aggressive bidding
+        elite_player_threshold: float = 70.0,  # Avg points for elite status
+        elite_max_overbid_pct: float = 30.0,  # Can bid more for elite long-term holds
         min_bid_increment: int = 1000,  # Minimum bid increment (€1k)
         bid_learner: Optional["BidLearner"] = None,  # Optional learning from past auctions
     ):
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
         self.high_value_threshold = high_value_threshold
+        self.elite_player_threshold = elite_player_threshold
+        self.elite_max_overbid_pct = elite_max_overbid_pct
         self.min_bid_increment = min_bid_increment
         self.bid_learner = bid_learner
 
@@ -47,6 +51,8 @@ class SmartBidding:
         is_replacement: bool = False,
         replacement_sell_value: int = 0,
         predicted_future_value: int | None = None,
+        average_points: float = 0.0,
+        is_long_term_hold: bool = False,
     ) -> BidRecommendation:
         """
         Calculate optimal bid for a player with value-bounded learning
@@ -87,12 +93,18 @@ class SmartBidding:
                 # Learning failed, fall back to default
                 pass
 
+        # Check if this is an elite player we want to keep long-term
+        is_elite = is_long_term_hold and average_points >= self.elite_player_threshold
+
         # Calculate base overbid percentage (use learned if available)
         if learned_overbid_pct is not None and learned_overbid_pct > 0:
             overbid_pct = learned_overbid_pct
         else:
             overbid_pct = self._calculate_overbid_percentage(
-                value_score=value_score, confidence=confidence, is_replacement=is_replacement
+                value_score=value_score,
+                confidence=confidence,
+                is_replacement=is_replacement,
+                is_elite=is_elite,
             )
 
         # Calculate raw bid amount
@@ -137,6 +149,7 @@ class SmartBidding:
             is_replacement=is_replacement,
             learning_reason=learning_reason,
             value_ceiling_applied=recommended_bid >= predicted_future_value,
+            is_elite=is_elite,
         )
 
         return BidRecommendation(
@@ -149,15 +162,19 @@ class SmartBidding:
         )
 
     def _calculate_overbid_percentage(
-        self, value_score: float, confidence: float, is_replacement: bool
+        self, value_score: float, confidence: float, is_replacement: bool, is_elite: bool = False
     ) -> float:
         """Calculate how much to overbid based on player quality and situation"""
 
         # Base overbid
         overbid = self.default_overbid_pct
 
+        # ELITE PLAYERS: Exceptional long-term holds - bid much more aggressively
+        if is_elite:
+            overbid += 15.0  # Start much higher for elite players
+
         # Increase for high-value players (we really want them)
-        if value_score >= self.high_value_threshold:
+        elif value_score >= self.high_value_threshold:
             # High value players: bid more aggressively
             overbid += 5.0
 
@@ -171,8 +188,9 @@ class SmartBidding:
         if is_replacement:
             overbid += 2.0
 
-        # Cap at maximum
-        overbid = min(overbid, self.max_overbid_pct)
+        # Cap at maximum (higher for elite players)
+        max_overbid = self.elite_max_overbid_pct if is_elite else self.max_overbid_pct
+        overbid = min(overbid, max_overbid)
 
         return overbid
 
@@ -198,10 +216,15 @@ class SmartBidding:
         is_replacement: bool,
         learning_reason: str | None = None,
         value_ceiling_applied: bool = False,
+        is_elite: bool = False,
     ) -> str:
         """Generate human-readable reasoning for the bid"""
 
         reasons = []
+
+        # Elite player status (highest priority)
+        if is_elite:
+            reasons.append("🌟 ELITE PLAYER - Long-term hold")
 
         # Learning-based reasoning (priority)
         if learning_reason:

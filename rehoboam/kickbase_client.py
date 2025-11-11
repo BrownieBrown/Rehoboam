@@ -63,8 +63,8 @@ class MarketPlayer:
     status: int
     seller_user_id: str | None = None  # None if KICKBASE is selling
     offer_count: int = 0  # Number of offers on player
-    user_offer_price: int | None = None  # Your bid if you made one
-    user_offer_id: str | None = None  # Your user ID if you're highest bidder
+    user_offer_price: int | None = None  # Your bid amount if you made one
+    user_offer_id: str | None = None  # Your offer ID (needed to cancel bid)
     listed_at: str | None = None  # When player was listed (ISO datetime)
     offers: list = None  # List of all offers
 
@@ -328,6 +328,31 @@ class KickbaseV4Client:
             return response.json()  # Returns offer ID
         else:
             raise Exception(f"Failed to make offer: {response.status_code} - {response.text}")
+
+    def cancel_offer(self, league_id: str, player_id: str, offer_id: str) -> dict[str, Any]:
+        """
+        Cancel your offer/bid on a player
+        DELETE /v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}
+
+        Note: This cancels YOUR specific offer on a player (when you're bidding).
+        Different from removing a player from market (when you're selling).
+
+        Args:
+            league_id: League ID
+            player_id: Player ID to cancel bid on
+            offer_id: The specific offer ID to cancel (from user_offer_id)
+
+        Returns:
+            Response data from cancellation
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}"
+
+        response = self.session.delete(url)
+
+        if response.status_code in [200, 201, 204]:
+            return response.json() if response.text else {}
+        else:
+            raise Exception(f"Failed to cancel offer: {response.status_code} - {response.text}")
 
     def add_to_market(self, league_id: str, player_id: str, price: int) -> dict[str, Any]:
         """

@@ -81,6 +81,17 @@ class KickbaseAPI:
                 f"Failed to buy player {player.first_name} {player.last_name}: {e}"
             ) from e
 
+    def cancel_bid(self, league: League, player: MarketPlayer) -> bool:
+        """Cancel your bid on a player"""
+        try:
+            if not player.user_offer_id:
+                raise Exception("No offer ID found - player may not have your bid")
+            return self.client.cancel_offer(league.id, player.id, player.user_offer_id)
+        except Exception as e:
+            raise Exception(
+                f"Failed to cancel bid on {player.first_name} {player.last_name}: {e}"
+            ) from e
+
     def sell_player(self, league: League, player: Player, price: int) -> bool:
         """List a player for sale"""
         try:
