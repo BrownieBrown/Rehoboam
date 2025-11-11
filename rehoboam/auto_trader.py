@@ -65,6 +65,11 @@ class AutoTrader:
         self.daily_spend = 0
         self.last_reset = datetime.now().date()
 
+        # Learning system
+        from .bid_learner import BidLearner
+
+        self.learner = BidLearner()
+
     def _reset_daily_limits_if_needed(self):
         """Reset daily limits at midnight"""
         today = datetime.now().date()
@@ -86,6 +91,9 @@ class AutoTrader:
         trader = Trader(self.api, self.settings)
 
         console.print("\n[bold cyan]🤖 Auto-Trading: Profit Opportunities[/bold cyan]")
+
+        # Step 0: Check resolved auctions for learning
+        self.check_resolved_auctions(league)
 
         # Step 1: Re-evaluate active bids FIRST
         from .bid_evaluator import BidEvaluator
@@ -333,6 +341,10 @@ class AutoTrader:
                 f"[green]✓ Buy order placed for {player.first_name} {player.last_name}[/green]"
             )
 
+            # Record auction outcome for learning (bid placed)
+            # Note: We don't know yet if we won or lost - that's determined later
+            self._record_bid_placed(player, price)
+
             return AutoTradeResult(
                 success=True,
                 player_name=f"{player.first_name} {player.last_name}",
@@ -383,6 +395,9 @@ class AutoTrader:
             console.print(
                 f"[green]✓ {player.first_name} {player.last_name} listed for sale[/green]"
             )
+
+            # Record flip outcome for learning (if we bought this player)
+            self._record_flip_outcome(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -582,3 +597,232 @@ class AutoTrader:
             total_earned=total_earned,
             net_change=net_change,
         )
+
+    def _record_bid_placed(self, player, our_bid: int):
+        """Record that we placed a bid for learning"""
+        try:
+            from .bid_learner import AuctionOutcome
+            from .value_calculator import PlayerValue
+
+            # Calculate overbid percentage
+            asking_price = player.price
+            overbid_pct = ((our_bid - asking_price) / asking_price * 100) if asking_price > 0 else 0
+
+            # Get value score
+            value = PlayerValue.calculate(player)
+
+            outcome = AuctionOutcome(
+                player_id=player.id,
+                player_name=f"{player.first_name} {player.last_name}",
+                our_bid=our_bid,
+                asking_price=asking_price,
+                our_overbid_pct=overbid_pct,
+                won=False,  # Will be updated when auction resolves
+                timestamp=time.time(),
+                player_value_score=value.value_score,
+                market_value=player.market_value,
+            )
+
+            # Don't record yet - we'll record when we know the outcome
+            # Store in a pending bids file for later resolution
+            import json
+            from pathlib import Path
+
+            pending_file = Path("logs") / "pending_bids.json"
+            pending_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Load existing pending bids
+            pending = []
+            if pending_file.exists():
+                with open(pending_file) as f:
+                    pending = json.load(f)
+
+            # Add new bid
+            pending.append(
+                {
+                    "player_id": outcome.player_id,
+                    "player_name": outcome.player_name,
+                    "our_bid": outcome.our_bid,
+                    "asking_price": outcome.asking_price,
+                    "our_overbid_pct": outcome.our_overbid_pct,
+                    "timestamp": outcome.timestamp,
+                    "player_value_score": outcome.player_value_score,
+                    "market_value": outcome.market_value,
+                }
+            )
+
+            # Save
+            with open(pending_file, "w") as f:
+                json.dump(pending, f, indent=2)
+
+        except Exception as e:
+            console.print(f"[dim]Could not record bid for learning: {e}[/dim]")
+
+    def check_resolved_auctions(self, league):
+        """Check pending bids and record outcomes for learning"""
+        try:
+            import json
+            from pathlib import Path
+
+            from .bid_learner import AuctionOutcome
+
+            pending_file = Path("logs") / "pending_bids.json"
+            if not pending_file.exists():
+                return
+
+            # Load pending bids
+            with open(pending_file) as f:
+                pending = json.load(f)
+
+            if not pending:
+                return
+
+            # Get our current team and active bids
+            my_team = self.api.get_my_team(league)
+            my_bids = self.api.get_my_bids(league)
+
+            my_player_ids = {p.id for p in my_team}
+            active_bid_ids = {p.id for p in my_bids}
+
+            resolved = []
+            still_pending = []
+
+            for bid_data in pending:
+                player_id = bid_data["player_id"]
+
+                # Check if auction resolved
+                if player_id in my_player_ids:
+                    # We won!
+                    outcome = AuctionOutcome(
+                        player_id=bid_data["player_id"],
+                        player_name=bid_data["player_name"],
+                        our_bid=bid_data["our_bid"],
+                        asking_price=bid_data["asking_price"],
+                        our_overbid_pct=bid_data["our_overbid_pct"],
+                        won=True,
+                        timestamp=bid_data["timestamp"],
+                        player_value_score=bid_data.get("player_value_score"),
+                        market_value=bid_data.get("market_value"),
+                    )
+                    self.learner.record_outcome(outcome)
+                    resolved.append(bid_data["player_name"])
+
+                    # Also track purchase for flip outcome recording
+                    self._track_purchase(player_id, bid_data)
+
+                elif player_id not in active_bid_ids:
+                    # Not in our team and not in active bids = we lost
+                    outcome = AuctionOutcome(
+                        player_id=bid_data["player_id"],
+                        player_name=bid_data["player_name"],
+                        our_bid=bid_data["our_bid"],
+                        asking_price=bid_data["asking_price"],
+                        our_overbid_pct=bid_data["our_overbid_pct"],
+                        won=False,
+                        timestamp=bid_data["timestamp"],
+                        player_value_score=bid_data.get("player_value_score"),
+                        market_value=bid_data.get("market_value"),
+                    )
+                    self.learner.record_outcome(outcome)
+                    resolved.append(bid_data["player_name"])
+
+                else:
+                    # Still active bid
+                    still_pending.append(bid_data)
+
+            # Update pending file
+            with open(pending_file, "w") as f:
+                json.dump(still_pending, f, indent=2)
+
+            if resolved:
+                console.print(f"[dim]Recorded {len(resolved)} auction outcomes for learning[/dim]")
+
+        except Exception as e:
+            console.print(f"[dim]Could not check resolved auctions: {e}[/dim]")
+
+    def _track_purchase(self, player_id: str, bid_data: dict):
+        """Track a player purchase for flip outcome recording"""
+        try:
+            import json
+            from pathlib import Path
+
+            purchases_file = Path("logs") / "tracked_purchases.json"
+            purchases_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Load existing purchases
+            purchases = {}
+            if purchases_file.exists():
+                with open(purchases_file) as f:
+                    purchases = json.load(f)
+
+            # Add this purchase
+            purchases[player_id] = {
+                "player_name": bid_data["player_name"],
+                "buy_price": bid_data["our_bid"],
+                "buy_date": bid_data["timestamp"],
+            }
+
+            # Save
+            with open(purchases_file, "w") as f:
+                json.dump(purchases, f, indent=2)
+
+        except Exception as e:
+            console.print(f"[dim]Could not track purchase: {e}[/dim]")
+
+    def _record_flip_outcome(self, player, sell_price: int):
+        """Record a flip outcome when we sell a player we bought"""
+        try:
+            import json
+            from pathlib import Path
+
+            from .bid_learner import FlipOutcome
+
+            purchases_file = Path("logs") / "tracked_purchases.json"
+            if not purchases_file.exists():
+                return
+
+            # Load purchases
+            with open(purchases_file) as f:
+                purchases = json.load(f)
+
+            if player.id not in purchases:
+                return  # We didn't buy this player (or not tracked)
+
+            purchase_data = purchases[player.id]
+            buy_price = purchase_data["buy_price"]
+            buy_date = purchase_data["buy_date"]
+            sell_date = time.time()
+
+            profit = sell_price - buy_price
+            profit_pct = (profit / buy_price * 100) if buy_price > 0 else 0
+            hold_days = int((sell_date - buy_date) / (24 * 3600))
+
+            outcome = FlipOutcome(
+                player_id=player.id,
+                player_name=f"{player.first_name} {player.last_name}",
+                buy_price=buy_price,
+                sell_price=sell_price,
+                profit=profit,
+                profit_pct=profit_pct,
+                hold_days=hold_days,
+                buy_date=buy_date,
+                sell_date=sell_date,
+                average_points=getattr(player, "average_points", None),
+                position=getattr(player, "position", None),
+                was_injured=(player.status != 0) if hasattr(player, "status") else False,
+            )
+
+            self.learner.record_flip(outcome)
+
+            # Remove from purchases
+            del purchases[player.id]
+            with open(purchases_file, "w") as f:
+                json.dump(purchases, f, indent=2)
+
+            profit_emoji = "📈" if profit > 0 else "📉"
+            console.print(
+                f"[dim]{profit_emoji} Flip recorded: {outcome.player_name} - €{profit:,} ({profit_pct:+.1f}%)[/dim]"
+            )
+
+        except Exception as e:
+            console.print(f"[dim]Could not record flip outcome: {e}[/dim]")

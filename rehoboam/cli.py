@@ -426,6 +426,121 @@ def config():
 
 
 @app.command()
+def stats(
+    show_patterns: bool = typer.Option(
+        False, "--patterns", "-p", help="Show detailed pattern analysis"
+    ),
+):
+    """View bot learning statistics and recommendations"""
+    from .bid_learner import BidLearner
+
+    learner = BidLearner()
+
+    console.print("\n[bold cyan]📊 Bot Learning Statistics[/bold cyan]\n")
+
+    # Auction outcomes
+    auction_stats = learner.get_statistics()
+
+    console.print("[bold]Auction Performance:[/bold]")
+    console.print(f"  Total auctions: {auction_stats['total_auctions']}")
+    console.print(
+        f"  Wins: [green]{auction_stats['wins']}[/green] | Losses: [red]{auction_stats['losses']}[/red]"
+    )
+    console.print(f"  Win rate: [cyan]{auction_stats['win_rate']}%[/cyan]")
+
+    if auction_stats["total_auctions"] > 0:
+        console.print(
+            f"  Avg winning overbid: [green]{auction_stats['avg_winning_overbid']}%[/green]"
+        )
+        console.print(f"  Avg losing overbid: [red]{auction_stats['avg_losing_overbid']}%[/red]")
+        console.print(
+            f"  Avg value score (wins): {auction_stats.get('avg_value_score_wins', 0):.1f}"
+        )
+        console.print(
+            f"  Avg value score (losses): {auction_stats.get('avg_value_score_losses', 0):.1f}"
+        )
+
+    # Flip outcomes
+    console.print("\n[bold]Flip Performance:[/bold]")
+    flip_stats = learner.get_flip_statistics()
+
+    console.print(f"  Total flips: {flip_stats['total_flips']}")
+
+    if flip_stats["total_flips"] > 0:
+        console.print(
+            f"  Profitable: [green]{flip_stats['profitable_flips']}[/green] | Unprofitable: [red]{flip_stats['unprofitable_flips']}[/red]"
+        )
+        console.print(f"  Success rate: [cyan]{flip_stats['success_rate']}%[/cyan]")
+        console.print(f"  Avg profit: [green]+{flip_stats['avg_profit_pct']}%[/green]")
+        console.print(f"  Avg loss: [red]{flip_stats['avg_loss_pct']}%[/red]")
+        console.print(f"  Avg hold time (profit): {flip_stats['avg_hold_days_profit']:.0f} days")
+        console.print(f"  Avg hold time (loss): {flip_stats['avg_hold_days_loss']:.0f} days")
+        console.print(f"  Total profit: [cyan]€{flip_stats['total_profit']:,}[/cyan]")
+
+        if flip_stats["best_flip"]:
+            best = flip_stats["best_flip"]
+            console.print(
+                f"\n  🏆 Best flip: {best['player']} - €{best['profit']:,} ({best['profit_pct']:+.1f}%) in {best['hold_days']} days"
+            )
+
+        if flip_stats["worst_flip"]:
+            worst = flip_stats["worst_flip"]
+            console.print(
+                f"  📉 Worst flip: {worst['player']} - €{worst['profit']:,} ({worst['profit_pct']:+.1f}%) in {worst['hold_days']} days"
+            )
+
+    # Recommendations
+    console.print("\n[bold]💡 Learning Recommendations:[/bold]")
+    recommendations = learner.get_learning_recommendations()
+
+    for rec in recommendations:
+        console.print(f"  • {rec}")
+
+    # Detailed patterns
+    if show_patterns and flip_stats["total_flips"] > 0:
+        console.print("\n[bold]📈 Detailed Pattern Analysis:[/bold]")
+        patterns = learner.analyze_flip_patterns()
+
+        if patterns.get("by_trend"):
+            console.print("\n[cyan]By Trend:[/cyan]")
+            for trend, stats in patterns["by_trend"].items():
+                console.print(
+                    f"  {trend}: {stats['count']} flips | {stats['avg_profit_pct']:+.1f}% avg | {stats['success_rate']}% success"
+                )
+
+        if patterns.get("by_position"):
+            console.print("\n[cyan]By Position:[/cyan]")
+            for position, stats in sorted(
+                patterns["by_position"].items(), key=lambda x: x[1]["avg_profit_pct"], reverse=True
+            ):
+                console.print(
+                    f"  {position}: {stats['count']} flips | {stats['avg_profit_pct']:+.1f}% avg | {stats['success_rate']}% success"
+                )
+
+        if patterns.get("by_hold_time"):
+            console.print("\n[cyan]By Hold Time:[/cyan]")
+            for period, stats in patterns["by_hold_time"].items():
+                console.print(
+                    f"  {period}: {stats['count']} flips | {stats['avg_profit_pct']:+.1f}% avg | {stats['success_rate']}% success"
+                )
+
+        if patterns.get("by_injury_status"):
+            console.print("\n[cyan]By Injury Status:[/cyan]")
+            for status, stats in patterns["by_injury_status"].items():
+                console.print(
+                    f"  {status}: {stats['count']} flips | {stats['avg_profit_pct']:+.1f}% avg | {stats['success_rate']}% success"
+                )
+
+    if auction_stats["total_auctions"] == 0 and flip_stats["total_flips"] == 0:
+        console.print(
+            "\n[yellow]No data collected yet. Start trading to build learning database![/yellow]"
+        )
+        console.print("[dim]Run 'rehoboam auto' to start automated trading[/dim]")
+
+    console.print()
+
+
+@app.command()
 def auto(
     league_index: int = typer.Option(0, help="League index (0 for first league)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate trades without executing"),

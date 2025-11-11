@@ -25,6 +25,25 @@ class AuctionOutcome:
     market_value: int | None = None
 
 
+@dataclass
+class FlipOutcome:
+    """Record of a completed flip (buy + sell)"""
+
+    player_id: str
+    player_name: str
+    buy_price: int
+    sell_price: int
+    profit: int
+    profit_pct: float
+    hold_days: int
+    buy_date: float
+    sell_date: float
+    trend_at_buy: str | None = None  # rising, falling, stable
+    average_points: float | None = None
+    position: str | None = None
+    was_injured: bool = False
+
+
 class BidLearner:
     """Learn from auction outcomes to improve bidding strategy"""
 
@@ -73,6 +92,42 @@ class BidLearner:
             """
             )
 
+            # Flip outcomes table for tracking buy+sell transactions
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS flip_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    buy_price INTEGER NOT NULL,
+                    sell_price INTEGER NOT NULL,
+                    profit INTEGER NOT NULL,
+                    profit_pct REAL NOT NULL,
+                    hold_days INTEGER NOT NULL,
+                    buy_date REAL NOT NULL,
+                    sell_date REAL NOT NULL,
+                    trend_at_buy TEXT,
+                    average_points REAL,
+                    position TEXT,
+                    was_injured INTEGER NOT NULL DEFAULT 0
+                )
+            """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_flip_player_id
+                ON flip_outcomes(player_id)
+            """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_flip_buy_date
+                ON flip_outcomes(buy_date)
+            """
+            )
+
             conn.commit()
 
     def record_outcome(self, outcome: AuctionOutcome):
@@ -103,6 +158,36 @@ class BidLearner:
                     outcome.timestamp,
                     outcome.player_value_score,
                     outcome.market_value,
+                ),
+            )
+            conn.commit()
+
+    def record_flip(self, outcome: FlipOutcome):
+        """Record a completed flip for learning"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO flip_outcomes (
+                    player_id, player_name, buy_price, sell_price, profit, profit_pct,
+                    hold_days, buy_date, sell_date, trend_at_buy, average_points, position,
+                    was_injured
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    outcome.player_id,
+                    outcome.player_name,
+                    outcome.buy_price,
+                    outcome.sell_price,
+                    outcome.profit,
+                    outcome.profit_pct,
+                    outcome.hold_days,
+                    outcome.buy_date,
+                    outcome.sell_date,
+                    outcome.trend_at_buy,
+                    outcome.average_points,
+                    outcome.position,
+                    1 if outcome.was_injured else 0,
                 ),
             )
             conn.commit()
@@ -416,3 +501,253 @@ class BidLearner:
                 "assessment": assessment,
                 "days_since_auction": int((datetime.now().timestamp() - timestamp) / (24 * 3600)),
             }
+
+    def get_flip_statistics(self) -> dict[str, Any]:
+        """Get statistics about completed flips for learning"""
+        with sqlite3.connect(self.db_path) as conn:
+            # Total flips
+            cursor = conn.execute("SELECT COUNT(*) FROM flip_outcomes")
+            total = cursor.fetchone()[0]
+
+            if total == 0:
+                return {
+                    "total_flips": 0,
+                    "profitable_flips": 0,
+                    "unprofitable_flips": 0,
+                    "success_rate": 0.0,
+                }
+
+            # Profitable vs unprofitable
+            cursor = conn.execute("SELECT COUNT(*) FROM flip_outcomes WHERE profit > 0")
+            profitable = cursor.fetchone()[0]
+
+            cursor = conn.execute("SELECT COUNT(*) FROM flip_outcomes WHERE profit <= 0")
+            unprofitable = cursor.fetchone()[0]
+
+            # Average profit
+            cursor = conn.execute("SELECT AVG(profit_pct) FROM flip_outcomes WHERE profit > 0")
+            avg_profit_pct = cursor.fetchone()[0] or 0
+
+            cursor = conn.execute("SELECT AVG(profit_pct) FROM flip_outcomes WHERE profit <= 0")
+            avg_loss_pct = cursor.fetchone()[0] or 0
+
+            # Average hold time
+            cursor = conn.execute("SELECT AVG(hold_days) FROM flip_outcomes WHERE profit > 0")
+            avg_hold_days_profit = cursor.fetchone()[0] or 0
+
+            cursor = conn.execute("SELECT AVG(hold_days) FROM flip_outcomes WHERE profit <= 0")
+            avg_hold_days_loss = cursor.fetchone()[0] or 0
+
+            # Best flip
+            cursor = conn.execute(
+                """
+                SELECT player_name, profit, profit_pct, hold_days
+                FROM flip_outcomes
+                ORDER BY profit_pct DESC
+                LIMIT 1
+            """
+            )
+            best_flip = cursor.fetchone()
+
+            # Worst flip
+            cursor = conn.execute(
+                """
+                SELECT player_name, profit, profit_pct, hold_days
+                FROM flip_outcomes
+                ORDER BY profit_pct ASC
+                LIMIT 1
+            """
+            )
+            worst_flip = cursor.fetchone()
+
+            # Total profit
+            cursor = conn.execute("SELECT SUM(profit) FROM flip_outcomes")
+            total_profit = cursor.fetchone()[0] or 0
+
+            return {
+                "total_flips": total,
+                "profitable_flips": profitable,
+                "unprofitable_flips": unprofitable,
+                "success_rate": round((profitable / total * 100) if total > 0 else 0, 1),
+                "avg_profit_pct": round(avg_profit_pct, 1),
+                "avg_loss_pct": round(avg_loss_pct, 1),
+                "avg_hold_days_profit": round(avg_hold_days_profit, 1),
+                "avg_hold_days_loss": round(avg_hold_days_loss, 1),
+                "total_profit": total_profit,
+                "best_flip": (
+                    {
+                        "player": best_flip[0],
+                        "profit": best_flip[1],
+                        "profit_pct": round(best_flip[2], 1),
+                        "hold_days": best_flip[3],
+                    }
+                    if best_flip
+                    else None
+                ),
+                "worst_flip": (
+                    {
+                        "player": worst_flip[0],
+                        "profit": worst_flip[1],
+                        "profit_pct": round(worst_flip[2], 1),
+                        "hold_days": worst_flip[3],
+                    }
+                    if worst_flip
+                    else None
+                ),
+            }
+
+    def analyze_flip_patterns(self) -> dict[str, Any]:
+        """Analyze patterns in flip outcomes to learn what works"""
+        with sqlite3.connect(self.db_path) as conn:
+            # Trend analysis
+            cursor = conn.execute(
+                """
+                SELECT trend_at_buy, COUNT(*), AVG(profit_pct), SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END)
+                FROM flip_outcomes
+                WHERE trend_at_buy IS NOT NULL
+                GROUP BY trend_at_buy
+            """
+            )
+
+            trend_results = {}
+            for trend, count, avg_profit, wins in cursor.fetchall():
+                trend_results[trend] = {
+                    "count": count,
+                    "avg_profit_pct": round(avg_profit, 1) if avg_profit else 0,
+                    "success_rate": round((wins / count * 100) if count > 0 else 0, 1),
+                }
+
+            # Position analysis
+            cursor = conn.execute(
+                """
+                SELECT position, COUNT(*), AVG(profit_pct), SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END)
+                FROM flip_outcomes
+                WHERE position IS NOT NULL
+                GROUP BY position
+            """
+            )
+
+            position_results = {}
+            for position, count, avg_profit, wins in cursor.fetchall():
+                position_results[position] = {
+                    "count": count,
+                    "avg_profit_pct": round(avg_profit, 1) if avg_profit else 0,
+                    "success_rate": round((wins / count * 100) if count > 0 else 0, 1),
+                }
+
+            # Hold time analysis (group by days)
+            cursor = conn.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN hold_days <= 1 THEN '0-1 days'
+                        WHEN hold_days <= 3 THEN '2-3 days'
+                        WHEN hold_days <= 7 THEN '4-7 days'
+                        ELSE '8+ days'
+                    END as hold_period,
+                    COUNT(*),
+                    AVG(profit_pct),
+                    SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END)
+                FROM flip_outcomes
+                GROUP BY hold_period
+            """
+            )
+
+            hold_time_results = {}
+            for period, count, avg_profit, wins in cursor.fetchall():
+                hold_time_results[period] = {
+                    "count": count,
+                    "avg_profit_pct": round(avg_profit, 1) if avg_profit else 0,
+                    "success_rate": round((wins / count * 100) if count > 0 else 0, 1),
+                }
+
+            # Injury impact
+            cursor = conn.execute(
+                """
+                SELECT was_injured, COUNT(*), AVG(profit_pct), SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END)
+                FROM flip_outcomes
+                GROUP BY was_injured
+            """
+            )
+
+            injury_results = {}
+            for was_injured, count, avg_profit, wins in cursor.fetchall():
+                injury_results["injured" if was_injured else "healthy"] = {
+                    "count": count,
+                    "avg_profit_pct": round(avg_profit, 1) if avg_profit else 0,
+                    "success_rate": round((wins / count * 100) if count > 0 else 0, 1),
+                }
+
+            return {
+                "by_trend": trend_results,
+                "by_position": position_results,
+                "by_hold_time": hold_time_results,
+                "by_injury_status": injury_results,
+            }
+
+    def get_learning_recommendations(self) -> list[str]:
+        """Get actionable recommendations based on learning data"""
+        recommendations = []
+
+        patterns = self.analyze_flip_patterns()
+
+        # Trend recommendations
+        if "by_trend" in patterns and patterns["by_trend"]:
+            trends = patterns["by_trend"]
+            if "rising" in trends and "falling" in trends:
+                rising_success = trends["rising"]["success_rate"]
+                falling_success = trends["falling"]["success_rate"]
+
+                if rising_success > falling_success + 20:
+                    recommendations.append(
+                        f"Focus on rising trend players (success rate: {rising_success}% vs {falling_success}% for falling)"
+                    )
+                elif falling_success > rising_success + 20:
+                    recommendations.append(
+                        f"Mean reversion strategy working well on falling players ({falling_success}% success rate)"
+                    )
+
+        # Position recommendations
+        if "by_position" in patterns and patterns["by_position"]:
+            positions = patterns["by_position"]
+            sorted_positions = sorted(
+                positions.items(), key=lambda x: x[1]["avg_profit_pct"], reverse=True
+            )
+
+            if sorted_positions:
+                best_pos, best_stats = sorted_positions[0]
+                if best_stats["count"] >= 3:  # Need at least 3 samples
+                    recommendations.append(
+                        f"Best position: {best_pos} ({best_stats['avg_profit_pct']}% avg profit, {best_stats['success_rate']}% success)"
+                    )
+
+        # Hold time recommendations
+        if "by_hold_time" in patterns and patterns["by_hold_time"]:
+            hold_times = patterns["by_hold_time"]
+            sorted_holds = sorted(
+                hold_times.items(), key=lambda x: x[1]["avg_profit_pct"], reverse=True
+            )
+
+            if sorted_holds:
+                best_hold, best_stats = sorted_holds[0]
+                if best_stats["count"] >= 3:
+                    recommendations.append(
+                        f"Optimal hold time: {best_hold} ({best_stats['avg_profit_pct']}% avg profit)"
+                    )
+
+        # Injury recommendations
+        if "by_injury_status" in patterns and patterns["by_injury_status"]:
+            injury = patterns["by_injury_status"]
+            if "healthy" in injury and "injured" in injury:
+                healthy_success = injury["healthy"]["success_rate"]
+                injured_success = injury["injured"]["success_rate"]
+
+                if healthy_success > injured_success + 15:
+                    recommendations.append(
+                        f"Avoid injured players (healthy success: {healthy_success}% vs injured: {injured_success}%)"
+                    )
+
+        if not recommendations:
+            recommendations.append("Not enough data yet - keep trading to build learning database!")
+
+        return recommendations
