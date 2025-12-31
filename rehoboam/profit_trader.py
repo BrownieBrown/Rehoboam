@@ -2,6 +2,10 @@
 
 from dataclasses import dataclass
 
+from rich.console import Console
+
+console = Console()
+
 
 @dataclass
 class ProfitOpportunity:
@@ -75,6 +79,7 @@ class ProfitTrader:
         affordable = 0
         has_trend_data = 0
         meets_threshold = 0
+        small_sample_filtered = 0  # Count players filtered due to small sample size
 
         for player in market_players:
             checked += 1
@@ -109,22 +114,47 @@ class ProfitTrader:
             is_kickbase = player.price == player.market_value
 
             if is_kickbase:
-                # KICKBASE players: Look for momentum opportunities
-                # Must have rising trend OR be significantly below peak (but NOT falling)
-                expected_appreciation = 0
+                # KICKBASE players: Look for momentum opportunities ONLY
+                # ONLY bid on rising trend players with decent points
 
-                # Rising trend = momentum opportunity
+                # Filter 1: Must have minimum avg points (avoid 0-point players)
+                MIN_AVG_POINTS = 20.0  # Don't flip players with <20 pts/week (relaxed from 30)
+                if player.average_points < MIN_AVG_POINTS:
+                    continue  # Skip low-performing players
+
+                # Filter 2: CRITICAL - Detect and skip small sample size anomalies
+                # Players like Emre Can (1 game, 100+ points) have:
+                # - Very high average points (>80)
+                # - Very strong rising trend (>40%) - market reacting to one game
+                # - This is a small sample size trap!
+                # HEURISTIC: If avg_points > 80 AND trend > 40%, likely 1-2 game anomaly
+                if player.average_points > 80 and trend_pct > 40:
+                    small_sample_filtered += 1
+                    console.print(
+                        f"[yellow]⚠️  Filtered {player.first_name} {player.last_name} from profit trades: "
+                        f"Likely small sample size ({player.average_points:.1f} pts/game, +{trend_pct:.1f}% trend)[/yellow]"
+                    )
+                    continue  # Skip small sample size anomalies
+
+                # Filter 3: Accept rising trends OR stable performers with good points
+                expected_appreciation = 0
                 if trend_direction == "rising" and trend_pct > 5:
                     # Expect trend to continue (cap at 20%)
                     expected_appreciation = min(trend_pct, 20)
-
-                # Below peak = mean reversion opportunity (only if NOT actively falling)
-                elif peak_value > 0 and trend_direction != "falling":
-                    vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
-                    if vs_peak_pct < -15:  # More than 15% below peak
-                        # Expect partial recovery (50% of the gap)
-                        recovery_potential = abs(vs_peak_pct) * 0.5
-                        expected_appreciation = min(recovery_potential, 20)
+                elif trend_direction == "stable" and player.average_points >= 40:
+                    # Stable good performers - conservative 8% appreciation
+                    expected_appreciation = 8
+                elif trend_direction == "falling" and peak_value > 0:
+                    # Mean reversion for players significantly below peak
+                    current_vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
+                    if current_vs_peak_pct < -50 and player.average_points >= 40:
+                        # More than 50% below peak + good performer = mean reversion play
+                        expected_appreciation = min(abs(current_vs_peak_pct) * 0.3, 15)
+                    else:
+                        continue  # Skip falling players not far below peak
+                else:
+                    # Not rising, not stable good performer, not recovery candidate
+                    continue
 
                 # Skip if no profit potential
                 if expected_appreciation < self.min_profit_pct:
@@ -222,16 +252,6 @@ class ProfitTrader:
 
         # Sort by profit potential (value gap % + expected appreciation)
         opportunities.sort(key=lambda o: o.value_gap_pct + o.expected_appreciation, reverse=True)
-
-        # Debug: Print filtering statistics
-        print("\n[DEBUG] Profit Opportunity Filtering:")
-        print(f"  Checked: {checked} players")
-        print(f"  Healthy: {healthy} (not injured)")
-        print(f"  Affordable: {affordable} (budget limit)")
-        print(f"  Has trend data: {has_trend_data} (92-day history)")
-        print(f"  Meets threshold: {meets_threshold} (>= {self.min_profit_pct}% expected profit)")
-        print(f"  Passed risk: {len(opportunities)} (risk <= {self.max_risk_score})")
-        print(f"  Final opportunities: {min(len(opportunities), max_opportunities)}")
 
         return opportunities[:max_opportunities]
 

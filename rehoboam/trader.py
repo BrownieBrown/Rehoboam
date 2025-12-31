@@ -8,9 +8,13 @@ from .api import KickbaseAPI
 from .bid_monitor import BidMonitor, ReplacementPlan
 from .bidding_strategy import SmartBidding
 from .config import Settings
+from .historical_tracker import HistoricalTracker
 from .kickbase_client import League
 from .matchup_analyzer import MatchupAnalyzer
+from .opportunity_cost import OpportunityCostAnalyzer
+from .risk_analyzer import RiskAnalyzer, RiskMetrics
 from .value_history import ValueHistoryCache
+from .value_tracker import ValueTracker
 
 console = Console()
 
@@ -18,9 +22,12 @@ console = Console()
 class Trader:
     """Handles automated trading operations"""
 
-    def __init__(self, api: KickbaseAPI, settings: Settings):
+    def __init__(
+        self, api: KickbaseAPI, settings: Settings, verbose: bool = False, bid_learner=None
+    ):
         self.api = api
         self.settings = settings
+        self.verbose = verbose
         self.analyzer = MarketAnalyzer(
             min_buy_value_increase_pct=settings.min_buy_value_increase_pct,
             min_sell_profit_pct=settings.min_sell_profit_pct,
@@ -28,31 +35,38 @@ class Trader:
             min_value_score_to_buy=settings.min_value_score_to_buy,
         )
         self.history_cache = ValueHistoryCache()
-        self.bidding = SmartBidding()
+        # Connect learner to bidding strategy for adaptive learning
+        self.bidding = SmartBidding(bid_learner=bid_learner)
         self.bid_monitor = BidMonitor(api=api)
         self.matchup_analyzer = MatchupAnalyzer()
+        self.risk_analyzer = RiskAnalyzer()
+        self.value_tracker = ValueTracker()
+        self.opportunity_cost_analyzer = OpportunityCostAnalyzer(
+            min_squad_size=settings.min_squad_size
+        )
+        self.historical_tracker = HistoricalTracker()
 
-    def analyze_market(self, league: League) -> list[PlayerAnalysis]:
-        """Analyze all players on the market"""
-        console.print("[cyan]Fetching market data...[/cyan]")
+    def analyze_market(
+        self, league: League, calculate_risk: bool = False, track_history: bool = False
+    ) -> list[PlayerAnalysis]:
+        """
+        Analyze all players on the market
+
+        Args:
+            league: League object
+            calculate_risk: Whether to calculate risk metrics
+            track_history: Whether to track recommendations for learning
+        """
         market_players = self.api.get_market(league)
 
         # Filter for only KICKBASE sellers (not user listings)
         kickbase_players = [p for p in market_players if p.is_kickbase_seller()]
-        user_listings = len(market_players) - len(kickbase_players)
-
-        console.print(
-            f"[green]Found {len(kickbase_players)} KICKBASE players on the market[/green]"
-        )
-        if user_listings > 0:
-            console.print(f"[dim](Filtered out {user_listings} user listings)[/dim]")
-
-        console.print("[cyan]Fetching detailed player performance and matchup data...[/cyan]")
 
         analyses = []
         for player in kickbase_players:
             # CRITICAL FIX: Fetch real performance data with caching
             # Market endpoint shows points=0 but performance endpoint has actual stats
+            performance_volatility = 0.5  # Default if not available
             try:
                 # Check cache first
                 perf_data = self.history_cache.get_cached_performance(
@@ -69,10 +83,18 @@ class Trader:
                 if real_points > 0:
                     # Update player with real points
                     player.points = real_points
-            except Exception as e:
-                console.print(
-                    f"[dim]Warning: Could not fetch performance for {player.last_name}: {e}[/dim]"
-                )
+
+                # Extract performance volatility for risk calculation
+                if calculate_risk:
+                    from .value_calculator import PlayerValue
+
+                    player_value = PlayerValue.calculate(player, performance_data=perf_data)
+                    if player_value.consistency_score is not None:
+                        # Convert consistency to volatility (inverse relationship)
+                        performance_volatility = 1.0 - player_value.consistency_score
+
+            except Exception:
+                pass  # Silent failure for performance data
 
             # Fetch historical trend data with caching
             history_data = self._get_player_trend(league, player.id)
@@ -92,7 +114,30 @@ class Trader:
             analysis = self.analyzer.analyze_market_player(
                 player, trend_data=trend_data, matchup_context=matchup_context
             )
+
+            # Calculate risk metrics if enabled
+            if calculate_risk:
+                risk_metrics = self._calculate_risk_metrics(
+                    player=player,
+                    league=league,
+                    performance_volatility=performance_volatility,
+                    expected_return_30d=None,  # Could integrate with predictions later
+                )
+                analysis.risk_metrics = risk_metrics
+
             analyses.append(analysis)
+
+        # Track recommendations for learning if enabled
+        if track_history:
+            for analysis in analyses:
+                # Only track BUY and SELL recommendations
+                if analysis.recommendation in ["BUY", "SELL"]:
+                    try:
+                        self.historical_tracker.record_recommendation(
+                            player_analysis=analysis, league_id=league.id
+                        )
+                    except Exception:
+                        pass  # Silent failure for tracking
 
         return analyses
 
@@ -143,8 +188,7 @@ class Trader:
                     points = match.get("p", 0)
                     total_points += points
 
-        except Exception as e:
-            console.print(f"[dim]Error parsing performance data: {e}[/dim]")
+        except Exception:
             return 0
 
         return total_points
@@ -187,10 +231,8 @@ class Trader:
             )
 
             return history_data  # Return raw data, will analyze with market value
-        except Exception as e:
-            # If API call fails, return empty trend data
-            console.print(f"[dim]Warning: Could not fetch trend for player {player_id}: {e}[/dim]")
-            return None
+        except Exception:
+            return None  # Silent failure for trend data
 
     def _get_matchup_context(self, league: League, player_id: str) -> dict:
         """
@@ -268,11 +310,92 @@ class Trader:
                 "sos": sos_analysis,
             }
 
-        except Exception as e:
-            console.print(
-                f"[dim]Warning: Could not fetch matchup context for player {player_id}: {e}[/dim]"
-            )
+        except Exception:
             return {"has_data": False}
+
+    def _calculate_risk_metrics(
+        self,
+        player,
+        league: League,
+        performance_volatility: float,
+        expected_return_30d: float | None = None,
+    ) -> RiskMetrics | None:
+        """
+        Calculate risk metrics for a player with caching
+
+        Args:
+            player: Player object
+            league: League object
+            performance_volatility: Performance CV from PlayerValue
+            expected_return_30d: Expected 30-day return from predictions
+
+        Returns:
+            RiskMetrics or None if insufficient data
+        """
+        try:
+            # Check cache first (6 hour TTL)
+            cached = self.value_tracker.get_cached_risk_metrics(player.id, max_age_hours=6)
+            if cached:
+                # Return cached metrics (reconstruct RiskMetrics object)
+                return RiskMetrics(
+                    player_id=player.id,
+                    player_name=f"{player.first_name} {player.last_name}",
+                    price_volatility=cached["price_volatility"],
+                    performance_volatility=cached["performance_volatility"],
+                    volatility_score=self.risk_analyzer._normalize_volatility_score(
+                        cached["price_volatility"]
+                    ),
+                    var_7d_95pct=cached["var_7d"],
+                    var_30d_95pct=cached["var_30d"],
+                    expected_return_30d=expected_return_30d or 0.0,
+                    sharpe_ratio=cached["sharpe_ratio"],
+                    risk_category=self.risk_analyzer._assess_risk_category(
+                        self.risk_analyzer._normalize_volatility_score(cached["price_volatility"]),
+                        cached["var_30d"],
+                    ),
+                    price_std_dev=0.0,  # Not cached
+                    data_points=0,  # Not cached
+                    confidence=0.8,  # Assume good confidence for cached data
+                )
+
+            # Get price history from API (92-day history)
+            history_data = self.api.client.get_player_market_value_history_v2(
+                player_id=player.id, timeframe=92
+            )
+
+            # Extract price history
+            price_history = self.risk_analyzer.extract_price_history_from_api_data(history_data)
+
+            # Also record daily price for future analysis
+            self.value_tracker.record_daily_price(player.id, league.id, player.market_value)
+
+            # Calculate risk metrics
+            risk_metrics = self.risk_analyzer.calculate_risk_metrics(
+                player=player,
+                price_history=price_history,
+                performance_volatility=performance_volatility,
+                expected_return_30d=expected_return_30d,
+            )
+
+            # Cache the results
+            self.value_tracker.cache_risk_metrics(
+                player_id=player.id,
+                price_volatility=risk_metrics.price_volatility,
+                performance_volatility=risk_metrics.performance_volatility,
+                var_7d=risk_metrics.var_7d_95pct,
+                var_30d=risk_metrics.var_30d_95pct,
+                sharpe_ratio=risk_metrics.sharpe_ratio,
+                data_quality="good" if risk_metrics.data_points >= 14 else "fair",
+            )
+
+            return risk_metrics
+
+        except Exception as e:
+            if self.verbose:
+                console.print(
+                    f"[dim]Risk calculation failed for {player.first_name} {player.last_name}: {e}[/dim]"
+                )
+            return None
 
     def find_best_replacement(
         self, owned_player, market_players: list, league: League
@@ -403,14 +526,8 @@ class Trader:
                 else:
                     player_trends[player.id] = {"has_data": False}
 
-            except Exception as e:
+            except Exception:
                 player_trends[player.id] = {"has_data": False}
-                errors.append(f"{player.first_name} {player.last_name}: {str(e)}")
-
-        if errors and len(errors) <= 5:
-            console.print(
-                f"[yellow]Warning: Could not fetch trends for {len(errors)} player(s)[/yellow]"
-            )
 
         return player_trends
 
@@ -424,8 +541,6 @@ class Trader:
         from datetime import datetime
 
         from .profit_trader import ProfitTrader
-
-        console.print("[cyan]Analyzing profit trading opportunities...[/cyan]")
 
         # Get market
         market = self.api.get_market(league)
@@ -486,34 +601,18 @@ class Trader:
         else:
             # No match date - use full capacity but be cautious
             flip_budget = current_budget + int(max_debt * 0.75)
-            console.print("[dim]No match date found - using 75% of debt capacity[/dim]")
-
-        console.print(f"[dim]Current Budget: €{current_budget:,}[/dim]")
-        console.print(
-            f"[dim]Max Debt Allowed: €{max_debt:,} ({self.settings.max_debt_pct_of_team_value}% of team value)[/dim]"
-        )
-        console.print(f"[dim]Available for Flips: €{flip_budget:,}[/dim]")
 
         if current_budget < 0:
-            debt_used = abs(current_budget)
-            debt_remaining = max_debt - debt_used
-            console.print(
-                f"[red]Current Debt: €{debt_used:,} (€{debt_remaining:,} remaining capacity)[/red]"
-            )
-        else:
-            console.print(f"[green]No debt currently (€{max_debt:,} available if needed)[/green]")
+            pass
 
         # Get trend data for all market players
-        console.print(
-            f"[dim]Fetching trend data for {min(50, len(kickbase_market))} market players...[/dim]"
-        )
         player_trends = self._fetch_player_trends(kickbase_market, limit=50)
 
         # Find profit opportunities
         profit_trader = ProfitTrader(
-            min_profit_pct=10.0,  # Need at least 10% profit potential
+            min_profit_pct=8.0,  # Need at least 8% profit potential (relaxed from 10%)
             max_hold_days=7,  # Hold max 7 days
-            max_risk_score=50.0,  # Moderate risk tolerance
+            max_risk_score=60.0,  # Moderate-high risk tolerance (increased from 50)
         )
 
         # Find more opportunities when we have debt capacity
@@ -538,33 +637,27 @@ class Trader:
         from .trade_optimizer import TradeOptimizer
         from .value_calculator import PlayerValue
 
-        console.print("[cyan]Analyzing trade opportunities...[/cyan]")
-
         # Get current squad and market
         squad = self.api.get_squad(league)
         market = self.api.get_market(league)
 
         # Filter to only KICKBASE-owned players (exclude human managers)
         kickbase_market = [p for p in market if p.is_kickbase_seller()]
-        human_listings = len(market) - len(kickbase_market)
-        console.print(
-            f"[dim]Market: {len(market)} total, {len(kickbase_market)} KICKBASE-owned, {human_listings} human listings (filtered out)[/dim]"
-        )
 
         # Get current budget
         team_info = self.api.get_team_info(league)
         current_budget = team_info.get("budget", 0)
-        console.print(f"[dim]Current budget: €{current_budget:,}[/dim]")
 
-        # Score market players (only affordable KICKBASE players to save time)
-        affordable_market = [p for p in kickbase_market if p.market_value <= current_budget]
-        console.print(
-            f"[dim]Analyzing {len(affordable_market)} affordable KICKBASE players...[/dim]"
-        )
+        # Score market players (only affordable HEALTHY KICKBASE players)
+        # Filter out injured players - we NEVER want injured players in lineup trades
+        affordable_market = [
+            p
+            for p in kickbase_market
+            if p.market_value <= current_budget and p.status == 0  # 0 = healthy
+        ]
 
         # Fetch trend data for ALL players (squad + affordable market)
         all_players = list(squad) + affordable_market
-        console.print(f"[dim]Fetching market value trends for {len(all_players)} players...[/dim]")
         player_trends = self._fetch_player_trends(all_players, limit=len(all_players))
 
         # Calculate value scores for all players
@@ -575,7 +668,21 @@ class Trader:
             try:
                 matchup_context = self._get_matchup_context(league, player.id)
                 trend_data = player_trends.get(player.id)
-                value = PlayerValue.calculate(player, trend_data=trend_data)
+
+                # Fetch performance data for sample size reliability
+                perf_data = self.history_cache.get_cached_performance(
+                    player_id=player.id, league_id=league.id, max_age_hours=6
+                )
+                if not perf_data:
+                    try:
+                        perf_data = self.api.client.get_player_performance(league.id, player.id)
+                        self.history_cache.cache_performance(player.id, league.id, perf_data)
+                    except Exception:
+                        perf_data = None
+
+                value = PlayerValue.calculate(
+                    player, trend_data=trend_data, performance_data=perf_data
+                )
 
                 # Adjust for matchups/SOS
                 if matchup_context and matchup_context.get("has_data"):
@@ -593,12 +700,33 @@ class Trader:
             except Exception:
                 player_values[player.id] = 0
 
-        # Score market players
+        # Score market players (and filter risky ones based on games played)
+        filtered_market = []
         for player in affordable_market:
             try:
                 matchup_context = self._get_matchup_context(league, player.id)
                 trend_data = player_trends.get(player.id)
-                value = PlayerValue.calculate(player, trend_data=trend_data)
+
+                # Fetch performance data for sample size reliability
+                perf_data = self.history_cache.get_cached_performance(
+                    player_id=player.id, league_id=league.id, max_age_hours=6
+                )
+                if not perf_data:
+                    try:
+                        perf_data = self.api.client.get_player_performance(league.id, player.id)
+                        self.history_cache.cache_performance(player.id, league.id, perf_data)
+                    except Exception:
+                        perf_data = None
+
+                value = PlayerValue.calculate(
+                    player, trend_data=trend_data, performance_data=perf_data
+                )
+
+                # FILTER: For lineup improvements, require minimum 5 games played
+                # This prevents buying players like Emre Can (1 game, 100 pts) who are too risky
+                # Also filter if we can't determine games played (no data = risky)
+                if value.games_played is None or value.games_played < 5:
+                    continue  # Skip players without sufficient game data
 
                 if matchup_context and matchup_context.get("has_data"):
                     adjustment = 0
@@ -612,16 +740,17 @@ class Trader:
                     value.value_score = max(0, min(100, value.value_score + adjustment))
 
                 player_values[player.id] = value.value_score
+                filtered_market.append(player)  # Only add if passed filters
             except Exception:
                 player_values[player.id] = 0
 
-        # Find best trades
+        # Find best trades (using filtered market)
         optimizer = TradeOptimizer(
             max_players_out=3, max_players_in=3, bidding_strategy=self.bidding
         )
         trades = optimizer.find_best_trades(
             current_squad=squad,
-            market_players=affordable_market,
+            market_players=filtered_market,  # Use filtered list (no risky players)
             player_values=player_values,
             current_budget=current_budget,
             min_improvement_points=2.0,  # Need at least +2 pts/week improvement
@@ -634,12 +763,12 @@ class Trader:
         """Analyze all players in your team with comprehensive sell signals"""
         from datetime import datetime
 
-        console.print("[cyan]Fetching your squad...[/cyan]")
+        from .formation import select_best_eleven
+        from .value_calculator import PlayerValue
+
         players = self.api.get_squad(league)
-        console.print(f"[green]You have {len(players)} players in squad[/green]")
 
         # Fetch market trends and player stats for all squad players
-        console.print("[cyan]Fetching market value trends and player statistics...[/cyan]")
         player_trends = self._fetch_player_trends(players, limit=len(players))
 
         # Fetch player statistics from API
@@ -670,11 +799,8 @@ class Trader:
 
                 if next_match_date:
                     days_until_match = (next_match_date - datetime.now()).days
-                    console.print(
-                        f"[cyan]Next match in {days_until_match} days ({next_match_date.strftime('%Y-%m-%d')})[/cyan]"
-                    )
-        except Exception as e:
-            console.print(f"[dim]Could not fetch next match date: {e}[/dim]")
+        except Exception:
+            pass
 
         # Only warn about squad size if match is approaching (within 2 days)
         enforce_squad_size = False
@@ -689,8 +815,21 @@ class Trader:
                 f"[yellow]⚠️  Squad below minimum ({len(players)}/{self.settings.min_squad_size}). Consider buying before next match[/yellow]"
             )
 
-        console.print("[cyan]Analyzing squad players...[/cyan]")
+        # STEP 1: Calculate preliminary value scores to determine best 11
+        # (This prevents selling players just because they're bench for real team)
+        player_values = {}
+        for player in players:
+            try:
+                player_value = PlayerValue.calculate(player)
+                player_values[player.id] = player_value.value_score
+            except Exception:
+                player_values[player.id] = 0
 
+        # STEP 2: Determine best 11 based on value scores
+        best_eleven = select_best_eleven(players, player_values)
+        best_eleven_ids = {p.id for p in best_eleven}
+
+        # STEP 3: Analyze each player with best 11 context
         analyses = []
         for player in players:
             try:
@@ -747,6 +886,9 @@ class Trader:
                 # Get matchup context (includes SOS!)
                 matchup_context = self._get_matchup_context(league, player.id)
 
+                # Check if player is in best 11
+                is_in_best_eleven = player.id in best_eleven_ids
+
                 # Analyze the player with full context
                 analysis = self.analyzer.analyze_owned_player(
                     player,
@@ -754,6 +896,7 @@ class Trader:
                     trend_data=trend_data,
                     matchup_context=matchup_context,
                     peak_analysis=peak_dict,
+                    is_in_best_eleven=is_in_best_eleven,
                 )
 
                 # Only override SELL if match is within 2 days AND squad is at minimum
@@ -765,20 +908,17 @@ class Trader:
 
                 analyses.append(analysis)
 
-            except Exception as e:
-                console.print(
-                    f"[yellow]Warning: Could not analyze {player.first_name} {player.last_name}: {e}[/yellow]"
-                )
+            except Exception:
                 continue
-
-        console.print(
-            f"[green]✓ Analyzed {len(analyses)} players with market trends and statistics[/green]"
-        )
 
         return analyses
 
     def display_analysis(
-        self, analyses: list[PlayerAnalysis], title: str = "Analysis", show_bids: bool = True
+        self,
+        analyses: list[PlayerAnalysis],
+        title: str = "Analysis",
+        show_bids: bool = True,
+        show_risk: bool = False,
     ):
         """Display analysis results in a nice table"""
         table = Table(title=title, show_header=True, header_style="bold magenta")
@@ -790,6 +930,10 @@ class Trader:
         table.add_column("Value Score", justify="right", style="magenta")
         table.add_column("Pts/M€", justify="right", style="green")
         table.add_column("Points", justify="right", style="green")
+        if show_risk:
+            table.add_column("Risk", justify="center", style="yellow")
+            table.add_column("Sharpe", justify="right", style="cyan")
+            table.add_column("VaR (7d)", justify="right", style="red")
         table.add_column("Recommendation", justify="center")
         table.add_column("Reason", style="dim")
 
@@ -843,10 +987,28 @@ class Trader:
                     score_str,
                     f"{analysis.points_per_million:.1f}",
                     str(analysis.points),
-                    rec_str,
-                    analysis.reason,
                 ]
             )
+
+            # Add risk columns if enabled
+            if show_risk and analysis.risk_metrics:
+                rm = analysis.risk_metrics
+                risk_color = self.risk_analyzer.get_risk_color(rm.risk_category)
+                sharpe_color = self.risk_analyzer.get_sharpe_color(rm.sharpe_ratio)
+                var_color = self.risk_analyzer.get_var_color(rm.var_7d_95pct)
+
+                risk_label = rm.risk_category.replace(" Risk", "")
+                row_data.extend(
+                    [
+                        f"[{risk_color}]{risk_label}[/{risk_color}]",
+                        f"[{sharpe_color}]{rm.sharpe_ratio:.2f}[/{sharpe_color}]",
+                        f"[{var_color}]{rm.var_7d_95pct:.1f}%[/{var_color}]",
+                    ]
+                )
+            elif show_risk:
+                row_data.extend(["-", "-", "-"])
+
+            row_data.extend([rec_str, analysis.reason])
 
             table.add_row(*row_data)
 
@@ -951,6 +1113,63 @@ class Trader:
 
         console.print(table)
 
+    def display_opportunity_costs(
+        self,
+        analyses: list[PlayerAnalysis],
+        league: League,
+        max_opportunities: int = 3,
+    ):
+        """
+        Display opportunity cost analysis for top BUY recommendations
+
+        Args:
+            analyses: List of PlayerAnalysis objects (should be BUY recommendations)
+            league: League object
+            max_opportunities: Maximum number of opportunities to analyze
+        """
+        # Filter to BUY recommendations only
+        buy_recommendations = [a for a in analyses if a.recommendation == "BUY"]
+
+        if not buy_recommendations:
+            return
+
+        # Get current squad and budget
+        try:
+            squad = self.api.get_squad(league)
+            team_info = self.api.get_team_info(league)
+            current_budget = team_info.get("budget", 0)
+        except Exception as e:
+            console.print(
+                f"[yellow]Could not fetch squad/budget for opportunity cost analysis: {e}[/yellow]"
+            )
+            return
+
+        # Analyze squad to get value scores
+        squad_analyses = self.analyze_team(league)
+
+        # Display opportunity costs for top N BUY recommendations
+        for analysis in buy_recommendations[:max_opportunities]:
+            try:
+                # Calculate opportunity cost
+                cost_analysis = self.opportunity_cost_analyzer.analyze_buy_impact(
+                    target_analysis=analysis,
+                    current_squad=squad,
+                    squad_analyses=squad_analyses,
+                    current_budget=current_budget,
+                )
+
+                if cost_analysis:
+                    # Display the opportunity cost panel
+                    self.opportunity_cost_analyzer.display_opportunity_cost(
+                        analysis=analysis, cost=cost_analysis
+                    )
+
+            except Exception as e:
+                if self.verbose:
+                    console.print(
+                        f"[dim]Failed to calculate opportunity cost for {analysis.player.first_name} {analysis.player.last_name}: {e}[/dim]"
+                    )
+
     def display_profit_opportunities(
         self,
         opportunities: list,
@@ -1049,7 +1268,10 @@ class Trader:
             return
 
         console.print(f"\n[bold magenta]{title}[/bold magenta]")
-        console.print(f"[dim]Found {len(trades)} trade(s) that improve your starting 11[/dim]\n")
+        console.print(f"[dim]Found {len(trades)} trade(s) that improve your starting 11[/dim]")
+        console.print(
+            "[dim]Note: Only players with 5+ games played are considered for lineup improvements[/dim]\n"
+        )
 
         for idx, trade in enumerate(trades[:5], 1):  # Show top 5 trades
             console.print(
@@ -1066,8 +1288,14 @@ class Trader:
             # Buy section
             console.print("[green]BUY:[/green]")
             for player in trade.players_in:
+                # Show average points for context
+                avg_points_str = (
+                    f" | {player.average_points:.1f} pts/game"
+                    if hasattr(player, "average_points")
+                    else ""
+                )
                 console.print(
-                    f"  • {player.first_name} {player.last_name} ({player.position}) - €{player.market_value:,}"
+                    f"  • {player.first_name} {player.last_name} ({player.position}) - €{player.market_value:,}{avg_points_str}"
                 )
 
             # Financial summary
@@ -1275,6 +1503,100 @@ class Trader:
             net_profit=-replacement_candidate["net_cost"],  # Negative cost = profit
             expected_budget_after=expected_budget_after,
         )
+
+    def optimize_squad_for_gameday(self, league: League):
+        """
+        Optimize squad for gameday - select best 11 and manage budget
+
+        Returns:
+            SquadOptimization result
+        """
+        from datetime import datetime
+
+        from .squad_optimizer import SquadOptimizer
+        from .value_calculator import PlayerValue
+
+        # Get current squad
+        squad = self.api.get_squad(league)
+
+        # Get current budget and team info
+        team_info = self.api.get_team_info(league)
+        current_budget = team_info.get("budget", 0)
+
+        # Get next match date
+        days_until_gameday = None
+        try:
+            starting_eleven = self.api.get_starting_eleven(league)
+            next_match = starting_eleven.get("nm") or starting_eleven.get("nextMatch")
+            if next_match:
+                if isinstance(next_match, int | float):
+                    next_match_date = datetime.fromtimestamp(next_match)
+                elif isinstance(next_match, str):
+                    next_match_date = datetime.fromisoformat(next_match.replace("Z", "+00:00"))
+
+                if next_match_date:
+                    days_until_gameday = (next_match_date - datetime.now()).days
+        except Exception:
+            pass
+
+        # Calculate player values for all squad members
+        player_values = {}
+        for player in squad:
+            try:
+                # Get cached performance data
+                perf_data = self.history_cache.get_cached_performance(
+                    player_id=player.id, league_id=league.id, max_age_hours=6
+                )
+                if not perf_data:
+                    try:
+                        perf_data = self.api.client.get_player_performance(league.id, player.id)
+                        self.history_cache.cache_performance(player.id, league.id, perf_data)
+                    except Exception:
+                        perf_data = None
+
+                # Get matchup context (includes SOS)
+                matchup_context = self._get_matchup_context(league, player.id)
+
+                # Calculate value with all context
+                value = PlayerValue.calculate(player, performance_data=perf_data)
+
+                # Adjust for matchups/SOS
+                if matchup_context and matchup_context.get("has_data"):
+                    adjustment = 0
+                    matchup_bonus_data = matchup_context.get("matchup_bonus", {})
+                    adjustment += matchup_bonus_data.get("bonus_points", 0)
+
+                    sos_data = matchup_context.get("sos")
+                    if sos_data:
+                        adjustment += sos_data.sos_bonus
+
+                    value.value_score = max(0, min(100, value.value_score + adjustment))
+
+                player_values[player.id] = value.value_score
+            except Exception:
+                player_values[player.id] = 0
+
+        # Run optimization
+        optimizer = SquadOptimizer(min_squad_size=self.settings.min_squad_size, max_squad_size=15)
+
+        return optimizer.optimize_squad(
+            squad=squad,
+            player_values=player_values,
+            current_budget=current_budget,
+            days_until_gameday=days_until_gameday,
+        )
+
+    def get_player_values_from_analyses(self, analyses: list) -> dict[str, float]:
+        """
+        Extract player values from PlayerAnalysis list
+
+        Args:
+            analyses: List of PlayerAnalysis
+
+        Returns:
+            Dict mapping player.id -> value_score
+        """
+        return {a.player.id: a.value_score for a in analyses}
 
     def auto_trade(self, league: League, max_trades: int = 5):
         """Run automated trading cycle"""

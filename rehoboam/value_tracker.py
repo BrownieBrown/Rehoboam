@@ -94,6 +94,42 @@ class ValueTracker:
             """
             )
 
+            # Daily price snapshots for volatility analysis
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_prices (
+                    player_id TEXT NOT NULL,
+                    league_id TEXT NOT NULL,
+                    market_value INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    PRIMARY KEY (player_id, league_id, date)
+                )
+            """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_daily_prices_date
+                ON daily_prices(date)
+            """
+            )
+
+            # Risk metrics cache
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS risk_metrics_cache (
+                    player_id TEXT PRIMARY KEY,
+                    price_volatility REAL,
+                    performance_volatility REAL,
+                    var_7d REAL,
+                    var_30d REAL,
+                    sharpe_ratio REAL,
+                    calculated_at TEXT,
+                    data_quality TEXT
+                )
+            """
+            )
+
             conn.commit()
 
     def record_snapshot(self, snapshot: ValueSnapshot):
@@ -352,4 +388,126 @@ class ValueTracker:
                 "total_snapshots": total_snapshots,
                 "owned_players": owned_players,
                 "days_tracking": days_tracking,
+            }
+
+    def record_daily_price(
+        self, player_id: str, league_id: str, market_value: int, date: str | None = None
+    ):
+        """Record daily price snapshot for volatility analysis"""
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO daily_prices (player_id, league_id, market_value, date)
+                VALUES (?, ?, ?, ?)
+            """,
+                (player_id, league_id, market_value, date),
+            )
+            conn.commit()
+
+    def get_daily_prices(self, player_id: str, league_id: str, days: int = 30) -> list[int]:
+        """
+        Get daily price history for a player
+
+        Args:
+            player_id: Player ID
+            league_id: League ID
+            days: Number of days to look back
+
+        Returns:
+            List of daily prices (most recent first)
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+            cursor = conn.execute(
+                """
+                SELECT market_value
+                FROM daily_prices
+                WHERE player_id = ? AND league_id = ? AND date >= ?
+                ORDER BY date DESC
+            """,
+                (player_id, league_id, cutoff_date),
+            )
+
+            return [row[0] for row in cursor.fetchall()]
+
+    def cache_risk_metrics(
+        self,
+        player_id: str,
+        price_volatility: float,
+        performance_volatility: float,
+        var_7d: float,
+        var_30d: float,
+        sharpe_ratio: float,
+        data_quality: str,
+    ):
+        """Cache calculated risk metrics"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO risk_metrics_cache (
+                    player_id, price_volatility, performance_volatility,
+                    var_7d, var_30d, sharpe_ratio, calculated_at, data_quality
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    player_id,
+                    price_volatility,
+                    performance_volatility,
+                    var_7d,
+                    var_30d,
+                    sharpe_ratio,
+                    datetime.now().isoformat(),
+                    data_quality,
+                ),
+            )
+            conn.commit()
+
+    def get_cached_risk_metrics(
+        self, player_id: str, max_age_hours: int = 6
+    ) -> dict[str, Any] | None:
+        """
+        Get cached risk metrics if recent enough
+
+        Args:
+            player_id: Player ID
+            max_age_hours: Maximum age of cache in hours
+
+        Returns:
+            Cached metrics or None if too old/not found
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT price_volatility, performance_volatility, var_7d, var_30d,
+                       sharpe_ratio, calculated_at, data_quality
+                FROM risk_metrics_cache
+                WHERE player_id = ?
+            """,
+                (player_id,),
+            )
+
+            result = cursor.fetchone()
+            if not result:
+                return None
+
+            # Check if cache is fresh enough
+            calculated_at = datetime.fromisoformat(result[5])
+            age_hours = (datetime.now() - calculated_at).total_seconds() / 3600
+
+            if age_hours > max_age_hours:
+                return None
+
+            return {
+                "price_volatility": result[0],
+                "performance_volatility": result[1],
+                "var_7d": result[2],
+                "var_30d": result[3],
+                "sharpe_ratio": result[4],
+                "calculated_at": result[5],
+                "data_quality": result[6],
             }

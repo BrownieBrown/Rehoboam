@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.prompt import Confirm
 
 from .api import KickbaseAPI
+from .bid_learner import BidLearner
 from .config import get_settings
 from .trader import Trader
 
@@ -20,6 +21,11 @@ def get_api() -> KickbaseAPI:
     """Initialize and return the API client"""
     settings = get_settings()
     return KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
+
+
+def get_learner() -> BidLearner:
+    """Initialize and return the bid learner for adaptive bidding"""
+    return BidLearner()
 
 
 @app.command()
@@ -49,6 +55,22 @@ def analyze(
     show_all: bool = typer.Option(
         False, "--all", "-a", help="Show all players, not just opportunities"
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed debug information"),
+    simple: bool = typer.Option(
+        False, "--simple", "-s", help="Simple mode - skip predictions and advanced analysis"
+    ),
+    show_risk: bool = typer.Option(
+        False, "--risk", "-r", help="Show risk metrics (volatility, VaR, Sharpe ratio)"
+    ),
+    show_opportunity_cost: bool = typer.Option(
+        False, "--opportunity-cost", "-oc", help="Show trade-off analysis for purchases"
+    ),
+    show_portfolio: bool = typer.Option(
+        False,
+        "--portfolio",
+        "-p",
+        help="Show portfolio-level metrics (diversification, risk, projections)",
+    ),
 ):
     """Analyze the market for trading opportunities"""
 
@@ -66,75 +88,343 @@ def analyze(
         raise typer.Exit(code=1)
 
     league = leagues[league_index]
-    console.print(f"\n[bold]Analyzing league: {league.name}[/bold]\n")
 
-    trader = Trader(api, settings)
+    # Print clean header
+    console.print("\n" + "═" * 60)
+    console.print(f"[bold cyan]🏆  {league.name}[/bold cyan]")
+    console.print("═" * 60 + "\n")
 
-    # Analyze market
-    market_analyses = trader.analyze_market(league)
+    # Connect learner for adaptive bidding
+    learner = get_learner()
+    trader = Trader(api, settings, verbose=verbose, bid_learner=learner)
+
+    # Analyze market (suppress verbose output unless requested)
+    if not verbose:
+        import sys
+        from io import StringIO
+
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+
+    market_analyses = trader.analyze_market(league, calculate_risk=show_risk)
+
+    if not verbose:
+        sys.stdout = old_stdout
+
+    # Get team info early for budget display
+    team_info = trader.api.get_team_info(league)
+    current_budget = team_info.get("budget", 0)
+
+    # SECTION 1: Market Opportunities
+    console.print("[bold cyan]📈 MARKET OPPORTUNITIES[/bold cyan]")
+    console.print("─" * 60 + "\n")
 
     if show_all:
-        trader.display_analysis(market_analyses, title="All Market Players")
+        trader.display_analysis(market_analyses, title="All Market Players", show_risk=show_risk)
     else:
-        opportunities = trader.analyzer.find_best_opportunities(market_analyses, top_n=20)
+        opportunities = trader.analyzer.find_best_opportunities(market_analyses, top_n=15)
         if opportunities:
-            trader.display_analysis(opportunities, title="Top 20 Trading Opportunities")
+            trader.display_analysis(
+                opportunities, title="Top 15 Trading Opportunities", show_risk=show_risk
+            )
+
+            # Show opportunity cost analysis if enabled
+            if show_opportunity_cost:
+                console.print("\n" + "─" * 60)
+                console.print("[bold cyan]💡 OPPORTUNITY COST ANALYSIS[/bold cyan]")
+                console.print("─" * 60 + "\n")
+                trader.display_opportunity_costs(opportunities, league, max_opportunities=3)
         else:
             console.print("[yellow]No trading opportunities found[/yellow]")
 
-    # Analyze your team
-    console.print("\n")
+    # SECTION 2: Your Squad
+    console.print("\n" + "═" * 60)
+    console.print("[bold cyan]📊 YOUR SQUAD ANALYSIS[/bold cyan]")
+    console.print("═" * 60 + "\n")
+
     team_analyses = trader.analyze_team(league)
 
-    # Always show full squad overview (like we do for market)
-    trader.display_sell_analysis(team_analyses, title="📊 Your Squad Analysis", league=league)
+    # Squad Optimization - Get recommendations FIRST to coordinate with individual analysis
+    squad_optimization = None
+    try:
+        squad_optimization = trader.optimize_squad_for_gameday(league)
+        if squad_optimization and squad_optimization.players_to_sell:
+            # Update recommendations to match squad optimizer
+            players_to_sell_ids = {p.id for p in squad_optimization.players_to_sell}
+            for analysis in team_analyses:
+                if analysis.player.id in players_to_sell_ids:
+                    # Override recommendation to SELL for budget management
+                    old_rec = analysis.recommendation
+                    analysis.recommendation = "SELL"
+                    if old_rec == "HOLD":
+                        # Update reason to explain why
+                        analysis.reason = f"Bench player - sell to clear debt | {analysis.reason}"
+                        analysis.confidence = 0.8
+    except Exception:
+        pass  # Silent failure for squad optimization
+
+    # Show squad analysis
+    trader.display_sell_analysis(team_analyses, title="Your Squad", league=league)
 
     # Show recommendation breakdown
     sell_count = sum(1 for a in team_analyses if a.recommendation == "SELL")
     hold_count = sum(1 for a in team_analyses if a.recommendation == "HOLD")
 
-    console.print(f"\n📋 Recommendations: {sell_count} SELL, {hold_count} HOLD")
+    console.print(f"\n[bold]Summary:[/bold] {sell_count} to sell, {hold_count} to hold")
 
     if sell_count > 0:
-        console.print(f"[red]⚠️  Found {sell_count} player(s) you should consider selling![/red]")
+        console.print(f"[red]⚠️  {sell_count} player(s) recommended for sale[/red]")
     else:
-        console.print("[green]✓ No urgent sell recommendations - all players worth holding[/green]")
+        console.print("[green]✓ No urgent sell recommendations[/green]")
 
-    # Find profit trading opportunities (buy low, sell high)
-    console.print("\n")
+    # Squad Balance & Composition (enhanced feature - always show unless simple mode)
+    if not simple:
+        try:
+            from .enhanced_analyzer import EnhancedAnalyzer
+
+            enhanced_analyzer = EnhancedAnalyzer()
+
+            console.print("\n" + "─" * 60)
+            squad_balance = enhanced_analyzer.analyze_squad_balance(team_analyses)
+            enhanced_analyzer.display_squad_balance(squad_balance, current_budget=current_budget)
+        except Exception as e:
+            if verbose:
+                console.print(f"[red]Squad balance error: {e}[/red]")
+
+    # Show Squad Optimization details
+    if squad_optimization:
+        try:
+            from .squad_optimizer import SquadOptimizer
+
+            optimizer = SquadOptimizer()
+            console.print("\n" + "─" * 60)
+            optimizer.display_optimization(
+                squad_optimization,
+                player_values=trader.get_player_values_from_analyses(team_analyses),
+            )
+        except Exception:
+            pass
+
+    # Portfolio Analysis
+    if show_portfolio:
+        try:
+            from .portfolio_analyzer import PortfolioAnalyzer
+
+            portfolio_analyzer = PortfolioAnalyzer()
+            console.print("\n" + "─" * 60)
+
+            # Analyze portfolio
+            portfolio_metrics = portfolio_analyzer.analyze_portfolio(
+                squad_analyses=team_analyses,
+                market_analyses=market_analyses,
+                current_budget=current_budget,
+            )
+
+            # Display metrics
+            portfolio_analyzer.display_portfolio_metrics(portfolio_metrics)
+        except Exception as e:
+            if verbose:
+                console.print(f"[red]Portfolio analysis error: {e}[/red]")
+
+    # SECTION 3: Trading Strategies
+    console.print("\n" + "═" * 60)
+    console.print("[bold cyan]💡 TRADING STRATEGIES[/bold cyan]")
+    console.print("═" * 60 + "\n")
+
+    # Profit trading opportunities
     try:
-        # Get current budget for display
-        team_info = trader.api.get_team_info(league)
-        current_budget = team_info.get("budget", 0)
-
         profit_opps = trader.find_profit_opportunities(league)
-        trader.display_profit_opportunities(profit_opps, current_budget=current_budget)
+        if profit_opps:
+            console.print("[bold]Strategy 1: Quick Profit Flips[/bold]")
+            console.print("Buy undervalued, hold 3-7 days, sell for profit\n")
+            trader.display_profit_opportunities(profit_opps, current_budget=current_budget)
     except Exception as e:
-        console.print(f"[yellow]Warning: Could not analyze profit opportunities: {e}[/yellow]")
+        if verbose:
+            console.print(f"[red]Profit opportunities error: {e}[/red]")
 
-    # Find N-for-M trade opportunities (improve lineup)
-    console.print("\n")
+    # N-for-M trade opportunities
     try:
         trades = trader.find_trade_opportunities(league)
-        trader.display_trade_recommendations(trades)
+        if trades:
+            console.print("\n[bold]Strategy 2: Lineup Upgrades[/bold]")
+            console.print("Trade combinations to improve your best 11\n")
+            trader.display_trade_recommendations(trades)
     except Exception as e:
-        console.print(
-            f"[yellow]Warning: Could not analyze lineup trade opportunities: {e}[/yellow]"
-        )
+        if verbose:
+            console.print(f"[red]Trade opportunities error: {e}[/red]")
 
-    # Debug info for first-time users
-    if show_all or sell_count == 0:
-        # Show reasons for HOLD recommendations
-        hold_reasons = {}
-        for a in team_analyses:
-            if a.recommendation == "HOLD":
-                reason_key = a.reason.split(" | ")[0]  # Get first part of reason
-                hold_reasons[reason_key] = hold_reasons.get(reason_key, 0) + 1
+    # SECTION 4: Predictions & Insights (enhanced - skip in simple mode)
+    if not simple:
+        console.print("\n" + "═" * 60)
+        console.print("[bold cyan]🔮 VALUE PREDICTIONS & INSIGHTS[/bold cyan]")
+        console.print("═" * 60 + "\n")
 
-        if hold_reasons:
-            console.print("\n[dim]Why players are on HOLD:[/dim]")
-            for reason, count in hold_reasons.items():
-                console.print(f"[dim]  • {count}x: {reason}[/dim]")
+        try:
+            from .enhanced_analyzer import EnhancedAnalyzer
+
+            enhanced_analyzer = EnhancedAnalyzer()
+
+            # Position Landscape Analysis
+            console.print("[bold]Market Analysis by Position[/bold]")
+            console.print("Compare opportunities across different positions\n")
+            position_comparisons = enhanced_analyzer.analyze_position_landscape(market_analyses)
+            enhanced_analyzer.display_position_comparison(position_comparisons)
+
+            # Value Predictions for your squad
+            console.print("\n" + "─" * 60)
+            console.print("[bold]Your Squad - Value Predictions[/bold]")
+            console.print("Predicted market value changes for your players\n")
+
+            squad_predictions = []
+            for analysis in team_analyses[:8]:  # Top 8 players
+                try:
+                    # Get trend data using v2 endpoint (has actual historical data)
+                    history_data = trader.api.client.get_player_market_value_history_v2(
+                        player_id=analysis.player.id, timeframe=92  # 3 months
+                    )
+
+                    # Extract trend from historical data
+                    it_array = history_data.get("it", [])
+                    trend_analysis = {"has_data": False}
+
+                    if it_array and len(it_array) >= 14:
+                        recent = it_array[-14:]
+                        first_value = recent[0].get("mv", 0)
+                        last_value = recent[-1].get("mv", 0)
+
+                        if first_value > 0:
+                            trend_pct = ((last_value - first_value) / first_value) * 100
+
+                            # Long-term trend
+                            long_term_pct = 0
+                            if len(it_array) >= 30:
+                                month_ago_value = it_array[-30].get("mv", 0)
+                                if month_ago_value > 0:
+                                    long_term_pct = (
+                                        (last_value - month_ago_value) / month_ago_value
+                                    ) * 100
+
+                            trend_analysis = {
+                                "has_data": True,
+                                "trend_pct": trend_pct,
+                                "long_term_pct": long_term_pct,
+                                "peak_value": history_data.get("hmv", 0),
+                                "current_value": last_value,
+                            }
+
+                    # Get performance data
+                    perf_data = trader.history_cache.get_cached_performance(
+                        player_id=analysis.player.id, league_id=league.id, max_age_hours=24
+                    )
+                    if not perf_data:
+                        perf_data = trader.api.client.get_player_performance(
+                            league.id, analysis.player.id
+                        )
+
+                    prediction = enhanced_analyzer.predict_player_value(
+                        analysis.player, trend_analysis, perf_data
+                    )
+                    squad_predictions.append(prediction)
+                except Exception as e:
+                    if verbose:
+                        console.print(
+                            f"[dim]Prediction error for {analysis.player.first_name}: {e}[/dim]"
+                        )
+                    pass
+
+            if squad_predictions:
+                enhanced_analyzer.display_predictions(squad_predictions, title="")
+            else:
+                console.print("[dim]No prediction data available for your squad[/dim]")
+
+            # Market Predictions for top opportunities
+            console.print("\n" + "─" * 60)
+            console.print("[bold]Market Opportunities - Value Predictions[/bold]")
+            console.print("Players expected to gain value - buy before they rise!\n")
+
+            market_predictions = []
+            top_market_players = trader.analyzer.find_best_opportunities(market_analyses, top_n=8)
+
+            for analysis in top_market_players:
+                try:
+                    # Get trend data using v2 endpoint (has actual historical data)
+                    history_data = trader.api.client.get_player_market_value_history_v2(
+                        player_id=analysis.player.id, timeframe=92  # 3 months
+                    )
+
+                    # Extract trend from historical data
+                    it_array = history_data.get("it", [])
+                    trend_analysis = {"has_data": False}
+
+                    if it_array and len(it_array) >= 14:
+                        recent = it_array[-14:]
+                        first_value = recent[0].get("mv", 0)
+                        last_value = recent[-1].get("mv", 0)
+
+                        if first_value > 0:
+                            trend_pct = ((last_value - first_value) / first_value) * 100
+
+                            # Long-term trend
+                            long_term_pct = 0
+                            if len(it_array) >= 30:
+                                month_ago_value = it_array[-30].get("mv", 0)
+                                if month_ago_value > 0:
+                                    long_term_pct = (
+                                        (last_value - month_ago_value) / month_ago_value
+                                    ) * 100
+
+                            trend_analysis = {
+                                "has_data": True,
+                                "trend_pct": trend_pct,
+                                "long_term_pct": long_term_pct,
+                                "peak_value": history_data.get("hmv", 0),
+                                "current_value": last_value,
+                            }
+
+                    # Get performance data
+                    perf_data = trader.history_cache.get_cached_performance(
+                        player_id=analysis.player.id, league_id=league.id, max_age_hours=24
+                    )
+                    if not perf_data:
+                        perf_data = trader.api.client.get_player_performance(
+                            league.id, analysis.player.id
+                        )
+
+                    prediction = enhanced_analyzer.predict_player_value(
+                        analysis.player, trend_analysis, perf_data
+                    )
+                    market_predictions.append(prediction)
+                except Exception as e:
+                    if verbose:
+                        console.print(
+                            f"[dim]Prediction error for {analysis.player.first_name}: {e}[/dim]"
+                        )
+                    pass
+
+            if market_predictions:
+                enhanced_analyzer.display_predictions(market_predictions, title="")
+            else:
+                console.print("[dim]No prediction data available for market opportunities[/dim]")
+
+            # Tips and recommendations
+            console.print("\n" + "─" * 60)
+            console.print("[bold]💡 Quick Tips[/bold]\n")
+            console.print("📈 [green]Improving[/green] - Strong upward momentum, buy now")
+            console.print("📉 [red]Declining[/red] - Losing value, sell or avoid")
+            console.print("➡️  [yellow]Stable[/yellow] - Predictable, safe hold")
+            console.print("🌊 [magenta]Volatile[/magenta] - Unpredictable, risky\n")
+
+        except Exception as e:
+            if verbose:
+                console.print(f"[red]Predictions error: {e}[/red]")
+            pass  # Silent failure for predictions
+
+    # Final summary
+    console.print("\n" + "═" * 60)
+    console.print("[bold]Analysis complete![/bold]")
+    if simple:
+        console.print("[dim]Run without --simple for predictions and insights[/dim]")
+    console.print("═" * 60 + "\n")
 
 
 @app.command()
@@ -171,7 +461,9 @@ def trade(
     league = leagues[league_index]
     console.print(f"\n[bold]Trading in league: {league.name}[/bold]")
 
-    trader = Trader(api, settings)
+    # Connect learner for adaptive bidding
+    learner = get_learner()
+    trader = Trader(api, settings, bid_learner=learner)
     trader.auto_trade(league, max_trades=max_trades)
 
 
@@ -213,7 +505,9 @@ def monitor(
     league = leagues[league_index]
     console.print(f"\n[bold]Monitoring bids in league: {league.name}[/bold]\n")
 
-    trader = Trader(api, settings)
+    # Connect learner for adaptive bidding
+    learner = get_learner()
+    trader = Trader(api, settings, bid_learner=learner)
 
     # Get pending bids summary
     summary = trader.bid_monitor.get_pending_summary()
@@ -263,7 +557,9 @@ def register_bid(
     league = leagues[league_index]
     console.print(f"\n[bold]Searching for bids in league: {league.name}[/bold]\n")
 
-    trader = Trader(api, settings)
+    # Connect learner for adaptive bidding
+    learner = get_learner()
+    trader = Trader(api, settings, bid_learner=learner)
 
     # Search market for player with your bid
     market_players = api.get_market(league)
@@ -346,7 +642,6 @@ def record_purchase(
     league = leagues[league_index]
 
     # Get squad
-    console.print(f"[cyan]Fetching your squad from {league.name}...[/cyan]")
     players = api.get_squad(league)
 
     # Find player by name
@@ -430,9 +725,13 @@ def stats(
     show_patterns: bool = typer.Option(
         False, "--patterns", "-p", help="Show detailed pattern analysis"
     ),
+    show_learning: bool = typer.Option(
+        False, "--learning", "-l", help="Show factor performance and learning insights"
+    ),
 ):
     """View bot learning statistics and recommendations"""
     from .bid_learner import BidLearner
+    from .historical_tracker import HistoricalTracker
 
     learner = BidLearner()
 
@@ -537,6 +836,12 @@ def stats(
         )
         console.print("[dim]Run 'rehoboam auto' to start automated trading[/dim]")
 
+    # Learning insights (factor performance)
+    if show_learning:
+        console.print("\n" + "═" * 60)
+        tracker = HistoricalTracker()
+        tracker.display_learning_report()
+
     console.print()
 
 
@@ -627,6 +932,62 @@ def daemon(
         scheduler.run()
     except KeyboardInterrupt:
         console.print("\n[yellow]Daemon stopped by user[/yellow]")
+
+
+@app.command()
+def stats():
+    """Show bot learning statistics and recommendations"""
+    learner = get_learner()
+
+    console.print("\n[bold cyan]🧠 Bot Learning Statistics[/bold cyan]\n")
+
+    # Auction stats
+    auction_stats = learner.get_statistics()
+    console.print("[bold]Auction Performance:[/bold]")
+    console.print(f"  Total auctions: {auction_stats['total_auctions']}")
+    console.print(f"  Wins: [green]{auction_stats['wins']}[/green]")
+    console.print(f"  Losses: [red]{auction_stats['losses']}[/red]")
+    console.print(f"  Win rate: [cyan]{auction_stats['win_rate']}%[/cyan]")
+
+    if auction_stats["total_auctions"] > 0:
+        console.print(
+            f"\n  Avg winning overbid: [green]{auction_stats['avg_winning_overbid']}%[/green]"
+        )
+        console.print(f"  Avg losing overbid: [red]{auction_stats['avg_losing_overbid']}%[/red]")
+
+        if auction_stats["avg_value_score_wins"] > 0:
+            console.print(f"\n  Avg value score (wins): {auction_stats['avg_value_score_wins']}")
+            console.print(f"  Avg value score (losses): {auction_stats['avg_value_score_losses']}")
+
+    # Flip stats
+    console.print("\n[bold]Flip Trading Performance:[/bold]")
+    flip_stats = learner.get_flip_statistics()
+    console.print(f"  Total flips: {flip_stats['total_flips']}")
+    console.print(f"  Profitable: [green]{flip_stats['profitable_flips']}[/green]")
+    console.print(f"  Unprofitable: [red]{flip_stats['unprofitable_flips']}[/red]")
+    console.print(f"  Success rate: [cyan]{flip_stats['success_rate']}%[/cyan]")
+
+    if flip_stats["total_flips"] > 0:
+        console.print(f"\n  Avg profit (winners): [green]{flip_stats['avg_profit_pct']}%[/green]")
+        console.print(f"  Avg loss (losers): [red]{flip_stats['avg_loss_pct']}%[/red]")
+        console.print(f"  Total profit: [cyan]€{flip_stats['total_profit']:,}[/cyan]")
+        console.print(f"\n  Avg hold time (profitable): {flip_stats['avg_hold_days_profit']} days")
+        console.print(f"  Avg hold time (unprofitable): {flip_stats['avg_hold_days_loss']} days")
+
+        if flip_stats["best_flip"]:
+            best = flip_stats["best_flip"]
+            console.print(f"\n  [bold green]Best flip:[/bold green] {best['player']}")
+            console.print(
+                f"    Profit: €{best['profit']:,} ({best['profit_pct']}%) in {best['hold_days']} days"
+            )
+
+    # Recommendations
+    console.print("\n[bold]Learning Recommendations:[/bold]")
+    recommendations = learner.get_learning_recommendations()
+    for rec in recommendations:
+        console.print(f"  • {rec}")
+
+    console.print("")
 
 
 @app.callback()

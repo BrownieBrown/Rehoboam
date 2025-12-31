@@ -189,11 +189,18 @@ class TradeOptimizer:
             # Calculate smart bid for each incoming player
             for p in players_in:
                 value_score = player_values.get(p.id, 0)
+                # Estimate predicted future value (higher value score = more growth)
+                growth_factor = 1.0 + (value_score / 1000)
+                predicted_future_value = int(p.market_value * growth_factor)
+
                 bid_rec = self.bidding_strategy.calculate_bid(
                     asking_price=p.price,
                     market_value=p.market_value,
                     value_score=value_score,
                     confidence=0.8,  # Conservative confidence for lineup trades
+                    is_long_term_hold=True,  # LINEUP TRADES = long-term holds
+                    average_points=p.average_points,  # Enable elite bidding for >70 pts
+                    predicted_future_value=predicted_future_value,
                 )
                 smart_bids[p.id] = bid_rec.recommended_bid
             total_cost = sum(smart_bids.values())
@@ -284,11 +291,18 @@ class TradeOptimizer:
                 # Calculate smart bid for each incoming player
                 for p in players_in:
                     value_score = player_values.get(p.id, 0)
+                    # Estimate predicted future value (higher value score = more growth)
+                    growth_factor = 1.0 + (value_score / 1000)
+                    predicted_future_value = int(p.market_value * growth_factor)
+
                     bid_rec = self.bidding_strategy.calculate_bid(
                         asking_price=p.price,
                         market_value=p.market_value,
                         value_score=value_score,
                         confidence=0.8,  # Conservative confidence for lineup trades
+                        is_long_term_hold=True,  # LINEUP TRADES = long-term holds
+                        average_points=p.average_points,  # Enable elite bidding for >70 pts
+                        predicted_future_value=predicted_future_value,
                     )
                     smart_bids[p.id] = bid_rec.recommended_bid
                 total_cost = sum(smart_bids.values())

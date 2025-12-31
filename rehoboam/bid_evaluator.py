@@ -96,12 +96,25 @@ class BidEvaluator:
                 recommendation = "CANCEL"
                 reason = f"Player is injured (status: {bid_player.status})"
 
-            elif is_falling and for_profit:
-                recommendation = "CANCEL"
-                reason = f"Falling trend ({trend_pct:.1f}%) - not good for flips"
+            elif is_falling and trend_pct < -10 and for_profit:
+                # Falling trend - but check if it's a mean reversion opportunity first
+                # Mean reversion: player far below peak (>50%) with good performance
+                # peak_value and current_value already extracted above (lines 74-75)
 
-            elif for_profit and bid_vs_mv_pct > 15:
-                # For profit flips, don't bid >15% over market value
+                is_mean_reversion = False
+                if peak_value > 0:
+                    current_vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
+                    if current_vs_peak_pct < -50 and bid_player.average_points >= 40:
+                        # Mean reversion opportunity: >50% below peak + good performer
+                        is_mean_reversion = True
+
+                if not is_mean_reversion:
+                    # Not a mean reversion play - cancel falling bid
+                    recommendation = "CANCEL"
+                    reason = f"Falling trend ({trend_pct:.1f}%) - not good for flips"
+
+            elif for_profit and bid_vs_mv_pct > 25:
+                # For profit flips, don't bid >25% over market value (relaxed from 15%)
                 recommendation = "CANCEL"
                 reason = f"Bid {bid_vs_mv_pct:.1f}% over market value - too expensive for flip"
 
@@ -109,24 +122,31 @@ class BidEvaluator:
             else:
                 if for_profit:
                     # Calculate expected profit potential
+                    # Accept rising trends, stable good performers, or mean reversion plays
                     expected_appreciation = 0
                     if trend_direction == "rising" and trend_pct > 5:
                         expected_appreciation = min(trend_pct, 20)
-                    elif peak_value > 0 and trend_direction != "falling":
-                        vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
-                        if vs_peak_pct < -15:
-                            recovery_potential = abs(vs_peak_pct) * 0.5
-                            expected_appreciation = min(recovery_potential, 20)
+                    elif trend_direction == "stable" and bid_player.average_points >= 40:
+                        # Stable good performers - conservative estimate
+                        expected_appreciation = 8
+                    elif trend_direction == "falling":
+                        # Check for mean reversion opportunity
+                        # peak_value and current_value already extracted above (lines 74-75)
+                        if peak_value > 0:
+                            current_vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
+                            if current_vs_peak_pct < -50 and bid_player.average_points >= 40:
+                                # Mean reversion play
+                                expected_appreciation = min(abs(current_vs_peak_pct) * 0.3, 15)
 
                     profit_potential = expected_appreciation
 
-                    if profit_potential >= 10:
+                    if profit_potential >= 8:  # Relaxed from 10%
                         reason = (
                             f"Good flip potential: {profit_potential:.1f}% expected appreciation"
                         )
                     else:
                         recommendation = "CANCEL"
-                        reason = f"Low profit potential: {profit_potential:.1f}% (need >= 10%)"
+                        reason = f"Low profit potential: {profit_potential:.1f}% (need >= 8%)"
                 else:
                     # For lineup improvements, more lenient
                     if bid_player.average_points > 50 and not is_falling:

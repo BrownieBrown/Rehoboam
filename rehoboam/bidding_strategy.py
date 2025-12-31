@@ -26,11 +26,11 @@ class SmartBidding:
 
     def __init__(
         self,
-        default_overbid_pct: float = 5.0,  # Default overbid %
-        max_overbid_pct: float = 15.0,  # Never exceed this overbid
+        default_overbid_pct: float = 10.0,  # Default overbid % (increased from 5%)
+        max_overbid_pct: float = 25.0,  # Never exceed this overbid (increased from 15%)
         high_value_threshold: float = 70.0,  # Value score for aggressive bidding
         elite_player_threshold: float = 70.0,  # Avg points for elite status
-        elite_max_overbid_pct: float = 30.0,  # Can bid more for elite long-term holds
+        elite_max_overbid_pct: float = 40.0,  # Can bid more for elite long-term holds (increased from 30%)
         min_bid_increment: int = 1000,  # Minimum bid increment (€1k)
         bid_learner: Optional["BidLearner"] = None,  # Optional learning from past auctions
     ):
@@ -116,19 +116,31 @@ class SmartBidding:
         # Calculate recommended bid
         recommended_bid = asking_price + overbid_amount
 
+        # LEAGUE RULE ENFORCEMENT: Never bid below market value
+        # Add 1% buffer to be competitive while staying compliant (reduced from 2%)
+        market_value_floor = int(market_value * 1.01)  # Market value + 1% buffer
+        if recommended_bid < market_value_floor:
+            recommended_bid = market_value_floor
+            overbid_amount = recommended_bid - asking_price
+
         # CRITICAL: Calculate max profitable bid with VALUE CEILING
         # The absolute maximum is predicted_future_value - we NEVER exceed this
         max_profitable_bid = predicted_future_value
+
+        # For high-confidence bids, allow 10% flexibility above value ceiling
+        # This helps win competitive auctions for players we're very confident about
+        if confidence >= 0.9:
+            max_profitable_bid = int(max_profitable_bid * 1.10)  # 10% flexibility
 
         # For replacements, consider net cost
         if is_replacement and replacement_sell_value > 0:
             # Net cost = new player cost - sell value
             # We can spend more if we're selling someone good
             replacement_adjusted_max = replacement_sell_value + int(replacement_sell_value * 0.5)
-            # But STILL never exceed predicted future value
+            # But STILL never exceed predicted future value (with confidence flexibility)
             max_profitable_bid = min(max_profitable_bid, replacement_adjusted_max)
 
-        # Apply value ceiling - NEVER exceed predicted future value
+        # Apply value ceiling - cap at max_profitable_bid
         if recommended_bid > max_profitable_bid:
             recommended_bid = max_profitable_bid
             overbid_amount = recommended_bid - asking_price
@@ -166,27 +178,27 @@ class SmartBidding:
     ) -> float:
         """Calculate how much to overbid based on player quality and situation"""
 
-        # Base overbid
+        # Base overbid (now 10% instead of 5%)
         overbid = self.default_overbid_pct
 
         # ELITE PLAYERS: Exceptional long-term holds - bid much more aggressively
         if is_elite:
-            overbid += 15.0  # Start much higher for elite players
+            overbid += 18.0  # Start much higher for elite players (increased from 15%)
 
         # Increase for high-value players (we really want them)
         elif value_score >= self.high_value_threshold:
             # High value players: bid more aggressively
-            overbid += 5.0
+            overbid += 8.0  # Increased from 5%
 
-        # Increase based on confidence
+        # Increase based on confidence (more aggressive)
         if confidence >= 0.9:
-            overbid += 3.0
+            overbid += 5.0  # Increased from 3.0
         elif confidence >= 0.7:
-            overbid += 1.5
+            overbid += 3.0  # Increased from 1.5
 
         # Replacements can bid more (we're selling someone)
         if is_replacement:
-            overbid += 2.0
+            overbid += 3.0  # Increased from 2.0
 
         # Cap at maximum (higher for elite players)
         max_overbid = self.elite_max_overbid_pct if is_elite else self.max_overbid_pct

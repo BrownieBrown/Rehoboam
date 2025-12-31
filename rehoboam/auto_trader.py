@@ -43,7 +43,7 @@ class AutoTrader:
         self,
         api,
         settings,
-        max_trades_per_session: int = 3,
+        max_trades_per_session: int = 5,  # Increased from 3 for more competitiveness
         max_daily_spend: int = 50_000_000,  # 50M max per day
         dry_run: bool = False,
     ):
@@ -88,22 +88,38 @@ class AutoTrader:
         from .trader import Trader
 
         results = []
-        trader = Trader(self.api, self.settings)
+        # Pass learner to trader for adaptive bidding
+        trader = Trader(self.api, self.settings, bid_learner=self.learner)
 
         console.print("\n[bold cyan]🤖 Auto-Trading: Profit Opportunities[/bold cyan]")
 
         # Step 0: Check resolved auctions for learning
         self.check_resolved_auctions(league)
 
-        # Step 1: Re-evaluate active bids FIRST
-        from .bid_evaluator import BidEvaluator
+        # Step 0.5: Check bid compliance (league rule: no bids below market value)
+        from .league_compliance import LeagueComplianceChecker
 
-        bid_evaluator = BidEvaluator(self.api, self.settings)
+        compliance_checker = LeagueComplianceChecker(self.api, self.settings)
 
-        # Get trend data for bid evaluation
+        # Get market data and trends for compliance checks
         market = self.api.get_market(league)
         kickbase_market = [p for p in market if p.is_kickbase_seller()]
         player_trends = trader._fetch_player_trends(kickbase_market, limit=50)
+
+        # Run bid compliance check (adjust/cancel bids below market value)
+        adjusted, canceled_compliance = compliance_checker.run_bid_compliance_check(
+            league, player_trends=player_trends, auto_resolve=True, dry_run=self.dry_run
+        )
+
+        if adjusted > 0 or canceled_compliance > 0:
+            console.print(
+                f"\n[cyan]Bid compliance: {adjusted} adjusted, {canceled_compliance} canceled[/cyan]"
+            )
+
+        # Step 1: Re-evaluate active bids for quality
+        from .bid_evaluator import BidEvaluator
+
+        bid_evaluator = BidEvaluator(self.api, self.settings)
 
         bid_evaluations = bid_evaluator.evaluate_active_bids(
             league, player_trends=player_trends, for_profit=True
@@ -159,15 +175,6 @@ class AutoTrader:
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
         flip_budget = current_budget + max_debt - pending_bid_total
 
-        console.print(f"[dim]Found {len(opportunities)} opportunities[/dim]")
-        console.print(f"[dim]Current budget: €{current_budget:,}[/dim]")
-        console.print(f"[dim]Team value: €{team_value:,}[/dim]")
-        console.print(f"[dim]Max debt %: {max_debt_pct}%[/dim]")
-        if pending_bid_total > 0:
-            console.print(f"[dim]Pending bids: €{pending_bid_total:,}[/dim]")
-        console.print(f"[dim]Debt capacity: €{max_debt:,}[/dim]")
-        console.print(f"[dim]Available for flips: €{flip_budget:,}[/dim]")
-
         # Execute top opportunities (up to max_trades_per_session)
         executed_count = 0
         for opp in opportunities:
@@ -186,7 +193,9 @@ class AutoTrader:
 
             if current_bid > 0:
                 # We already bid on this player - should we increase our bid?
-                bid_increase_threshold = current_bid * 1.05  # Need 5% higher to re-bid
+                bid_increase_threshold = (
+                    current_bid * 1.02
+                )  # Need 2% higher to re-bid (more competitive)
 
                 if opp.buy_price <= current_bid:
                     console.print(
@@ -232,7 +241,8 @@ class AutoTrader:
         from .trader import Trader
 
         results = []
-        trader = Trader(self.api, self.settings)
+        # Pass learner to trader for adaptive bidding
+        trader = Trader(self.api, self.settings, bid_learner=self.learner)
 
         console.print("\n[bold cyan]🤖 Auto-Trading: Lineup Improvements[/bold cyan]")
 
@@ -267,13 +277,6 @@ class AutoTrader:
         # Calculate effective budget (subtract pending bids)
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
         available_budget = current_budget + max_debt - pending_bid_total
-
-        console.print(f"[dim]Found {len(trades)} lineup trades[/dim]")
-        if pending_bid_total > 0:
-            console.print(
-                f"[dim]Budget: €{current_budget:,}, Pending bids: €{pending_bid_total:,}[/dim]"
-            )
-        console.print(f"[dim]Available budget (with debt): €{available_budget:,}[/dim]")
 
         # Execute best trade (only 1 lineup trade per session for safety)
         for trade in trades[:1]:  # Only top trade
@@ -320,7 +323,6 @@ class AutoTrader:
         console.print(
             f"\n[cyan]Buying {player.first_name} {player.last_name} for €{price:,}[/cyan]"
         )
-        console.print(f"[dim]Reason: {opportunity.reason}[/dim]")
 
         if self.dry_run:
             console.print("[yellow]DRY RUN: Trade not executed[/yellow]")
@@ -375,7 +377,6 @@ class AutoTrader:
         console.print(
             f"\n[cyan]Selling {player.first_name} {player.last_name} for €{price:,}[/cyan]"
         )
-        console.print(f"[dim]Reason: {reason}[/dim]")
 
         if self.dry_run:
             console.print("[yellow]DRY RUN: Trade not executed[/yellow]")
@@ -390,7 +391,7 @@ class AutoTrader:
 
         try:
             # List player on market
-            self.api.list_player(league_id=league.id, player_id=player.id, price=price)
+            self.api.sell_player(league=league, player=player, price=price)
 
             console.print(
                 f"[green]✓ {player.first_name} {player.last_name} listed for sale[/green]"
@@ -431,7 +432,6 @@ class AutoTrader:
         console.print(
             f"\n[cyan]Executing {len(trade.players_in)}-for-{len(trade.players_out)} lineup trade[/cyan]"
         )
-        console.print(f"[dim]Expected improvement: +{trade.improvement_points:.1f} pts/week[/dim]")
 
         # Step 1: Buy all players first
         console.print("\n[cyan]Step 1: Buying players...[/cyan]")
@@ -456,7 +456,7 @@ class AutoTrader:
                     )
 
                     # Recalculate smart bid with fresh market value
-                    trader = Trader(self.api, self.settings)
+                    trader = Trader(self.api, self.settings, bid_learner=self.learner)
                     value = PlayerValue.calculate(fresh_player)
                     fresh_bid = trader.bidding.calculate_bid(
                         asking_price=fresh_player.price,
@@ -539,6 +539,28 @@ class AutoTrader:
         lineup_results = []
         errors = []
 
+        # Step 0: Squad Optimization - Ensure best 11 and positive budget by gameday
+        console.print("\n[bold cyan]🎯 Squad Optimization[/bold cyan]")
+        try:
+            squad_optimization = self.optimize_and_execute_squad(league)
+            if squad_optimization and squad_optimization.players_to_sell:
+                # Track sales as part of session results
+                for player in squad_optimization.players_to_sell:
+                    lineup_results.append(
+                        AutoTradeResult(
+                            success=True,
+                            player_name=f"{player.first_name} {player.last_name}",
+                            action="SELL",
+                            price=player.market_value,
+                            reason="Squad optimization - excess player",
+                            timestamp=time.time(),
+                        )
+                    )
+        except Exception as e:
+            error_msg = f"Squad optimization error: {str(e)}"
+            console.print(f"[red]{error_msg}[/red]")
+            errors.append(error_msg)
+
         # Run profit trading
         try:
             profit_results = self.run_profit_trading_session(league)
@@ -549,7 +571,7 @@ class AutoTrader:
 
         # Run lineup trading
         try:
-            lineup_results = self.run_lineup_improvement_session(league)
+            lineup_results.extend(self.run_lineup_improvement_session(league))
         except Exception as e:
             error_msg = f"Lineup trading error: {str(e)}"
             console.print(f"[red]{error_msg}[/red]")
@@ -655,8 +677,8 @@ class AutoTrader:
             with open(pending_file, "w") as f:
                 json.dump(pending, f, indent=2)
 
-        except Exception as e:
-            console.print(f"[dim]Could not record bid for learning: {e}[/dim]")
+        except Exception:
+            pass  # Silent failure for bid recording
 
     def check_resolved_auctions(self, league):
         """Check pending bids and record outcomes for learning"""
@@ -678,7 +700,7 @@ class AutoTrader:
                 return
 
             # Get our current team and active bids
-            my_team = self.api.get_my_team(league)
+            my_team = self.api.get_squad(league)
             my_bids = self.api.get_my_bids(league)
 
             my_player_ids = {p.id for p in my_team}
@@ -734,11 +756,8 @@ class AutoTrader:
             with open(pending_file, "w") as f:
                 json.dump(still_pending, f, indent=2)
 
-            if resolved:
-                console.print(f"[dim]Recorded {len(resolved)} auction outcomes for learning[/dim]")
-
-        except Exception as e:
-            console.print(f"[dim]Could not check resolved auctions: {e}[/dim]")
+        except Exception:
+            pass  # Silent failure for auction outcome recording
 
     def _track_purchase(self, player_id: str, bid_data: dict):
         """Track a player purchase for flip outcome recording"""
@@ -766,8 +785,49 @@ class AutoTrader:
             with open(purchases_file, "w") as f:
                 json.dump(purchases, f, indent=2)
 
-        except Exception as e:
-            console.print(f"[dim]Could not track purchase: {e}[/dim]")
+        except Exception:
+            pass  # Silent failure for purchase tracking
+
+    def optimize_and_execute_squad(self, league):
+        """
+        Run squad optimization and execute recommended sales
+
+        Returns:
+            SquadOptimization result
+        """
+        from .squad_optimizer import SquadOptimizer
+        from .trader import Trader
+
+        # Use trader's full optimization method (includes all context: performance, SOS, matchups)
+        trader = Trader(self.api, self.settings, bid_learner=self.learner)
+        optimization = trader.optimize_squad_for_gameday(league)
+
+        if not optimization:
+            return None
+
+        # Get player values for display
+        team_analyses = trader.analyze_team(league)
+        player_values = trader.get_player_values_from_analyses(team_analyses)
+
+        # Display optimization
+        optimizer = SquadOptimizer(min_squad_size=11, max_squad_size=15)
+        optimizer.display_optimization(optimization, player_values=player_values)
+
+        # Execute recommended sales if needed
+        if optimization.players_to_sell and not optimization.is_gameday_ready:
+            console.print(
+                f"\n[yellow]⚠️  Budget negative, selling {len(optimization.players_to_sell)} player(s)...[/yellow]"
+            )
+            results = optimizer.execute_sell_recommendations(
+                optimization, api=self.api, league=league, dry_run=self.dry_run
+            )
+
+            if results["sold"]:
+                console.print(
+                    f"[green]✓ Sold {len(results['sold'])} player(s) for €{sum(p.market_value for p in results['sold']):,}[/green]"
+                )
+
+        return optimization
 
     def _record_flip_outcome(self, player, sell_price: int):
         """Record a flip outcome when we sell a player we bought"""
@@ -819,10 +879,5 @@ class AutoTrader:
             with open(purchases_file, "w") as f:
                 json.dump(purchases, f, indent=2)
 
-            profit_emoji = "📈" if profit > 0 else "📉"
-            console.print(
-                f"[dim]{profit_emoji} Flip recorded: {outcome.player_name} - €{profit:,} ({profit_pct:+.1f}%)[/dim]"
-            )
-
-        except Exception as e:
-            console.print(f"[dim]Could not record flip outcome: {e}[/dim]")
+        except Exception:
+            pass  # Silent failure for flip outcome recording
