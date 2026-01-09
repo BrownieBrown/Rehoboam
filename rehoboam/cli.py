@@ -52,27 +52,36 @@ def login():
 @app.command()
 def analyze(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+    detailed: bool = typer.Option(
+        False, "--detailed", "-d", help="Show detailed analysis (default is compact action plan)"
+    ),
     show_all: bool = typer.Option(
-        False, "--all", "-a", help="Show all players, not just opportunities"
+        False, "--all", "-a", help="Show all players, not just opportunities (detailed mode only)"
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed debug information"),
     simple: bool = typer.Option(
         False, "--simple", "-s", help="Simple mode - skip predictions and advanced analysis"
     ),
     show_risk: bool = typer.Option(
-        False, "--risk", "-r", help="Show risk metrics (volatility, VaR, Sharpe ratio)"
+        False,
+        "--risk",
+        "-r",
+        help="Show risk metrics (volatility, VaR, Sharpe ratio) (detailed mode)",
     ),
     show_opportunity_cost: bool = typer.Option(
-        False, "--opportunity-cost", "-oc", help="Show trade-off analysis for purchases"
+        False,
+        "--opportunity-cost",
+        "-oc",
+        help="Show trade-off analysis for purchases (detailed mode)",
     ),
     show_portfolio: bool = typer.Option(
         False,
         "--portfolio",
         "-p",
-        help="Show portfolio-level metrics (diversification, risk, projections)",
+        help="Show portfolio-level metrics (diversification, risk, projections) (detailed mode)",
     ),
 ):
-    """Analyze the market for trading opportunities"""
+    """Analyze the market for trading opportunities (compact action plan by default)"""
 
     settings = get_settings()
     api = get_api()
@@ -94,9 +103,27 @@ def analyze(
     console.print(f"[bold cyan]🏆  {league.name}[/bold cyan]")
     console.print("═" * 60 + "\n")
 
-    # Connect learner for adaptive bidding
+    # Auto-sync activity feed for learning (silent background operation)
+    try:
+        from .activity_feed_learner import ActivityFeedLearner
+
+        feed_learner = ActivityFeedLearner()
+        activities = api.client.get_activities_feed(league.id, start=0)
+        stats = feed_learner.process_activity_feed(activities, api_client=api.client)
+
+        if verbose and (stats["transfers_new"] > 0 or stats["market_values_new"] > 0):
+            console.print(
+                f"[dim]✓ Synced activity feed: {stats['transfers_new']} new transfers, {stats['market_values_new']} new market values[/dim]"
+            )
+    except Exception as e:
+        if verbose:
+            console.print(f"[dim]Warning: Could not sync activity feed: {e}[/dim]")
+
+    # Connect learners for adaptive bidding + competitive intelligence
     learner = get_learner()
-    trader = Trader(api, settings, verbose=verbose, bid_learner=learner)
+    trader = Trader(
+        api, settings, verbose=verbose, bid_learner=learner, activity_feed_learner=feed_learner
+    )
 
     # Analyze market (suppress verbose output unless requested)
     if not verbose:
@@ -115,6 +142,13 @@ def analyze(
     team_info = trader.api.get_team_info(league)
     current_budget = team_info.get("budget", 0)
 
+    # Use compact display by default, detailed only if requested
+    if not detailed:
+        # COMPACT MODE - Action plan focused display
+        trader.display_compact_action_plan(league, market_analyses, current_budget)
+        return
+
+    # DETAILED MODE - Full analysis (original behavior)
     # SECTION 1: Market Opportunities
     console.print("[bold cyan]📈 MARKET OPPORTUNITIES[/bold cyan]")
     console.print("─" * 60 + "\n")
@@ -122,10 +156,28 @@ def analyze(
     if show_all:
         trader.display_analysis(market_analyses, title="All Market Players", show_risk=show_risk)
     else:
-        opportunities = trader.analyzer.find_best_opportunities(market_analyses, top_n=15)
+        opportunities = trader.analyzer.find_best_opportunities(market_analyses, top_n=8)
         if opportunities:
             trader.display_analysis(
-                opportunities, title="Top 15 Trading Opportunities", show_risk=show_risk
+                opportunities,
+                title="Top Buy Recommendations",
+                show_risk=show_risk,
+                show_bids=True,
+            )
+
+            # Add helpful context about bidding and market timing
+            console.print("\n[dim]💡 Tips:[/dim]")
+            console.print(
+                "[dim]  • Smart Bid shows recommended bid amount (+% over asking price)[/dim]"
+            )
+            console.print(
+                "[dim]  • Days Listed shows time on market with predicted price change[/dim]"
+            )
+            console.print(
+                "[dim]  • Value Score combines performance, trends, and matchups (40+ = buy threshold)[/dim]"
+            )
+            console.print(
+                "[dim]  • Run 'rehoboam market-intel' to see learned price adjustment patterns[/dim]"
             )
 
             # Show opportunity cost analysis if enabled
@@ -231,10 +283,12 @@ def analyze(
     console.print("[bold cyan]💡 TRADING STRATEGIES[/bold cyan]")
     console.print("═" * 60 + "\n")
 
-    # Profit trading opportunities
+    # Profit trading opportunities (limit to top 5 for cleaner output)
     try:
         profit_opps = trader.find_profit_opportunities(league)
         if profit_opps:
+            # Limit to top 5 opportunities for cleaner output
+            profit_opps = profit_opps[:5]
             console.print("[bold]Strategy 1: Quick Profit Flips[/bold]")
             console.print("Buy undervalued, hold 3-7 days, sell for profit\n")
             trader.display_profit_opportunities(profit_opps, current_budget=current_budget)
@@ -242,10 +296,12 @@ def analyze(
         if verbose:
             console.print(f"[red]Profit opportunities error: {e}[/red]")
 
-    # N-for-M trade opportunities
+    # N-for-M trade opportunities (limit to top 3 for cleaner output)
     try:
         trades = trader.find_trade_opportunities(league)
         if trades:
+            # Limit to top 3 trades for cleaner output
+            trades = trades[:3]
             console.print("\n[bold]Strategy 2: Lineup Upgrades[/bold]")
             console.print("Trade combinations to improve your best 11\n")
             trader.display_trade_recommendations(trades)
@@ -461,9 +517,12 @@ def trade(
     league = leagues[league_index]
     console.print(f"\n[bold]Trading in league: {league.name}[/bold]")
 
-    # Connect learner for adaptive bidding
+    # Connect learners for adaptive bidding + competitive intelligence
+    from .activity_feed_learner import ActivityFeedLearner
+
     learner = get_learner()
-    trader = Trader(api, settings, bid_learner=learner)
+    feed_learner = ActivityFeedLearner()
+    trader = Trader(api, settings, bid_learner=learner, activity_feed_learner=feed_learner)
     trader.auto_trade(league, max_trades=max_trades)
 
 
@@ -505,9 +564,12 @@ def monitor(
     league = leagues[league_index]
     console.print(f"\n[bold]Monitoring bids in league: {league.name}[/bold]\n")
 
-    # Connect learner for adaptive bidding
+    # Connect learners for adaptive bidding + competitive intelligence
+    from .activity_feed_learner import ActivityFeedLearner
+
     learner = get_learner()
-    trader = Trader(api, settings, bid_learner=learner)
+    feed_learner = ActivityFeedLearner()
+    trader = Trader(api, settings, bid_learner=learner, activity_feed_learner=feed_learner)
 
     # Get pending bids summary
     summary = trader.bid_monitor.get_pending_summary()
@@ -557,9 +619,12 @@ def register_bid(
     league = leagues[league_index]
     console.print(f"\n[bold]Searching for bids in league: {league.name}[/bold]\n")
 
-    # Connect learner for adaptive bidding
+    # Connect learners for adaptive bidding + competitive intelligence
+    from .activity_feed_learner import ActivityFeedLearner
+
     learner = get_learner()
-    trader = Trader(api, settings, bid_learner=learner)
+    feed_learner = ActivityFeedLearner()
+    trader = Trader(api, settings, bid_learner=learner, activity_feed_learner=feed_learner)
 
     # Search market for player with your bid
     market_players = api.get_market(league)
@@ -612,6 +677,8 @@ def register_bid(
         player_id=player.id,
         player_name=f"{player.first_name} {player.last_name}",
         bid_amount=player.user_offer_price,
+        asking_price=player.price,
+        market_value=player.market_value,
     )
 
     console.print("\n[green]✓ Bid registered successfully![/green]")
@@ -721,12 +788,120 @@ def config():
 
 
 @app.command()
+def market_intel(
+    show_recent: bool = typer.Option(False, "--recent", "-r", help="Show recent price adjustments"),
+    hours: int = typer.Option(24, "--hours", "-h", help="Hours of recent history to show"),
+):
+    """View market price adjustment patterns and intelligence"""
+    from .market_price_tracker import MarketPriceTracker
+
+    tracker = MarketPriceTracker()
+
+    # Show learned patterns
+    tracker.display_adjustment_patterns()
+
+    # Show recent adjustments if requested
+    if show_recent:
+        tracker.display_recent_adjustments(hours=hours)
+
+
+@app.command()
+def sync_activity_feed(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """Sync activity feed to learn from all league transfers"""
+    from .activity_feed_learner import ActivityFeedLearner
+
+    api = get_api()
+    api.login()
+
+    leagues = api.get_leagues()
+    if league_index >= len(leagues):
+        console.print(f"[red]Invalid league index. You have {len(leagues)} leagues.[/red]")
+        raise typer.Exit(code=1)
+
+    league = leagues[league_index]
+    console.print(f"\n[bold cyan]Syncing activity feed for: {league.name}[/bold cyan]\n")
+
+    learner = ActivityFeedLearner()
+
+    # Fetch and process activity feed
+    console.print("[dim]Fetching activity feed...[/dim]")
+    activities = api.client.get_activities_feed(league.id, start=0)
+
+    console.print("[dim]Processing activities...[/dim]")
+    stats = learner.process_activity_feed(activities, api_client=api.client)
+
+    console.print("\n[green]✓ Sync complete![/green]")
+    console.print(f"  New transfers: {stats['transfers_new']}")
+    console.print(f"  New market values: {stats['market_values_new']}")
+    console.print(
+        f"  Duplicates skipped: {stats['transfers_duplicate'] + stats['market_values_duplicate']}"
+    )
+
+    # Display league stats
+    learner.display_league_stats()
+
+    console.print("[dim]Run 'rehoboam stats' to see overall learning statistics[/dim]\n")
+
+
+@app.command()
+def competitors(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+    competitor_name: str = typer.Option(None, "--name", "-n", help="Analyze specific competitor"),
+):
+    """Analyze competitor bidding patterns and threats"""
+    from .activity_feed_learner import ActivityFeedLearner
+
+    api = get_api()
+    api.login()
+
+    leagues = api.get_leagues()
+    if league_index >= len(leagues):
+        console.print(f"[red]Invalid league index. You have {len(leagues)} leagues.[/red]")
+        raise typer.Exit(code=1)
+
+    league = leagues[league_index]
+    console.print(f"\n[bold cyan]Analyzing competitors in: {league.name}[/bold cyan]")
+
+    learner = ActivityFeedLearner()
+
+    if competitor_name:
+        # Analyze specific competitor
+        analysis = learner.get_competitor_analysis(competitor_name)
+
+        if analysis["purchases"] == 0:
+            console.print(f"\n[yellow]{analysis['message']}[/yellow]\n")
+            return
+
+        console.print(f"\n[bold red]Competitor Profile: {competitor_name}[/bold red]\n")
+        console.print(f"Total purchases: {analysis['purchases']}")
+        console.print(f"Average price: €{analysis['avg_price']:,}")
+        console.print(f"Price range: €{analysis['min_price']:,} - €{analysis['max_price']:,}")
+        console.print(f"Recent activity: {analysis['recent_purchases']} purchases in last 7 days")
+        console.print(f"Aggression level: {analysis['aggression_level']}")
+
+        if analysis.get("expensive_buys"):
+            console.print("\n[bold]Most Expensive Purchases:[/bold]")
+            for buy in analysis["expensive_buys"]:
+                console.print(f"  • {buy['player']}: €{buy['price']:,}")
+
+        console.print()
+    else:
+        # Display full competitor threat analysis
+        learner.display_competitor_analysis()
+
+
+@app.command()
 def stats(
     show_patterns: bool = typer.Option(
         False, "--patterns", "-p", help="Show detailed pattern analysis"
     ),
     show_learning: bool = typer.Option(
         False, "--learning", "-l", help="Show factor performance and learning insights"
+    ),
+    show_league: bool = typer.Option(
+        False, "--league", help="Show league transfer statistics from activity feed"
     ),
 ):
     """View bot learning statistics and recommendations"""
@@ -842,6 +1017,15 @@ def stats(
         tracker = HistoricalTracker()
         tracker.display_learning_report()
 
+    # League transfer statistics
+    if show_league:
+        from .activity_feed_learner import ActivityFeedLearner
+
+        console.print("\n" + "═" * 60)
+        feed_learner = ActivityFeedLearner()
+        feed_learner.display_league_stats()
+        console.print("[dim]Run 'rehoboam sync-activity-feed' to update this data[/dim]")
+
     console.print()
 
 
@@ -932,62 +1116,6 @@ def daemon(
         scheduler.run()
     except KeyboardInterrupt:
         console.print("\n[yellow]Daemon stopped by user[/yellow]")
-
-
-@app.command()
-def stats():
-    """Show bot learning statistics and recommendations"""
-    learner = get_learner()
-
-    console.print("\n[bold cyan]🧠 Bot Learning Statistics[/bold cyan]\n")
-
-    # Auction stats
-    auction_stats = learner.get_statistics()
-    console.print("[bold]Auction Performance:[/bold]")
-    console.print(f"  Total auctions: {auction_stats['total_auctions']}")
-    console.print(f"  Wins: [green]{auction_stats['wins']}[/green]")
-    console.print(f"  Losses: [red]{auction_stats['losses']}[/red]")
-    console.print(f"  Win rate: [cyan]{auction_stats['win_rate']}%[/cyan]")
-
-    if auction_stats["total_auctions"] > 0:
-        console.print(
-            f"\n  Avg winning overbid: [green]{auction_stats['avg_winning_overbid']}%[/green]"
-        )
-        console.print(f"  Avg losing overbid: [red]{auction_stats['avg_losing_overbid']}%[/red]")
-
-        if auction_stats["avg_value_score_wins"] > 0:
-            console.print(f"\n  Avg value score (wins): {auction_stats['avg_value_score_wins']}")
-            console.print(f"  Avg value score (losses): {auction_stats['avg_value_score_losses']}")
-
-    # Flip stats
-    console.print("\n[bold]Flip Trading Performance:[/bold]")
-    flip_stats = learner.get_flip_statistics()
-    console.print(f"  Total flips: {flip_stats['total_flips']}")
-    console.print(f"  Profitable: [green]{flip_stats['profitable_flips']}[/green]")
-    console.print(f"  Unprofitable: [red]{flip_stats['unprofitable_flips']}[/red]")
-    console.print(f"  Success rate: [cyan]{flip_stats['success_rate']}%[/cyan]")
-
-    if flip_stats["total_flips"] > 0:
-        console.print(f"\n  Avg profit (winners): [green]{flip_stats['avg_profit_pct']}%[/green]")
-        console.print(f"  Avg loss (losers): [red]{flip_stats['avg_loss_pct']}%[/red]")
-        console.print(f"  Total profit: [cyan]€{flip_stats['total_profit']:,}[/cyan]")
-        console.print(f"\n  Avg hold time (profitable): {flip_stats['avg_hold_days_profit']} days")
-        console.print(f"  Avg hold time (unprofitable): {flip_stats['avg_hold_days_loss']} days")
-
-        if flip_stats["best_flip"]:
-            best = flip_stats["best_flip"]
-            console.print(f"\n  [bold green]Best flip:[/bold green] {best['player']}")
-            console.print(
-                f"    Profit: €{best['profit']:,} ({best['profit_pct']}%) in {best['hold_days']} days"
-            )
-
-    # Recommendations
-    console.print("\n[bold]Learning Recommendations:[/bold]")
-    recommendations = learner.get_learning_recommendations()
-    for rec in recommendations:
-        console.print(f"  • {rec}")
-
-    console.print("")
 
 
 @app.callback()

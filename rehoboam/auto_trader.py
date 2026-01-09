@@ -66,9 +66,11 @@ class AutoTrader:
         self.last_reset = datetime.now().date()
 
         # Learning system
+        from .activity_feed_learner import ActivityFeedLearner
         from .bid_learner import BidLearner
 
         self.learner = BidLearner()
+        self.activity_feed_learner = ActivityFeedLearner()
 
     def _reset_daily_limits_if_needed(self):
         """Reset daily limits at midnight"""
@@ -88,8 +90,13 @@ class AutoTrader:
         from .trader import Trader
 
         results = []
-        # Pass learner to trader for adaptive bidding
-        trader = Trader(self.api, self.settings, bid_learner=self.learner)
+        # Pass learners to trader for adaptive bidding with competitive intelligence
+        trader = Trader(
+            self.api,
+            self.settings,
+            bid_learner=self.learner,
+            activity_feed_learner=self.activity_feed_learner,
+        )
 
         console.print("\n[bold cyan]🤖 Auto-Trading: Profit Opportunities[/bold cyan]")
 
@@ -241,8 +248,13 @@ class AutoTrader:
         from .trader import Trader
 
         results = []
-        # Pass learner to trader for adaptive bidding
-        trader = Trader(self.api, self.settings, bid_learner=self.learner)
+        # Pass learners to trader for adaptive bidding with competitive intelligence
+        trader = Trader(
+            self.api,
+            self.settings,
+            bid_learner=self.learner,
+            activity_feed_learner=self.activity_feed_learner,
+        )
 
         console.print("\n[bold cyan]🤖 Auto-Trading: Lineup Improvements[/bold cyan]")
 
@@ -534,6 +546,21 @@ class AutoTrader:
         if self.dry_run:
             console.print("[yellow]DRY RUN MODE - No trades will be executed[/yellow]")
         console.print(f"{'=' * 70}")
+
+        # Auto-sync activity feed for competitive intelligence
+        try:
+            console.print("\n[dim]Syncing league activity feed...[/dim]")
+            activities = self.api.client.get_activities_feed(league.id, start=0)
+            stats = self.activity_feed_learner.process_activity_feed(
+                activities, api_client=self.api.client
+            )
+
+            if stats["transfers_new"] > 0 or stats["market_values_new"] > 0:
+                console.print(
+                    f"[dim]✓ Synced: {stats['transfers_new']} new transfers, {stats['market_values_new']} new market values[/dim]"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not sync activity feed: {e}[/yellow]")
 
         profit_results = []
         lineup_results = []

@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 try:
+    from .activity_feed_learner import ActivityFeedLearner
     from .bid_learner import BidLearner
 except ImportError:
     BidLearner = None
+    ActivityFeedLearner = None
 
 
 @dataclass
@@ -33,6 +35,9 @@ class SmartBidding:
         elite_max_overbid_pct: float = 40.0,  # Can bid more for elite long-term holds (increased from 30%)
         min_bid_increment: int = 1000,  # Minimum bid increment (€1k)
         bid_learner: Optional["BidLearner"] = None,  # Optional learning from past auctions
+        activity_feed_learner: Optional[
+            "ActivityFeedLearner"
+        ] = None,  # Learn from league transfers
     ):
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -41,6 +46,9 @@ class SmartBidding:
         self.elite_max_overbid_pct = elite_max_overbid_pct
         self.min_bid_increment = min_bid_increment
         self.bid_learner = bid_learner
+        self.activity_feed_learner = activity_feed_learner or (
+            ActivityFeedLearner() if ActivityFeedLearner else None
+        )
 
     def calculate_bid(
         self,
@@ -53,6 +61,7 @@ class SmartBidding:
         predicted_future_value: int | None = None,
         average_points: float = 0.0,
         is_long_term_hold: bool = False,
+        player_id: str | None = None,  # For activity feed learning
     ) -> BidRecommendation:
         """
         Calculate optimal bid for a player with value-bounded learning
@@ -96,6 +105,45 @@ class SmartBidding:
         # Check if this is an elite player we want to keep long-term
         is_elite = is_long_term_hold and average_points >= self.elite_player_threshold
 
+        # Get league competitive intelligence from activity feed
+        demand_adjustment = 0.0
+        demand_score = 0.0
+        league_competitive_level = 0.0
+
+        if self.activity_feed_learner and player_id:
+            try:
+                # Get player demand score (how hot is this player?)
+                demand_score = self.activity_feed_learner.get_player_demand_score(player_id)
+
+                # Get league competitive stats
+                league_stats = self.activity_feed_learner.get_competitive_bidding_stats()
+
+                # Calculate league competitive level based on average transfer prices
+                if league_stats["total_transfers"] > 0:
+                    avg_price = league_stats["avg_transfer_price"]
+                    # If league average is high, we need to bid more aggressively
+                    if avg_price > 15_000_000:
+                        league_competitive_level = 8.0  # Very competitive league
+                    elif avg_price > 10_000_000:
+                        league_competitive_level = 5.0  # Competitive league
+                    elif avg_price > 5_000_000:
+                        league_competitive_level = 3.0  # Moderate league
+                    else:
+                        league_competitive_level = 0.0  # Casual league
+
+                # Adjust for player demand
+                if demand_score >= 75:
+                    demand_adjustment = 8.0  # Hot player - bid aggressively
+                elif demand_score >= 60:
+                    demand_adjustment = 5.0  # Above average demand
+                elif demand_score >= 50:
+                    demand_adjustment = 2.0  # Normal demand
+                # else: no adjustment for low demand
+
+            except Exception:
+                # Fail silently - don't break bidding if feed learner fails
+                pass
+
         # Calculate base overbid percentage (use learned if available)
         if learned_overbid_pct is not None and learned_overbid_pct > 0:
             overbid_pct = learned_overbid_pct
@@ -106,6 +154,10 @@ class SmartBidding:
                 is_replacement=is_replacement,
                 is_elite=is_elite,
             )
+
+        # Apply league competitive intelligence
+        overbid_pct += league_competitive_level
+        overbid_pct += demand_adjustment
 
         # Calculate raw bid amount
         overbid_amount = int(asking_price * (overbid_pct / 100))
@@ -162,6 +214,8 @@ class SmartBidding:
             learning_reason=learning_reason,
             value_ceiling_applied=recommended_bid >= predicted_future_value,
             is_elite=is_elite,
+            league_competitive_level=league_competitive_level,
+            demand_adjustment=demand_adjustment,
         )
 
         return BidRecommendation(
@@ -229,6 +283,8 @@ class SmartBidding:
         learning_reason: str | None = None,
         value_ceiling_applied: bool = False,
         is_elite: bool = False,
+        league_competitive_level: float = 0.0,
+        demand_adjustment: float = 0.0,
     ) -> str:
         """Generate human-readable reasoning for the bid"""
 
@@ -237,6 +293,18 @@ class SmartBidding:
         # Elite player status (highest priority)
         if is_elite:
             reasons.append("🌟 ELITE PLAYER - Long-term hold")
+
+        # League competitive intelligence
+        if league_competitive_level >= 8.0:
+            reasons.append("🔥 Very competitive league")
+        elif league_competitive_level >= 5.0:
+            reasons.append("⚡ Competitive league")
+
+        # Player demand signal
+        if demand_adjustment >= 8.0:
+            reasons.append("🎯 HOT PLAYER - high demand")
+        elif demand_adjustment >= 5.0:
+            reasons.append("📈 Above avg demand")
 
         # Learning-based reasoning (priority)
         if learning_reason:

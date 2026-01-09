@@ -119,7 +119,9 @@ class ValueHistoryCache:
         self, history_data: dict[str, Any], current_market_value: int = 0
     ) -> dict[str, Any]:
         """
-        Analyze trend from API history data
+        Analyze trend from API history data with focus on RECENT momentum
+
+        CRITICAL: Use recent price movement to avoid buying at peaks!
 
         Args:
             history_data: Response from API get_player_market_value_history
@@ -128,46 +130,120 @@ class ValueHistoryCache:
         Returns:
             Trend analysis dict with:
             - trend: "rising", "falling", "stable", "unknown"
-            - change_pct: percentage change
+            - change_pct: percentage change (RECENT, not overall)
             - reference_value: reference price from API
             - current_value: current market value
         """
         # API Response structure:
         # {
-        #   "it": [],  # Historical data points (often empty)
-        #   "trp": <number>,  # Reference price (possibly trend/transfer price)
-        #   "prlo": <number>,  # Price low in period
+        #   "it": [{dt: days_since_epoch, mv: market_value}, ...],  # Historical data points
+        #   "trp": <number>,  # Reference price (could be old)
+        #   "hmv": <number>,  # Highest market value (peak)
         #   "lmv": <number>,  # Lowest market value
-        #   "hmv": <number>,  # Highest market value
-        #   "iso": <bool>,  # In squad owner?
-        #   "idp": <bool>   # Unknown
         # }
 
         if not history_data or current_market_value == 0:
             return {"trend": "unknown", "change_pct": 0.0, "has_data": False}
 
-        # Use trp (reference price) and prlo (price low) to determine trend
+        # CRITICAL FIX: Look at historical data points for RECENT trend
+        historical_items = history_data.get("it", [])
+        peak_value = history_data.get("hmv", 0)
+
+        if historical_items and len(historical_items) >= 2:
+            # Sort by date (most recent first)
+            sorted_items = sorted(historical_items, key=lambda x: x.get("dt", 0), reverse=True)
+
+            # Get most recent historical value (not current, but last recorded)
+            # and compare to value from 7-14 days ago for RECENT trend
+            recent_value = sorted_items[0].get("mv", 0) if len(sorted_items) > 0 else 0
+            week_ago_value = (
+                sorted_items[min(2, len(sorted_items) - 1)].get("mv", 0)
+                if len(sorted_items) > 1
+                else 0
+            )
+
+            # CRITICAL: Check for recent peak in last few data points
+            # Look at last 3-4 data points to find local peak
+            recent_peak = max(
+                [item.get("mv", 0) for item in sorted_items[: min(4, len(sorted_items))]]
+            )
+
+            # Use RECENT trend (last week) instead of overall
+            if week_ago_value > 0 and recent_value > 0:
+                # Recent trend: comparing last data point to week ago
+                recent_change_pct = ((recent_value - week_ago_value) / week_ago_value) * 100
+
+                # Also check if currently ABOVE or BELOW recent value
+                # If current < recent, they're falling RIGHT NOW
+                current_vs_recent = (
+                    ((current_market_value - recent_value) / recent_value) * 100
+                    if recent_value > 0
+                    else 0
+                )
+
+                # CRITICAL: Check if falling from recent peak (last 3-4 data points)
+                if recent_peak > 0 and current_market_value < recent_peak * 0.92:
+                    # More than 8% below recent peak = likely falling from peak
+                    decline_from_peak = ((current_market_value - recent_peak) / recent_peak) * 100
+                    return {
+                        "trend": "falling",
+                        "change_pct": round(decline_from_peak, 2),
+                        "reference_value": recent_peak,
+                        "price_low": week_ago_value,
+                        "current_value": current_market_value,
+                        "has_data": True,
+                    }
+
+                # REJECT if falling vs most recent data (catching knives)
+                if current_vs_recent < -5:
+                    trend = "falling"
+                    change_pct = current_vs_recent
+                # Otherwise use recent trend
+                elif recent_change_pct > 5:
+                    trend = "rising"
+                    change_pct = recent_change_pct
+                elif recent_change_pct < -5:
+                    trend = "falling"
+                    change_pct = recent_change_pct
+                else:
+                    trend = "stable"
+                    change_pct = recent_change_pct
+
+                return {
+                    "trend": trend,
+                    "change_pct": round(change_pct, 2),
+                    "reference_value": recent_value,
+                    "price_low": week_ago_value,
+                    "current_value": current_market_value,
+                    "has_data": True,
+                }
+
+        # Fallback: Use reference price but be MORE CONSERVATIVE
         reference_price = history_data.get("trp", 0)
-        price_low = history_data.get("prlo", 0)
+        peak_value = history_data.get("hmv", 0)
 
-        # If no reference data, return unknown
-        if reference_price == 0 and price_low == 0:
-            return {"trend": "unknown", "change_pct": 0.0, "has_data": False}
+        # CRITICAL: If current is below peak, check if falling from peak
+        if peak_value > 0 and current_market_value < peak_value * 0.95:
+            # More than 5% below peak = likely falling
+            decline_from_peak = ((current_market_value - peak_value) / peak_value) * 100
+            return {
+                "trend": "falling",  # Assume falling if off peak
+                "change_pct": round(decline_from_peak, 2),
+                "reference_value": peak_value,
+                "current_value": current_market_value,
+                "has_data": True,
+            }
 
-        # Calculate trend based on current vs reference price
-        # Lower reference = was cheaper before = rising trend
-        # Higher reference = was more expensive before = falling trend
+        # If no historical data, use reference but be conservative
         if reference_price > 0:
             change_pct = ((current_market_value - reference_price) / reference_price) * 100
-        elif price_low > 0:
-            change_pct = ((current_market_value - price_low) / price_low) * 100
         else:
-            change_pct = 0.0
+            return {"trend": "unknown", "change_pct": 0.0, "has_data": False}
 
-        # Determine trend
-        if change_pct > 10:
+        # Much stricter thresholds when using old reference data
+        if change_pct > 20:  # Was 10
             trend = "rising"
-        elif change_pct < -10:
+        elif change_pct < -5:  # Was -10
             trend = "falling"
         else:
             trend = "stable"
@@ -176,7 +252,6 @@ class ValueHistoryCache:
             "trend": trend,
             "change_pct": round(change_pct, 2),
             "reference_value": reference_price,
-            "price_low": price_low,
             "current_value": current_market_value,
             "has_data": True,
         }

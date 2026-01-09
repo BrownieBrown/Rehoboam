@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 
 from .kickbase_client import MarketPlayer
+from .risk_analyzer import RiskMetrics
 from .value_calculator import PlayerValue
 
 
@@ -80,7 +81,7 @@ class MarketAnalyzer:
         self.weights = factor_weights or FactorWeights()
 
         # Decision thresholds (can be tuned)
-        self.buy_threshold = min_value_score_to_buy
+        self.buy_threshold = max(min_value_score_to_buy, 50.0)  # Minimum 50 for buy recommendations
         self.hold_threshold = max(min_value_score_to_buy - 20, 20)
         self.sell_threshold = 40  # For owned players
 
@@ -93,6 +94,28 @@ class MarketAnalyzer:
         """Analyze a player on the market for buying opportunity using factor-based scoring"""
         market_value = player.market_value
         current_price = player.price
+
+        # CRITICAL: Skip injured players completely
+        # status: 0 = healthy, 1+ = injured/unavailable
+        if player.status != 0:
+            # Return SKIP recommendation for injured players
+            return PlayerAnalysis(
+                player=player,
+                current_price=current_price,
+                market_value=market_value,
+                value_change_pct=0.0,
+                points=player.points,
+                average_points=player.average_points,
+                recommendation="SKIP",
+                confidence=0.0,
+                reason="Player is injured or unavailable",
+                value_score=0.0,
+                points_per_million=0.0,
+                avg_points_per_million=0.0,
+                trend=None,
+                trend_change_pct=None,
+                factors=[],
+            )
 
         # Calculate value change percentage
         if market_value > 0:
@@ -158,21 +181,27 @@ class MarketAnalyzer:
             matchup_reason = matchup_bonus_data.get("reason", "")
 
             if matchup_bonus_points > 0:
+                # Easy matchup - add bonus
+                score_contribution = abs(matchup_bonus_points) * self.weights.matchup_easy / 10
                 matchup_factor = ScoringFactor(
                     name="Easy Matchup",
                     raw_value=matchup_bonus_points,
                     weight=self.weights.matchup_easy,
-                    score=matchup_bonus_points * self.weights.matchup_easy / 10,  # Scale down
+                    score=score_contribution,  # Always positive for easy
                     description=matchup_reason,
                 )
                 factors.append(matchup_factor)
                 final_score += matchup_factor.score
             elif matchup_bonus_points < 0:
+                # Hard matchup - subtract penalty (use absolute value, then negate)
+                score_contribution = -(
+                    abs(matchup_bonus_points) * abs(self.weights.matchup_hard) / 10
+                )
                 matchup_factor = ScoringFactor(
                     name="Hard Matchup",
                     raw_value=matchup_bonus_points,
                     weight=self.weights.matchup_hard,
-                    score=matchup_bonus_points * self.weights.matchup_hard / 10,  # Scale down
+                    score=score_contribution,  # Always negative for hard
                     description=matchup_reason,
                 )
                 factors.append(matchup_factor)
@@ -213,10 +242,47 @@ class MarketAnalyzer:
         # Clamp final score to 0-150 range (can exceed 100 with bonuses)
         final_score = max(0, min(150, final_score))
 
-        # DECISION LOGIC: Simple threshold-based
+        # DECISION LOGIC: Stricter quality-based recommendations
+        # Don't recommend buying just to recommend something - only genuinely good opportunities
         if final_score >= self.buy_threshold:
-            recommendation = "BUY"
-            confidence = min(final_score / 100.0, 1.0)
+            # Additional quality checks for BUY recommendation
+            trend_check = True
+            if trend_change_pct is not None:
+                # Reject deeply falling players (< -10%)
+                if trend_change_pct < -10:
+                    trend_check = False
+                # For moderate decline (-10 to -5), require very high score
+                elif trend_change_pct < -5 and final_score < 65:
+                    trend_check = False
+
+            # Base value check - player must have decent fundamentals
+            base_value_check = base_value_score >= 35.0  # Minimum base value
+
+            # Schedule check - only reject VERY hard schedules
+            # If no matchup data, assume neutral (don't penalize lack of data)
+            schedule_check = True
+            if matchup_context and matchup_context.get("has_data"):
+                # Check matchup bonus - only reject extremely hard matchups
+                matchup_bonus_data = matchup_context.get("matchup_bonus", {})
+                matchup_bonus_points = matchup_bonus_data.get("bonus_points", 0)
+                if matchup_bonus_points < -8:  # Only very hard matchups (was -5)
+                    schedule_check = False
+
+                # Check SOS - only reject very difficult schedules
+                sos_data = matchup_context.get("sos")
+                if sos_data:
+                    sos_rating = sos_data.short_term_rating
+                    # Only reject VERY difficult schedules, not just difficult
+                    if sos_rating == "Very Difficult":  # Was ["Difficult", "Very Difficult"]
+                        schedule_check = False
+
+            if trend_check and base_value_check and schedule_check:
+                recommendation = "BUY"
+                confidence = min(final_score / 100.0, 1.0)
+            else:
+                # Downgrade to HOLD if quality checks fail
+                recommendation = "HOLD"
+                confidence = 0.5
         elif final_score >= self.hold_threshold:
             recommendation = "HOLD"
             confidence = 0.6
@@ -238,6 +304,11 @@ class MarketAnalyzer:
 
         reason = " | ".join(reason_parts)
 
+        # Build metadata with SOS rating for compact display
+        metadata = {}
+        if sos_rating:
+            metadata["sos_rating"] = sos_rating
+
         return PlayerAnalysis(
             player=player,
             current_price=current_price,
@@ -253,6 +324,7 @@ class MarketAnalyzer:
             avg_points_per_million=player_value.avg_points_per_million,
             trend=trend,
             trend_change_pct=trend_change_pct,
+            metadata=metadata if metadata else None,
             factors=factors,
         )
 
@@ -466,8 +538,59 @@ class MarketAnalyzer:
     def find_best_opportunities(
         self, analyses: list[PlayerAnalysis], top_n: int = 10
     ) -> list[PlayerAnalysis]:
-        """Find the best buying opportunities from a list of analyses"""
+        """
+        Find the best buying opportunities from a list of analyses
+
+        Prioritizes rising/stable players over falling players to avoid catching falling knives
+        """
         buy_opportunities = [a for a in analyses if a.recommendation == "BUY"]
-        # Sort by confidence * value_score for best opportunities
-        buy_opportunities.sort(key=lambda a: a.confidence * a.value_score, reverse=True)
-        return buy_opportunities[:top_n]
+
+        # Separate into rising/stable vs falling players
+        rising_or_stable = []
+        falling_recovery = []
+
+        for analysis in buy_opportunities:
+            trend_change = analysis.trend_change_pct if analysis.trend_change_pct else 0
+
+            # Rising or stable trend (or no trend data)
+            if trend_change >= -2:  # Allow slight decline (-2%)
+                rising_or_stable.append(analysis)
+            # Falling but with recovery signs
+            elif trend_change >= -10 and analysis.value_score >= 70:
+                # Only include falling players if they have high value score (70+)
+                # and aren't falling too hard (>-10%)
+                falling_recovery.append(analysis)
+            # Ignore deeply falling players (catching falling knives)
+            # else: skip
+
+        # Score each group
+        def calculate_opportunity_score(a: PlayerAnalysis) -> float:
+            base_score = a.confidence * a.value_score
+
+            # Bonus for rising trends
+            if a.trend and "rising" in a.trend.lower():
+                trend_change = a.trend_change_pct if a.trend_change_pct else 0
+                if trend_change > 15:
+                    base_score *= 1.3  # Strong uptrend bonus
+                elif trend_change > 5:
+                    base_score *= 1.15  # Moderate uptrend bonus
+
+            # Penalty for falling trends
+            elif a.trend and "falling" in a.trend.lower():
+                base_score *= 0.7  # Falling penalty
+
+            return base_score
+
+        # Sort each group
+        rising_or_stable.sort(key=calculate_opportunity_score, reverse=True)
+        falling_recovery.sort(key=calculate_opportunity_score, reverse=True)
+
+        # Prioritize rising/stable, then add falling recovery if we need more
+        result = rising_or_stable[:top_n]
+
+        if len(result) < top_n:
+            # Add falling recovery players only if we don't have enough rising/stable
+            remaining = top_n - len(result)
+            result.extend(falling_recovery[:remaining])
+
+        return result[:top_n]

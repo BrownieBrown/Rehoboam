@@ -7,9 +7,11 @@ from .analyzer import MarketAnalyzer, PlayerAnalysis
 from .api import KickbaseAPI
 from .bid_monitor import BidMonitor, ReplacementPlan
 from .bidding_strategy import SmartBidding
+from .compact_display import CompactDisplay
 from .config import Settings
 from .historical_tracker import HistoricalTracker
 from .kickbase_client import League
+from .market_price_tracker import MarketPriceTracker
 from .matchup_analyzer import MatchupAnalyzer
 from .opportunity_cost import OpportunityCostAnalyzer
 from .risk_analyzer import RiskAnalyzer, RiskMetrics
@@ -23,7 +25,12 @@ class Trader:
     """Handles automated trading operations"""
 
     def __init__(
-        self, api: KickbaseAPI, settings: Settings, verbose: bool = False, bid_learner=None
+        self,
+        api: KickbaseAPI,
+        settings: Settings,
+        verbose: bool = False,
+        bid_learner=None,
+        activity_feed_learner=None,
     ):
         self.api = api
         self.settings = settings
@@ -35,8 +42,10 @@ class Trader:
             min_value_score_to_buy=settings.min_value_score_to_buy,
         )
         self.history_cache = ValueHistoryCache()
-        # Connect learner to bidding strategy for adaptive learning
-        self.bidding = SmartBidding(bid_learner=bid_learner)
+        # Connect learners to bidding strategy for adaptive learning + competitive intelligence
+        self.bidding = SmartBidding(
+            bid_learner=bid_learner, activity_feed_learner=activity_feed_learner
+        )
         self.bid_monitor = BidMonitor(api=api)
         self.matchup_analyzer = MatchupAnalyzer()
         self.risk_analyzer = RiskAnalyzer()
@@ -45,6 +54,147 @@ class Trader:
             min_squad_size=settings.min_squad_size
         )
         self.historical_tracker = HistoricalTracker()
+        self.market_price_tracker = MarketPriceTracker()
+        self.compact_display = CompactDisplay(bidding_strategy=self.bidding)
+
+    def display_compact_action_plan(
+        self, league: League, market_analyses: list[PlayerAnalysis], current_budget: int
+    ):
+        """
+        Display compact action-oriented plan
+
+        Args:
+            league: League object
+            market_analyses: Market player analyses
+            current_budget: Current budget
+        """
+        # Check squad size for emergencies
+        squad = self.api.get_squad(league)
+        squad_size = len(squad)
+        is_emergency = squad_size < self.settings.min_squad_size
+
+        # Get top buy opportunities (top 5, or more if emergency)
+        top_n = 8 if is_emergency else 5
+        buy_opportunities = self.analyzer.find_best_opportunities(market_analyses, top_n=top_n)
+
+        # If squad emergency and still no recommendations, lower the bar
+        if is_emergency and len(buy_opportunities) < 3:
+            # Get ANY players with score 40+ when in emergency
+            emergency_buys = [
+                a
+                for a in market_analyses
+                if a.recommendation in ["BUY", "HOLD"]
+                and a.value_score >= 40.0
+                and a.player.status == 0  # Still require healthy
+            ]
+            # Sort by value score
+            emergency_buys.sort(key=lambda a: a.value_score, reverse=True)
+            # Add emergency buys to fill the list
+            needed = min(5, self.settings.min_squad_size - squad_size)
+            buy_opportunities = emergency_buys[:needed]
+
+        # Analyze squad
+        team_analyses = self.analyze_team(league)
+
+        # Filter for URGENT sells only (sell score >= 60)
+        sell_urgent = [
+            a
+            for a in team_analyses
+            if a.recommendation == "SELL"
+            and hasattr(a, "factors")
+            and sum(f.score for f in a.factors) >= 60
+        ]
+
+        # Get flip opportunities (top 3)
+        flip_opportunities = []
+        try:
+            profit_opps = self.find_profit_opportunities(league)
+            flip_opportunities = profit_opps[:3] if profit_opps else []
+        except Exception:
+            pass  # Silent failure for profit opportunities
+
+        # Calculate squad summary
+        team_info = self.api.get_team_info(league)
+        team_value = team_info.get("team_value", 0)
+        if team_value == 0:
+            squad = self.api.get_squad(league)
+            team_value = sum(player.market_value for player in squad)
+
+        max_debt = int(team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        available_to_spend = current_budget + max_debt
+
+        # Calculate best 11 strength
+        from .formation import select_best_eleven
+        from .value_calculator import PlayerValue
+
+        squad = self.api.get_squad(league)
+        player_values = {}
+        for player in squad:
+            try:
+                value = PlayerValue.calculate(player)
+                player_values[player.id] = value.value_score
+            except Exception:
+                player_values[player.id] = 0
+
+        best_eleven = select_best_eleven(squad, player_values)
+        best_11_strength = sum(p.average_points for p in best_eleven)
+
+        sell_count = sum(1 for a in team_analyses if a.recommendation == "SELL")
+        hold_count = sum(1 for a in team_analyses if a.recommendation == "HOLD")
+
+        squad_summary = {
+            "budget": current_budget,
+            "team_value": team_value,
+            "available_to_spend": available_to_spend,
+            "best_11_strength": best_11_strength,
+            "sell_count": sell_count,
+            "hold_count": hold_count,
+        }
+
+        # Generate market insights
+        easy_schedule = sum(
+            1 for a in market_analyses if a.recommendation == "BUY" and "easy" in a.reason.lower()
+        )
+
+        price_drop_soon = 0
+        new_listings = 0
+        rising_trend = sum(
+            1
+            for a in market_analyses
+            if a.recommendation == "BUY" and a.trend and "rising" in a.trend
+        )
+
+        for a in market_analyses:
+            if hasattr(a.player, "listed_at") and a.player.listed_at:
+                try:
+                    from datetime import datetime
+
+                    listed_dt = datetime.fromisoformat(a.player.listed_at.replace("Z", "+00:00"))
+                    days = (datetime.now(listed_dt.tzinfo) - listed_dt).days
+                    if days >= 5:
+                        price_drop_soon += 1
+                    elif days == 0:
+                        new_listings += 1
+                except Exception:
+                    pass
+
+        market_insights = {
+            "easy_schedule_count": easy_schedule,
+            "price_drop_soon": price_drop_soon,
+            "rising_trend_count": rising_trend,
+            "new_listings": new_listings,
+        }
+
+        # Display compact action plan
+        self.compact_display.display_action_plan(
+            buy_opportunities=buy_opportunities,
+            sell_urgent=sell_urgent,
+            flip_opportunities=flip_opportunities,
+            squad_summary=squad_summary,
+            market_insights=market_insights,
+            is_emergency=is_emergency,
+            squad_size=squad_size,
+        )
 
     def analyze_market(
         self, league: League, calculate_risk: bool = False, track_history: bool = False
@@ -58,6 +208,18 @@ class Trader:
             track_history: Whether to track recommendations for learning
         """
         market_players = self.api.get_market(league)
+
+        # Track current market prices for learning
+        try:
+            self.market_price_tracker.record_market_snapshot(market_players)
+            # Detect any price adjustments since last check
+            adjustments = self.market_price_tracker.detect_price_adjustments(market_players)
+            if adjustments and self.verbose:
+                console.print(
+                    f"[dim]Detected {len(adjustments)} price adjustment(s) since last check[/dim]"
+                )
+        except Exception:
+            pass  # Silent failure for price tracking
 
         # Filter for only KICKBASE sellers (not user listings)
         kickbase_players = [p for p in market_players if p.is_kickbase_seller()]
@@ -469,7 +631,6 @@ class Trader:
             Dict mapping player_id -> trend data
         """
         player_trends = {}
-        errors = []
 
         for player in players[:limit]:
             try:
@@ -927,6 +1088,7 @@ class Trader:
         table.add_column("Price", justify="right", style="yellow")
         if show_bids:
             table.add_column("Smart Bid", justify="right", style="bright_yellow")
+        table.add_column("Days Listed", justify="center", style="dim")
         table.add_column("Value Score", justify="right", style="magenta")
         table.add_column("Pts/M€", justify="right", style="green")
         table.add_column("Points", justify="right", style="green")
@@ -959,6 +1121,44 @@ class Trader:
             }.get(analysis.recommendation, "white")
             rec_str = f"[{rec_color}]{analysis.recommendation}[/{rec_color}]"
 
+            # Calculate days on market and predict price adjustments
+            days_listed_str = "-"
+            if hasattr(player, "listed_at") and player.listed_at:
+                try:
+                    from datetime import datetime
+
+                    # Parse ISO datetime (e.g., "2025-11-07T23:08:41Z")
+                    listed_dt = datetime.fromisoformat(player.listed_at.replace("Z", "+00:00"))
+                    days_on_market = (datetime.now(listed_dt.tzinfo) - listed_dt).days
+
+                    # Get price adjustment prediction
+                    prediction = self.market_price_tracker.predict_price_adjustment(
+                        player, days_on_market
+                    )
+
+                    # Color code: newer listings in green, older in yellow/red
+                    if days_on_market == 0:
+                        base_str = "[bright_green]<1d[/bright_green]"
+                    elif days_on_market <= 2:
+                        base_str = f"[green]{days_on_market}d[/green]"
+                    elif days_on_market <= 5:
+                        base_str = f"[yellow]{days_on_market}d[/yellow]"
+                    else:
+                        base_str = f"[red]{days_on_market}d[/red]"
+
+                    # Add prediction if available
+                    if prediction and prediction["confidence"] >= 0.3:
+                        expected_change = prediction["expected_change_pct"]
+                        if abs(expected_change) >= 1.0:  # Only show significant predictions
+                            change_color = "red" if expected_change < 0 else "green"
+                            days_listed_str = f"{base_str}\n[{change_color}]{expected_change:+.0f}%[/{change_color}]"
+                        else:
+                            days_listed_str = base_str
+                    else:
+                        days_listed_str = base_str
+                except Exception:
+                    days_listed_str = "-"
+
             # Calculate smart bid for BUY recommendations
             smart_bid_str = ""
             if show_bids and analysis.recommendation == "BUY":
@@ -967,6 +1167,7 @@ class Trader:
                     market_value=analysis.market_value,
                     value_score=analysis.value_score,
                     confidence=analysis.confidence,
+                    player_id=analysis.player.id,
                 )
                 overbid_pct_color = "green" if bid_rec.overbid_pct >= 10 else "yellow"
                 smart_bid_str = f"€{bid_rec.recommended_bid:,}\n[{overbid_pct_color}]+{bid_rec.overbid_pct:.1f}%[/{overbid_pct_color}]"
@@ -984,6 +1185,7 @@ class Trader:
 
             row_data.extend(
                 [
+                    days_listed_str,
                     score_str,
                     f"{analysis.points_per_million:.1f}",
                     str(analysis.points),
@@ -1191,7 +1393,8 @@ class Trader:
         table = Table(show_header=True, header_style="bold magenta")
         table.add_column("Player", style="cyan")
         table.add_column("Position", style="blue")
-        table.add_column("Buy Price", justify="right", style="yellow")
+        table.add_column("Asking Price", justify="right", style="dim")
+        table.add_column("Smart Bid", justify="right", style="yellow")
         table.add_column("Market Value", justify="right", style="green")
         table.add_column("Profit Pot.", justify="right", style="green")
         table.add_column("Hold Days", justify="center")
@@ -1201,6 +1404,19 @@ class Trader:
         for opp in opportunities:
             player = opp.player
             name = f"{player.first_name} {player.last_name}"
+
+            # Calculate smart bid (profit flips are short-term, moderate confidence)
+            bid_rec = self.bidding.calculate_bid(
+                asking_price=opp.buy_price,
+                market_value=opp.market_value,
+                value_score=60.0,  # Moderate value score for profit flips
+                confidence=0.7,  # Moderate confidence
+                is_replacement=False,
+                player_id=player.id,
+            )
+            overbid_pct = bid_rec.overbid_pct
+            overbid_color = "green" if overbid_pct >= 10 else "yellow"
+            smart_bid_str = f"€{bid_rec.recommended_bid:,}\n[{overbid_color}]+{overbid_pct:.0f}%[/{overbid_color}]"
 
             # Color code profit potential
             profit_color = "green" if opp.value_gap_pct > 20 else "yellow"
@@ -1225,6 +1441,7 @@ class Trader:
                 name,
                 player.position,
                 f"€{opp.buy_price:,}",
+                smart_bid_str,
                 f"€{opp.market_value:,}",
                 profit_str,
                 f"{opp.hold_days}d",
@@ -1234,8 +1451,19 @@ class Trader:
 
         console.print(table)
 
-        # Calculate total investment needed
-        total_investment = sum(opp.buy_price for opp in opportunities)
+        # Calculate total investment needed using smart bid prices
+        total_investment = 0
+        for opp in opportunities:
+            bid_rec = self.bidding.calculate_bid(
+                asking_price=opp.buy_price,
+                market_value=opp.market_value,
+                value_score=60.0,
+                confidence=0.7,
+                is_replacement=False,
+                player_id=opp.player.id,
+            )
+            total_investment += bid_rec.recommended_bid
+
         total_profit_potential = sum(opp.value_gap for opp in opportunities)
         avg_profit_pct = (
             sum(opp.value_gap_pct for opp in opportunities) / len(opportunities)
@@ -1243,7 +1471,9 @@ class Trader:
             else 0
         )
 
-        console.print(f"\n[bold]Total Investment:[/bold] €{total_investment:,}")
+        console.print(
+            f"\n[bold]Total Investment:[/bold] €{total_investment:,} [dim](smart bids)[/dim]"
+        )
         console.print(
             f"[bold]Total Profit Potential:[/bold] €{total_profit_potential:,} (avg {avg_profit_pct:.1f}%)"
         )
@@ -1270,7 +1500,10 @@ class Trader:
         console.print(f"\n[bold magenta]{title}[/bold magenta]")
         console.print(f"[dim]Found {len(trades)} trade(s) that improve your starting 11[/dim]")
         console.print(
-            "[dim]Note: Only players with 5+ games played are considered for lineup improvements[/dim]\n"
+            "[dim]Note: Lineup upgrades focus on best 11 improvement (different criteria than buy recommendations)[/dim]"
+        )
+        console.print(
+            "[dim]Only players with 5+ games played are considered to ensure reliability[/dim]\n"
         )
 
         for idx, trade in enumerate(trades[:5], 1):  # Show top 5 trades
@@ -1288,6 +1521,17 @@ class Trader:
             # Buy section
             console.print("[green]BUY:[/green]")
             for player in trade.players_in:
+                # Get smart bid price if available
+                if trade.smart_bids and player.id in trade.smart_bids:
+                    smart_bid = trade.smart_bids[player.id]
+                    overbid_pct = (
+                        ((smart_bid - player.price) / player.price * 100) if player.price > 0 else 0
+                    )
+                    price_str = f"€{smart_bid:,} [dim](+{overbid_pct:.0f}% bid)[/dim]"
+                else:
+                    # Fallback to market value
+                    price_str = f"€{player.market_value:,}"
+
                 # Show average points for context
                 avg_points_str = (
                     f" | {player.average_points:.1f} pts/game"
@@ -1295,23 +1539,40 @@ class Trader:
                     else ""
                 )
                 console.print(
-                    f"  • {player.first_name} {player.last_name} ({player.position}) - €{player.market_value:,}{avg_points_str}"
+                    f"  • {player.first_name} {player.last_name} ({player.position}) - {price_str}{avg_points_str}"
                 )
 
             # Financial summary
             net_cost_color = "red" if trade.net_cost > 0 else "green"
             console.print("\n[bold]Financial Summary:[/bold]")
-            console.print(f"  Total Cost: €{trade.total_cost:,}")
-            console.print(f"  Total Proceeds: €{trade.total_proceeds:,}")
+            console.print(f"  Total Cost: €{trade.total_cost:,} [dim](smart bid prices)[/dim]")
+            console.print(f"  Total Proceeds: €{trade.total_proceeds:,} [dim](sale value)[/dim]")
             console.print(f"  Net Cost: [{net_cost_color}]€{trade.net_cost:,}[/{net_cost_color}]")
             console.print(
-                f"  [yellow]Required Budget: €{trade.required_budget:,}[/yellow] (buy first!)"
+                f"  [yellow]Required Budget: €{trade.required_budget:,}[/yellow] [dim](need upfront for bids)[/dim]"
             )
 
             # Improvement summary
             console.print("\n[bold]Expected Improvement:[/bold]")
             console.print(f"  Points/Week: [green]+{trade.improvement_points:.1f}[/green]")
             console.print(f"  Value Score: [green]+{trade.improvement_value:.1f}[/green]")
+
+            # Bidding instructions
+            if trade.smart_bids:
+                console.print("\n[bold]💡 Recommended Bids:[/bold]")
+                for player in trade.players_in:
+                    if player.id in trade.smart_bids:
+                        smart_bid = trade.smart_bids[player.id]
+                        asking_price = player.price
+                        overbid_pct = (
+                            ((smart_bid - asking_price) / asking_price * 100)
+                            if asking_price > 0
+                            else 0
+                        )
+                        overbid_color = "green" if overbid_pct >= 10 else "yellow"
+                        console.print(
+                            f"  • {player.first_name} {player.last_name}: Bid €{smart_bid:,} [{overbid_color}](+{overbid_pct:.0f}% over asking)[/{overbid_color}]"
+                        )
 
             console.print("")  # Blank line between trades
 
@@ -1364,6 +1625,7 @@ class Trader:
                 confidence=analysis.confidence,
                 is_replacement=is_replacement,
                 replacement_sell_value=best_replacement["sell_value"] if best_replacement else 0,
+                player_id=player.id,
             )
 
             # Check budget constraints
@@ -1419,6 +1681,9 @@ class Trader:
                         player_name=f"{player.first_name} {player.last_name}",
                         bid_amount=bid_rec.recommended_bid,
                         replacement_plan=replacement_plan,
+                        asking_price=analysis.current_price,
+                        value_score=analysis.value_score,
+                        market_value=analysis.market_value,
                     )
 
                     results["bought"].append(analysis)

@@ -51,8 +51,8 @@ class Settings(BaseSettings):
         description="Minimum market value increase to consider buying",
     )
     min_value_score_to_buy: float = Field(
-        default=40.0,
-        description="Minimum value score (0-100) to consider buying a player",
+        default=50.0,
+        description="Minimum value score (0-100) to consider buying a player (enforced minimum: 50)",
     )
 
     # Budget Management

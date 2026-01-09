@@ -1,0 +1,13 @@
+# Rehoboam Trading Bot - Lambda Deployment Requirements
+# Generated from pyproject.toml dependencies
+
+# Core dependencies
+requests>=2.31.0
+typer>=0.9.0
+rich>=13.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# Note: boto3 and botocore are already included in AWS Lambda runtime
+# They will be removed during deployment to reduce package size
