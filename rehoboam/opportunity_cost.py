@@ -210,7 +210,7 @@ class OpportunityCostAnalyzer:
         players_to_sell = []
         total_proceeds = 0
 
-        for player_id, name, price, value_score, _ in sellable_scored:
+        for player_id, name, price, _value_score, _ in sellable_scored:
             if total_proceeds >= shortfall:
                 break
 

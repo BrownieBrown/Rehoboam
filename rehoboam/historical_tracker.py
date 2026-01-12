@@ -262,11 +262,11 @@ class HistoricalTracker:
         # Update each recommendation
         for (
             rec_id,
-            player_id,
+            _player_id,
             player_name,
             recommendation,
             original_value,
-            timestamp,
+            _timestamp,
         ) in recommendations:
             try:
                 # Fetch current market value

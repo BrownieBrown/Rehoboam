@@ -374,16 +374,13 @@ class ScenarioAnalyzer:
         for scenario_name in ["best", "likely", "worst"]:
             scenario = analysis.scenarios[scenario_name]
 
-            # Choose emoji and color
+            # Choose emoji
             if scenario_name == "best":
                 emoji = "🎯"
-                color = "green"
             elif scenario_name == "likely":
                 emoji = "➡️ "
-                color = "yellow"
             else:
                 emoji = "⚠️ "
-                color = "red"
 
             change_color = "green" if scenario.value_change_pct > 0 else "red"
 
