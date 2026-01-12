@@ -295,7 +295,6 @@ class EnhancedAnalyzer:
         # Different positions peak at different times
         from datetime import datetime
 
-        current_month = datetime.now().month
         days_into_season = (datetime.now() - datetime(datetime.now().year, 8, 1)).days
         days_until_season_end = (datetime(datetime.now().year + 1, 5, 31) - datetime.now()).days
 
