@@ -128,6 +128,23 @@ class BidLearner:
             """
             )
 
+            # Position-specific bidding statistics
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS position_bidding_stats (
+                    position TEXT PRIMARY KEY,
+                    avg_overbid_pct REAL,
+                    recommended_overbid_pct REAL,
+                    win_rate REAL,
+                    avg_value_score REAL,
+                    avg_profit_pct REAL,
+                    total_auctions INTEGER DEFAULT 0,
+                    successful_auctions INTEGER DEFAULT 0,
+                    last_updated TEXT
+                )
+            """
+            )
+
             conn.commit()
 
     def record_outcome(self, outcome: AuctionOutcome):
@@ -233,7 +250,7 @@ class BidLearner:
         max_overbid_amount = predicted_future_value - asking_price
         max_overbid_pct = (max_overbid_amount / asking_price) * 100
         with sqlite3.connect(self.db_path) as conn:
-            # Get recent auction outcomes
+            # Get recent auction outcomes (extended to 90 days for more data)
             cursor = conn.execute(
                 """
                 SELECT our_overbid_pct, won, winning_overbid_pct
@@ -242,18 +259,19 @@ class BidLearner:
                 ORDER BY timestamp DESC
                 LIMIT 100
             """,
-                (datetime.now().timestamp() - (30 * 24 * 3600),),
-            )  # Last 30 days
+                (datetime.now().timestamp() - (90 * 24 * 3600),),
+            )  # Last 90 days (extended from 30)
 
             outcomes = cursor.fetchall()
 
             if not outcomes or len(outcomes) < 5:
-                # Conservative default: 8%, but never exceed value ceiling
-                default_overbid = min(8.0, max_overbid_pct)
+                # Conservative default: 10%, but never exceed value ceiling
+                # Increased from 8% as historical data shows low bids lose
+                default_overbid = min(10.0, max_overbid_pct)
                 return {
                     "recommended_overbid_pct": default_overbid,
                     "confidence": "low",
-                    "reason": f"Insufficient data - using conservative {default_overbid:.1f}% (max: {max_overbid_pct:.1f}%)",
+                    "reason": f"Insufficient data - using {default_overbid:.1f}% (max: {max_overbid_pct:.1f}%)",
                     "based_on_auctions": len(outcomes),
                     "max_bid": predicted_future_value,
                     "value_ceiling_applied": default_overbid < max_overbid_pct,
@@ -291,6 +309,11 @@ class BidLearner:
             # Calculate winning overbid stats
             winning_overbids = [o[0] for o in wins]
             avg_winning_overbid = sum(winning_overbids) / len(winning_overbids)
+            losing_overbids = [o[0] for o in losses]
+            avg_losing_overbid = sum(losing_overbids) / len(losing_overbids) if losses else 0
+
+            # Calculate win rate for adaptive learning
+            win_rate = len(wins) / len(outcomes) * 100
 
             # If we have data about what others bid
             competitor_overbids = [o[2] for o in losses if o[2] is not None]
@@ -298,22 +321,39 @@ class BidLearner:
             if competitor_overbids:
                 # We know what beats us
                 avg_competitor_overbid = sum(competitor_overbids) / len(competitor_overbids)
-                # Recommend slightly above average competitor
-                recommended = avg_competitor_overbid + 2.0
+                # Recommend above average competitor (more aggressive)
+                recommended = avg_competitor_overbid + 3.0
             else:
-                # Use our own winning pattern
+                # Use our own winning pattern as base
                 recommended = avg_winning_overbid
+
+            # ADAPTIVE LEARNING: Adjust based on win rate
+            # If win rate is too low, we need to bid more aggressively
+            if win_rate < 30:
+                # Losing too much - increase bid significantly
+                # Add the gap between losing and winning bids
+                bid_gap = max(avg_losing_overbid - avg_winning_overbid, 0) + 5.0
+                recommended = max(recommended, avg_losing_overbid + bid_gap)
+            elif win_rate < 50:
+                # Below 50% - increase moderately
+                recommended = max(recommended, avg_losing_overbid + 3.0)
+            elif win_rate > 80:
+                # Winning too much - might be overpaying, can reduce slightly
+                recommended = recommended * 0.9
 
             # Adjust for value score (before applying ceiling)
             if value_score >= 80:
                 # High value - bid aggressively
                 recommended = max(recommended, 12.0)
+            elif value_score >= 60:
+                # Good value - ensure competitive
+                recommended = max(recommended, 10.0)
             elif value_score < 50:
                 # Low value - bid conservatively
                 recommended = min(recommended, 8.0)
 
-            # Cap at reasonable operational limits
-            recommended = max(5.0, min(recommended, 20.0))
+            # Cap at reasonable operational limits (increased max to 25%)
+            recommended = max(8.0, min(recommended, 25.0))
 
             # CRITICAL: Apply value ceiling (never exceed predicted value)
             original_recommended = recommended
@@ -751,3 +791,265 @@ class BidLearner:
             recommendations.append("Not enough data yet - keep trading to build learning database!")
 
         return recommendations
+
+    def get_position_specific_overbid(
+        self,
+        position: str,
+        asking_price: int,
+        value_score: float,
+        market_value: int,
+        predicted_future_value: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get recommended overbid adjusted for position-specific patterns.
+
+        Different positions have different competition levels:
+        - Forward: High competition (premium strikers)
+        - Midfielder: Medium-high competition
+        - Defender: Medium competition
+        - Goalkeeper: Low competition
+
+        Args:
+            position: Player position (Goalkeeper/Defender/Midfielder/Forward)
+            asking_price: Player's asking price
+            value_score: Our calculated value score
+            market_value: Player's market value
+            predicted_future_value: Maximum we should pay
+
+        Returns:
+            dict with recommended_overbid_pct and metadata
+        """
+        # Get base recommendation
+        base_rec = self.get_recommended_overbid(
+            asking_price, value_score, market_value, predicted_future_value
+        )
+
+        # Map position to short code
+        position_map = {
+            "Goalkeeper": "GK",
+            "Defender": "DEF",
+            "Midfielder": "MID",
+            "Forward": "FWD",
+        }
+        position_code = position_map.get(position, position)
+
+        # Get position-specific statistics
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT avg_overbid_pct, win_rate, total_auctions, recommended_overbid_pct
+                FROM position_bidding_stats
+                WHERE position = ?
+                """,
+                (position_code,),
+            )
+            result = cursor.fetchone()
+
+        if not result or result[2] < 10:  # Less than 10 auctions for position
+            # Not enough data - use position multipliers
+            position_multipliers = {
+                "FWD": 1.15,  # 15% more aggressive
+                "MID": 1.08,  # 8% more aggressive
+                "DEF": 1.0,  # Neutral
+                "GK": 0.9,  # 10% less aggressive
+            }
+
+            multiplier = position_multipliers.get(position_code, 1.0)
+            adjusted_overbid = base_rec["recommended_overbid_pct"] * multiplier
+
+            base_rec["recommended_overbid_pct"] = round(adjusted_overbid, 1)
+            base_rec["position_adjusted"] = True
+            base_rec["reason"] += f" | Position: {position_code} (multiplier: {multiplier:.2f}x)"
+
+            return base_rec
+
+        avg_pos_overbid, pos_win_rate, total_auctions, recommended_pos_overbid = result
+
+        # Adjust based on position win rate
+        if pos_win_rate and pos_win_rate < 40:  # Winning <40% - bid higher
+            adjustment = 1.2
+            reason_adj = "low win rate"
+        elif pos_win_rate and pos_win_rate > 60:  # Winning >60% - can bid less
+            adjustment = 0.9
+            reason_adj = "high win rate"
+        else:
+            adjustment = 1.0
+            reason_adj = "balanced"
+
+        adjusted_overbid = base_rec["recommended_overbid_pct"] * adjustment
+
+        # Apply value ceiling if provided
+        if predicted_future_value:
+            max_overbid_pct = ((predicted_future_value - asking_price) / asking_price) * 100
+            adjusted_overbid = min(adjusted_overbid, max_overbid_pct)
+
+        base_rec["recommended_overbid_pct"] = round(adjusted_overbid, 1)
+        base_rec["position_adjusted"] = True
+        base_rec["position_win_rate"] = round(pos_win_rate, 1) if pos_win_rate else None
+        base_rec["position_auctions"] = total_auctions
+        base_rec["reason"] += f" | {position_code}: {reason_adj} ({total_auctions} auctions)"
+
+        return base_rec
+
+    def get_trend_aware_overbid(
+        self,
+        asking_price: int,
+        value_score: float,
+        market_value: int,
+        trend: str | None,
+        trend_change_pct: float | None,
+        predicted_future_value: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Adjust overbid based on player trend.
+
+        Rising trends = more competition = bid higher
+        Falling trends = less competition = bid lower
+
+        Args:
+            asking_price: Player's asking price
+            value_score: Our calculated value score
+            market_value: Player's market value
+            trend: Trend direction ("rising"/"falling"/"stable")
+            trend_change_pct: Trend change percentage
+            predicted_future_value: Maximum we should pay
+
+        Returns:
+            dict with recommended_overbid_pct and metadata
+        """
+        base_rec = self.get_recommended_overbid(
+            asking_price, value_score, market_value, predicted_future_value
+        )
+
+        if not trend or not trend_change_pct:
+            return base_rec
+
+        # Analyze historical trend performance from flip outcomes
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT trend_at_buy, COUNT(*), AVG(profit_pct)
+                FROM flip_outcomes
+                WHERE buy_date > ?
+                GROUP BY trend_at_buy
+                """,
+                (datetime.now().timestamp() - (60 * 24 * 3600),),  # Last 60 days
+            )
+            trend_stats = {
+                row[0]: {"count": row[1], "avg_profit": row[2]} for row in cursor.fetchall()
+            }
+
+        # Apply trend-based adjustment
+        if trend == "rising" and trend_change_pct > 10:
+            # Strong uptrend - expect competition
+            multiplier = 1.15
+            reason = " | Rising trend - expect competition"
+
+            # Check if rising trends have been profitable historically
+            if "rising" in trend_stats and trend_stats["rising"]["count"] >= 5:
+                avg_profit = trend_stats["rising"]["avg_profit"]
+                if avg_profit > 15:
+                    multiplier = 1.20  # Very profitable - bid even more aggressively
+                    reason = f" | Rising trend - historically {avg_profit:.0f}% profit"
+
+        elif trend == "falling" and trend_change_pct < -10:
+            # Falling - less competition
+            multiplier = 0.85
+            reason = " | Falling trend - less competition"
+
+            # Check if falling trends have worked (mean reversion)
+            if "falling" in trend_stats and trend_stats["falling"]["count"] >= 5:
+                avg_profit = trend_stats["falling"]["avg_profit"]
+                if avg_profit > 10:
+                    multiplier = 0.90  # Mean reversion works - bid slightly more
+                    reason = f" | Falling trend - mean reversion ({avg_profit:.0f}% profit)"
+        else:
+            multiplier = 1.0
+            reason = ""
+
+        adjusted = base_rec["recommended_overbid_pct"] * multiplier
+
+        # Apply ceiling
+        if predicted_future_value:
+            max_overbid_pct = ((predicted_future_value - asking_price) / asking_price) * 100
+            adjusted = min(adjusted, max_overbid_pct)
+
+        base_rec["recommended_overbid_pct"] = round(adjusted, 1)
+        base_rec["reason"] += reason
+        base_rec["trend_adjusted"] = True
+        base_rec["trend"] = trend
+        base_rec["trend_change_pct"] = round(trend_change_pct, 1) if trend_change_pct else None
+
+        return base_rec
+
+    def update_position_statistics(self):
+        """
+        Update position-specific bidding statistics from auction history.
+
+        Should be called periodically (daily) to keep stats fresh.
+        """
+        from datetime import datetime
+
+        with sqlite3.connect(self.db_path) as conn:
+            # For each position, calculate stats from flip outcomes
+            for position in ["GK", "DEF", "MID", "FWD"]:
+                # Get flip outcomes for this position
+                cursor = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*),
+                        AVG(CASE WHEN profit > 0 THEN 1.0 ELSE 0.0 END) * 100,
+                        AVG(profit_pct)
+                    FROM flip_outcomes
+                    WHERE position = ?
+                      AND buy_date > ?
+                    """,
+                    (position, datetime.now().timestamp() - (60 * 24 * 3600)),
+                )
+
+                result = cursor.fetchone()
+                if result and result[0] > 0:
+                    total_flips, success_rate, avg_profit_pct = result
+
+                    # Get auction stats for this position (approximate from asking price ranges)
+                    # Note: We don't directly track position in auction_outcomes, so this is an approximation
+                    cursor = conn.execute(
+                        """
+                        SELECT
+                            AVG(our_overbid_pct),
+                            COUNT(*),
+                            AVG(CASE WHEN won = 1 THEN 1.0 ELSE 0.0 END) * 100,
+                            AVG(player_value_score)
+                        FROM auction_outcomes
+                        WHERE timestamp > ?
+                        """,
+                        (datetime.now().timestamp() - (60 * 24 * 3600),),
+                    )
+
+                    auction_result = cursor.fetchone()
+                    if auction_result:
+                        avg_overbid, total_auctions, win_rate, avg_value = auction_result
+
+                        # Calculate recommended overbid (slightly above average)
+                        recommended_overbid = avg_overbid * 1.05 if avg_overbid else 10.0
+
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO position_bidding_stats
+                            (position, avg_overbid_pct, recommended_overbid_pct, win_rate,
+                             avg_value_score, avg_profit_pct, total_auctions, successful_auctions,
+                             last_updated)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                position,
+                                avg_overbid,
+                                recommended_overbid,
+                                win_rate,
+                                avg_value,
+                                avg_profit_pct,
+                                int(total_auctions),
+                                int(total_auctions * win_rate / 100) if win_rate else 0,
+                                datetime.now().isoformat(),
+                            ),
+                        )

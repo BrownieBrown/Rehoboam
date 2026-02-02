@@ -471,23 +471,27 @@ class PlayerValue:
                     momentum = -5
 
             # Peak position analysis - significant factor in momentum!
+            # CRITICAL: NO recovery bonus for falling players - they are falling knives!
             if vs_peak_pct is not None:
-                # Below peak = upside potential (recovery opportunity)
-                if vs_peak_pct < -40:
-                    # Very far below peak = high recovery potential
-                    if trend_direction != "falling" or trend_pct > -10:
+                # Below peak = upside potential ONLY if trend is rising/stable
+                if trend_direction == "rising":
+                    # Rising from below peak = genuine recovery
+                    if vs_peak_pct < -40:
                         momentum += 10  # Major upside potential
-                elif vs_peak_pct < -25:
-                    # Far below peak = good recovery potential
-                    if trend_direction != "falling" or trend_pct > -10:
+                    elif vs_peak_pct < -25:
                         momentum += 7
-                elif vs_peak_pct < -15:
-                    # Moderately below peak = some upside
-                    if trend_direction != "falling":
+                    elif vs_peak_pct < -15:
                         momentum += 5
-                elif vs_peak_pct > -5 and trend_direction == "falling":
-                    # At/near peak but falling = danger zone!
-                    momentum -= 5  # Likely to decline from peak
+                elif trend_direction == "falling":
+                    # FALLING from any position = danger, no recovery bonus
+                    # Add extra penalty for falling from near peak
+                    if vs_peak_pct > -10:
+                        # Near peak and falling = crash incoming
+                        momentum -= 8
+                    elif vs_peak_pct > -20:
+                        # Falling and not far from peak
+                        momentum -= 5
+                # stable trend: no peak bonus (wait for confirmation)
 
         # 6. Sample size reliability penalty (0 to -30 points) - NEW!
         # CRITICAL: Players with few games get massive penalty

@@ -31,22 +31,42 @@ class Trader:
         verbose: bool = False,
         bid_learner=None,
         activity_feed_learner=None,
+        factor_weight_learner=None,
+        sell_timing_optimizer=None,
     ):
         self.api = api
         self.settings = settings
         self.verbose = verbose
+        self.factor_weight_learner = factor_weight_learner
+        self.sell_timing_optimizer = sell_timing_optimizer
+
+        # Load learned weights if learner provided
+        factor_weights = None
+        if factor_weight_learner:
+            try:
+                factor_weights = factor_weight_learner.get_current_weights()
+                if verbose:
+                    console.print("[dim]Using learned factor weights[/dim]")
+            except Exception as e:
+                if verbose:
+                    console.print(f"[yellow]Could not load learned weights: {e}[/yellow]")
+
         self.analyzer = MarketAnalyzer(
             min_buy_value_increase_pct=settings.min_buy_value_increase_pct,
             min_sell_profit_pct=settings.min_sell_profit_pct,
             max_loss_pct=settings.max_loss_pct,
             min_value_score_to_buy=settings.min_value_score_to_buy,
+            factor_weights=factor_weights,
         )
         self.history_cache = ValueHistoryCache()
+        # Store bid_learner for shared use across components
+        self.bid_learner = bid_learner
         # Connect learners to bidding strategy for adaptive learning + competitive intelligence
         self.bidding = SmartBidding(
             bid_learner=bid_learner, activity_feed_learner=activity_feed_learner
         )
-        self.bid_monitor = BidMonitor(api=api)
+        # CRITICAL: Pass same bid_learner to monitor so outcomes feed back into learning
+        self.bid_monitor = BidMonitor(api=api, bid_learner=bid_learner)
         self.matchup_analyzer = MatchupAnalyzer()
         self.risk_analyzer = RiskAnalyzer()
         self.value_tracker = ValueTracker()
@@ -56,6 +76,113 @@ class Trader:
         self.historical_tracker = HistoricalTracker()
         self.market_price_tracker = MarketPriceTracker()
         self.compact_display = CompactDisplay(bidding_strategy=self.bidding)
+
+    def run_learning_update(self, league: League):
+        """
+        Run learning system updates after analysis.
+
+        This method consolidates all learning operations:
+        1. Update recommendation outcomes
+        2. Optimize factor weights if needed
+        3. Update sell timing snapshots
+
+        Args:
+            league: League object
+        """
+        if not self.factor_weight_learner and not self.sell_timing_optimizer:
+            return  # No learning systems enabled
+
+        try:
+            # STEP 1: Update outcomes for historical recommendations
+            if self.verbose:
+                console.print("[dim]Updating recommendation outcomes...[/dim]")
+
+            self.historical_tracker.update_outcomes(league.id, self.api, days_after=30)
+
+            # STEP 2: Optimize factor weights if needed
+            if self.factor_weight_learner:
+                should_optimize = self.factor_weight_learner.should_run_optimization()
+
+                if should_optimize["baseline_needed"]:
+                    # Count available recommendations
+                    import sqlite3
+                    from pathlib import Path
+
+                    db_path = Path("logs") / "bid_learning.db"
+                    with sqlite3.connect(db_path) as conn:
+                        cursor = conn.execute(
+                            "SELECT COUNT(*) FROM recommendations WHERE actual_profit_pct IS NOT NULL"
+                        )
+                        outcome_count = cursor.fetchone()[0]
+
+                    if outcome_count >= 30:
+                        if self.verbose:
+                            console.print(
+                                f"[cyan]Running baseline optimization ({outcome_count} samples)...[/cyan]"
+                            )
+
+                        # Run baseline optimization for both BUY and SELL
+                        buy_weights, buy_results = (
+                            self.factor_weight_learner.optimize_baseline_weights(
+                                "BUY", min_samples=15
+                            )
+                        )
+                        sell_weights, sell_results = (
+                            self.factor_weight_learner.optimize_baseline_weights(
+                                "SELL", min_samples=10
+                            )
+                        )
+
+                        # Display results if verbose
+                        if self.verbose and (buy_results or sell_results):
+                            console.print("[green]✓ Baseline optimization complete[/green]")
+                            significant_changes = [
+                                r for r in (buy_results + sell_results) if abs(r.change_pct) > 10
+                            ]
+                            if significant_changes:
+                                console.print(
+                                    f"[dim]Found {len(significant_changes)} significant weight changes[/dim]"
+                                )
+                    else:
+                        if self.verbose:
+                            console.print(
+                                f"[dim]Insufficient samples for baseline optimization ({outcome_count}/30)[/dim]"
+                            )
+
+                elif should_optimize["incremental_needed"]:
+                    if self.verbose:
+                        console.print("[cyan]Running incremental weight updates...[/cyan]")
+
+                    # Run incremental updates for both BUY and SELL
+                    buy_weights, buy_results = (
+                        self.factor_weight_learner.update_weights_incrementally(
+                            "BUY", window_days=30
+                        )
+                    )
+                    sell_weights, sell_results = (
+                        self.factor_weight_learner.update_weights_incrementally(
+                            "SELL", window_days=30
+                        )
+                    )
+
+                    # Display results if verbose
+                    if self.verbose and (buy_results or sell_results):
+                        console.print("[green]✓ Incremental updates complete[/green]")
+                        applied = [r for r in (buy_results + sell_results) if abs(r.change_pct) > 1]
+                        if applied:
+                            console.print(f"[dim]Applied {len(applied)} weight adjustments[/dim]")
+
+            # STEP 3: Update sell timing snapshots
+            if self.sell_timing_optimizer:
+                if self.verbose:
+                    console.print("[dim]Updating sell timing snapshots...[/dim]")
+
+                self.sell_timing_optimizer.update_hold_period_snapshots(self.api, league.id)
+
+        except Exception as e:
+            if self.verbose:
+                console.print(f"[yellow]Learning update failed: {e}[/yellow]")
+            # Silent failure in non-verbose mode to avoid disrupting normal operations
 
     def display_compact_action_plan(
         self, league: League, market_analyses: list[PlayerAnalysis], current_budget: int
@@ -137,7 +264,72 @@ class Trader:
                 player_values[player.id] = 0
 
         best_eleven = select_best_eleven(squad, player_values)
+        best_eleven_ids = {p.id for p in best_eleven}
         best_11_strength = sum(p.average_points for p in best_eleven)
+
+        # Get player stats for purchase prices using market value history endpoint
+        # This endpoint returns 'trp' (transfer price) which is the actual purchase price
+        player_stats = {}
+        for player in squad:
+            try:
+                # Use market value history v2 which includes trp (transfer price)
+                history = self.api.client.get_player_market_value_history_v2(
+                    player_id=player.id, timeframe=30
+                )
+                player_stats[player.id] = history
+            except Exception:
+                player_stats[player.id] = None
+
+        # Calculate position counts
+        position_counts = {}
+        for player in squad:
+            pos = player.position
+            position_counts[pos] = position_counts.get(pos, 0) + 1
+
+        # Collect matchup data for each squad player (SOS ratings)
+        player_matchup_data = {}
+        team_positions = {}
+        player_trend_data = {}
+
+        for player in squad:
+            try:
+                # Get matchup context (includes SOS)
+                matchup_context = self._get_matchup_context(league, player.id)
+                player_matchup_data[player.id] = matchup_context
+
+                # Extract team position from matchup context
+                if matchup_context.get("has_data"):
+                    player_team = matchup_context.get("player_team")
+                    if player_team and hasattr(player_team, "league_position"):
+                        team_positions[player.team_id] = player_team.league_position
+
+                # Get trend data for recovery prediction
+                history_data = self._get_player_trend(league, player.id)
+                if history_data:
+                    trend_data = self.history_cache.get_trend_analysis(
+                        history_data, player.market_value
+                    )
+                    player_trend_data[player.id] = trend_data
+                else:
+                    player_trend_data[player.id] = {"has_data": False}
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"[dim]Failed to get data for {player.last_name}: {e}[/dim]")
+                player_matchup_data[player.id] = {"has_data": False}
+                player_trend_data[player.id] = {"has_data": False}
+
+        # Rank squad for selling with SOS, team positions, and trend data
+        sell_candidates, recovery_plan = self.analyzer.rank_squad_for_selling(
+            squad=squad,
+            player_stats=player_stats,
+            player_values=player_values,
+            best_eleven_ids=best_eleven_ids,
+            position_counts=position_counts,
+            current_budget=current_budget,
+            player_matchup_data=player_matchup_data,
+            team_positions=team_positions,
+            player_trend_data=player_trend_data,
+        )
 
         sell_count = sum(1 for a in team_analyses if a.recommendation == "SELL")
         hold_count = sum(1 for a in team_analyses if a.recommendation == "HOLD")
@@ -147,6 +339,8 @@ class Trader:
             "team_value": team_value,
             "available_to_spend": available_to_spend,
             "best_11_strength": best_11_strength,
+            "best_eleven": best_eleven,
+            "player_values": player_values,
             "sell_count": sell_count,
             "hold_count": hold_count,
         }
@@ -194,6 +388,9 @@ class Trader:
             market_insights=market_insights,
             is_emergency=is_emergency,
             squad_size=squad_size,
+            sell_candidates=sell_candidates,
+            recovery_plan=recovery_plan,
+            current_budget=current_budget,
         )
 
     def analyze_market(
@@ -224,11 +421,56 @@ class Trader:
         # Filter for only KICKBASE sellers (not user listings)
         kickbase_players = [p for p in market_players if p.is_kickbase_seller()]
 
+        # Build roster context for position-aware recommendations
+        roster_contexts = {}
+        try:
+            from .roster_analyzer import RosterAnalyzer
+            from .value_calculator import PlayerValue
+
+            squad = self.api.get_squad(league)
+
+            # Fetch player market value history for purchase prices (trp field)
+            player_stats = {}
+            for player in squad:
+                try:
+                    history = self.api.client.get_player_market_value_history_v2(
+                        player_id=player.id, timeframe=30
+                    )
+                    player_stats[player.id] = history
+                except Exception:
+                    player_stats[player.id] = None
+
+            # Calculate value scores for squad members
+            player_values = {}
+            for player in squad:
+                try:
+                    pv = PlayerValue.calculate(player)
+                    player_values[player.id] = pv.value_score
+                except Exception:
+                    player_values[player.id] = 0.0
+
+            # Build roster contexts by position (with pre-calculated values)
+            roster_analyzer = RosterAnalyzer()
+            roster_contexts = roster_analyzer.analyze_roster(squad, player_stats, player_values)
+
+            if self.verbose:
+                # Show roster composition summary
+                for position, ctx in roster_contexts.items():
+                    status = (
+                        "full" if ctx.is_position_full else f"{ctx.current_count}/{ctx.ideal_count}"
+                    )
+                    console.print(f"[dim]Roster: {position} ({status})[/dim]")
+        except Exception as e:
+            if self.verbose:
+                console.print(f"[yellow]Could not build roster context: {e}[/yellow]")
+            roster_contexts = {}
+
         analyses = []
         for player in kickbase_players:
             # CRITICAL FIX: Fetch real performance data with caching
             # Market endpoint shows points=0 but performance endpoint has actual stats
             performance_volatility = 0.5  # Default if not available
+            perf_data = None  # Store for passing to analyzer (sample size checks)
             try:
                 # Check cache first
                 perf_data = self.history_cache.get_cached_performance(
@@ -256,7 +498,7 @@ class Trader:
                         performance_volatility = 1.0 - player_value.consistency_score
 
             except Exception:
-                pass  # Silent failure for performance data
+                perf_data = None  # Ensure None on failure
 
             # Fetch historical trend data with caching
             history_data = self._get_player_trend(league, player.id)
@@ -272,9 +514,17 @@ class Trader:
             # Fetch matchup context (team strength, opponent, player status)
             matchup_context = self._get_matchup_context(league, player.id)
 
-            # Analyze player with trend and matchup data
+            # Get roster context for this player's position
+            roster_context = roster_contexts.get(player.position)
+
+            # Analyze player with trend, matchup, roster, and performance data
+            # Performance data enables sample size checks (games_played)
             analysis = self.analyzer.analyze_market_player(
-                player, trend_data=trend_data, matchup_context=matchup_context
+                player,
+                trend_data=trend_data,
+                matchup_context=matchup_context,
+                roster_context=roster_context,
+                performance_data=perf_data,
             )
 
             # Calculate risk metrics if enabled
@@ -376,10 +626,8 @@ class Trader:
         )
 
         if cached:
-            # Need current market value - get from player
-            return self.history_cache.get_trend_analysis(
-                cached, current_market_value=0
-            )  # Will be passed separately
+            # Return raw cached data - caller will analyze with market value
+            return cached
 
         # Fetch from API
         try:
@@ -932,12 +1180,14 @@ class Trader:
         # Fetch market trends and player stats for all squad players
         player_trends = self._fetch_player_trends(players, limit=len(players))
 
-        # Fetch player statistics from API
+        # Fetch player market value history for purchase prices (trp field)
         player_stats = {}
         for player in players:
             try:
-                stats = self.api.client.get_player_statistics(player.id, league.id)
-                player_stats[player.id] = stats
+                history = self.api.client.get_player_market_value_history_v2(
+                    player_id=player.id, timeframe=30
+                )
+                player_stats[player.id] = history
             except Exception:
                 player_stats[player.id] = None
 
@@ -996,13 +1246,16 @@ class Trader:
             try:
                 # Get trend data (already fetched)
                 trend = player_trends.get(player.id, {})
-                stats = player_stats.get(player.id)
 
-                # Extract purchase price from API
-                purchase_price = player.market_value  # Default
-                if stats and stats.get("trp"):
-                    # trp = transfer price (what we paid)
-                    purchase_price = stats["trp"]
+                # Get purchase price from player object (mvgl from squad API)
+                # Negative mvgl = free agency pickup (treat as 0 cost)
+                # Positive mvgl = actual purchase price
+                if player.buy_price > 0:
+                    purchase_price = player.buy_price
+                elif player.buy_price < 0:
+                    purchase_price = 0  # Free agency - no cost
+                else:
+                    purchase_price = player.market_value  # Unknown, use current value
 
                 # Build peak analysis from trend data
                 peak_dict = None
@@ -1162,12 +1415,21 @@ class Trader:
             # Calculate smart bid for BUY recommendations
             smart_bid_str = ""
             if show_bids and analysis.recommendation == "BUY":
+                # Get roster impact score for tier-based bidding
+                roster_impact_score = 0.0
+                if analysis.roster_impact:
+                    roster_impact_score = analysis.roster_impact.value_score_gain
+                    # Add bonus for fills_gap impact type
+                    if analysis.roster_impact.impact_type == "fills_gap":
+                        roster_impact_score += 10.0
+
                 bid_rec = self.bidding.calculate_bid(
                     asking_price=analysis.current_price,
                     market_value=analysis.market_value,
                     value_score=analysis.value_score,
                     confidence=analysis.confidence,
                     player_id=analysis.player.id,
+                    roster_impact=roster_impact_score,
                 )
                 overbid_pct_color = "green" if bid_rec.overbid_pct >= 10 else "yellow"
                 smart_bid_str = f"€{bid_rec.recommended_bid:,}\n[{overbid_pct_color}]+{bid_rec.overbid_pct:.1f}%[/{overbid_pct_color}]"
@@ -1617,6 +1879,13 @@ class Trader:
             is_replacement = len(replacement_candidates) > 0
             best_replacement = replacement_candidates[0] if is_replacement else None
 
+            # Get roster impact score for tier-based bidding
+            roster_impact_score = 0.0
+            if analysis.roster_impact:
+                roster_impact_score = analysis.roster_impact.value_score_gain
+                if analysis.roster_impact.impact_type == "fills_gap":
+                    roster_impact_score += 10.0
+
             # Calculate smart bid
             bid_rec = self.bidding.calculate_bid(
                 asking_price=analysis.current_price,
@@ -1626,6 +1895,7 @@ class Trader:
                 is_replacement=is_replacement,
                 replacement_sell_value=best_replacement["sell_value"] if best_replacement else 0,
                 player_id=player.id,
+                roster_impact=roster_impact_score,
             )
 
             # Check budget constraints

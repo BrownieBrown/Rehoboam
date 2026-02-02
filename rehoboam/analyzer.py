@@ -8,6 +8,31 @@ from .value_calculator import PlayerValue
 
 
 @dataclass
+class RosterContext:
+    """Context about user's current roster for a position"""
+
+    position: str  # Position name (e.g., "Goalkeeper", "Midfielder")
+    current_count: int  # How many players at this position
+    minimum_count: int  # Minimum required (GK:1, DEF:3, MID:2, FWD:1)
+    existing_players: list  # List of (player, purchase_price, current_value, value_score)
+    weakest_player: dict | None  # Player with lowest value score
+    is_below_minimum: bool  # True if below minimum required
+    upgrade_potential: float  # How much better market player is vs weakest
+
+
+@dataclass
+class RosterImpact:
+    """Roster impact information for a buy recommendation"""
+
+    is_upgrade: bool  # True if this is an upgrade over existing player
+    impact_type: str  # "upgrade", "depth", "fills_gap", "redundant"
+    replaces_player: str | None  # Name of player this would replace
+    value_score_gain: float  # Value score improvement over replaced player
+    net_cost: int  # Cost after selling replaced player
+    reason: str  # Human-readable reason
+
+
+@dataclass
 class ScoringFactor:
     """Individual scoring factor contribution"""
 
@@ -61,6 +86,25 @@ class PlayerAnalysis:
     metadata: dict | None = None  # Additional data (peak analysis, stats, etc.)
     factors: list[ScoringFactor] = field(default_factory=list)  # Scoring breakdown
     risk_metrics: "RiskMetrics | None" = None  # Risk analysis (volatility, VaR, Sharpe)
+    roster_impact: "RosterImpact | None" = None  # Roster context for buy recommendations
+
+
+@dataclass
+class SellCandidate:
+    """Player evaluated as potential sell candidate for squad management"""
+
+    player: any  # Player object
+    expendability_score: float  # 0-100 (higher = more expendable, should sell first)
+    is_protected: bool  # True if player cannot/should not be sold
+    protection_reason: str | None  # "Best 11", "Only GK", "Min DEF", etc.
+    value_score: float  # Base value score
+    market_value: int  # Current market value
+    profit_loss_pct: float  # P/L percentage from purchase
+    budget_recovery: int  # How much budget selling recovers
+    sos_rating: str | None = None  # "Very Easy" to "Very Difficult"
+    team_position: int | None = None  # 1-18 league position
+    trend: str | None = None  # "rising", "falling", "stable"
+    recovery_signal: str | None = None  # "HOLD", "CUT", or None (for loss recovery)
 
 
 class MarketAnalyzer:
@@ -90,8 +134,18 @@ class MarketAnalyzer:
         player: MarketPlayer,
         trend_data: dict | None = None,
         matchup_context: dict | None = None,
+        roster_context: "RosterContext | None" = None,
+        performance_data: dict | None = None,
     ) -> PlayerAnalysis:
-        """Analyze a player on the market for buying opportunity using factor-based scoring"""
+        """Analyze a player on the market for buying opportunity using factor-based scoring
+
+        Args:
+            player: MarketPlayer to analyze
+            trend_data: Market value trend data (14-day history)
+            matchup_context: Upcoming fixtures and strength of schedule
+            roster_context: Current roster composition for upgrade analysis
+            performance_data: Match-by-match performance for sample size analysis
+        """
         market_value = player.market_value
         current_price = player.price
 
@@ -123,8 +177,10 @@ class MarketAnalyzer:
         else:
             value_change_pct = 0.0
 
-        # Calculate base player value
-        player_value = PlayerValue.calculate(player, trend_data=trend_data)
+        # Calculate base player value (with performance data for sample size analysis)
+        player_value = PlayerValue.calculate(
+            player, trend_data=trend_data, performance_data=performance_data
+        )
         base_value_score = player_value.value_score
 
         # FACTOR-BASED SCORING: Calculate each factor independently
@@ -227,17 +283,67 @@ class MarketAnalyzer:
                     factors.append(sos_factor)
                     final_score += sos_factor.score
 
-        # Factor 5: Market discount
-        if value_change_pct >= self.min_buy_value_increase_pct:
+        # Factor 5: Market discount/premium
+        # Negative value_change_pct means current_price > market_value = undervalued = good deal
+        # Positive value_change_pct means current_price < market_value = overvalued = bad deal
+        if value_change_pct <= -self.min_buy_value_increase_pct:
+            # Player is undervalued (priced below market value) - BONUS
             discount_factor = ScoringFactor(
-                name="Market Discount",
+                name="Undervalued",
                 raw_value=value_change_pct,
                 weight=self.weights.discount,
                 score=self.weights.discount,
-                description=f"Undervalued by {value_change_pct:.1f}%",
+                description=f"Priced below market value by {abs(value_change_pct):.1f}%",
             )
             factors.append(discount_factor)
             final_score += discount_factor.score
+        elif value_change_pct >= self.min_buy_value_increase_pct:
+            # Player is overvalued (priced above market value) - PENALTY
+            overvalued_factor = ScoringFactor(
+                name="Overvalued",
+                raw_value=value_change_pct,
+                weight=self.weights.discount,
+                score=-self.weights.discount,  # PENALTY not bonus
+                description=f"Overpriced by {value_change_pct:.1f}%",
+            )
+            factors.append(overvalued_factor)
+            final_score += overvalued_factor.score
+
+        # Factor 6: Roster Impact (for display and upgrade bonus)
+        roster_impact = None
+        if roster_context:
+            from .roster_analyzer import RosterAnalyzer
+
+            roster_analyzer = RosterAnalyzer()
+            roster_impact = roster_analyzer.get_roster_impact(
+                market_player=player,
+                market_player_score=final_score,  # Use score calculated so far
+                roster_context=roster_context,
+            )
+
+            # Add bonus for significant upgrades
+            if roster_impact.is_upgrade:
+                upgrade_bonus = min(roster_impact.value_score_gain, 15.0)  # Cap at 15
+                roster_factor = ScoringFactor(
+                    name="Squad Upgrade",
+                    raw_value=roster_impact.value_score_gain,
+                    weight=1.0,
+                    score=upgrade_bonus,
+                    description=f"Replaces {roster_impact.replaces_player} (+{roster_impact.value_score_gain:.0f} value)",
+                )
+                factors.append(roster_factor)
+                final_score += roster_factor.score
+            elif roster_context.is_below_minimum:
+                # Bonus for filling a required gap
+                gap_factor = ScoringFactor(
+                    name="Fills Gap",
+                    raw_value=1.0,
+                    weight=10.0,
+                    score=10.0,
+                    description=f"Fills gap ({roster_context.current_count}/{roster_context.minimum_count} {roster_context.position}s)",
+                )
+                factors.append(gap_factor)
+                final_score += gap_factor.score
 
         # Clamp final score to 0-150 range (can exceed 100 with bonuses)
         final_score = max(0, min(150, final_score))
@@ -248,15 +354,32 @@ class MarketAnalyzer:
             # Additional quality checks for BUY recommendation
             trend_check = True
             if trend_change_pct is not None:
-                # Reject deeply falling players (< -10%)
-                if trend_change_pct < -10:
+                # TIGHTENED: Reject falling players more aggressively
+                # Any decline > 5% is a red flag
+                if trend_change_pct < -5:
                     trend_check = False
-                # For moderate decline (-10 to -5), require very high score
-                elif trend_change_pct < -5 and final_score < 65:
+                # For slight decline (-5 to 0), require high score
+                elif trend_change_pct < 0 and final_score < 70:
                     trend_check = False
 
             # Base value check - player must have decent fundamentals
-            base_value_check = base_value_score >= 35.0  # Minimum base value
+            base_value_check = base_value_score >= 45.0  # Raised threshold for higher quality
+
+            # Points check - reject players with 0 points (likely injured/benched)
+            points_check = player.points > 0
+
+            # Sample size check - reject players with too few games
+            # This prevents buying on 1-2 game hot streaks
+            sample_size_check = True
+            games_played = None
+            if player_value.games_played is not None:
+                games_played = player_value.games_played
+                if games_played < 3:
+                    # Less than 3 games = too risky, skip entirely
+                    sample_size_check = False
+                elif games_played < 5 and final_score < 75:
+                    # 3-4 games = risky, need very high score
+                    sample_size_check = False
 
             # Schedule check - only reject VERY hard schedules
             # If no matchup data, assume neutral (don't penalize lack of data)
@@ -276,13 +399,26 @@ class MarketAnalyzer:
                     if sos_rating == "Very Difficult":  # Was ["Difficult", "Very Difficult"]
                         schedule_check = False
 
-            if trend_check and base_value_check and schedule_check:
+            if (
+                trend_check
+                and base_value_check
+                and schedule_check
+                and points_check
+                and sample_size_check
+            ):
                 recommendation = "BUY"
                 confidence = min(final_score / 100.0, 1.0)
             else:
                 # Downgrade to HOLD if quality checks fail
-                recommendation = "HOLD"
-                confidence = 0.5
+                if not points_check:
+                    recommendation = "SKIP"
+                    confidence = 0.2
+                elif not sample_size_check:
+                    recommendation = "HOLD"  # Wait for more data
+                    confidence = 0.3
+                else:
+                    recommendation = "HOLD"
+                    confidence = 0.5
         elif final_score >= self.hold_threshold:
             recommendation = "HOLD"
             confidence = 0.6
@@ -326,6 +462,7 @@ class MarketAnalyzer:
             trend_change_pct=trend_change_pct,
             metadata=metadata if metadata else None,
             factors=factors,
+            roster_impact=roster_impact,
         )
 
     def _get_sos_indicator(self, rating: str) -> str:
@@ -594,3 +731,249 @@ class MarketAnalyzer:
             result.extend(falling_recovery[:remaining])
 
         return result[:top_n]
+
+    def rank_squad_for_selling(
+        self,
+        squad: list,
+        player_stats: dict,
+        player_values: dict[str, float],
+        best_eleven_ids: set[str],
+        position_counts: dict[str, int],
+        current_budget: int,
+        player_matchup_data: dict[str, dict] | None = None,
+        team_positions: dict[str, int] | None = None,
+        player_trend_data: dict[str, dict] | None = None,
+    ) -> tuple[list[SellCandidate], list[SellCandidate] | None]:
+        """
+        Rank entire squad by expendability for selling decisions.
+
+        Args:
+            squad: List of player objects in the squad
+            player_stats: Dict mapping player_id -> stats (for purchase price via trp)
+            player_values: Dict mapping player_id -> value_score
+            best_eleven_ids: Set of player IDs in the best 11
+            position_counts: Dict mapping position -> current count
+            current_budget: Current budget (negative means deficit)
+            player_matchup_data: Dict mapping player_id -> matchup context (SOS ratings)
+            team_positions: Dict mapping team_id -> league position (1-18)
+            player_trend_data: Dict mapping player_id -> trend data (for recovery prediction)
+
+        Returns:
+            Tuple of (all_candidates_ranked, recovery_plan_if_in_deficit)
+            - all_candidates_ranked: All players sorted by expendability (most expendable first)
+            - recovery_plan: List of players to sell to reach 0 budget (if in deficit)
+        """
+        from .config import POSITION_MINIMUMS
+
+        candidates = []
+
+        for player in squad:
+            value_score = player_values.get(player.id, 0.0)
+
+            # Get purchase price from player object (mvgl from squad API)
+            # Negative mvgl indicates free agency acquisition (no cost)
+            # Positive mvgl is the actual purchase price
+            purchase_price = player.buy_price
+
+            # Calculate profit/loss
+            if purchase_price > 0:
+                # Normal purchase - calculate P/L from buy price
+                profit_loss_pct = ((player.market_value - purchase_price) / purchase_price) * 100
+            elif purchase_price < 0:
+                # Free agency pickup (negative mvgl) - pure profit, show as percentage of market value
+                # Use absolute value to avoid confusion, cap at 100%
+                profit_loss_pct = 100.0  # Free acquisition = 100% profit
+            else:
+                # buy_price = 0 means unknown, fall back to 0%
+                profit_loss_pct = 0.0
+
+            # Start with inverse of value score (low value = more expendable)
+            expendability = 100 - value_score
+
+            # Determine protection status
+            is_protected = False
+            protection_reason = None
+            position = player.position
+
+            # Check position minimums
+            current_at_position = position_counts.get(position, 0)
+            min_required = POSITION_MINIMUMS.get(position, 1)
+
+            # Only player at position - cannot sell
+            if current_at_position <= 1:
+                is_protected = True
+                protection_reason = f"Only {position[:2]}"
+                expendability -= 50
+
+            # At position minimum - very protected
+            elif current_at_position <= min_required:
+                is_protected = True
+                protection_reason = f"Min {position[:3]}"
+                expendability -= 30
+
+            # If we have MORE than minimum at this position and in debt, boost expendability
+            # Extra players at position are more expendable when in debt
+            # GK especially since you only field 1
+            if current_budget < 0 and current_at_position > min_required:
+                if position == "Goalkeeper":
+                    expendability += 15  # Higher priority to sell extra GK
+                else:
+                    expendability += 5  # Slight boost for other excess positions
+
+            # In Best 11 - protected but sellable
+            if player.id in best_eleven_ids:
+                if not is_protected:
+                    protection_reason = "Best 11"
+                expendability -= 40
+
+            # Extract SOS rating and trend for this player
+            sos_rating = None
+            if player_matchup_data:
+                matchup = player_matchup_data.get(player.id, {})
+                if matchup.get("has_data"):
+                    sos_data = matchup.get("sos")
+                    if sos_data:
+                        sos_rating = sos_data.short_term_rating
+
+            # Extract trend data
+            trend = None
+            trend_change_pct = 0.0
+            if player_trend_data:
+                trend_data = player_trend_data.get(player.id, {})
+                if trend_data.get("has_data"):
+                    trend = trend_data.get("trend", "unknown")
+                    trend_change_pct = trend_data.get("change_pct", 0.0)
+
+            # Get team league position
+            team_pos = None
+            if team_positions:
+                team_pos = team_positions.get(player.team_id)
+
+            # SOS-BASED EXPENDABILITY
+            if sos_rating:
+                if sos_rating == "Very Difficult":
+                    expendability += 20  # Hard schedule = sell first
+                elif sos_rating == "Difficult":
+                    expendability += 10
+                elif sos_rating == "Easy":
+                    expendability -= 10  # Easy schedule = keep
+                elif sos_rating == "Very Easy":
+                    expendability -= 15
+
+            # TEAM LEAGUE POSITION-BASED EXPENDABILITY
+            if team_pos:
+                if team_pos >= 16:  # Bottom 3 (relegation zone)
+                    expendability += 15
+                elif team_pos >= 14:  # Near relegation
+                    expendability += 10
+                elif team_pos <= 4:  # Top 4
+                    expendability -= 10
+
+            # EXPENDABILITY BASED ON P/L (with recovery prediction for losses)
+            recovery_signal = None
+
+            if profit_loss_pct < -20:
+                # Big loss - check if recovery is possible
+                if trend in ["rising", "stable"]:
+                    # Value recovering - consider holding
+                    expendability += 10  # Still elevated but less urgent
+                    recovery_signal = "HOLD"
+                else:
+                    expendability += 25  # Big loss + declining = sell
+                    recovery_signal = "CUT"
+            elif profit_loss_pct < -10:
+                if trend == "rising":
+                    expendability += 5  # Moderate loss but recovering
+                    recovery_signal = "HOLD"
+                elif trend == "falling" and trend_change_pct < -5:
+                    expendability += 20  # Moderate loss + declining = sell soon
+                    recovery_signal = "CUT"
+                else:
+                    expendability += 15
+            elif profit_loss_pct < 0:
+                # Small loss - factor in trend and schedule for recovery prediction
+                if trend == "rising":
+                    expendability += 0  # Neutral - recovery likely
+                    recovery_signal = "HOLD"
+                elif trend == "falling" and trend_change_pct < -10:
+                    expendability += 15  # Sharp decline - cut losses
+                    recovery_signal = "CUT"
+                elif sos_rating in ["Easy", "Very Easy"]:
+                    expendability += 0  # Easy schedule = recovery likely
+                    recovery_signal = "HOLD"
+                elif sos_rating in ["Difficult", "Very Difficult"]:
+                    expendability += 12  # Hard schedule = continued decline
+                    recovery_signal = "CUT"
+                else:
+                    expendability += 10
+
+            # Profits = LESS expendable (protect winners)
+            # FIXED: Only protect notable profits (>5%), not 0-5%
+            elif profit_loss_pct > 20:
+                expendability -= 20  # Big profit - protect
+            elif profit_loss_pct > 10:
+                expendability -= 15
+            elif profit_loss_pct > 5:
+                expendability -= 10
+            # 0-5% profit = neutral (no adjustment)
+
+            # Poor performance (low value score) - more expendable
+            if value_score < 35:
+                expendability += 10
+
+            # Clamp expendability to 0-100
+            expendability = max(0, min(100, expendability))
+
+            candidates.append(
+                SellCandidate(
+                    player=player,
+                    expendability_score=expendability,
+                    is_protected=is_protected,
+                    protection_reason=protection_reason,
+                    value_score=value_score,
+                    market_value=player.market_value,
+                    profit_loss_pct=profit_loss_pct,
+                    budget_recovery=player.market_value,
+                    sos_rating=sos_rating,
+                    team_position=team_pos,
+                    trend=trend,
+                    recovery_signal=recovery_signal,
+                )
+            )
+
+        # Sort by expendability (most expendable first)
+        candidates.sort(key=lambda c: c.expendability_score, reverse=True)
+
+        # Calculate recovery plan if in deficit
+        recovery_plan = None
+        if current_budget < 0:
+            recovery_plan = self._calculate_recovery_plan(candidates, current_budget)
+
+        return candidates, recovery_plan
+
+    def _calculate_recovery_plan(
+        self, candidates: list[SellCandidate], current_budget: int
+    ) -> list[SellCandidate]:
+        """
+        Find minimum sells to reach 0 budget, prioritizing most expendable.
+
+        Args:
+            candidates: List of SellCandidate sorted by expendability
+            current_budget: Current budget (negative)
+
+        Returns:
+            List of candidates to sell to reach 0+ budget
+        """
+        # Filter to sellable candidates (not fully protected)
+        sellable = [c for c in candidates if not c.is_protected]
+
+        recovery_plan = []
+        remaining_deficit = abs(current_budget)
+
+        for candidate in sellable:
+            if remaining_deficit <= 0:
+                break
+            recovery_plan.append(candidate)
+            remaining_deficit -= candidate.market_value
+
+        return recovery_plan

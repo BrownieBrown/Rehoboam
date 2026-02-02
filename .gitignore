@@ -44,3 +44,7 @@ config.yaml
 *.sqlite
 logs/
 *.log
+
+# Lambda deployment artifacts
+lambda_package/
+lambda_*.zip

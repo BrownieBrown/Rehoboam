@@ -5,6 +5,19 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Minimum required players per position for a valid starting 11
+# Beyond these minimums, any position can be used to fill remaining spots
+POSITION_MINIMUMS = {
+    "Goalkeeper": 1,
+    "Defender": 3,
+    "Midfielder": 2,
+    "Forward": 1,
+}
+
+# Minimum value score improvement to consider a market player a significant upgrade
+# over an existing squad player
+MIN_UPGRADE_THRESHOLD = 10.0
+
 
 # Find .env file - look in current directory first, then in home directory
 def find_env_file() -> Path:
@@ -43,8 +56,8 @@ class Settings(BaseSettings):
         description="Minimum profit percentage to trigger a sell",
     )
     max_loss_pct: float = Field(
-        default=-3.0,
-        description="Maximum loss percentage before auto-selling",
+        default=-2.0,
+        description="Maximum loss percentage before triggering sell (tightened to -2% for faster loss prevention)",
     )
     min_buy_value_increase_pct: float = Field(
         default=10.0,
@@ -95,6 +108,16 @@ class Settings(BaseSettings):
     dry_run: bool = Field(
         default=True,
         description="If True, simulate trades without executing them",
+    )
+
+    # Telegram Notifications (optional)
+    telegram_bot_token: str | None = Field(
+        default=None,
+        description="Telegram bot token from @BotFather",
+    )
+    telegram_chat_id: str | None = Field(
+        default=None,
+        description="Telegram chat ID to send notifications to",
     )
 
 
