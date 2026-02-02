@@ -131,21 +131,31 @@ class Player:
     first_name: str
     last_name: str
     position: str
+    team_id: str
     market_value: int
     points: int
     average_points: float
+    buy_price: int = 0  # Purchase price (calculated from market_value - mvgl)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Player":
         # Squad endpoint uses 'n' for name, 'pos' for position, 'p' for points
+        # 'mvgl' = market value gain/loss (NOT purchase price!)
+        # Formula: purchase_price = market_value - mvgl
+        market_value = data.get("mv", 0)
+        mvgl = data.get("mvgl", 0)  # This is the GAIN, not purchase price
+        buy_price = market_value - mvgl if mvgl != 0 else 0
+
         return cls(
             id=data.get("i", ""),
             first_name=data.get("fn", ""),  # May not exist in squad response
             last_name=data.get("n", data.get("ln", "")),  # 'n' in squad, 'ln' in market
             position=MarketPlayer._parse_position(data.get("pos", data.get("p", 0))),
-            market_value=data.get("mv", 0),
+            team_id=data.get("tid", ""),
+            market_value=market_value,
             points=data.get("p", data.get("pts", 0)),  # 'p' in squad, 'pts' in market
             average_points=data.get("ap", 0.0),
+            buy_price=buy_price,
         )
 
 

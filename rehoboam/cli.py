@@ -121,8 +121,25 @@ def analyze(
 
     # Connect learners for adaptive bidding + competitive intelligence
     learner = get_learner()
+
+    # Initialize factor weight learner (unless simple mode)
+    factor_learner = None
+    if not simple:
+        try:
+            from .factor_weight_learner import FactorWeightLearner
+
+            factor_learner = FactorWeightLearner()
+        except Exception as e:
+            if verbose:
+                console.print(f"[yellow]Could not initialize factor learner: {e}[/yellow]")
+
     trader = Trader(
-        api, settings, verbose=verbose, bid_learner=learner, activity_feed_learner=feed_learner
+        api,
+        settings,
+        verbose=verbose,
+        bid_learner=learner,
+        activity_feed_learner=feed_learner,
+        factor_weight_learner=factor_learner,
     )
 
     # Analyze market (suppress verbose output unless requested)
@@ -474,6 +491,79 @@ def analyze(
             if verbose:
                 console.print(f"[red]Predictions error: {e}[/red]")
             pass  # Silent failure for predictions
+
+    # Update learning system (background operation unless verbose)
+    if not simple and factor_learner:
+        try:
+            if verbose:
+                console.print("\n[dim]Running learning system updates...[/dim]")
+
+            # Update outcomes for historical recommendations
+            trader.historical_tracker.update_outcomes(league.id, api, days_after=30)
+
+            # Check if optimization is needed
+            should_optimize = factor_learner.should_run_optimization()
+
+            if should_optimize["baseline_needed"]:
+                # Count available recommendations
+                import sqlite3
+
+                with sqlite3.connect(factor_learner.db_path) as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT COUNT(*) FROM recommendation_history
+                        WHERE outcome_timestamp IS NOT NULL
+                        """
+                    )
+                    outcome_count = cursor.fetchone()[0]
+
+                if outcome_count >= 30:
+                    if verbose:
+                        console.print(
+                            f"[cyan]Running baseline optimization with {outcome_count} outcomes...[/cyan]"
+                        )
+
+                    # Run baseline optimization for both BUY and SELL
+                    buy_weights, buy_results = factor_learner.optimize_baseline_weights(
+                        "BUY", min_samples=15
+                    )
+                    sell_weights, sell_results = factor_learner.optimize_baseline_weights(
+                        "SELL", min_samples=10
+                    )
+
+                    if buy_results or sell_results:
+                        console.print(
+                            f"[green]✓ Baseline optimization complete! "
+                            f"Learned {len(buy_results) + len(sell_results)} weights[/green]"
+                        )
+                elif verbose:
+                    console.print(
+                        f"[dim]Note: Need {30 - outcome_count} more outcomes for baseline optimization[/dim]"
+                    )
+
+            elif should_optimize["incremental_needed"]:
+                if verbose:
+                    console.print("[cyan]Running incremental weight updates...[/cyan]")
+
+                # Run incremental updates for both BUY and SELL
+                buy_weights, buy_results = factor_learner.update_weights_incrementally(
+                    "BUY", window_days=30
+                )
+                sell_weights, sell_results = factor_learner.update_weights_incrementally(
+                    "SELL", window_days=30
+                )
+
+                total_updates = len(buy_results) + len(sell_results)
+                if total_updates > 0:
+                    console.print(
+                        f"[green]✓ Incremental update complete! Updated {total_updates} weights[/green]"
+                    )
+                elif verbose:
+                    console.print("[dim]Weights are well-tuned, no updates needed[/dim]")
+
+        except Exception as e:
+            if verbose:
+                console.print(f"[yellow]Learning update warning: {e}[/yellow]")
 
     # Final summary
     console.print("\n" + "═" * 60)

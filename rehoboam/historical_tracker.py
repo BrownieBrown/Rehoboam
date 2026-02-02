@@ -235,17 +235,17 @@ class HistoricalTracker:
 
     def update_outcomes(self, league_id: str, api_client, days_after: int = 30):
         """
-        Update outcomes for recommendations
+        Update outcomes for recommendations by fetching current market values.
 
         Args:
             league_id: League ID
-            api_client: API client for fetching current data
+            api_client: API client (KickbaseAPI instance)
             days_after: Update recommendations older than this many days
         """
         cutoff_date = (datetime.now() - timedelta(days=days_after)).isoformat()
 
         with sqlite3.connect(self.db_path) as conn:
-            # Get recommendations without outcomes
+            # Get recommendations without outcomes that are old enough
             cursor = conn.execute(
                 """
                 SELECT id, player_id, player_name, recommendation, market_value, timestamp
@@ -256,34 +256,34 @@ class HistoricalTracker:
             """,
                 (league_id, cutoff_date),
             )
-
             recommendations = cursor.fetchall()
 
+        if not recommendations:
+            return
+
+        console.print(f"[dim]Updating outcomes for {len(recommendations)} recommendations...[/dim]")
+
+        # Fetch current market values in batch
+        player_ids = [rec[1] for rec in recommendations]
+        current_values = self._fetch_current_market_values(api_client, league_id, player_ids)
+
         # Update each recommendation
-        for (
-            rec_id,
-            _player_id,
-            player_name,
-            recommendation,
-            original_value,
-            _timestamp,
-        ) in recommendations:
+        updated = 0
+        for rec_id, player_id, player_name, rec_type, original_value, timestamp in recommendations:
             try:
-                # Fetch current market value
-                # This would need the actual API call - simplified here
-                current_value = original_value  # Placeholder
+                current_value = current_values.get(player_id)
+
+                if current_value is None:
+                    continue  # Player no longer available
 
                 # Calculate profit
                 profit_amount = current_value - original_value
                 profit_pct = (profit_amount / original_value * 100) if original_value > 0 else 0
 
-                # Determine if profitable based on recommendation
-                was_profitable = False
-                if recommendation == "BUY" and profit_pct > 5:  # Gained >5%
-                    was_profitable = True
-                elif recommendation == "SELL" and profit_pct < -5:  # Avoided >5% loss
-                    was_profitable = True
+                # Determine if profitable based on recommendation type
+                was_profitable = self._evaluate_outcome(rec_type, profit_pct, timestamp)
 
+                # Update database
                 with sqlite3.connect(self.db_path) as conn:
                     conn.execute(
                         """
@@ -303,8 +303,85 @@ class HistoricalTracker:
                         ),
                     )
 
+                updated += 1
+
             except Exception as e:
-                console.print(f"[dim]Failed to update outcome for {player_name}: {e}[/dim]")
+                console.print(
+                    f"[dim]Warning: Failed to update outcome for {player_name}: {e}[/dim]"
+                )
+
+        if updated > 0:
+            console.print(f"[dim]✓ Updated {updated} recommendation outcomes[/dim]")
+
+    def _fetch_current_market_values(
+        self, api_client, league_id: str, player_ids: list[str]
+    ) -> dict[str, int]:
+        """
+        Fetch current market values for players.
+
+        Args:
+            api_client: KickbaseAPI instance
+            league_id: League ID
+            player_ids: List of player IDs to fetch
+
+        Returns:
+            dict mapping player_id -> current_market_value
+        """
+        values = {}
+
+        try:
+            # Create league object (needed for API calls)
+            from .kickbase_client import League
+
+            league = League(id=league_id, name="", creator_id="")
+
+            # Get all market players
+            market_players = api_client.get_market(league)
+
+            for player in market_players:
+                if player.id in player_ids:
+                    values[player.id] = player.market_value
+
+            # Also check squad (for players we bought)
+            squad = api_client.get_squad(league)
+            for player in squad:
+                if player.id in player_ids:
+                    values[player.id] = player.market_value
+
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not fetch market values: {e}[/yellow]")
+
+        return values
+
+    def _evaluate_outcome(self, recommendation: str, profit_pct: float, timestamp: str) -> bool:
+        """
+        Evaluate if a recommendation was successful.
+
+        Success criteria:
+        - BUY: Value increased by >5% after 30 days
+        - SELL: Avoided >5% value decline OR captured profit
+        - HOLD: Maintained value ±5%
+
+        Args:
+            recommendation: The recommendation type
+            profit_pct: Actual profit percentage
+            timestamp: When recommendation was made
+
+        Returns:
+            True if recommendation was successful
+        """
+        if recommendation == "BUY":
+            # Success if value increased
+            return profit_pct > 5.0
+
+        elif recommendation == "SELL":
+            # Success if we would have lost money by keeping
+            # OR if we captured significant profit
+            return profit_pct < -5.0 or profit_pct > 15.0
+
+        else:  # HOLD
+            # Success if value remained relatively stable
+            return abs(profit_pct) <= 10.0
 
     def analyze_factor_performance(self) -> list[FactorPerformance]:
         """

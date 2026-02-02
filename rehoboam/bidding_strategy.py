@@ -62,6 +62,7 @@ class SmartBidding:
         average_points: float = 0.0,
         is_long_term_hold: bool = False,
         player_id: str | None = None,  # For activity feed learning
+        roster_impact: float = 0.0,  # Roster impact score for tier classification
     ) -> BidRecommendation:
         """
         Calculate optimal bid for a player with value-bounded learning
@@ -144,6 +145,9 @@ class SmartBidding:
                 # Fail silently - don't break bidding if feed learner fails
                 pass
 
+        # Classify player tier based on value and roster impact
+        player_tier = self._classify_player_tier(value_score, roster_impact)
+
         # Calculate base overbid percentage (use learned if available)
         if learned_overbid_pct is not None and learned_overbid_pct > 0:
             overbid_pct = learned_overbid_pct
@@ -153,6 +157,7 @@ class SmartBidding:
                 confidence=confidence,
                 is_replacement=is_replacement,
                 is_elite=is_elite,
+                player_tier=player_tier,
             )
 
         # Apply league competitive intelligence
@@ -216,6 +221,7 @@ class SmartBidding:
             is_elite=is_elite,
             league_competitive_level=league_competitive_level,
             demand_adjustment=demand_adjustment,
+            player_tier=player_tier,
         )
 
         return BidRecommendation(
@@ -227,8 +233,32 @@ class SmartBidding:
             max_profitable_bid=max_profitable_bid,
         )
 
+    def _classify_player_tier(self, value_score: float, roster_impact: float) -> str:
+        """
+        Classify player into bidding tier based on value and roster impact.
+
+        Tiers:
+        - anchor: High value + big roster impact - bid aggressively to secure
+        - strong: Good value OR significant roster impact - solid bid
+        - tactical: Moderate value, lower roster impact - conservative bid
+        - opportunistic: Lower scores - minimum viable bid
+        """
+        if value_score >= 80 and roster_impact >= 15:
+            return "anchor"
+        elif value_score >= 70 or roster_impact >= 12:
+            return "strong"
+        elif value_score >= 50:
+            return "tactical"
+        else:
+            return "opportunistic"
+
     def _calculate_overbid_percentage(
-        self, value_score: float, confidence: float, is_replacement: bool, is_elite: bool = False
+        self,
+        value_score: float,
+        confidence: float,
+        is_replacement: bool,
+        is_elite: bool = False,
+        player_tier: str = "tactical",
     ) -> float:
         """Calculate how much to overbid based on player quality and situation"""
 
@@ -253,6 +283,16 @@ class SmartBidding:
         # Replacements can bid more (we're selling someone)
         if is_replacement:
             overbid += 3.0  # Increased from 2.0
+
+        # Tier-based bidding adjustments (based on value + roster impact)
+        # Anchor players = must win, tactical players = don't overpay
+        tier_bonuses = {
+            "anchor": 12.0,  # Aggressive - must win
+            "strong": 8.0,  # Solid bid
+            "tactical": 3.0,  # Conservative
+            "opportunistic": 0.0,  # Minimum viable
+        }
+        overbid += tier_bonuses.get(player_tier, 0.0)
 
         # Cap at maximum (higher for elite players)
         max_overbid = self.elite_max_overbid_pct if is_elite else self.max_overbid_pct
@@ -285,6 +325,7 @@ class SmartBidding:
         is_elite: bool = False,
         league_competitive_level: float = 0.0,
         demand_adjustment: float = 0.0,
+        player_tier: str = "tactical",
     ) -> str:
         """Generate human-readable reasoning for the bid"""
 
@@ -293,6 +334,16 @@ class SmartBidding:
         # Elite player status (highest priority)
         if is_elite:
             reasons.append("🌟 ELITE PLAYER - Long-term hold")
+
+        # Player tier (anchor vs tactical)
+        tier_labels = {
+            "anchor": "🎯 ANCHOR - must secure",
+            "strong": "💪 Strong target",
+            "tactical": "📊 Tactical buy",
+            "opportunistic": "🔍 Opportunistic",
+        }
+        if player_tier in tier_labels and not is_elite:  # Don't show tier if already elite
+            reasons.append(tier_labels[player_tier])
 
         # League competitive intelligence
         if league_competitive_level >= 8.0:

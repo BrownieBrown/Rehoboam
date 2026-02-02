@@ -36,6 +36,9 @@ class CompactDisplay:
         market_insights: dict,
         is_emergency: bool = False,
         squad_size: int = 0,
+        sell_candidates: list | None = None,
+        recovery_plan: list | None = None,
+        current_budget: int = 0,
     ):
         """
         Display compact action plan
@@ -48,6 +51,9 @@ class CompactDisplay:
             market_insights: Dict with market intelligence
             is_emergency: True if squad below minimum
             squad_size: Current squad size
+            sell_candidates: All players ranked by expendability
+            recovery_plan: Players to sell to reach 0 budget (if in deficit)
+            current_budget: Current budget (for recovery display)
         """
         console.print("\n" + "═" * 80)
         console.print("[bold cyan]🎯  ACTION PLAN[/bold cyan]")
@@ -107,6 +113,10 @@ class CompactDisplay:
                 "[dim]Your squad looks healthy - no players need immediate selling[/dim]\n"
             )
 
+        # RECOMMENDED SELLS Section (ranked by expendability)
+        if sell_candidates:
+            self._display_sell_candidates(sell_candidates, recovery_plan, current_budget)
+
         # QUICK FLIPS Section (optional)
         if flip_opportunities:
             console.print("\n[bold yellow]💰 QUICK FLIPS (Optional - Profit Trading)[/bold yellow]")
@@ -151,8 +161,8 @@ class CompactDisplay:
         table.add_column("Pos", style="blue", width=3)
         table.add_column("Smart Bid", justify="right", style="yellow")
         table.add_column("Score", justify="right", style="magenta", width=5)
+        table.add_column("Impact", justify="center", style="dim", width=12)
         table.add_column("Next 3", justify="center", style="dim", width=7)
-        table.add_column("Days", justify="center", style="dim", width=4)
         table.add_column("Why", style="dim")
 
         for analysis in opportunities:
@@ -190,17 +200,23 @@ class CompactDisplay:
                 elif "🔥🔥" in analysis.reason or "Difficult" in analysis.reason:
                     sos_indicator = "🔥🔥"
 
-            # Days listed
-            days_str = "-"
-            if hasattr(player, "listed_at") and player.listed_at:
-                try:
-                    from datetime import datetime
-
-                    listed_dt = datetime.fromisoformat(player.listed_at.replace("Z", "+00:00"))
-                    days = (datetime.now(listed_dt.tzinfo) - listed_dt).days
-                    days_str = f"{days}d" if days > 0 else "<1d"
-                except Exception:
-                    pass
+            # Roster impact indicator
+            impact_str = "-"
+            if hasattr(analysis, "roster_impact") and analysis.roster_impact:
+                impact = analysis.roster_impact
+                if impact.impact_type == "upgrade":
+                    # Show upgrade with replaced player name and value gain
+                    short_name = (
+                        impact.replaces_player.split()[-1] if impact.replaces_player else "?"
+                    )
+                    impact_str = f"[green]↑ {short_name}\n+{impact.value_score_gain:.0f}[/green]"
+                elif impact.impact_type == "fills_gap":
+                    # Show that this fills a needed position
+                    impact_str = "[cyan]+ fills gap[/cyan]"
+                elif impact.impact_type == "depth":
+                    impact_str = "[yellow]= depth[/yellow]"
+                else:
+                    impact_str = "[dim]= depth[/dim]"
 
             # Compact reason - extract key points
             reason_parts = []
@@ -260,8 +276,8 @@ class CompactDisplay:
                 player.position[:2],  # Shorten position
                 bid_str,
                 f"{analysis.value_score:.0f}",
+                impact_str,
                 sos_indicator,
-                days_str,
                 reason,
             )
 
@@ -405,6 +421,40 @@ class CompactDisplay:
         console.print(f"\n[bold]Best 11:[/bold] {best_11_strength:.0f} pts/week", end=" | ")
         console.print(f"[bold]Bench:[/bold] {sell_count} SELL, {hold_count} HOLD")
 
+        # Display best 11 lineup if available
+        best_eleven = summary.get("best_eleven")
+        player_values = summary.get("player_values", {})
+        if best_eleven:
+            self._display_best_eleven(best_eleven, player_values)
+
+    def _display_best_eleven(self, best_eleven: list, player_values: dict):
+        """Display the best 11 starting lineup"""
+        console.print("\n[bold]⭐ BEST 11 STARTING LINEUP[/bold]\n")
+
+        table = Table(show_header=True, header_style="bold cyan", box=None)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("Value", justify="right", style="yellow")
+        table.add_column("Avg Pts", justify="right", style="green")
+        table.add_column("Score", justify="right", style="magenta")
+
+        # Sort by position for display (GK, DEF, MID, FWD)
+        position_order = {"Goalkeeper": 0, "Defender": 1, "Midfielder": 2, "Forward": 3}
+        sorted_eleven = sorted(best_eleven, key=lambda p: position_order.get(p.position, 99))
+
+        for player in sorted_eleven:
+            name = f"{player.first_name} {player.last_name}"
+            value_score = player_values.get(player.id, 0)
+            table.add_row(
+                name,
+                player.position[:2],
+                f"€{player.market_value / 1_000_000:.1f}M",
+                f"{player.average_points:.0f}",
+                f"{value_score:.0f}",
+            )
+
+        console.print(table)
+
     def _display_market_insights(self, insights: dict):
         """Display brief market intelligence"""
         easy_schedule_count = insights.get("easy_schedule_count", 0)
@@ -431,3 +481,163 @@ class CompactDisplay:
             console.print(f"• 🆕 [cyan]{new_listings} fresh listing(s) today (good timing)[/cyan]")
 
         console.print("\n• 🔍 [dim]Run 'rehoboam market-intel' for price adjustment patterns[/dim]")
+
+    def _display_sell_candidates(
+        self, candidates: list, recovery_plan: list | None, current_budget: int
+    ):
+        """
+        Display sell candidates ranked by expendability.
+
+        Args:
+            candidates: List of SellCandidate objects sorted by expendability
+            recovery_plan: List of candidates to sell to recover budget (if in deficit)
+            current_budget: Current budget for recovery calculation
+        """
+        console.print("\n" + "═" * 80)
+        console.print("[bold cyan]🔻 RECOMMENDED SELLS (ranked by expendability)[/bold cyan]")
+        console.print("═" * 80)
+        console.print(
+            "[dim]Higher expendability = safer to sell. Protected players should be kept.[/dim]\n"
+        )
+
+        # Check if all players are protected
+        sellable = [c for c in candidates if not c.is_protected]
+        if not sellable:
+            console.print(
+                "[yellow]⚠️  All players are protected - consider buying depth first[/yellow]\n"
+            )
+
+        # Display table of candidates
+        table = Table(show_header=True, header_style="bold magenta", box=None)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("Value", justify="right", style="magenta", width=5)
+        table.add_column("P/L", justify="right", width=6)
+        table.add_column("SOS", justify="center", width=7)
+        table.add_column("Trend", justify="center", width=6)
+        table.add_column("Signal", justify="center", width=6)
+        table.add_column("Status", justify="center", width=12)
+
+        # Show top candidates (limit to 8)
+        for candidate in candidates[:8]:
+            player = candidate.player
+            name = f"{player.first_name} {player.last_name}"
+
+            # Profit/loss coloring
+            pl_pct = candidate.profit_loss_pct
+            if pl_pct > 10:
+                pl_str = f"[green]+{pl_pct:.0f}%[/green]"
+            elif pl_pct > 0:
+                pl_str = f"[green]+{pl_pct:.0f}%[/green]"
+            elif pl_pct > -5:
+                pl_str = f"[yellow]{pl_pct:.0f}%[/yellow]"
+            else:
+                pl_str = f"[red]{pl_pct:.0f}%[/red]"
+
+            # SOS display (abbreviated)
+            sos_display = "-"
+            if candidate.sos_rating:
+                if candidate.sos_rating == "Very Difficult":
+                    sos_display = "[red]V.Hard[/red]"
+                elif candidate.sos_rating == "Difficult":
+                    sos_display = "[yellow]Hard[/yellow]"
+                elif candidate.sos_rating == "Easy":
+                    sos_display = "[green]Easy[/green]"
+                elif candidate.sos_rating == "Very Easy":
+                    sos_display = "[green]V.Easy[/green]"
+                else:
+                    sos_display = "Med"
+
+            # Trend display
+            trend_display = "-"
+            if candidate.trend:
+                if candidate.trend == "rising":
+                    trend_display = "[green]↗[/green]"
+                elif candidate.trend == "falling":
+                    trend_display = "[red]↘[/red]"
+                elif candidate.trend == "stable":
+                    trend_display = "[yellow]→[/yellow]"
+
+            # Recovery signal display (HOLD/CUT for losses)
+            signal_display = "-"
+            if candidate.recovery_signal:
+                if candidate.recovery_signal == "HOLD":
+                    signal_display = "[green]HOLD[/green]"
+                elif candidate.recovery_signal == "CUT":
+                    signal_display = "[red]CUT[/red]"
+
+            # Status based on protection
+            if candidate.is_protected:
+                if "Only" in (candidate.protection_reason or ""):
+                    status_str = f"[red]🔒 {candidate.protection_reason}[/red]"
+                elif "Min" in (candidate.protection_reason or ""):
+                    status_str = f"[yellow]⚠️ {candidate.protection_reason}[/yellow]"
+                elif "Best 11" in (candidate.protection_reason or ""):
+                    status_str = "[yellow]⚠️ Best 11[/yellow]"
+                else:
+                    status_str = f"[yellow]⚠️ {candidate.protection_reason}[/yellow]"
+            else:
+                status_str = "[green]SELL[/green]"
+
+            table.add_row(
+                name,
+                player.position[:2],
+                f"{candidate.value_score:.0f}",
+                pl_str,
+                sos_display,
+                trend_display,
+                signal_display,
+                status_str,
+            )
+
+        console.print(table)
+
+        # Show recovery plan if in deficit
+        if current_budget < 0 and recovery_plan:
+            console.print(
+                f"\n[bold red]⚠️  BUDGET RECOVERY NEEDED: {current_budget / 1_000_000:+.1f}M[/bold red]"
+            )
+
+            running_budget = current_budget
+            for candidate in recovery_plan:
+                player = candidate.player
+                name = f"{player.first_name} {player.last_name}"
+                running_budget += candidate.market_value
+                budget_str = f"{running_budget / 1_000_000:+.1f}M"
+
+                if running_budget >= 0:
+                    console.print(
+                        f"   → Sell {name} ({candidate.market_value / 1_000_000:.1f}M) to reach {budget_str} [green]✓[/green]"
+                    )
+                else:
+                    console.print(
+                        f"   → Sell {name} ({candidate.market_value / 1_000_000:.1f}M) to reach {budget_str}"
+                    )
+
+            # Check if recovery plan is sufficient
+            total_recovery = sum(c.market_value for c in recovery_plan)
+            if current_budget + total_recovery < 0:
+                console.print(
+                    "\n[red]⚠️  Cannot reach 0 budget without selling Best 11 players![/red]"
+                )
+                # Calculate how much more is needed
+                shortfall = abs(current_budget + total_recovery)
+                console.print(
+                    f"[yellow]   Shortfall: {shortfall / 1_000_000:.1f}M - consider selling protected players[/yellow]"
+                )
+        elif current_budget < 0:
+            console.print(
+                f"\n[bold red]⚠️  BUDGET RECOVERY NEEDED: {current_budget / 1_000_000:+.1f}M[/bold red]"
+            )
+            console.print(
+                "[red]   No sellable players available! Must sell protected players.[/red]"
+            )
+        else:
+            # Show tip about selling
+            if sellable:
+                # Calculate what selling top candidates would free up
+                top_3_recovery = sum(c.market_value for c in sellable[:3])
+                if top_3_recovery > 0:
+                    console.print(
+                        f"\n[dim]💡 Tip: Selling top 3 expendable players frees {top_3_recovery / 1_000_000:.1f}M budget[/dim]"
+                    )
