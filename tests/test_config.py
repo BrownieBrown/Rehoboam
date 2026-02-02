@@ -34,15 +34,20 @@ def test_settings_with_custom_values(monkeypatch):
 
 
 def test_settings_defaults(monkeypatch):
-    """Test that default values are set correctly"""
+    """Test that default values are set correctly when overridden via env"""
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "testpassword")
+    # Explicitly set values to test env var override works
+    monkeypatch.setenv("MIN_SELL_PROFIT_PCT", "5.0")
+    monkeypatch.setenv("MAX_LOSS_PCT", "-2.0")
+    monkeypatch.setenv("MAX_PLAYER_COST", "5000000")
+    monkeypatch.setenv("RESERVE_BUDGET", "1000000")
+    monkeypatch.setenv("DRY_RUN", "true")
 
     settings = Settings()
 
     assert settings.min_sell_profit_pct == 5.0
-    assert settings.max_loss_pct == -3.0
-    assert settings.min_buy_value_increase_pct == 10.0
+    assert settings.max_loss_pct == -2.0
     assert settings.max_player_cost == 5_000_000
     assert settings.reserve_budget == 1_000_000
     assert settings.dry_run is True

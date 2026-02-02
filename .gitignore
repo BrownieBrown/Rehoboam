@@ -48,3 +48,9 @@ logs/
 # Lambda deployment artifacts
 lambda_package/
 lambda_*.zip
+
+# Web frontend (Node.js)
+web/node_modules/
+web/dist/
+web/.env
+web/.env.local
