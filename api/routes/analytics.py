@@ -1,33 +1,24 @@
 """Analytics routes"""
 
-import os
+from fastapi import APIRouter, Depends, HTTPException
 
-from fastapi import APIRouter, HTTPException
-
-from api.dependencies import get_api_for_user, run_sync
+from api.auth import TokenData, get_current_user
+from api.dependencies import get_cached_api, run_sync
 from api.models import AnalyticsResponse, RecommendationResponse
 from rehoboam.analyzer import MarketAnalyzer
 from rehoboam.config import POSITION_MINIMUMS, get_settings
+from rehoboam.formation import select_best_eleven
 from rehoboam.roster_analyzer import RosterAnalyzer
 from rehoboam.value_calculator import PlayerValue
 
 router = APIRouter()
 
 
-def get_authenticated_api():
-    """Get authenticated API using env credentials"""
-    email = os.getenv("KICKBASE_EMAIL")
-    password = os.getenv("KICKBASE_PASSWORD")
-    if not email or not password:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return get_api_for_user(email, password)
-
-
 @router.get("/recommendations", response_model=AnalyticsResponse)
-async def get_recommendations():
+async def get_recommendations(current_user: TokenData = Depends(get_current_user)):
     """Get buy and sell recommendations"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
@@ -35,23 +26,28 @@ async def get_recommendations():
 
         league = leagues[0]
         settings = get_settings()
-        analyzer = MarketAnalyzer(settings)
+        analyzer = MarketAnalyzer(
+            min_buy_value_increase_pct=settings.min_buy_value_increase_pct,
+            min_sell_profit_pct=settings.min_sell_profit_pct,
+            max_loss_pct=settings.max_loss_pct,
+            min_value_score_to_buy=settings.min_value_score_to_buy,
+        )
         roster_analyzer = RosterAnalyzer()
 
         # Get current squad
-        squad = await run_sync(api.get_squad, league.id)
+        squad = await run_sync(api.get_squad, league)
 
-        # Get player stats for purchase prices
-        player_stats = {}
-        try:
-            stats_data = await run_sync(api.get_player_stats, league.id)
-            if stats_data:
-                player_stats = {str(p.get("id")): p for p in stats_data}
-        except Exception:
-            pass
+        # Calculate value scores for best 11 determination and roster context
+        player_values = {}
+        for player in squad:
+            try:
+                pv = PlayerValue.calculate(player)
+                player_values[player.id] = pv.value_score
+            except Exception:
+                player_values[player.id] = player.average_points
 
-        # Analyze roster composition
-        roster_contexts = roster_analyzer.analyze_roster(squad, player_stats)
+        # Analyze roster composition with value scores
+        roster_contexts = roster_analyzer.analyze_roster(squad, {}, player_values)
 
         # Count positions
         position_counts = {}
@@ -66,23 +62,26 @@ async def get_recommendations():
             if current < minimum:
                 roster_gaps.append(f"{position}: {current}/{minimum}")
 
-        # Generate SELL recommendations from squad
+        # Determine best 11 for protection
+        best_eleven = select_best_eleven(squad, player_values)
+        best_eleven_ids = {p.id for p in best_eleven}
+
+        # Generate SELL recommendations using smart analyzer
         sell_recommendations = []
         for player in squad:
-            stats = player_stats.get(player.id, {})
-            purchase_price = stats.get("trp", player.market_value)
+            purchase_price = player.buy_price if player.buy_price > 0 else player.market_value
             profit_loss = player.market_value - purchase_price
             profit_loss_pct = (profit_loss / purchase_price * 100) if purchase_price > 0 else 0
 
-            # Calculate value score
-            try:
-                player_value = PlayerValue.calculate(player)
-                value_score = player_value.value_score
-            except Exception:
-                value_score = 0.0
+            # Use smart analyzer with best 11 protection
+            is_in_best_eleven = player.id in best_eleven_ids
+            analysis = analyzer.analyze_owned_player(
+                player=player,
+                purchase_price=purchase_price,
+                is_in_best_eleven=is_in_best_eleven,
+            )
 
-            # Check sell conditions
-            if profit_loss_pct >= settings.min_sell_profit_pct:
+            if analysis.recommendation == "SELL":
                 sell_recommendations.append(
                     RecommendationResponse(
                         player_id=player.id,
@@ -90,25 +89,9 @@ async def get_recommendations():
                         position=player.position,
                         team_name=player.team_name,
                         action="SELL",
-                        reason=f"Take profit: {profit_loss_pct:.1f}% gain",
-                        value_score=value_score,
-                        confidence=0.8,
-                        price=None,
-                        market_value=player.market_value,
-                        profit_loss_pct=profit_loss_pct,
-                    )
-                )
-            elif profit_loss_pct <= settings.max_loss_pct:
-                sell_recommendations.append(
-                    RecommendationResponse(
-                        player_id=player.id,
-                        player_name=f"{player.first_name} {player.last_name}".strip(),
-                        position=player.position,
-                        team_name=player.team_name,
-                        action="SELL",
-                        reason=f"Stop-loss: {profit_loss_pct:.1f}% loss",
-                        value_score=value_score,
-                        confidence=0.9,
+                        reason=analysis.reason,
+                        value_score=analysis.value_score,
+                        confidence=analysis.confidence,
                         price=None,
                         market_value=player.market_value,
                         profit_loss_pct=profit_loss_pct,
@@ -117,11 +100,12 @@ async def get_recommendations():
 
         # Generate BUY recommendations from market
         buy_recommendations = []
-        market_players = await run_sync(api.get_market, league.id)
+        market_players = await run_sync(api.get_market, league)
 
         for player in market_players:
-            # Analyze
-            analysis = analyzer.analyze_market_player(player)
+            # Analyze with roster context for position-aware scoring
+            roster_context = roster_contexts.get(player.position)
+            analysis = analyzer.analyze_market_player(player, roster_context=roster_context)
 
             if (
                 analysis.recommendation == "BUY"
@@ -169,30 +153,21 @@ async def get_recommendations():
 
 
 @router.get("/roster-impact")
-async def get_roster_analysis():
+async def get_roster_analysis(current_user: TokenData = Depends(get_current_user)):
     """Get detailed roster composition analysis"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
             raise HTTPException(status_code=400, detail="No leagues found")
 
         league = leagues[0]
-        squad = await run_sync(api.get_squad, league.id)
+        squad = await run_sync(api.get_squad, league)
         roster_analyzer = RosterAnalyzer()
 
-        # Get player stats
-        player_stats = {}
-        try:
-            stats_data = await run_sync(api.get_player_stats, league.id)
-            if stats_data:
-                player_stats = {str(p.get("id")): p for p in stats_data}
-        except Exception:
-            pass
-
         # Analyze roster
-        roster_contexts = roster_analyzer.analyze_roster(squad, player_stats)
+        roster_contexts = roster_analyzer.analyze_roster(squad, {})
 
         result = {}
         for position, context in roster_contexts.items():

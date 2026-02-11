@@ -29,3 +29,12 @@ export function useMarketTrends() {
     staleTime: 120000,
   })
 }
+
+export function usePlayerDetail(id: string | undefined, currentPrice?: number) {
+  return useQuery({
+    queryKey: ['player', 'detail', id, currentPrice],
+    queryFn: () => (id ? marketApi.getPlayerFull(id, currentPrice) : null),
+    enabled: !!id,
+    staleTime: 60000,
+  })
+}

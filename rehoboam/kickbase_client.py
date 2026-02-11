@@ -56,6 +56,7 @@ class MarketPlayer:
     last_name: str
     position: str
     team_id: str
+    team_name: str
     price: int
     market_value: int
     points: int
@@ -80,6 +81,7 @@ class MarketPlayer:
             last_name=data.get("n", ""),  # 'n' appears to be last name since 'fn' is first name
             position=cls._parse_position(data.get("pos", 0)),
             team_id=data.get("tid", ""),
+            team_name=data.get("tn", ""),
             price=data.get("prc", 0),
             market_value=data.get("mv", 0),
             points=data.get("p", data.get("pts", 0)),  # 'p' in market, 'pts' elsewhere
@@ -132,6 +134,7 @@ class Player:
     last_name: str
     position: str
     team_id: str
+    team_name: str
     market_value: int
     points: int
     average_points: float
@@ -152,6 +155,7 @@ class Player:
             last_name=data.get("n", data.get("ln", "")),  # 'n' in squad, 'ln' in market
             position=MarketPlayer._parse_position(data.get("pos", data.get("p", 0))),
             team_id=data.get("tid", ""),
+            team_name=data.get("tn", ""),
             market_value=market_value,
             points=data.get("p", data.get("pts", 0)),  # 'p' in squad, 'pts' in market
             average_points=data.get("ap", 0.0),

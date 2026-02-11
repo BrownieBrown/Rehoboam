@@ -101,6 +101,27 @@ class KickbaseAPI:
                 f"Failed to sell player {player.first_name} {player.last_name}: {e}"
             ) from e
 
+    def get_player_info(self, league: League, player_id: str) -> MarketPlayer | Player | None:
+        """Get player details - returns a Player-like object for use in routes"""
+        try:
+            details = self.client.get_player_details(league.id, player_id)
+            if not details:
+                return None
+            # Create a MarketPlayer from the details dict
+            return MarketPlayer.from_dict(details)
+        except Exception:
+            return None
+
+    def get_player_market_value_history(self, league: League, player_id: str) -> list[dict]:
+        """Get player market value history"""
+        try:
+            data = self.client.get_player_market_value_history(league.id, player_id)
+            # Convert the raw data to a list of date/value dicts
+            items = data.get("it", [])
+            return [{"date": item.get("dt"), "value": item.get("mv")} for item in items]
+        except Exception:
+            return []
+
     @property
     def user(self) -> User:
         """Get the logged-in user"""

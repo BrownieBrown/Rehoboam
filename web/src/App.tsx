@@ -6,10 +6,20 @@ import Dashboard from './pages/Dashboard'
 import Market from './pages/Market'
 import Portfolio from './pages/Portfolio'
 import Analytics from './pages/Analytics'
-import Settings from './pages/Settings'
+import Account from './pages/Account'
+import Player from './pages/Player'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
+  const { isAuthenticated, hasHydrated } = useAuthStore()
+
+  // Wait for zustand to hydrate from localStorage
+  if (!hasHydrated) {
+    return (
+      <div className="min-h-screen bg-kb-black flex items-center justify-center">
+        <div className="text-kb-grey">Loading...</div>
+      </div>
+    )
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />
@@ -34,7 +44,8 @@ function App() {
         <Route path="market" element={<Market />} />
         <Route path="portfolio" element={<Portfolio />} />
         <Route path="analytics" element={<Analytics />} />
-        <Route path="settings" element={<Settings />} />
+        <Route path="account" element={<Account />} />
+        <Route path="player/:id" element={<Player />} />
       </Route>
     </Routes>
   )

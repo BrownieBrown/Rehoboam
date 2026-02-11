@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from api.auth import create_access_token
 from api.dependencies import get_api_for_user, run_sync
-from api.models import Token, UserInfo
+from api.models import UserInfo
 
 router = APIRouter()
 
@@ -19,7 +19,15 @@ class LoginRequest(BaseModel):
     password: str
 
 
-@router.post("/login", response_model=Token)
+class LoginResponse(BaseModel):
+    """Login response with token and user info"""
+
+    access_token: str
+    token_type: str = "bearer"
+    user: UserInfo
+
+
+@router.post("/login", response_model=LoginResponse)
 async def login(credentials: LoginRequest):
     """Login with Kickbase credentials and get JWT token"""
     try:
@@ -34,18 +42,30 @@ async def login(credentials: LoginRequest):
                 detail="No leagues found for this account",
             )
 
-        # Use first league (could be extended to allow selection)
+        # Use first league
         league = leagues[0]
 
+        # Get user info
+        team_info = await run_sync(api.get_team_info, league)
+        squad = await run_sync(api.get_squad, league)
+        team_value = sum(p.market_value for p in squad)
+
         # Create JWT token
-        token, expires_at = create_access_token(
+        token, _ = create_access_token(
             email=credentials.email,
             league_id=league.id,
         )
 
-        return Token(
+        return LoginResponse(
             access_token=token,
-            expires_at=expires_at,
+            user=UserInfo(
+                email=credentials.email,
+                league_id=league.id,
+                league_name=league.name,
+                team_name=team_info.get("teamName", team_info.get("name", "My Team")),
+                budget=team_info.get("budget", 0),
+                team_value=team_value,
+            ),
         )
 
     except HTTPException:

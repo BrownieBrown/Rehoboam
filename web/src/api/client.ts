@@ -23,8 +23,10 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      // Clear both the token and zustand persisted auth state
+      // ProtectedRoute will handle redirect when isAuthenticated becomes false
       localStorage.removeItem('auth_token')
-      window.location.href = '/login'
+      localStorage.removeItem('auth-storage')
     }
     return Promise.reject(error)
   }
@@ -49,6 +51,11 @@ export const marketApi = {
   },
   getPlayer: async (id: string) => {
     const res = await api.get(`/api/market/players/${id}`)
+    return res.data
+  },
+  getPlayerFull: async (id: string, currentPrice?: number) => {
+    const params = currentPrice ? { current_price: currentPrice } : {}
+    const res = await api.get(`/api/market/players/${id}/full`, { params })
     return res.data
   },
   getTrends: async () => {
@@ -96,23 +103,9 @@ export const tradingApi = {
     const res = await api.get('/api/trading/auctions')
     return res.data
   },
-  getSuggestedBid: async (playerId: string) => {
-    const res = await api.get(`/api/trading/suggested-bid/${playerId}`)
-    return res.data
-  },
-}
-
-export const settingsApi = {
-  get: async () => {
-    const res = await api.get('/api/settings')
-    return res.data
-  },
-  update: async (settings: Record<string, unknown>) => {
-    const res = await api.put('/api/settings', settings)
-    return res.data
-  },
-  reset: async () => {
-    const res = await api.post('/api/settings/reset')
+  getSuggestedBid: async (playerId: string, currentPrice?: number) => {
+    const params = currentPrice ? { current_price: currentPrice } : {}
+    const res = await api.get(`/api/trading/suggested-bid/${playerId}`, { params })
     return res.data
   },
 }

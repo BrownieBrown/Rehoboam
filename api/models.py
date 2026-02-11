@@ -213,3 +213,105 @@ class PlayerDetailResponse(BaseModel):
     roster_impact: str | None
     replaces_player: str | None
     value_score_gain: float | None
+
+
+class PredictionResponse(BaseModel):
+    """Price prediction for player"""
+
+    predicted_value_7d: int
+    predicted_value_14d: int
+    predicted_value_30d: int
+    change_7d_pct: float
+    change_14d_pct: float
+    change_30d_pct: float
+    confidence: float
+    form_trajectory: str  # "improving", "declining", "stable", "volatile"
+
+
+class RiskMetricsResponse(BaseModel):
+    """Risk analysis metrics for player"""
+
+    price_volatility: float  # Standard deviation %
+    performance_volatility: float  # Points consistency
+    volatility_score: float  # Combined 0-100
+    var_7d_pct: float  # Value at Risk 7-day
+    var_30d_pct: float  # Value at Risk 30-day
+    sharpe_ratio: float  # Risk-adjusted return
+    expected_return_30d: float  # Expected 30-day return %
+    risk_category: str  # "Low Risk", "Medium Risk", "High Risk", "Very High Risk"
+    confidence: float  # Data quality confidence
+
+
+class MatchupResponse(BaseModel):
+    """Single matchup information with analysis"""
+
+    opponent: str
+    opponent_rank: int | None
+    is_home: bool
+    date: str
+    difficulty: str  # "Easy", "Medium", "Hard"
+    matchday: int | None = None
+    opponent_wins: int | None = None
+    opponent_draws: int | None = None
+    opponent_losses: int | None = None
+    opponent_points: int | None = None
+    opponent_strength: float | None = None  # 0-100
+    expected_points: float | None = None  # Expected fantasy points
+    analysis: str | None = None  # Match-specific analysis text
+
+
+class ScheduleResponse(BaseModel):
+    """Upcoming schedule analysis"""
+
+    upcoming: list[MatchupResponse]
+    difficulty_rating: str
+    avg_opponent_rank: float
+
+
+class PlayerFullResponse(BaseModel):
+    """Comprehensive player detail with all analysis data"""
+
+    # Basic info
+    id: str
+    first_name: str
+    last_name: str
+    position: str
+    team_name: str
+    team_id: str
+    market_value: int
+    price: int | None  # Current market price if on market
+    points: int
+    average_points: float
+    games_played: int | None
+    status: str | None  # Health/availability status
+    lineup_probability: int | None  # 1-5 (1=starter)
+
+    # Analysis
+    value_score: float
+    recommendation: str
+    confidence: float
+    factors: dict[str, float]
+    factor_details: list[dict]
+
+    # Trends
+    trend_direction: str | None
+    trend_pct: float | None
+    trend_history: list[TrendDataPoint]
+
+    # Predictions
+    predictions: PredictionResponse | None
+
+    # Risk metrics
+    risk_metrics: RiskMetricsResponse | None
+
+    # Schedule
+    schedule: ScheduleResponse | None
+
+    # Context
+    is_on_market: bool
+    is_in_squad: bool
+
+    # Roster-adjusted analysis (for comparison with market/dashboard)
+    roster_recommendation: str | None = None
+    roster_value_score: float | None = None
+    roster_impact: str | None = None

@@ -1,59 +1,65 @@
 """Portfolio routes"""
 
-import os
+from fastapi import APIRouter, Depends, HTTPException
 
-from fastapi import APIRouter, HTTPException
-
-from api.dependencies import get_api_for_user, run_sync
+from api.auth import TokenData, get_current_user
+from api.dependencies import get_cached_api, run_sync
 from api.models import PortfolioResponse, SquadPlayerResponse
+from rehoboam.analyzer import MarketAnalyzer
 from rehoboam.config import get_settings
+from rehoboam.formation import select_best_eleven
 from rehoboam.value_calculator import PlayerValue
 
 router = APIRouter()
 
 
-def get_authenticated_api():
-    """Get authenticated API using env credentials"""
-    email = os.getenv("KICKBASE_EMAIL")
-    password = os.getenv("KICKBASE_PASSWORD")
-    if not email or not password:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return get_api_for_user(email, password)
-
-
 @router.get("/squad", response_model=PortfolioResponse)
-async def get_squad():
+async def get_squad(current_user: TokenData = Depends(get_current_user)):
     """Get current squad with value tracking"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
             raise HTTPException(status_code=400, detail="No leagues found")
 
         league = leagues[0]
-        squad = await run_sync(api.get_squad, league.id)
-        budget_info = await run_sync(api.get_budget, league.id)
-
-        # Get player stats for purchase prices
-        player_stats = {}
-        try:
-            stats_data = await run_sync(api.get_player_stats, league.id)
-            if stats_data:
-                player_stats = {str(p.get("id")): p for p in stats_data}
-        except Exception:
-            pass
+        squad = await run_sync(api.get_squad, league)
+        budget_info = await run_sync(api.get_team_info, league)
 
         settings = get_settings()
+
+        # Create analyzer instance for smart sell recommendations
+        analyzer = MarketAnalyzer(
+            min_buy_value_increase_pct=settings.min_buy_value_increase_pct,
+            min_sell_profit_pct=settings.min_sell_profit_pct,
+            max_loss_pct=settings.max_loss_pct,
+            min_value_score_to_buy=settings.min_value_score_to_buy,
+        )
+
+        # First pass: Calculate value scores for all players to determine best 11
+        player_values = {}
+        player_value_scores = {}
+        for player in squad:
+            try:
+                pv = PlayerValue.calculate(player)
+                player_values[player.id] = pv.value_score
+                player_value_scores[player.id] = pv.value_score
+            except Exception:
+                player_values[player.id] = player.average_points  # Fallback
+                player_value_scores[player.id] = 0.0
+
+        # Determine best 11 for protection
+        best_eleven = select_best_eleven(squad, player_values)
+        best_eleven_ids = {p.id for p in best_eleven}
 
         squad_response = []
         total_value = 0
         total_profit_loss = 0
 
         for player in squad:
-            # Get purchase price from stats
-            stats = player_stats.get(player.id, {})
-            purchase_price = stats.get("trp", player.market_value)
+            # Use buy_price from player (falls back to market_value if not available)
+            purchase_price = player.buy_price if player.buy_price > 0 else player.market_value
 
             # Calculate profit/loss
             profit_loss = player.market_value - purchase_price
@@ -62,22 +68,22 @@ async def get_squad():
             total_value += player.market_value
             total_profit_loss += profit_loss
 
-            # Calculate value score
-            try:
-                player_value = PlayerValue.calculate(player)
-                value_score = player_value.value_score
-            except Exception:
-                value_score = 0.0
+            # Get pre-calculated value score
+            value_score = player_value_scores.get(player.id, 0.0)
 
-            # Check for sell recommendation
-            sell_recommendation = None
-            sell_reason = None
-            if profit_loss_pct >= settings.min_sell_profit_pct:
-                sell_recommendation = "SELL"
-                sell_reason = f"Profit target reached: {profit_loss_pct:.1f}%"
-            elif profit_loss_pct <= settings.max_loss_pct:
-                sell_recommendation = "SELL"
-                sell_reason = f"Stop-loss triggered: {profit_loss_pct:.1f}%"
+            # Use smart analyzer for sell recommendations
+            # Considers: profit target, stop loss, peak decline, poor performance,
+            # difficult schedule, falling trend, and best 11 protection
+            is_in_best_eleven = player.id in best_eleven_ids
+            analysis = analyzer.analyze_owned_player(
+                player=player,
+                purchase_price=purchase_price,
+                is_in_best_eleven=is_in_best_eleven,
+            )
+            sell_recommendation = (
+                analysis.recommendation if analysis.recommendation == "SELL" else None
+            )
+            sell_reason = analysis.reason if sell_recommendation else None
 
             squad_response.append(
                 SquadPlayerResponse(
@@ -117,18 +123,18 @@ async def get_squad():
 
 
 @router.get("/balance")
-async def get_balance():
+async def get_balance(current_user: TokenData = Depends(get_current_user)):
     """Get budget and team value"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
             raise HTTPException(status_code=400, detail="No leagues found")
 
         league = leagues[0]
-        budget_info = await run_sync(api.get_budget, league.id)
-        squad = await run_sync(api.get_squad, league.id)
+        budget_info = await run_sync(api.get_team_info, league)
+        squad = await run_sync(api.get_squad, league)
 
         team_value = sum(p.market_value for p in squad)
 
@@ -146,29 +152,19 @@ async def get_balance():
 
 
 @router.get("/history")
-async def get_value_history():
+async def get_value_history(current_user: TokenData = Depends(get_current_user)):
     """Get team value history"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
             raise HTTPException(status_code=400, detail="No leagues found")
 
-        league = leagues[0]
+        _league = leagues[0]  # noqa: F841 - validates league exists
 
-        # Try to get historical data
-        history = []
-        try:
-            history_data = await run_sync(api.get_team_value_history, league.id)
-            if history_data:
-                history = [
-                    {"date": item.get("date"), "value": item.get("value")} for item in history_data
-                ]
-        except Exception:
-            pass
-
-        return {"history": history}
+        # Team value history not available via API - return empty list
+        return {"history": []}
 
     except HTTPException:
         raise

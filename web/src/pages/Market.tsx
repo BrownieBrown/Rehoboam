@@ -1,7 +1,10 @@
 import { useState } from 'react'
-import { Search, Filter, TrendingUp, TrendingDown, Minus } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { Search, Filter, ChevronDown, ChevronUp, Loader2, Info, ExternalLink } from 'lucide-react'
 import { useMarketPlayers } from '../hooks/useMarket'
 import { useUIStore } from '../stores/uiStore'
+import { tradingApi } from '../api/client'
 
 const positions = ['all', 'Goalkeeper', 'Defender', 'Midfielder', 'Forward']
 
@@ -15,51 +18,68 @@ function formatCurrency(value: number): string {
   return value.toString()
 }
 
-function TrendIndicator({ direction }: { direction: string | null }) {
-  if (direction === 'rising') {
-    return <TrendingUp className="w-4 h-4 text-success-600" />
+function getPositionBadge(position: string) {
+  const badges: Record<string, string> = {
+    Goalkeeper: 'badge-gk',
+    Defender: 'badge-def',
+    Midfielder: 'badge-mid',
+    Forward: 'badge-fwd',
   }
-  if (direction === 'falling') {
-    return <TrendingDown className="w-4 h-4 text-danger-600" />
-  }
-  return <Minus className="w-4 h-4 text-gray-400" />
+  return badges[position] || 'badge-neutral'
 }
 
-function PlayerRow({ player }: { player: any }) {
-  const [showBidForm, setShowBidForm] = useState(false)
+function PlayerRow({ player, onViewDetail }: { player: any; onViewDetail: (id: string, price: number) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const [bidAmount, setBidAmount] = useState<number | null>(null)
+
+  // Fetch suggested bid when expanded
+  const { data: suggestedBid, isLoading: bidLoading, error: bidError } = useQuery({
+    queryKey: ['suggested-bid', player.id, player.price],
+    queryFn: () => tradingApi.getSuggestedBid(player.id, player.price),
+    enabled: expanded,
+    staleTime: 60000, // Cache for 1 minute
+    retry: false,
+  })
+
+  // Set bid amount to suggested when loaded
+  if (suggestedBid && bidAmount === null) {
+    setBidAmount(suggestedBid.suggested_bid)
+  }
 
   return (
     <>
       <tr
-        className="hover:bg-gray-50 cursor-pointer"
-        onClick={() => setShowBidForm(!showBidForm)}
+        className="table-row cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
       >
         <td className="px-4 py-3">
-          <div>
-            <p className="font-medium text-gray-900">{player.first_name} {player.last_name}</p>
-            <p className="text-sm text-gray-500">{player.team_name}</p>
+          <div className="flex items-center">
+            <div>
+              <p className="font-medium text-kb-white">{player.first_name} {player.last_name}</p>
+              <p className="text-sm text-kb-grey">{player.team_name}</p>
+            </div>
           </div>
         </td>
         <td className="px-4 py-3">
-          <span className="badge badge-primary">{player.position}</span>
+          <span className={getPositionBadge(player.position)}>{player.position}</span>
         </td>
-        <td className="px-4 py-3 text-right font-medium">
+        <td className="px-4 py-3 text-right font-medium text-kb-white">
           {formatCurrency(player.price)}
         </td>
-        <td className="px-4 py-3 text-right">
+        <td className="px-4 py-3 text-right text-kb-grey-light">
           {formatCurrency(player.market_value)}
         </td>
-        <td className="px-4 py-3 text-center">
-          <TrendIndicator direction={player.trend_direction} />
+        <td className="px-4 py-3 text-right">
+          <span className="text-kb-grey-light">{player.average_points.toFixed(1)}</span>
         </td>
         <td className="px-4 py-3 text-right">
           <span
             className={`font-semibold ${
               player.value_score >= 70
-                ? 'text-success-600'
+                ? 'text-success-400'
                 : player.value_score >= 50
-                ? 'text-warning-600'
-                : 'text-danger-600'
+                ? 'text-warning-400'
+                : 'text-danger-400'
             }`}
           >
             {player.value_score.toFixed(0)}
@@ -67,36 +87,144 @@ function PlayerRow({ player }: { player: any }) {
         </td>
         <td className="px-4 py-3">
           <span
-            className={`badge ${
+            className={
               player.recommendation === 'BUY'
                 ? 'badge-success'
                 : player.recommendation === 'WATCH'
                 ? 'badge-warning'
                 : 'badge-danger'
-            }`}
+            }
           >
             {player.recommendation}
           </span>
         </td>
+        <td className="px-4 py-3 text-center">
+          <div className="flex items-center justify-center space-x-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onViewDetail(player.id, player.price)
+              }}
+              className="p-1 hover:bg-kb-card rounded"
+              title="View full details"
+            >
+              <ExternalLink className="w-4 h-4 text-kb-grey hover:text-kb-white" />
+            </button>
+            {expanded ? (
+              <ChevronUp className="w-4 h-4 text-kb-grey" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-kb-grey" />
+            )}
+          </div>
+        </td>
       </tr>
-      {showBidForm && (
+      {expanded && (
         <tr>
-          <td colSpan={7} className="px-4 py-3 bg-gray-50">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-gray-600">
-                <strong>Factors:</strong>{' '}
-                {Object.entries(player.factors || {})
-                  .map(([k, v]) => `${k}: ${(v as number).toFixed(0)}`)
-                  .join(', ')}
+          <td colSpan={8} className="px-4 py-4 bg-kb-dark border-b border-kb-border">
+            <div className="space-y-4">
+              {/* Roster Impact */}
+              {player.roster_impact && (
+                <div className="flex items-start space-x-2 text-sm">
+                  <Info className="w-4 h-4 text-kb-red mt-0.5 flex-shrink-0" />
+                  <span className="text-kb-grey-light">{player.roster_impact}</span>
+                </div>
+              )}
+
+              {/* Factors */}
+              <div className="text-sm">
+                <span className="text-kb-grey">Scoring factors: </span>
+                <span className="text-kb-grey-light">
+                  {Object.entries(player.factors || {})
+                    .map(([k, v]) => `${k}: ${(v as number).toFixed(0)}`)
+                    .join(' · ')}
+                </span>
               </div>
-              <div className="flex items-center space-x-3">
-                <input
-                  type="number"
-                  className="input w-32"
-                  placeholder="Bid amount"
-                  defaultValue={Math.round(player.price * 1.15)}
-                />
-                <button className="btn-primary">Place Bid</button>
+
+              {/* Smart Bid Section */}
+              <div className="bg-kb-card border border-kb-border rounded-lg p-4">
+                <h4 className="text-sm font-medium text-kb-white mb-3">Smart Bid Recommendation</h4>
+
+                {bidLoading ? (
+                  <div className="flex items-center space-x-2 text-kb-grey">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Calculating optimal bid...</span>
+                  </div>
+                ) : suggestedBid ? (
+                  <div className="space-y-3">
+                    {suggestedBid.suggested_bid === 0 ? (
+                      // Not recommended to buy
+                      <div className="bg-danger-400/10 border border-danger-400/20 rounded-lg p-4">
+                        <p className="text-danger-400 font-medium mb-2">Not Recommended</p>
+                        <p className="text-sm text-kb-grey-light">
+                          Current price ({formatCurrency(suggestedBid.current_price)}) exceeds the maximum profitable bid ({formatCurrency(suggestedBid.max_bid)}).
+                          You would likely overpay for this player.
+                        </p>
+                        {suggestedBid.reasoning && (
+                          <p className="text-xs text-kb-grey mt-2">{suggestedBid.reasoning}</p>
+                        )}
+                      </div>
+                    ) : (
+                      // Good to buy
+                      <>
+                        <div className="grid grid-cols-3 gap-4 text-sm">
+                          <div>
+                            <p className="text-kb-grey">Min Bid</p>
+                            <p className="text-kb-white font-medium">{formatCurrency(suggestedBid.min_bid)}</p>
+                          </div>
+                          <div>
+                            <p className="text-kb-grey">Suggested</p>
+                            <p className="text-success-400 font-semibold">{formatCurrency(suggestedBid.suggested_bid)}</p>
+                          </div>
+                          <div>
+                            <p className="text-kb-grey">Max Profitable</p>
+                            <p className="text-kb-white font-medium">{formatCurrency(suggestedBid.max_bid)}</p>
+                          </div>
+                        </div>
+
+                        {suggestedBid.reasoning && (
+                          <p className="text-xs text-kb-grey">{suggestedBid.reasoning}</p>
+                        )}
+
+                        <div className="flex items-center space-x-3 pt-2">
+                          <input
+                            type="number"
+                            className="input w-40"
+                            placeholder="Bid amount"
+                            value={bidAmount || ''}
+                            onChange={(e) => setBidAmount(Number(e.target.value))}
+                            onClick={(e) => e.stopPropagation()}
+                            min={suggestedBid.min_bid}
+                          />
+                          <button
+                            className="btn-primary"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              // TODO: Implement actual bid placement
+                              alert(`Bid of ${formatCurrency(bidAmount || 0)} would be placed (not implemented)`)
+                            }}
+                          >
+                            Place Bid
+                          </button>
+                          <button
+                            className="btn-secondary"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setBidAmount(suggestedBid.suggested_bid)
+                            }}
+                          >
+                            Use Suggested
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : bidError ? (
+                  <p className="text-danger-400 text-sm">
+                    Error: {(bidError as any)?.response?.data?.detail || (bidError as Error).message || 'Unable to calculate bid'}
+                  </p>
+                ) : (
+                  <p className="text-kb-grey text-sm">Unable to calculate bid</p>
+                )}
               </div>
             </div>
           </td>
@@ -107,8 +235,13 @@ function PlayerRow({ player }: { player: any }) {
 }
 
 export default function Market() {
+  const navigate = useNavigate()
   const { marketFilters, setMarketFilters } = useUIStore()
   const [search, setSearch] = useState('')
+
+  const handleViewDetail = (id: string, price: number) => {
+    navigate(`/player/${id}?price=${price}`)
+  }
 
   const { data: players, isLoading, error } = useMarketPlayers({
     position: marketFilters.position === 'all' ? undefined : marketFilters.position,
@@ -121,10 +254,10 @@ export default function Market() {
   )
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Market</h1>
-        <p className="text-gray-500 mt-1">Browse and bid on players</p>
+        <h1 className="text-2xl font-bold text-kb-white">Market</h1>
+        <p className="text-kb-grey mt-1">Browse and bid on players</p>
       </div>
 
       {/* Filters */}
@@ -132,19 +265,20 @@ export default function Market() {
         <div className="flex flex-wrap items-center gap-4">
           {/* Search */}
           <div className="relative flex-1 min-w-[200px]">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-kb-grey pointer-events-none" />
             <input
               type="text"
               placeholder="Search players..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="input pl-10"
+              className="input"
+              style={{ paddingLeft: '2.5rem' }}
             />
           </div>
 
           {/* Position filter */}
           <div className="flex items-center space-x-2">
-            <Filter className="w-5 h-5 text-gray-400" />
+            <Filter className="w-5 h-5 text-kb-grey" />
             <select
               value={marketFilters.position}
               onChange={(e) => setMarketFilters({ position: e.target.value })}
@@ -160,7 +294,7 @@ export default function Market() {
 
           {/* Min score filter */}
           <div className="flex items-center space-x-2">
-            <span className="text-sm text-gray-500">Min Score:</span>
+            <span className="text-sm text-kb-grey">Min Score:</span>
             <input
               type="number"
               value={marketFilters.minScore}
@@ -176,43 +310,47 @@ export default function Market() {
       {/* Players table */}
       <div className="card overflow-hidden p-0">
         {isLoading ? (
-          <div className="p-8 text-center text-gray-500">Loading players...</div>
+          <div className="p-8 text-center text-kb-grey">Loading players...</div>
         ) : error ? (
-          <div className="p-8 text-center text-danger-600">Failed to load players</div>
+          <div className="p-8 text-center text-danger-400">Failed to load players</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="table-header">
                 <tr>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">
+                  <th className="px-4 py-3 text-left text-sm font-medium text-kb-grey-light">
                     Player
                   </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">
+                  <th className="px-4 py-3 text-left text-sm font-medium text-kb-grey-light">
                     Position
                   </th>
-                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">
+                  <th className="px-4 py-3 text-right text-sm font-medium text-kb-grey-light">
                     Price
                   </th>
-                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">
+                  <th className="px-4 py-3 text-right text-sm font-medium text-kb-grey-light">
                     Market Value
                   </th>
-                  <th className="px-4 py-3 text-center text-sm font-medium text-gray-500">
-                    Trend
+                  <th className="px-4 py-3 text-right text-sm font-medium text-kb-grey-light">
+                    Avg Pts
                   </th>
-                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">
+                  <th className="px-4 py-3 text-right text-sm font-medium text-kb-grey-light">
                     Score
                   </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">
+                  <th className="px-4 py-3 text-left text-sm font-medium text-kb-grey-light">
                     Action
                   </th>
+                  <th className="px-4 py-3 w-10"></th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-200">
+              <tbody>
                 {filteredPlayers?.map((player: any) => (
-                  <PlayerRow key={player.id} player={player} />
+                  <PlayerRow key={player.id} player={player} onViewDetail={handleViewDetail} />
                 ))}
               </tbody>
             </table>
+            {filteredPlayers?.length === 0 && (
+              <div className="p-8 text-center text-kb-grey">No players found</div>
+            )}
           </div>
         )}
       </div>

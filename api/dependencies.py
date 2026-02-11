@@ -45,3 +45,22 @@ def clear_api_cache(email: str | None = None) -> None:
         _api_cache.pop(email, None)
     else:
         _api_cache.clear()
+
+
+def get_cached_api(email: str) -> KickbaseAPI:
+    """Get cached API instance for user (must have logged in first).
+
+    Args:
+        email: The user's email address from their JWT token
+
+    Returns:
+        The cached KickbaseAPI instance
+
+    Raises:
+        HTTPException: 401 if user's session not found in cache
+    """
+    from fastapi import HTTPException
+
+    if email not in _api_cache:
+        raise HTTPException(status_code=401, detail="Session expired, please login again")
+    return _api_cache[email]

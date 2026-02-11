@@ -1,5 +1,9 @@
 .PHONY: help install install-dev install-web dev api web build lint format typecheck test clean
 
+# Use python -m pip for portability
+PIP := python3 -m pip
+PYTHON := python3
+
 # Default target
 help:
 	@echo "Rehoboam - KICKBASE Trading Bot"
@@ -43,12 +47,13 @@ help:
 # ============================================================================
 
 install:
-	pip install -e .
+	$(PIP) install -e .
 
 install-dev:
-	pip install -e ".[dev]"
+	$(PIP) install -e ".[dev]"
 
 install-web:
+	$(PIP) install -e ".[web]"
 	cd web && npm install
 
 install-all: install-dev install-web
@@ -59,7 +64,7 @@ install-all: install-dev install-web
 # ============================================================================
 
 api:
-	uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+	$(PYTHON) -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
 web:
 	cd web && npm run dev
@@ -82,17 +87,17 @@ cli:
 # ============================================================================
 
 lint:
-	ruff check rehoboam/ api/ --fix
+	$(PYTHON) -m ruff check rehoboam/ api/ --fix
 
 format:
-	black rehoboam/ api/
-	ruff check rehoboam/ api/ --fix
+	$(PYTHON) -m black rehoboam/ api/
+	$(PYTHON) -m ruff check rehoboam/ api/ --fix
 
 typecheck:
-	mypy rehoboam/ api/ --ignore-missing-imports
+	$(PYTHON) -m mypy rehoboam/ api/ --ignore-missing-imports
 
 security:
-	bandit -r rehoboam/ api/ -c pyproject.toml
+	$(PYTHON) -m bandit -r rehoboam/ api/ -c pyproject.toml
 
 check: lint typecheck security
 	@echo "All checks passed"
@@ -102,10 +107,10 @@ check: lint typecheck security
 # ============================================================================
 
 test:
-	pytest
+	$(PYTHON) -m pytest
 
 test-cov:
-	pytest --cov=rehoboam --cov-report=html --cov-report=term
+	$(PYTHON) -m pytest --cov=rehoboam --cov-report=html --cov-report=term
 
 # ============================================================================
 # Build
@@ -115,7 +120,7 @@ build:
 	cd web && npm run build
 
 build-api:
-	python -m build
+	$(PYTHON) -m build
 
 # ============================================================================
 # Utilities

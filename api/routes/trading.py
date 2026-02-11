@@ -1,31 +1,25 @@
 """Trading routes"""
 
-import os
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from fastapi import APIRouter, HTTPException
-
-from api.dependencies import get_api_for_user, run_sync
+from api.auth import TokenData, get_current_user
+from api.dependencies import get_cached_api, run_sync
 from api.models import BidRequest, BidResponse, SellRequest, SellResponse
-from rehoboam.bidding_strategy import BiddingStrategy
+from rehoboam.analyzer import MarketAnalyzer
+from rehoboam.bidding_strategy import SmartBidding
 from rehoboam.config import get_settings
 
 router = APIRouter()
 
 
-def get_authenticated_api():
-    """Get authenticated API using env credentials"""
-    email = os.getenv("KICKBASE_EMAIL")
-    password = os.getenv("KICKBASE_PASSWORD")
-    if not email or not password:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return get_api_for_user(email, password)
-
-
 @router.post("/bid", response_model=BidResponse)
-async def place_bid(request: BidRequest):
+async def place_bid(
+    request: BidRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
     """Place a bid on a market player"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
@@ -34,14 +28,14 @@ async def place_bid(request: BidRequest):
         league = leagues[0]
 
         # Get player info
-        player_info = await run_sync(api.get_player_info, request.player_id)
+        player_info = await run_sync(api.get_player_info, league, request.player_id)
         if not player_info:
             raise HTTPException(status_code=404, detail="Player not found")
 
         player_name = f"{player_info.first_name} {player_info.last_name}".strip()
 
         # Check budget
-        budget_info = await run_sync(api.get_budget, league.id)
+        budget_info = await run_sync(api.get_team_info, league)
         available = budget_info.get("budget", 0)
 
         if request.amount > available:
@@ -57,7 +51,7 @@ async def place_bid(request: BidRequest):
         if request.live:
             # Execute real bid
             try:
-                await run_sync(api.buy_player, league.id, request.player_id, request.amount)
+                await run_sync(api.buy_player, league, player_info, request.amount)
                 return BidResponse(
                     success=True,
                     player_id=request.player_id,
@@ -93,10 +87,13 @@ async def place_bid(request: BidRequest):
 
 
 @router.post("/sell", response_model=SellResponse)
-async def list_for_sale(request: SellRequest):
+async def list_for_sale(
+    request: SellRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
     """List a player for sale"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
@@ -105,7 +102,7 @@ async def list_for_sale(request: SellRequest):
         league = leagues[0]
 
         # Get player info
-        player_info = await run_sync(api.get_player_info, request.player_id)
+        player_info = await run_sync(api.get_player_info, league, request.player_id)
         if not player_info:
             raise HTTPException(status_code=404, detail="Player not found")
 
@@ -114,7 +111,7 @@ async def list_for_sale(request: SellRequest):
         if request.live:
             # Execute real sale listing
             try:
-                await run_sync(api.sell_player, league.id, request.player_id, request.price)
+                await run_sync(api.sell_player, league, player_info, request.price)
                 return SellResponse(
                     success=True,
                     player_id=request.player_id,
@@ -150,10 +147,10 @@ async def list_for_sale(request: SellRequest):
 
 
 @router.get("/auctions")
-async def get_active_auctions():
+async def get_active_auctions(current_user: TokenData = Depends(get_current_user)):
     """Get active auctions the user is participating in"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
@@ -162,7 +159,7 @@ async def get_active_auctions():
         league = leagues[0]
 
         # Get market players (auctions)
-        market_players = await run_sync(api.get_market, league.id)
+        market_players = await run_sync(api.get_market, league)
 
         auctions = []
         for player in market_players:
@@ -193,37 +190,68 @@ async def get_active_auctions():
 
 
 @router.get("/suggested-bid/{player_id}")
-async def get_suggested_bid(player_id: str):
+async def get_suggested_bid(
+    player_id: str,
+    current_price: int = Query(None, description="Current market price if known"),
+    current_user: TokenData = Depends(get_current_user),
+):
     """Get suggested bid amount for a player"""
     try:
-        api = await run_sync(get_authenticated_api)
+        api = get_cached_api(current_user.email)
         leagues = await run_sync(api.get_leagues)
 
         if not leagues:
             raise HTTPException(status_code=400, detail="No leagues found")
 
-        _league = leagues[0]  # noqa: F841 - validates league exists
+        league = leagues[0]
 
         # Get player info
-        player_info = await run_sync(api.get_player_info, player_id)
+        player_info = await run_sync(api.get_player_info, league, player_id)
         if not player_info:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        # Calculate suggested bid
-        settings = get_settings()
-        strategy = BiddingStrategy(settings)
+        # Set the price from query param if player doesn't have it (get_player_details doesn't return price)
+        if current_price and current_price > 0 and player_info.price == 0:
+            player_info.price = current_price
 
-        base_bid = player_info.price if hasattr(player_info, "price") else player_info.market_value
-        suggested = strategy.calculate_bid(base_bid, confidence=0.7)
+        # Analyze player for smart bidding
+        settings = get_settings()
+        analyzer = MarketAnalyzer(
+            min_buy_value_increase_pct=settings.min_buy_value_increase_pct,
+            min_sell_profit_pct=settings.min_sell_profit_pct,
+            max_loss_pct=settings.max_loss_pct,
+            min_value_score_to_buy=settings.min_value_score_to_buy,
+        )
+        analysis = analyzer.analyze_market_player(player_info)
+
+        # Calculate suggested bid with real values
+        strategy = SmartBidding()
+
+        # Use provided price, or player's price attribute, or fall back to market value
+        if current_price and current_price > 0:
+            base_bid = current_price
+        elif hasattr(player_info, "price") and player_info.price > 0:
+            base_bid = player_info.price
+        else:
+            base_bid = player_info.market_value
+        recommendation = strategy.calculate_bid(
+            asking_price=base_bid,
+            market_value=player_info.market_value,
+            value_score=analysis.value_score,
+            confidence=analysis.confidence,
+        )
 
         return {
             "player_id": player_id,
             "player_name": f"{player_info.first_name} {player_info.last_name}".strip(),
             "current_price": base_bid,
             "market_value": player_info.market_value,
-            "suggested_bid": suggested,
+            "value_score": analysis.value_score,
+            "recommendation": analysis.recommendation,
+            "suggested_bid": recommendation.recommended_bid,
             "min_bid": int(base_bid * 1.01),  # 1% above current
-            "max_bid": int(base_bid * 1.30),  # 30% above current
+            "max_bid": recommendation.max_profitable_bid,
+            "reasoning": recommendation.reasoning,
         }
 
     except HTTPException:
