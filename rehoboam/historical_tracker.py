@@ -80,6 +80,24 @@ class HistoricalTracker:
     def _init_db(self):
         """Initialize database schema"""
         with sqlite3.connect(self.db_path) as conn:
+            # Matchday results table (Feature #11)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS matchday_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    league_id TEXT NOT NULL,
+                    matchday INTEGER NOT NULL,
+                    player_id TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    actual_points INTEGER NOT NULL,
+                    was_in_predicted_eleven INTEGER DEFAULT 0,
+                    predicted_expected_points REAL,
+                    timestamp TEXT NOT NULL,
+                    UNIQUE(league_id, matchday, player_id)
+                )
+            """
+            )
+
             # Recommendation history table
             conn.execute(
                 """
@@ -147,6 +165,135 @@ class HistoricalTracker:
                 )
             """
             )
+
+    def record_matchday_result(
+        self,
+        league_id: str,
+        matchday: int,
+        player_results: list[dict],
+        predicted_eleven_ids: set[str] | None = None,
+        expected_points_map: dict[str, float] | None = None,
+    ):
+        """
+        Record actual matchday points for squad players.
+
+        Args:
+            league_id: League ID
+            matchday: Matchday number
+            player_results: List of dicts with keys: player_id, player_name, actual_points
+            predicted_eleven_ids: Set of player IDs that were in the predicted best 11
+            expected_points_map: Dict mapping player_id -> predicted expected points
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            for result in player_results:
+                player_id = result["player_id"]
+                was_predicted = (
+                    1 if predicted_eleven_ids and player_id in predicted_eleven_ids else 0
+                )
+                predicted_ep = expected_points_map.get(player_id) if expected_points_map else None
+
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO matchday_results
+                    (league_id, matchday, player_id, player_name, actual_points,
+                     was_in_predicted_eleven, predicted_expected_points, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        league_id,
+                        matchday,
+                        player_id,
+                        result["player_name"],
+                        result["actual_points"],
+                        was_predicted,
+                        predicted_ep,
+                        datetime.now().isoformat(),
+                    ),
+                )
+
+    def get_lineup_accuracy(self, league_id: str, last_n_matchdays: int = 5) -> dict:
+        """
+        Compare predicted best 11 vs actual best performers.
+
+        Args:
+            league_id: League ID
+            last_n_matchdays: Number of recent matchdays to analyze
+
+        Returns:
+            Dict with accuracy metrics
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT matchday, player_id, player_name, actual_points,
+                       was_in_predicted_eleven, predicted_expected_points
+                FROM matchday_results
+                WHERE league_id = ?
+                ORDER BY matchday DESC
+                """,
+                (league_id,),
+            )
+            rows = cursor.fetchall()
+
+        if not rows:
+            return {"has_data": False}
+
+        # Group by matchday
+        matchdays = {}
+        for matchday, pid, pname, actual, was_predicted, predicted_ep in rows:
+            if matchday not in matchdays:
+                matchdays[matchday] = []
+            matchdays[matchday].append(
+                {
+                    "player_id": pid,
+                    "player_name": pname,
+                    "actual_points": actual,
+                    "was_predicted": bool(was_predicted),
+                    "predicted_ep": predicted_ep,
+                }
+            )
+
+        # Analyze last N matchdays
+        recent_matchdays = sorted(matchdays.keys(), reverse=True)[:last_n_matchdays]
+
+        total_predicted_correct = 0
+        total_predicted = 0
+        total_actual_best_11_points = 0
+        total_predicted_11_points = 0
+
+        for md in recent_matchdays:
+            players = matchdays[md]
+            # Sort by actual points to find real best 11
+            by_actual = sorted(players, key=lambda p: p["actual_points"], reverse=True)
+            actual_best_11_ids = {p["player_id"] for p in by_actual[:11]}
+            actual_best_11_points = sum(p["actual_points"] for p in by_actual[:11])
+
+            predicted_11 = [p for p in players if p["was_predicted"]]
+            predicted_11_points = sum(p["actual_points"] for p in predicted_11)
+
+            # How many predicted players were in actual best 11
+            correct = sum(1 for p in predicted_11 if p["player_id"] in actual_best_11_ids)
+
+            total_predicted_correct += correct
+            total_predicted += len(predicted_11)
+            total_actual_best_11_points += actual_best_11_points
+            total_predicted_11_points += predicted_11_points
+
+        accuracy = (total_predicted_correct / total_predicted * 100) if total_predicted > 0 else 0
+        points_capture = (
+            (total_predicted_11_points / total_actual_best_11_points * 100)
+            if total_actual_best_11_points > 0
+            else 0
+        )
+
+        return {
+            "has_data": True,
+            "matchdays_analyzed": len(recent_matchdays),
+            "lineup_accuracy_pct": round(accuracy, 1),
+            "points_capture_pct": round(points_capture, 1),
+            "total_predicted_points": total_predicted_11_points,
+            "total_optimal_points": total_actual_best_11_points,
+        }
 
     def record_recommendation(
         self, player_analysis, league_id: str  # PlayerAnalysis object
@@ -509,6 +656,82 @@ class HistoricalTracker:
                 )
 
         return performances
+
+    def get_track_record(self) -> dict:
+        """
+        Get summary of recommendation track record for display.
+
+        Returns:
+            Dict with buy/sell win rates, avg profit, and recent results.
+            Returns {"has_data": False} if insufficient data.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # BUY recommendations with outcomes
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN was_profitable = 1 THEN 1 ELSE 0 END) as wins,
+                       AVG(CASE WHEN profit_amount IS NOT NULL AND market_value > 0
+                           THEN (profit_amount * 100.0 / market_value) ELSE NULL END) as avg_profit_pct
+                FROM recommendation_history
+                WHERE recommendation = 'BUY'
+                  AND outcome_timestamp IS NOT NULL
+                """
+            )
+            buy_row = cursor.fetchone()
+            buy_total = buy_row[0] or 0
+            buy_wins = buy_row[1] or 0
+            buy_avg_profit = buy_row[2] or 0.0
+
+            # SELL recommendations with outcomes
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN was_profitable = 1 THEN 1 ELSE 0 END) as wins
+                FROM recommendation_history
+                WHERE recommendation = 'SELL'
+                  AND outcome_timestamp IS NOT NULL
+                """
+            )
+            sell_row = cursor.fetchone()
+            sell_total = sell_row[0] or 0
+            sell_wins = sell_row[1] or 0
+
+            # Recent BUY recs (last 10 with outcomes)
+            cursor = conn.execute(
+                """
+                SELECT player_name, was_profitable, profit_amount, market_value, timestamp
+                FROM recommendation_history
+                WHERE recommendation = 'BUY'
+                  AND outcome_timestamp IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 10
+                """
+            )
+            recent_buys = [
+                {
+                    "player": row[0],
+                    "won": bool(row[1]),
+                    "profit_pct": (row[2] * 100.0 / row[3]) if row[3] and row[3] > 0 else 0.0,
+                }
+                for row in cursor.fetchall()
+            ]
+
+        total_with_outcomes = buy_total + sell_total
+        if total_with_outcomes < 5:
+            return {"has_data": False}
+
+        return {
+            "has_data": True,
+            "buy_total": buy_total,
+            "buy_wins": buy_wins,
+            "buy_win_rate": (buy_wins / buy_total) if buy_total > 0 else 0.0,
+            "buy_avg_profit_pct": buy_avg_profit,
+            "sell_total": sell_total,
+            "sell_wins": sell_wins,
+            "sell_win_rate": (sell_wins / sell_total) if sell_total > 0 else 0.0,
+            "recent_buys": recent_buys,
+        }
 
     def get_learning_insights(self) -> dict:
         """

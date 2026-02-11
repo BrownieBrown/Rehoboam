@@ -210,6 +210,7 @@ class EnhancedAnalyzer:
         trend_data: dict,
         performance_data: dict = None,
         matchup_context: dict = None,
+        predict_points: bool = False,
     ) -> PlayerPrediction:
         """
         Predict future player value based on trends, fixtures, and seasonal patterns
@@ -405,7 +406,36 @@ class EnhancedAnalyzer:
             confidence_level=0.70,  # 70% confidence intervals
         )
 
-        return PlayerPrediction(
+        # Points prediction: estimate expected matchday points
+        expected_points = None
+        if predict_points and performance_data:
+            avg_pts = player.average_points
+            # Base: average points
+            expected_pts = avg_pts
+
+            # Form adjustment: recent performance vs average
+            if player.points > 0 and avg_pts > 0:
+                form_ratio = player.points / avg_pts
+                if form_ratio > 1.5:
+                    expected_pts *= 1.15  # Hot streak boost
+                elif form_ratio < 0.5:
+                    expected_pts *= 0.85  # Cold streak penalty
+
+            # Fixture adjustment
+            if fixture_adjustment > 0:
+                expected_pts *= 1.1  # Easy fixture boost
+            elif fixture_adjustment < 0:
+                expected_pts *= 0.9  # Hard fixture penalty
+
+            # Consistency adjustment
+            if consistency > 0.7:
+                expected_pts *= 1.05  # Reliable scorer
+            elif consistency < 0.3:
+                expected_pts *= 0.9  # Unreliable
+
+            expected_points = round(expected_pts, 1)
+
+        prediction = PlayerPrediction(
             player_id=player.id,
             player_name=player_name,
             predicted_value_7d=int(pred_7d),
@@ -426,6 +456,12 @@ class EnhancedAnalyzer:
             games_played=games_played,
             consistency_score=consistency,
         )
+
+        # Store expected points in metadata-like attribute
+        if expected_points is not None:
+            prediction.expected_points = expected_points
+
+        return prediction
 
     def compare_similar_players(self, player, all_analyses: list, top_n: int = 5) -> list:
         """

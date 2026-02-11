@@ -52,20 +52,20 @@ class Settings(BaseSettings):
 
     # Trading Configuration
     min_sell_profit_pct: float = Field(
-        default=5.0,
-        description="Minimum profit percentage to trigger a sell",
+        default=15.0,
+        description="Minimum profit percentage to trigger a sell (raised to keep winners longer)",
     )
     max_loss_pct: float = Field(
-        default=-2.0,
-        description="Maximum loss percentage before triggering sell (tightened to -2% for faster loss prevention)",
+        default=-8.0,
+        description="Maximum loss percentage before triggering sell (relaxed to avoid panic selling)",
     )
     min_buy_value_increase_pct: float = Field(
         default=10.0,
         description="Minimum market value increase to consider buying",
     )
     min_value_score_to_buy: float = Field(
-        default=50.0,
-        description="Minimum value score (0-100) to consider buying a player (enforced minimum: 50)",
+        default=55.0,
+        description="Minimum value score (0-100) to consider buying a player (raised for quality-first strategy)",
     )
 
     # Budget Management

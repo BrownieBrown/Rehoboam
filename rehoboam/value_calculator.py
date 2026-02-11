@@ -383,39 +383,41 @@ class PlayerValue:
 
         Higher score = better value
 
-        Base Factors:
-        - Points efficiency (0-40)
-        - Average points (0-25)
-        - Affordability (0-15)
-        - Current form (0-20)
-        - Market momentum (0-15)
-        - Sample size reliability penalty (0 to -30)
+        Base Factors (points-first strategy):
+        - Points efficiency (0-30)
+        - Average points (0-40) — PRIMARY DRIVER
+        - Affordability (0-5)
+        - Current form (-15 to +20)
+        - Market momentum (-8 to +8) — capped, not primary
+        - Sample size reliability penalty (0 to -50)
+        - Consistency bonus (0-10) — NEW
+        - Starter bonus (0-10) — NEW
 
-        Advanced Factors (Phase 3):
-        - Team form (0-15)
+        Advanced Factors:
+        - Team form (-5 to +15)
         - League position (0-10)
         - Minutes trend (-15 to +10)
         - Substitution pattern (-10 to 0)
         - Home/away split (+/-5)
         """
-        # Normalize components to 0-100 scale
+        # Normalize components to 0-100 scale (points-first strategy)
 
-        # 1. Points efficiency (0-40 points)
+        # 1. Points efficiency (0-30 points) — reduced from 40
         # Good players: 10+ points per million
-        points_efficiency = min((points / price_millions) / 10 * 40, 40)
+        points_efficiency = min((points / price_millions) / 10 * 30, 30)
 
-        # 2. Average points (0-25 points)
-        # Players with good historical performance get some credit
-        avg_efficiency = min(avg_points * 4, 25)
+        # 2. Average points (0-40 points) — PRIMARY DRIVER (was 0-25)
+        # Player averaging 16+ pts/game maxes out
+        avg_efficiency = min(avg_points * 2.5, 40)
 
-        # 3. Affordability bonus (0-15 points)
-        # Cheaper players get bonus (more budget flexibility)
+        # 3. Affordability bonus (0-5 points) — drastically reduced from 15
+        # Cheap player with 0 points is useless
         if price_millions < 5:
-            affordability = 15
-        elif price_millions < 10:
-            affordability = 10
-        elif price_millions < 20:
             affordability = 5
+        elif price_millions < 10:
+            affordability = 3
+        elif price_millions < 20:
+            affordability = 1
         else:
             affordability = 0
 
@@ -442,56 +444,25 @@ class PlayerValue:
         else:
             form = 0
 
-        # 5. Market momentum (0-15 points) - NEW!
-        # Rising market value = bonus, falling = penalty
+        # 5. Market momentum (-8 to +8 points) — capped, not primary driver
+        # Rising market value doesn't mean more matchday points
         momentum = 0
         if trend_direction and trend_pct is not None:
             if trend_direction == "rising":
-                # Rising trend = buy signal
-                # Strong rise (>15%) = +15 points
-                # Moderate rise (5-15%) = +10 points
-                # Weak rise (>0%) = +5 points
                 if trend_pct > 15:
-                    momentum = 15
+                    momentum = 8
                 elif trend_pct > 5:
-                    momentum = 10
-                else:
                     momentum = 5
+                else:
+                    momentum = 3
 
             elif trend_direction == "falling":
-                # Falling trend = sell signal (penalty for buying)
-                # Strong fall (>15%) = -15 points
-                # Moderate fall (5-15%) = -10 points
-                # Weak fall (>0%) = -5 points
                 if trend_pct < -15:
-                    momentum = -15
+                    momentum = -8
                 elif trend_pct < -5:
-                    momentum = -10
-                else:
                     momentum = -5
-
-            # Peak position analysis - significant factor in momentum!
-            # CRITICAL: NO recovery bonus for falling players - they are falling knives!
-            if vs_peak_pct is not None:
-                # Below peak = upside potential ONLY if trend is rising/stable
-                if trend_direction == "rising":
-                    # Rising from below peak = genuine recovery
-                    if vs_peak_pct < -40:
-                        momentum += 10  # Major upside potential
-                    elif vs_peak_pct < -25:
-                        momentum += 7
-                    elif vs_peak_pct < -15:
-                        momentum += 5
-                elif trend_direction == "falling":
-                    # FALLING from any position = danger, no recovery bonus
-                    # Add extra penalty for falling from near peak
-                    if vs_peak_pct > -10:
-                        # Near peak and falling = crash incoming
-                        momentum -= 8
-                    elif vs_peak_pct > -20:
-                        # Falling and not far from peak
-                        momentum -= 5
-                # stable trend: no peak bonus (wait for confirmation)
+                else:
+                    momentum = -3
 
         # 6. Sample size reliability penalty (0 to -30 points) - NEW!
         # CRITICAL: Players with few games get massive penalty
@@ -524,6 +495,21 @@ class PlayerValue:
             if consistency_score is not None and consistency_score < 0.5:
                 # Very inconsistent = additional penalty
                 sample_penalty -= 5
+
+        # 6b. Consistency bonus (0-10 points) - NEW
+        # Reward consistent performers who reliably score matchday points
+        consistency_bonus = 0
+        if consistency_score is not None and consistency_score > 0.5:
+            consistency_bonus = consistency_score * 10  # Max 10 at consistency=1.0
+
+        # 6c. Starter bonus (0-10 points) - NEW
+        # Players who play 80+ minutes are more likely to score points
+        starter_bonus = 0
+        if avg_minutes is not None:
+            if avg_minutes >= 80:
+                starter_bonus = 10
+            elif avg_minutes >= 60:
+                starter_bonus = 5
 
         # 7. Team Form Factor (0-15 points) - PHASE 3
         # Players on winning teams score more points
@@ -603,6 +589,8 @@ class PlayerValue:
             + form
             + momentum
             + sample_penalty
+            + consistency_bonus
+            + starter_bonus
             + team_form
             + position_factor
             + minutes_factor

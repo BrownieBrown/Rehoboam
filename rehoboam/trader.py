@@ -204,6 +204,33 @@ class Trader:
         top_n = 8 if is_emergency else 5
         buy_opportunities = self.analyzer.find_best_opportunities(market_analyses, top_n=top_n)
 
+        # Boost new listings in sort order (listed < 24h gets +5 effective score for sorting)
+        for analysis in buy_opportunities:
+            if hasattr(analysis.player, "listed_at") and analysis.player.listed_at:
+                try:
+                    from datetime import datetime
+
+                    listed_dt = datetime.fromisoformat(
+                        analysis.player.listed_at.replace("Z", "+00:00")
+                    )
+                    hours_listed = (
+                        datetime.now(listed_dt.tzinfo) - listed_dt
+                    ).total_seconds() / 3600
+                    if hours_listed < 24:
+                        # Mark as new listing in metadata for display
+                        if analysis.metadata is None:
+                            analysis.metadata = {}
+                        analysis.metadata["new_listing"] = True
+                except Exception:
+                    pass
+
+        # Re-sort with new listing boost
+        buy_opportunities.sort(
+            key=lambda a: a.value_score
+            + (5 if a.metadata and a.metadata.get("new_listing") else 0),
+            reverse=True,
+        )
+
         # If squad emergency and still no recommendations, lower the bar
         if is_emergency and len(buy_opportunities) < 3:
             # Get ANY players with score 40+ when in emergency
@@ -334,6 +361,16 @@ class Trader:
         sell_count = sum(1 for a in team_analyses if a.recommendation == "SELL")
         hold_count = sum(1 for a in team_analyses if a.recommendation == "HOLD")
 
+        # Calculate position needs
+        from .config import POSITION_MINIMUMS
+
+        position_needs = []
+        for pos, min_count in POSITION_MINIMUMS.items():
+            current = position_counts.get(pos, 0)
+            if current < min_count:
+                short = pos[:3].upper()
+                position_needs.append(f"{short} ({current}/{min_count})")
+
         squad_summary = {
             "budget": current_budget,
             "team_value": team_value,
@@ -343,6 +380,7 @@ class Trader:
             "player_values": player_values,
             "sell_count": sell_count,
             "hold_count": hold_count,
+            "position_needs": position_needs,
         }
 
         # Generate market insights
@@ -372,12 +410,115 @@ class Trader:
                 except Exception:
                     pass
 
+        # Count injured players worth watching
+        injured_watch_count = sum(
+            1
+            for a in market_analyses
+            if a.recommendation == "SKIP" and a.player.status != 0 and a.player.average_points >= 30
+        )
+
         market_insights = {
             "easy_schedule_count": easy_schedule,
             "price_drop_soon": price_drop_soon,
             "rising_trend_count": rising_trend,
             "new_listings": new_listings,
+            "injured_watch_count": injured_watch_count,
         }
+
+        # Get track record from historical data
+        track_record = None
+        try:
+            track_record = self.historical_tracker.get_track_record()
+        except Exception:
+            pass
+
+        # Count learned weights
+        learned_weights_count = 0
+        if self.factor_weight_learner:
+            try:
+                import sqlite3
+
+                with sqlite3.connect(self.factor_weight_learner.db_path) as conn:
+                    cursor = conn.execute("SELECT COUNT(*) FROM learned_factor_weights")
+                    learned_weights_count = cursor.fetchone()[0]
+            except Exception:
+                pass
+
+        # Enrich buy opportunities with predictions and demand scores
+        for analysis in buy_opportunities:
+            try:
+                from .enhanced_analyzer import EnhancedAnalyzer
+
+                enhanced = EnhancedAnalyzer()
+                history_data = self.api.client.get_player_market_value_history_v2(
+                    player_id=analysis.player.id, timeframe=92
+                )
+                it_array = history_data.get("it", [])
+                trend_analysis = {"has_data": False}
+                if it_array and len(it_array) >= 14:
+                    recent = it_array[-14:]
+                    first_value = recent[0].get("mv", 0)
+                    last_value = recent[-1].get("mv", 0)
+                    if first_value > 0:
+                        trend_pct = ((last_value - first_value) / first_value) * 100
+                        long_term_pct = 0
+                        if len(it_array) >= 30:
+                            month_ago = it_array[-30].get("mv", 0)
+                            if month_ago > 0:
+                                long_term_pct = ((last_value - month_ago) / month_ago) * 100
+                        trend_analysis = {
+                            "has_data": True,
+                            "trend_pct": trend_pct,
+                            "long_term_pct": long_term_pct,
+                        }
+
+                perf_data = self.history_cache.get_cached_performance(
+                    player_id=analysis.player.id, league_id=league.id, max_age_hours=24
+                )
+                if not perf_data:
+                    perf_data = self.api.client.get_player_performance(
+                        league.id, analysis.player.id
+                    )
+
+                prediction = enhanced.predict_player_value(
+                    analysis.player, trend_analysis, perf_data
+                )
+                if analysis.metadata is None:
+                    analysis.metadata = {}
+                analysis.metadata["prediction_7d_pct"] = prediction.value_change_7d_pct
+            except Exception:
+                pass
+
+            # Add demand score
+            if hasattr(self, "bidding") and self.bidding and self.bidding.activity_feed_learner:
+                try:
+                    demand = self.bidding.activity_feed_learner.get_player_demand_score(
+                        analysis.player.id
+                    )
+                    if analysis.metadata is None:
+                        analysis.metadata = {}
+                    analysis.metadata["demand_score"] = demand
+                except Exception:
+                    pass
+
+        # Build watchlist: players with score 40-49 that are trending up or have easy schedule
+        watchlist = [
+            a
+            for a in market_analyses
+            if a.recommendation in ["HOLD", "SKIP"]
+            and 40 <= a.value_score < 50
+            and a.player.status == 0
+            and (
+                (a.trend and "rising" in a.trend.lower())
+                or (
+                    hasattr(a, "metadata")
+                    and a.metadata
+                    and a.metadata.get("sos_rating") in ["Easy", "Very Easy"]
+                )
+            )
+        ]
+        watchlist.sort(key=lambda a: a.value_score, reverse=True)
+        watchlist = watchlist[:3]
 
         # Display compact action plan
         self.compact_display.display_action_plan(
@@ -391,6 +532,9 @@ class Trader:
             sell_candidates=sell_candidates,
             recovery_plan=recovery_plan,
             current_budget=current_budget,
+            track_record=track_record,
+            learned_weights_count=learned_weights_count,
+            watchlist=watchlist,
         )
 
     def analyze_market(

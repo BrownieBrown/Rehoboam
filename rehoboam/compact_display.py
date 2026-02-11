@@ -39,6 +39,9 @@ class CompactDisplay:
         sell_candidates: list | None = None,
         recovery_plan: list | None = None,
         current_budget: int = 0,
+        track_record: dict | None = None,
+        learned_weights_count: int = 0,
+        watchlist: list | None = None,
     ):
         """
         Display compact action plan
@@ -57,7 +60,29 @@ class CompactDisplay:
         """
         console.print("\n" + "═" * 80)
         console.print("[bold cyan]🎯  ACTION PLAN[/bold cyan]")
-        console.print("═" * 80 + "\n")
+        console.print("═" * 80)
+
+        # Position needs indicator
+        position_needs = squad_summary.get("position_needs")
+        if position_needs:
+            needs_str = " | ".join(position_needs)
+            console.print(f"[yellow]⚠️  Position gaps: {needs_str}[/yellow]")
+
+        # Track record summary
+        if track_record and track_record.get("has_data"):
+            parts = []
+            bt = track_record.get("buy_total", 0)
+            bw = track_record.get("buy_wins", 0)
+            if bt > 0:
+                bwr = track_record.get("buy_win_rate", 0)
+                avg_p = track_record.get("buy_avg_profit_pct", 0)
+                parts.append(f"BUY accuracy: {bw}/{bt} profitable ({bwr:.0%}), avg {avg_p:+.1f}%")
+            if learned_weights_count > 0:
+                parts.append(f"{learned_weights_count} learned weights active")
+            if parts:
+                console.print(f"[dim]{' | '.join(parts)}[/dim]")
+
+        console.print()
 
         # BUY NOW Section
         if buy_opportunities:
@@ -102,6 +127,36 @@ class CompactDisplay:
                 console.print(
                     "[dim]✓ New players are added to the market daily - check back later[/dim]\n"
                 )
+
+        # Budget summary after buy recommendations
+        if buy_opportunities and current_budget != 0:
+            displayed = buy_opportunities[: 8 if is_emergency else 5]
+            cumulative_cost = 0
+            for analysis in displayed:
+                if self.bidding:
+                    bid_rec = self.bidding.calculate_bid(
+                        asking_price=analysis.current_price,
+                        market_value=analysis.market_value,
+                        value_score=analysis.value_score,
+                        confidence=analysis.confidence,
+                        player_id=analysis.player.id,
+                    )
+                    cumulative_cost += bid_rec.recommended_bid
+                else:
+                    cumulative_cost += analysis.current_price
+            remaining = current_budget - cumulative_cost
+            console.print(
+                f"\n[dim]Budget if buying all {len(displayed)}: €{remaining / 1_000_000:+.1f}M remaining "
+                f"(spending €{cumulative_cost / 1_000_000:.1f}M)[/dim]"
+            )
+
+        # WATCHLIST Section (near-threshold players)
+        if watchlist:
+            console.print(
+                f"\n[bold yellow]👀 WATCHLIST ({len(watchlist)} players near threshold)[/bold yellow]"
+            )
+            console.print("[dim]Score 40-49, could become buys soon[/dim]\n")
+            self._display_watchlist(watchlist)
 
         # SELL NOW Section
         if sell_urgent:
@@ -161,6 +216,7 @@ class CompactDisplay:
         table.add_column("Pos", style="blue", width=3)
         table.add_column("Smart Bid", justify="right", style="yellow")
         table.add_column("Score", justify="right", style="magenta", width=5)
+        table.add_column("7d", justify="right", width=5)
         table.add_column("Impact", justify="center", style="dim", width=12)
         table.add_column("Next 3", justify="center", style="dim", width=7)
         table.add_column("Why", style="dim")
@@ -168,6 +224,20 @@ class CompactDisplay:
         for analysis in opportunities:
             player = analysis.player
             name = f"{player.first_name} {player.last_name}"
+
+            # NEW badge for fresh listings (< 24h)
+            if hasattr(player, "listed_at") and player.listed_at:
+                try:
+                    from datetime import datetime
+
+                    listed_dt = datetime.fromisoformat(player.listed_at.replace("Z", "+00:00"))
+                    hours_listed = (
+                        datetime.now(listed_dt.tzinfo) - listed_dt
+                    ).total_seconds() / 3600
+                    if hours_listed < 24:
+                        name = f"🆕 {name}"
+                except Exception:
+                    pass
 
             # Calculate smart bid
             if self.bidding:
@@ -269,15 +339,78 @@ class CompactDisplay:
                 elif analysis.average_points >= 50:
                     reason_parts.append(f"{analysis.average_points:.0f} avg pts")
 
-            reason = " | ".join(reason_parts[:2]) if reason_parts else "High value"
+            # Add demand signal from metadata
+            demand_score = 0
+            if hasattr(analysis, "metadata") and analysis.metadata:
+                demand_score = analysis.metadata.get("demand_score", 0)
+            if demand_score >= 70:
+                reason_parts.append("Hot")
+            elif demand_score >= 50:
+                reason_parts.append("In demand")
+
+            # Add timing hint based on schedule
+            sos_rating_val = None
+            if hasattr(analysis, "metadata") and analysis.metadata:
+                sos_rating_val = analysis.metadata.get("sos_rating")
+            if sos_rating_val in ["Very Easy", "Easy"]:
+                reason_parts.append("Buy now")
+            elif sos_rating_val in ["Difficult"] and analysis.value_score >= 60:
+                reason_parts.append("Wait for dip?")
+
+            reason = " | ".join(reason_parts[:3]) if reason_parts else "High value"
+
+            # 7d prediction from metadata
+            pred_str = "[dim]-[/dim]"
+            if hasattr(analysis, "metadata") and analysis.metadata:
+                pred_7d = analysis.metadata.get("prediction_7d_pct")
+                if pred_7d is not None:
+                    pred_color = "green" if pred_7d >= 0 else "red"
+                    pred_str = f"[{pred_color}]{pred_7d:+.0f}%[/{pred_color}]"
 
             table.add_row(
                 name,  # Player name
                 player.position[:2],  # Shorten position
                 bid_str,
                 f"{analysis.value_score:.0f}",
+                pred_str,
                 impact_str,
                 sos_indicator,
+                reason,
+            )
+
+        console.print(table)
+
+    def _display_watchlist(self, watchlist: list):
+        """Display near-threshold players that could become buys"""
+        table = Table(show_header=True, header_style="bold yellow", box=None)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("Price", justify="right", style="yellow")
+        table.add_column("Score", justify="right", style="magenta", width=5)
+        table.add_column("Why to Watch", style="dim")
+
+        for analysis in watchlist[:3]:
+            player = analysis.player
+            name = f"{player.first_name} {player.last_name}"
+
+            # Build watch reason
+            reasons = []
+            if analysis.trend and "rising" in analysis.trend.lower():
+                reasons.append(f"Trending up +{analysis.trend_change_pct:.0f}%")
+            if hasattr(analysis, "metadata") and analysis.metadata:
+                sos = analysis.metadata.get("sos_rating")
+                if sos in ["Easy", "Very Easy"]:
+                    reasons.append("Easy schedule")
+            if analysis.value_score >= 48:
+                reasons.append("Almost at threshold")
+
+            reason = " | ".join(reasons) if reasons else "Close to buy threshold"
+
+            table.add_row(
+                name,
+                player.position[:2],
+                f"€{analysis.current_price / 1_000_000:.1f}M",
+                f"{analysis.value_score:.0f}",
                 reason,
             )
 
@@ -461,6 +594,7 @@ class CompactDisplay:
         price_drop_soon = insights.get("price_drop_soon", 0)
         rising_trend_count = insights.get("rising_trend_count", 0)
         new_listings = insights.get("new_listings", 0)
+        injured_watch_count = insights.get("injured_watch_count", 0)
 
         if easy_schedule_count > 0:
             console.print(
@@ -479,6 +613,11 @@ class CompactDisplay:
 
         if new_listings > 0:
             console.print(f"• 🆕 [cyan]{new_listings} fresh listing(s) today (good timing)[/cyan]")
+
+        if injured_watch_count > 0:
+            console.print(
+                f"• 🏥 [yellow]{injured_watch_count} injured player(s) on market — monitor for recovery bargains[/yellow]"
+            )
 
         console.print("\n• 🔍 [dim]Run 'rehoboam market-intel' for price adjustment patterns[/dim]")
 
@@ -515,7 +654,7 @@ class CompactDisplay:
         table.add_column("P/L", justify="right", width=6)
         table.add_column("SOS", justify="center", width=7)
         table.add_column("Trend", justify="center", width=6)
-        table.add_column("Signal", justify="center", width=6)
+        table.add_column("Timing", justify="center", width=10)
         table.add_column("Status", justify="center", width=12)
 
         # Show top candidates (limit to 8)
@@ -558,13 +697,24 @@ class CompactDisplay:
                 elif candidate.trend == "stable":
                     trend_display = "[yellow]→[/yellow]"
 
-            # Recovery signal display (HOLD/CUT for losses)
-            signal_display = "-"
-            if candidate.recovery_signal:
-                if candidate.recovery_signal == "HOLD":
-                    signal_display = "[green]HOLD[/green]"
-                elif candidate.recovery_signal == "CUT":
-                    signal_display = "[red]CUT[/red]"
+            # Timing signal - actionable sell timing advice
+            timing_display = "-"
+            pl_pct_val = candidate.profit_loss_pct
+            trend_val = candidate.trend
+            sos_val = candidate.sos_rating
+
+            if trend_val == "falling" and pl_pct_val > 10:
+                timing_display = "[red]Sell now[/red]"
+            elif trend_val == "rising" and pl_pct_val > 20:
+                timing_display = "[yellow]Near peak[/yellow]"
+            elif sos_val in ["Very Difficult", "Difficult"] and pl_pct_val > 5:
+                timing_display = "[yellow]Pre-fixture[/yellow]"
+            elif trend_val == "rising" and pl_pct_val < 5:
+                timing_display = "[green]Wait[/green]"
+            elif candidate.recovery_signal == "CUT":
+                timing_display = "[red]CUT[/red]"
+            elif candidate.recovery_signal == "HOLD":
+                timing_display = "[green]HOLD[/green]"
 
             # Status based on protection
             if candidate.is_protected:
@@ -586,7 +736,7 @@ class CompactDisplay:
                 pl_str,
                 sos_display,
                 trend_display,
-                signal_display,
+                timing_display,
                 status_str,
             )
 
@@ -641,3 +791,134 @@ class CompactDisplay:
                     console.print(
                         f"\n[dim]💡 Tip: Selling top 3 expendable players frees {top_3_recovery / 1_000_000:.1f}M budget[/dim]"
                     )
+
+    def display_lineup(self, best_eleven: list, bench: list, expected_points_map: dict):
+        """
+        Display the optimal starting 11 for next matchday based on expected points.
+
+        Args:
+            best_eleven: List of players in the starting 11
+            bench: List of bench players
+            expected_points_map: Dict mapping player_id -> ExpectedPointsResult
+        """
+        console.print("\n" + "═" * 80)
+        console.print("[bold cyan]⚽  MATCHDAY LINEUP (by Expected Points)[/bold cyan]")
+        console.print("═" * 80)
+
+        # Starting 11 table
+        table = Table(show_header=True, header_style="bold green", box=None)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("Avg Pts", justify="right", style="yellow", width=7)
+        table.add_column("Exp Pts", justify="right", style="green", width=7)
+        table.add_column("Lineup", justify="center", width=8)
+        table.add_column("Notes", style="dim")
+
+        # Sort by position for display (GK, DEF, MID, FWD)
+        position_order = {"Goalkeeper": 0, "Defender": 1, "Midfielder": 2, "Forward": 3}
+        sorted_eleven = sorted(best_eleven, key=lambda p: position_order.get(p.position, 99))
+
+        total_expected = 0.0
+        concerns = []
+
+        for i, player in enumerate(sorted_eleven, 1):
+            name = f"{player.first_name} {player.last_name}"
+            ep = expected_points_map.get(player.id)
+
+            if ep:
+                exp_pts = ep.expected_points
+                total_expected += exp_pts
+
+                # Lineup probability display
+                prob = ep.lineup_probability
+                if prob == 1:
+                    lineup_str = "[green]Starter[/green]"
+                elif prob == 2:
+                    lineup_str = "[yellow]Rotation[/yellow]"
+                elif prob == 3:
+                    lineup_str = "[yellow]Bench[/yellow]"
+                    concerns.append(f"{name}: bench risk")
+                elif prob is not None and prob >= 4:
+                    lineup_str = "[red]Unlikely[/red]"
+                    concerns.append(f"{name}: unlikely to play!")
+                else:
+                    lineup_str = "[dim]-[/dim]"
+
+                notes = " | ".join(ep.notes[:2]) if ep.notes else ""
+
+                table.add_row(
+                    str(i),
+                    name,
+                    player.position[:2],
+                    f"{player.average_points:.0f}",
+                    f"{exp_pts:.0f}",
+                    lineup_str,
+                    notes,
+                )
+            else:
+                table.add_row(
+                    str(i),
+                    name,
+                    player.position[:2],
+                    f"{player.average_points:.0f}",
+                    "[dim]-[/dim]",
+                    "[dim]-[/dim]",
+                    "",
+                )
+
+        console.print("\n[bold]⭐ STARTING 11[/bold]\n")
+        console.print(table)
+        console.print(f"\n[bold]Total Expected Points: [green]{total_expected:.0f}[/green][/bold]")
+
+        # Concerns
+        if concerns:
+            console.print("\n[yellow]⚠️  Concerns:[/yellow]")
+            for concern in concerns:
+                console.print(f"  • [yellow]{concern}[/yellow]")
+
+        # Bench
+        if bench:
+            console.print("\n[bold]📋 BENCH[/bold] (ranked by expected points)\n")
+
+            bench_table = Table(show_header=True, header_style="bold dim", box=None)
+            bench_table.add_column("Player", style="dim cyan", no_wrap=True)
+            bench_table.add_column("Pos", style="dim blue", width=3)
+            bench_table.add_column("Avg Pts", justify="right", style="dim yellow", width=7)
+            bench_table.add_column("Exp Pts", justify="right", style="dim", width=7)
+            bench_table.add_column("Notes", style="dim")
+
+            # Sort bench by expected points
+            bench_sorted = sorted(
+                bench,
+                key=lambda p: (
+                    expected_points_map.get(
+                        p.id, type("", (), {"expected_points": 0})()
+                    ).expected_points
+                    if expected_points_map.get(p.id)
+                    else 0
+                ),
+                reverse=True,
+            )
+
+            for player in bench_sorted:
+                name = f"{player.first_name} {player.last_name}"
+                ep = expected_points_map.get(player.id)
+                exp_str = f"{ep.expected_points:.0f}" if ep else "-"
+                notes = " | ".join(ep.notes[:2]) if ep and ep.notes else ""
+
+                bench_table.add_row(
+                    name,
+                    player.position[:2],
+                    f"{player.average_points:.0f}",
+                    exp_str,
+                    notes,
+                )
+
+            console.print(bench_table)
+
+        console.print("\n" + "═" * 80)
+        console.print(
+            "[dim]Expected points based on avg performance, form, fixtures, and lineup probability[/dim]"
+        )
+        console.print("═" * 80 + "\n")

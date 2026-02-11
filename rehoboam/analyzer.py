@@ -47,14 +47,14 @@ class ScoringFactor:
 class FactorWeights:
     """Configuration for factor weights in scoring"""
 
-    # Market buying weights
+    # Market buying weights (points-first strategy)
     base_value: float = 1.0  # Base value score (0-100)
-    trend_rising: float = 15.0  # Bonus for rising trends
-    trend_falling: float = -20.0  # Penalty for falling trends
+    trend_rising: float = 8.0  # Reduced: rising trend less important than points
+    trend_falling: float = -10.0  # Reduced: falling trend penalty
     matchup_easy: float = 10.0  # Bonus for easy matchups
     matchup_hard: float = -5.0  # Penalty for hard matchups
     sos_bonus: float = 1.0  # Direct bonus from SOS calculation
-    discount: float = 15.0  # Bonus for undervalued players
+    discount: float = 8.0  # Reduced: cheap players with 0 points are useless
 
     # Owned player weights
     profit_target: float = 50.0  # Strong sell signal on profit target
@@ -136,6 +136,7 @@ class MarketAnalyzer:
         matchup_context: dict | None = None,
         roster_context: "RosterContext | None" = None,
         performance_data: dict | None = None,
+        risk_metrics: "RiskMetrics | None" = None,
     ) -> PlayerAnalysis:
         """Analyze a player on the market for buying opportunity using factor-based scoring
 
@@ -145,6 +146,7 @@ class MarketAnalyzer:
             matchup_context: Upcoming fixtures and strength of schedule
             roster_context: Current roster composition for upgrade analysis
             performance_data: Match-by-match performance for sample size analysis
+            risk_metrics: Risk analysis (volatility, VaR) if available
         """
         market_value = player.market_value
         current_price = player.price
@@ -153,6 +155,7 @@ class MarketAnalyzer:
         # status: 0 = healthy, 1+ = injured/unavailable
         if player.status != 0:
             # Return SKIP recommendation for injured players
+            # Include metadata so display can count interesting injured players
             return PlayerAnalysis(
                 player=player,
                 current_price=current_price,
@@ -169,10 +172,11 @@ class MarketAnalyzer:
                 trend=None,
                 trend_change_pct=None,
                 factors=[],
+                metadata={"injury_watch": True},
             )
 
-        # Calculate value change percentage
-        if market_value > 0:
+        # Calculate value change percentage (guard against division by zero)
+        if market_value > 0 and current_price > 0:
             value_change_pct = ((market_value - current_price) / current_price) * 100
         else:
             value_change_pct = 0.0
@@ -345,6 +349,34 @@ class MarketAnalyzer:
                 factors.append(gap_factor)
                 final_score += gap_factor.score
 
+        # Factor 7: Volatility penalty (risk-adjusted scoring)
+        # Use consistency_score from PlayerValue (already calculated, no extra API call)
+        if player_value.consistency_score is not None and player_value.consistency_score < 0.3:
+            # Very inconsistent player: consistency < 0.3 means high coefficient of variation
+            # Scale penalty: 0.3 -> -5, 0.0 -> -10
+            penalty = -5 - ((0.3 - player_value.consistency_score) / 0.3) * 5
+            vol_factor = ScoringFactor(
+                name="High Volatility",
+                raw_value=player_value.consistency_score,
+                weight=1.0,
+                score=penalty,
+                description=f"Inconsistent performer ({player_value.consistency_score:.0%} consistency)",
+            )
+            factors.append(vol_factor)
+            final_score += vol_factor.score
+        # Also use full risk_metrics if available (from --risk flag)
+        elif risk_metrics and risk_metrics.volatility_score > 70:
+            penalty = -5 - ((risk_metrics.volatility_score - 70) / 30) * 5
+            vol_factor = ScoringFactor(
+                name="High Volatility",
+                raw_value=risk_metrics.volatility_score,
+                weight=1.0,
+                score=penalty,
+                description=f"Volatile value swings ({risk_metrics.risk_category})",
+            )
+            factors.append(vol_factor)
+            final_score += vol_factor.score
+
         # Clamp final score to 0-150 range (can exceed 100 with bonuses)
         final_score = max(0, min(150, final_score))
 
@@ -363,10 +395,31 @@ class MarketAnalyzer:
                     trend_check = False
 
             # Base value check - player must have decent fundamentals
-            base_value_check = base_value_score >= 45.0  # Raised threshold for higher quality
+            base_value_check = base_value_score >= 50.0  # Raised for quality-first strategy
 
             # Points check - reject players with 0 points (likely injured/benched)
             points_check = player.points > 0
+
+            # Consistency check - unreliable performers need very high score
+            consistency_check = True
+            if player_value.consistency_score is not None:
+                if player_value.consistency_score < 0.4 and final_score < 80:
+                    consistency_check = False
+
+            # Games played check - not enough data means HOLD, not BUY
+            games_check = True
+            is_filling_gap = roster_context and roster_context.is_below_minimum
+            if player_value.games_played is not None and player_value.games_played < 6:
+                if not is_filling_gap:
+                    games_check = False
+
+            # Average points quality gate - only buy players who score matchday points
+            avg_points_check = True
+            avg_points_threshold = (
+                10 if (roster_context and roster_context.is_below_minimum) else 20
+            )
+            if player.average_points < avg_points_threshold:
+                avg_points_check = False
 
             # Sample size check - reject players with too few games
             # This prevents buying on 1-2 game hot streaks
@@ -405,6 +458,9 @@ class MarketAnalyzer:
                 and schedule_check
                 and points_check
                 and sample_size_check
+                and avg_points_check
+                and consistency_check
+                and games_check
             ):
                 recommendation = "BUY"
                 confidence = min(final_score / 100.0, 1.0)
@@ -413,9 +469,15 @@ class MarketAnalyzer:
                 if not points_check:
                     recommendation = "SKIP"
                     confidence = 0.2
-                elif not sample_size_check:
+                elif not avg_points_check:
+                    recommendation = "HOLD"  # Low matchday points
+                    confidence = 0.3
+                elif not sample_size_check or not games_check:
                     recommendation = "HOLD"  # Wait for more data
                     confidence = 0.3
+                elif not consistency_check:
+                    recommendation = "HOLD"  # Too inconsistent
+                    confidence = 0.4
                 else:
                     recommendation = "HOLD"
                     confidence = 0.5
@@ -462,6 +524,7 @@ class MarketAnalyzer:
             trend_change_pct=trend_change_pct,
             metadata=metadata if metadata else None,
             factors=factors,
+            risk_metrics=risk_metrics,
             roster_impact=roster_impact,
         )
 
@@ -508,7 +571,10 @@ class MarketAnalyzer:
         sell_score = 0.0
 
         # Factor 1: Profit target reached (strong sell signal)
-        if profit_pct >= self.min_sell_profit_pct:
+        # Keep high-performing players (avg_points > 40) unless profit > 40%
+        is_high_performer = player.average_points > 40
+        effective_profit_threshold = 40.0 if is_high_performer else 25.0
+        if profit_pct >= effective_profit_threshold:
             profit_factor = ScoringFactor(
                 name="Profit Target",
                 raw_value=profit_pct,
@@ -565,13 +631,24 @@ class MarketAnalyzer:
             if sos_data:
                 sos_rating = sos_data.short_term_rating
                 if sos_rating in ["Difficult", "Very Difficult"] and profit_pct > 5:
-                    # Only sell on difficult schedule if profitable
+                    # Sell profitable players before tough fixtures
                     schedule_factor = ScoringFactor(
                         name="Difficult Fixtures",
                         raw_value=sos_data.sos_bonus,
                         weight=self.weights.difficult_schedule,
                         score=self.weights.difficult_schedule,
                         description=f"Sell before {sos_rating} games",
+                    )
+                    factors.append(schedule_factor)
+                    sell_score += schedule_factor.score
+                elif sos_rating in ["Difficult", "Very Difficult"] and profit_pct < -5:
+                    # Also cut losses on declining players with hard schedules
+                    schedule_factor = ScoringFactor(
+                        name="Hard Schedule + Loss",
+                        raw_value=sos_data.sos_bonus,
+                        weight=self.weights.difficult_schedule * 0.75,
+                        score=self.weights.difficult_schedule * 0.75,
+                        description=f"Cut loss ({profit_pct:.0f}%) before {sos_rating} games",
                     )
                     factors.append(schedule_factor)
                     sell_score += schedule_factor.score
@@ -716,6 +793,12 @@ class MarketAnalyzer:
             elif a.trend and "falling" in a.trend.lower():
                 base_score *= 0.7  # Falling penalty
 
+            # Bonus for gap fillers (position-aware sorting)
+            if a.roster_impact and a.roster_impact.impact_type == "fills_gap":
+                base_score *= 1.5  # Gap fillers get priority
+            elif a.roster_impact and a.roster_impact.impact_type == "upgrade":
+                base_score *= 1.2  # Upgrades also boosted
+
             return base_score
 
         # Sort each group
@@ -853,8 +936,13 @@ class MarketAnalyzer:
             if sos_rating:
                 if sos_rating == "Very Difficult":
                     expendability += 20  # Hard schedule = sell first
+                    # Extra penalty for falling + hard schedule
+                    if trend == "falling" and profit_loss_pct < -5:
+                        expendability += 10
                 elif sos_rating == "Difficult":
                     expendability += 10
+                    if trend == "falling" and profit_loss_pct < -5:
+                        expendability += 5
                 elif sos_rating == "Easy":
                     expendability -= 10  # Easy schedule = keep
                 elif sos_rating == "Very Easy":

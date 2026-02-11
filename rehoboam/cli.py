@@ -854,6 +854,124 @@ def record_purchase(
 
 
 @app.command()
+def lineup(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed debug information"),
+):
+    """Show optimal starting 11 for next matchday based on expected points"""
+    from .compact_display import CompactDisplay
+    from .expected_points import calculate_expected_points
+    from .formation import select_best_eleven
+    from .matchup_analyzer import MatchupAnalyzer
+    from .value_history import ValueHistoryCache
+
+    api = get_api()
+    api.login()
+
+    leagues = api.get_leagues()
+    if not leagues:
+        console.print("[red]No leagues found[/red]")
+        raise typer.Exit(code=1)
+
+    if league_index >= len(leagues):
+        console.print(f"[red]Invalid league index. You have {len(leagues)} leagues.[/red]")
+        raise typer.Exit(code=1)
+
+    league = leagues[league_index]
+
+    console.print("\n" + "═" * 60)
+    console.print(f"[bold cyan]🏆  {league.name} — Matchday Lineup[/bold cyan]")
+    console.print("═" * 60)
+
+    # Get squad
+    squad = api.get_squad(league)
+    if not squad:
+        console.print("[red]No players in squad[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[dim]Analyzing {len(squad)} players...[/dim]")
+
+    history_cache = ValueHistoryCache()
+    matchup_analyzer = MatchupAnalyzer()
+
+    # Calculate expected points for each player
+    expected_points_map = {}
+    for player in squad:
+        try:
+            # Get performance data (cached)
+            perf_data = history_cache.get_cached_performance(
+                player_id=player.id, league_id=league.id, max_age_hours=24
+            )
+            if not perf_data:
+                perf_data = api.client.get_player_performance(league.id, player.id)
+                if perf_data:
+                    history_cache.cache_performance(
+                        player_id=player.id, league_id=league.id, data=perf_data
+                    )
+
+            # Get player details for lineup probability and matchup bonus
+            player_details = None
+            matchup_context = None
+            try:
+                player_details = api.client.get_player_details(league.id, player.id)
+
+                if player_details:
+                    team_id = player_details.get("tid", "")
+                    if team_id:
+                        # Build matchup context
+                        player_team_profile = api.client.get_team_profile(league.id, team_id)
+                        player_team = matchup_analyzer.get_team_strength(player_team_profile)
+                        next_matchup = matchup_analyzer.get_next_matchup(player_details)
+
+                        opponent_team = None
+                        if next_matchup and next_matchup.opponent_id:
+                            try:
+                                opp_profile = api.client.get_team_profile(
+                                    league.id, next_matchup.opponent_id
+                                )
+                                opponent_team = matchup_analyzer.get_team_strength(opp_profile)
+                            except Exception:
+                                pass
+
+                        matchup_bonus = matchup_analyzer.get_matchup_bonus(
+                            player_details, player_team, opponent_team
+                        )
+                        matchup_context = {
+                            "has_data": True,
+                            "matchup_bonus": matchup_bonus,
+                            "player_team": player_team,
+                        }
+            except Exception:
+                pass
+
+            ep = calculate_expected_points(
+                player=player,
+                performance_data=perf_data,
+                matchup_context=matchup_context,
+                player_details=player_details,
+            )
+            expected_points_map[player.id] = ep
+
+            if verbose:
+                name = f"{player.first_name} {player.last_name}"
+                console.print(f"[dim]  {name}: {ep.expected_points:.0f} exp pts[/dim]")
+
+        except Exception as e:
+            if verbose:
+                console.print(f"[dim]  Error for {player.last_name}: {e}[/dim]")
+
+    # Select best 11 using expected points (not value score)
+    ep_scores = {pid: ep.expected_points for pid, ep in expected_points_map.items()}
+    best_eleven = select_best_eleven(squad, ep_scores)
+    best_eleven_ids = {p.id for p in best_eleven}
+    bench = [p for p in squad if p.id not in best_eleven_ids]
+
+    # Display
+    display = CompactDisplay()
+    display.display_lineup(best_eleven, bench, expected_points_map)
+
+
+@app.command()
 def config():
     """Show current configuration"""
     try:
@@ -1123,8 +1241,11 @@ def stats(
 def auto(
     league_index: int = typer.Option(0, help="League index (0 for first league)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate trades without executing"),
-    max_trades: int = typer.Option(3, "--max-trades", help="Max trades per session"),
+    max_trades: int = typer.Option(5, "--max-trades", help="Max trades per session"),
     max_spend: int = typer.Option(50_000_000, "--max-spend", help="Max daily spend"),
+    aggressive: bool = typer.Option(
+        False, "--aggressive", help="Lower buy threshold by 5 and increase max spend by 50%"
+    ),
 ):
     """Run a single automated trading session (profit + lineup)"""
     from .auto_trader import AutoTrader
@@ -1148,7 +1269,17 @@ def auto(
         raise typer.Exit(code=1)
 
     league = leagues[league_index]
-    console.print(f"[cyan]Trading in league: {league.name}[/cyan]\n")
+    console.print(f"[cyan]Trading in league: {league.name}[/cyan]")
+
+    # Apply aggressive mode
+    if aggressive:
+        settings.min_value_score_to_buy = max(settings.min_value_score_to_buy - 5, 40)
+        max_spend = int(max_spend * 1.5)
+        console.print(
+            "[yellow]AGGRESSIVE MODE: Lowered buy threshold, increased spending limit[/yellow]"
+        )
+
+    console.print()
 
     # Run auto trader
     auto_trader = AutoTrader(
