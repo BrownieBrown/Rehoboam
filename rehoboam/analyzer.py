@@ -57,12 +57,12 @@ class FactorWeights:
     discount: float = 8.0  # Reduced: cheap players with 0 points are useless
 
     # Owned player weights
-    profit_target: float = 50.0  # Strong sell signal on profit target
-    stop_loss: float = 60.0  # Strongest sell signal
-    peak_decline: float = 40.0  # Strong sell on peak decline
-    poor_performance: float = 30.0  # Moderate sell on low value
+    profit_target: float = 40.0  # Sell signal on profit target
+    stop_loss: float = 40.0  # Sell signal on stop loss (scaled by magnitude)
+    peak_decline: float = 30.0  # Sell on peak decline
+    poor_performance: float = 25.0  # Moderate sell on low value
     best_eleven_protection: float = -25.0  # Keep players in best 11
-    difficult_schedule: float = 20.0  # Sell before tough fixtures
+    difficult_schedule: float = 15.0  # Sell before tough fixtures
 
 
 @dataclass
@@ -127,7 +127,7 @@ class MarketAnalyzer:
         # Decision thresholds (can be tuned)
         self.buy_threshold = max(min_value_score_to_buy, 50.0)  # Minimum 50 for buy recommendations
         self.hold_threshold = max(min_value_score_to_buy - 20, 20)
-        self.sell_threshold = 40  # For owned players
+        self.sell_threshold = 50  # For owned players (raised to require stronger conviction)
 
     def analyze_market_player(
         self,
@@ -202,15 +202,53 @@ class MarketAnalyzer:
         factors.append(base_factor)
         final_score += base_factor.score
 
-        # Factor 2: Trend analysis
+        # Factor 2: Trend analysis (pattern-aware scoring)
         trend = None
         trend_change_pct = None
-        if trend_data and trend_data.get("has_data") and trend_data.get("reference_value", 0) > 0:
+        if trend_data and trend_data.get("has_data"):
             trend = trend_data.get("trend", "unknown")
-            trend_change_pct = trend_data.get("change_pct", 0.0)
+            trend_change_pct = trend_data.get("trend_pct", 0.0)
+            range_position = trend_data.get("yearly_range_position", 0.5)
 
-            if trend == "rising" and trend_change_pct > 15:
-                # Strong upward trend
+            # Pattern-aware scoring using rich trend data
+            if trend_data.get("is_dip_in_uptrend"):
+                # Temporary dip in long-term uptrend — buying opportunity
+                trend_factor = ScoringFactor(
+                    name="Dip in Uptrend",
+                    raw_value=trend_change_pct,
+                    weight=1.0,
+                    score=5.0,
+                    description=f"Temporary dip ({trend_change_pct:+.1f}% 14d) in rising trend",
+                )
+                factors.append(trend_factor)
+                final_score += trend_factor.score
+
+            elif trend_data.get("is_secular_decline"):
+                # Long-term decline across all windows — avoid
+                trend_factor = ScoringFactor(
+                    name="Secular Decline",
+                    raw_value=trend_change_pct,
+                    weight=1.0,
+                    score=-15.0,
+                    description=f"Declining across all windows ({trend_change_pct:+.1f}% 14d)",
+                )
+                factors.append(trend_factor)
+                final_score += trend_factor.score
+
+            elif trend_data.get("is_recovery"):
+                # Recovering from lows — cautious positive signal
+                trend_factor = ScoringFactor(
+                    name="Recovery",
+                    raw_value=trend_change_pct,
+                    weight=1.0,
+                    score=4.0,
+                    description=f"Recovering: {trend_change_pct:+.1f}% 14d (still below avg)",
+                )
+                factors.append(trend_factor)
+                final_score += trend_factor.score
+
+            elif trend == "rising" and trend_change_pct > 15:
+                # Strong upward trend (retained)
                 trend_factor = ScoringFactor(
                     name="Rising Trend",
                     raw_value=trend_change_pct,
@@ -222,7 +260,7 @@ class MarketAnalyzer:
                 final_score += trend_factor.score
 
             elif trend == "falling" and trend_change_pct < -10:
-                # Strong downward trend - penalty
+                # Strong downward trend (retained)
                 trend_factor = ScoringFactor(
                     name="Falling Trend",
                     raw_value=trend_change_pct,
@@ -232,6 +270,50 @@ class MarketAnalyzer:
                 )
                 factors.append(trend_factor)
                 final_score += trend_factor.score
+
+            # Range position bonuses/penalties (prefer pattern flags over raw thresholds)
+            if trend_data.get("is_at_trough"):
+                range_factor = ScoringFactor(
+                    name="Near Yearly Low",
+                    raw_value=range_position,
+                    weight=1.0,
+                    score=3.0,
+                    description=f"Within 3% of yearly low ({range_position:.0%} of range)",
+                )
+                factors.append(range_factor)
+                final_score += range_factor.score
+            elif range_position < 0.2:
+                # Near yearly low — buying opportunity
+                range_factor = ScoringFactor(
+                    name="Near Yearly Low",
+                    raw_value=range_position,
+                    weight=1.0,
+                    score=5.0,
+                    description=f"At {range_position:.0%} of yearly range",
+                )
+                factors.append(range_factor)
+                final_score += range_factor.score
+            elif trend_data.get("is_at_peak"):
+                range_factor = ScoringFactor(
+                    name="Near Yearly High",
+                    raw_value=range_position,
+                    weight=1.0,
+                    score=-5.0,
+                    description=f"Within 3% of yearly high ({range_position:.0%} of range)",
+                )
+                factors.append(range_factor)
+                final_score += range_factor.score
+            elif range_position > 0.95:
+                # Near yearly high — risky to buy at peak
+                range_factor = ScoringFactor(
+                    name="Near Yearly High",
+                    raw_value=range_position,
+                    weight=1.0,
+                    score=-5.0,
+                    description=f"At {range_position:.0%} of yearly range (peak risk)",
+                )
+                factors.append(range_factor)
+                final_score += range_factor.score
 
         # Factor 3: Matchup bonus
         matchup_bonus_points = 0
@@ -384,15 +466,22 @@ class MarketAnalyzer:
         # Don't recommend buying just to recommend something - only genuinely good opportunities
         if final_score >= self.buy_threshold:
             # Additional quality checks for BUY recommendation
-            trend_check = True
-            if trend_change_pct is not None:
-                # TIGHTENED: Reject falling players more aggressively
-                # Any decline > 5% is a red flag
-                if trend_change_pct < -5:
+            # If trend data exists, use it. If missing (new KICKBASE listing with
+            # no history), allow high-scoring players through — they're fresh listings
+            # at market value, not falling players we can't see.
+            if trend_data and trend_data.get("has_data"):
+                trend_check = True
+                if trend_data.get("is_secular_decline"):
                     trend_check = False
-                # For slight decline (-5 to 0), require high score
-                elif trend_change_pct < 0 and final_score < 70:
+                elif trend_data.get("is_dip_in_uptrend"):
+                    trend_check = True  # Dips in uptrends are buying opportunities
+                elif trend_change_pct is not None and trend_change_pct < -5:
                     trend_check = False
+                elif trend_change_pct is not None and trend_change_pct < 0 and final_score < 70:
+                    trend_check = False
+            else:
+                # No trend data — allow if score is strong (new listing), block if marginal
+                trend_check = final_score >= 70
 
             # Base value check - player must have decent fundamentals
             base_value_check = base_value_score >= 50.0  # Raised for quality-first strategy
@@ -549,6 +638,7 @@ class MarketAnalyzer:
         matchup_context: dict | None = None,
         peak_analysis: dict | None = None,
         is_in_best_eleven: bool = False,
+        days_held: int | None = None,
     ) -> PlayerAnalysis:
         """Analyze a player you own for selling opportunity using factor-based scoring"""
         current_value = player.market_value
@@ -570,43 +660,60 @@ class MarketAnalyzer:
         factors = []
         sell_score = 0.0
 
-        # Factor 1: Profit target reached (strong sell signal)
+        # Factor 1: Profit target reached (sell signal, scaled by profit magnitude)
         # Keep high-performing players (avg_points > 40) unless profit > 40%
         is_high_performer = player.average_points > 40
         effective_profit_threshold = 40.0 if is_high_performer else 25.0
         if profit_pct >= effective_profit_threshold:
+            # Scale: 25% profit = 60% of weight, 50%+ profit = 100% of weight
+            profit_magnitude = min((profit_pct - effective_profit_threshold) / 25.0, 1.0)
+            scaled_score = self.weights.profit_target * (0.6 + 0.4 * profit_magnitude)
             profit_factor = ScoringFactor(
                 name="Profit Target",
                 raw_value=profit_pct,
                 weight=self.weights.profit_target,
-                score=self.weights.profit_target,
+                score=scaled_score,
                 description=f"Hit profit target: {profit_pct:.1f}% gain",
             )
             factors.append(profit_factor)
             sell_score += profit_factor.score
 
-        # Factor 2: Stop-loss triggered (strongest sell signal)
-        if profit_pct <= self.max_loss_pct:
+        # Factor 2: Stop-loss (scaled by loss magnitude, with noise buffer)
+        # Losses under 5% are normal daily fluctuation — no sell signal
+        # Beyond 5%, scale proportionally up to and past max_loss_pct
+        noise_buffer_pct = -5.0  # Losses within 5% are market noise
+        if profit_pct <= noise_buffer_pct:
+            # Scale from noise_buffer to max_loss_pct and beyond:
+            # At noise_buffer (-5%):   score = 30% of weight (mild signal)
+            # At max_loss_pct (-15%):  score = 100% of weight (strong, needs 1 more factor)
+            # At 2x max_loss (-25%+):  score = 170% of weight (sells on its own)
+            loss_range = abs(self.max_loss_pct - noise_buffer_pct)  # e.g., 10
+            loss_depth = abs(profit_pct - noise_buffer_pct)  # how far past buffer
+            loss_magnitude = min(loss_depth / max(loss_range, 1.0), 2.0)  # cap at 2x
+            scaled_score = self.weights.stop_loss * (0.3 + 0.7 * loss_magnitude)
             loss_factor = ScoringFactor(
                 name="Stop Loss",
                 raw_value=profit_pct,
                 weight=self.weights.stop_loss,
-                score=self.weights.stop_loss,
+                score=scaled_score,
                 description=f"Cut losses: {profit_pct:.1f}% down",
             )
             factors.append(loss_factor)
             sell_score += loss_factor.score
 
-        # Factor 3: Peaked and declining
+        # Factor 3: Peaked and declining (scaled by decline magnitude)
         if peak_analysis and peak_analysis.get("is_declining"):
             decline_pct = peak_analysis.get("decline_from_peak_pct", 0)
             days_since = peak_analysis.get("days_since_peak", 0)
 
+            # Scale: 5% decline = 40% of weight, 20%+ decline = 100%
+            decline_magnitude = min(max(decline_pct - 5, 0) / 15.0, 1.0)
+            scaled_score = self.weights.peak_decline * (0.4 + 0.6 * decline_magnitude)
             peak_factor = ScoringFactor(
                 name="Peak Decline",
                 raw_value=decline_pct,
                 weight=self.weights.peak_decline,
-                score=self.weights.peak_decline,
+                score=scaled_score,
                 description=f"Value peaked, down {decline_pct:.1f}% over {days_since}d",
             )
             factors.append(peak_factor)
@@ -653,23 +760,82 @@ class MarketAnalyzer:
                     factors.append(schedule_factor)
                     sell_score += schedule_factor.score
 
-        # Factor 6: Falling trend (if at profit)
+        # Factor 6: Trend-based sell signals (pattern-aware)
         trend = None
         trend_change_pct = None
         if trend_data and trend_data.get("has_data"):
             trend = trend_data.get("trend", "unknown")
-            trend_change_pct = trend_data.get("change_pct", 0)
+            trend_change_pct = trend_data.get("trend_pct", 0)
 
-            if trend in ["falling", "strongly falling"] and profit_pct > 5:
+            if trend_data.get("is_secular_decline"):
+                if profit_pct > 0:
+                    # Secular decline + profit = strong sell (take profit)
+                    trend_factor = ScoringFactor(
+                        name="Secular Decline",
+                        raw_value=trend_change_pct,
+                        weight=1.0,
+                        score=20.0,
+                        description=f"Long-term decline ({trend_change_pct:+.1f}%) - take profit",
+                    )
+                else:
+                    # Secular decline + loss = accelerate stop-loss
+                    loss_severity = min(abs(profit_pct) / 15.0, 1.0)
+                    score = 15.0 + 10.0 * loss_severity
+                    trend_factor = ScoringFactor(
+                        name="Secular Decline",
+                        raw_value=trend_change_pct,
+                        weight=1.0,
+                        score=score,
+                        description=f"Long-term decline ({trend_change_pct:+.1f}%) at {profit_pct:+.1f}% loss",
+                    )
+                factors.append(trend_factor)
+                sell_score += trend_factor.score
+
+            elif trend_data.get("is_dip_in_uptrend") and profit_pct < 0:
+                # Dip in uptrend + any loss = hold signal (counter sell pressure)
                 trend_factor = ScoringFactor(
-                    name="Falling Trend",
+                    name="Dip in Uptrend",
                     raw_value=trend_change_pct,
-                    weight=15.0,  # Moderate signal
-                    score=15.0,
-                    description=f"Declining {trend_change_pct:.1f}% - lock in profit",
+                    weight=1.0,
+                    score=-10.0,
+                    description="Temporary dip in rising trend - hold for recovery",
                 )
                 factors.append(trend_factor)
                 sell_score += trend_factor.score
+
+            elif trend in ["falling", "strongly falling"]:
+                if profit_pct > 5:
+                    # Falling + good profit = lock in profit
+                    trend_factor = ScoringFactor(
+                        name="Falling Trend",
+                        raw_value=trend_change_pct,
+                        weight=15.0,
+                        score=15.0,
+                        description=f"Declining {trend_change_pct:.1f}% - lock in profit",
+                    )
+                else:
+                    # Falling at low/no profit = mild sell signal
+                    trend_factor = ScoringFactor(
+                        name="Falling Trend",
+                        raw_value=trend_change_pct,
+                        weight=1.0,
+                        score=8.0,
+                        description=f"Declining {trend_change_pct:.1f}% - trend weakening",
+                    )
+                factors.append(trend_factor)
+                sell_score += trend_factor.score
+
+        # Factor 6b: Peak take-profit signal
+        if trend_data and trend_data.get("is_at_peak") and profit_pct > 5:
+            peak_factor = ScoringFactor(
+                name="At Peak",
+                raw_value=profit_pct,
+                weight=1.0,
+                score=10.0,
+                description=f"Near yearly high with {profit_pct:.1f}% profit - take profit",
+            )
+            factors.append(peak_factor)
+            sell_score += peak_factor.score
 
         # Factor 7: Best 11 protection (negative signal - keep them!)
         if is_in_best_eleven:
@@ -684,6 +850,22 @@ class MarketAnalyzer:
                 )
                 factors.append(protection_factor)
                 sell_score += protection_factor.score
+
+        # Factor 8: Holding period protection (recently bought = don't sell yet)
+        min_holding_days = 7
+        if days_held is not None and days_held < min_holding_days:
+            # Protection fades linearly: strongest at day 0, gone at min_holding_days
+            protection_strength = 1.0 - (days_held / min_holding_days)
+            protection_score = -40 * protection_strength
+            hold_factor = ScoringFactor(
+                name="Recent Purchase",
+                raw_value=float(days_held),
+                weight=40.0,
+                score=protection_score,
+                description=f"Bought {days_held}d ago (hold {min_holding_days}d min)",
+            )
+            factors.append(hold_factor)
+            sell_score += hold_factor.score
 
         # Clamp sell score
         sell_score = max(0, sell_score)
@@ -918,14 +1100,18 @@ class MarketAnalyzer:
                     if sos_data:
                         sos_rating = sos_data.short_term_rating
 
-            # Extract trend data
+            # Extract trend data (supports both rich TrendService dicts and legacy)
             trend = None
             trend_change_pct = 0.0
+            is_dip_in_uptrend = False
+            is_secular_decline = False
             if player_trend_data:
                 trend_data = player_trend_data.get(player.id, {})
                 if trend_data.get("has_data"):
                     trend = trend_data.get("trend", "unknown")
-                    trend_change_pct = trend_data.get("change_pct", 0.0)
+                    trend_change_pct = trend_data.get("trend_pct", 0.0)
+                    is_dip_in_uptrend = trend_data.get("is_dip_in_uptrend", False)
+                    is_secular_decline = trend_data.get("is_secular_decline", False)
 
             # Get team league position
             team_pos = None
@@ -957,20 +1143,31 @@ class MarketAnalyzer:
                 elif team_pos <= 4:  # Top 4
                     expendability -= 10
 
-            # EXPENDABILITY BASED ON P/L (with recovery prediction for losses)
+            # EXPENDABILITY BASED ON P/L (with pattern-aware recovery prediction)
             recovery_signal = None
 
             if profit_loss_pct < -20:
-                # Big loss - check if recovery is possible
-                if trend in ["rising", "stable"]:
-                    # Value recovering - consider holding
-                    expendability += 10  # Still elevated but less urgent
+                # Big loss - check if recovery is possible using patterns
+                if is_dip_in_uptrend:
+                    expendability += 5  # Dip in uptrend = likely recovery
+                    recovery_signal = "HOLD"
+                elif is_secular_decline:
+                    expendability += 30  # Secular decline = cut losses immediately
+                    recovery_signal = "CUT"
+                elif trend in ["rising", "stable"]:
+                    expendability += 10  # Value recovering - consider holding
                     recovery_signal = "HOLD"
                 else:
                     expendability += 25  # Big loss + declining = sell
                     recovery_signal = "CUT"
             elif profit_loss_pct < -10:
-                if trend == "rising":
+                if is_dip_in_uptrend:
+                    expendability += 3  # Dip in uptrend = recovery likely
+                    recovery_signal = "HOLD"
+                elif is_secular_decline:
+                    expendability += 25  # Secular decline = sell
+                    recovery_signal = "CUT"
+                elif trend == "rising":
                     expendability += 5  # Moderate loss but recovering
                     recovery_signal = "HOLD"
                 elif trend == "falling" and trend_change_pct < -5:
@@ -979,8 +1176,14 @@ class MarketAnalyzer:
                 else:
                     expendability += 15
             elif profit_loss_pct < 0:
-                # Small loss - factor in trend and schedule for recovery prediction
-                if trend == "rising":
+                # Small loss - factor in pattern, trend, and schedule for recovery
+                if is_dip_in_uptrend:
+                    expendability += 0  # Dip = recovery expected
+                    recovery_signal = "HOLD"
+                elif is_secular_decline:
+                    expendability += 18  # Secular decline = sell even at small loss
+                    recovery_signal = "CUT"
+                elif trend == "rising":
                     expendability += 0  # Neutral - recovery likely
                     recovery_signal = "HOLD"
                 elif trend == "falling" and trend_change_pct < -10:

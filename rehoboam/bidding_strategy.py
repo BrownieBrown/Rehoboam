@@ -28,11 +28,11 @@ class SmartBidding:
 
     def __init__(
         self,
-        default_overbid_pct: float = 10.0,  # Default overbid % (increased from 5%)
-        max_overbid_pct: float = 25.0,  # Never exceed this overbid (increased from 15%)
+        default_overbid_pct: float = 5.0,  # Default overbid % (reduced to avoid overpaying)
+        max_overbid_pct: float = 20.0,  # Never exceed this overbid
         high_value_threshold: float = 70.0,  # Value score for aggressive bidding
         elite_player_threshold: float = 70.0,  # Avg points for elite status
-        elite_max_overbid_pct: float = 40.0,  # Can bid more for elite long-term holds (increased from 30%)
+        elite_max_overbid_pct: float = 30.0,  # Can bid more for elite long-term holds
         min_bid_increment: int = 1000,  # Minimum bid increment (€1k)
         bid_learner: Optional["BidLearner"] = None,  # Optional learning from past auctions
         activity_feed_learner: Optional[
@@ -63,6 +63,7 @@ class SmartBidding:
         is_long_term_hold: bool = False,
         player_id: str | None = None,  # For activity feed learning
         roster_impact: float = 0.0,  # Roster impact score for tier classification
+        trend_change_pct: float | None = None,  # Market value trend (negative = falling)
     ) -> BidRecommendation:
         """
         Calculate optimal bid for a player with value-bounded learning
@@ -163,6 +164,21 @@ class SmartBidding:
         # Apply league competitive intelligence
         overbid_pct += league_competitive_level
         overbid_pct += demand_adjustment
+
+        # Trend-based overbid adjustment — don't overbid aggressively on falling players
+        if trend_change_pct is not None:
+            if trend_change_pct < -10:
+                overbid_pct *= 0.3  # Strongly falling: slash overbid to 30%
+            elif trend_change_pct < -5:
+                overbid_pct *= 0.5  # Falling: halve overbid
+            elif trend_change_pct < 0:
+                overbid_pct *= 0.75  # Slight decline: reduce by 25%
+        else:
+            overbid_pct *= 0.6  # Unknown trend: conservative
+
+        # FINAL cap (after ALL adjustments including league + demand + trend)
+        max_overbid = self.elite_max_overbid_pct if is_elite else self.max_overbid_pct
+        overbid_pct = min(overbid_pct, max_overbid)
 
         # Calculate raw bid amount
         overbid_amount = int(asking_price * (overbid_pct / 100))
@@ -287,9 +303,9 @@ class SmartBidding:
         # Tier-based bidding adjustments (based on value + roster impact)
         # Anchor players = must win, tactical players = don't overpay
         tier_bonuses = {
-            "anchor": 12.0,  # Aggressive - must win
-            "strong": 8.0,  # Solid bid
-            "tactical": 3.0,  # Conservative
+            "anchor": 8.0,  # Aggressive - must win
+            "strong": 5.0,  # Solid bid
+            "tactical": 2.0,  # Conservative
             "opportunistic": 0.0,  # Minimum viable
         }
         overbid += tier_bonuses.get(player_tier, 0.0)

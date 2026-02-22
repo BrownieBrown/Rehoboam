@@ -62,6 +62,17 @@ class CompactDisplay:
         console.print("[bold cyan]🎯  ACTION PLAN[/bold cyan]")
         console.print("═" * 80)
 
+        # Budget negative warning — ZERO POINTS penalty at kickoff
+        if current_budget < 0:
+            deficit = abs(current_budget)
+            console.print(
+                f"\n[bold red on white]"
+                f" 🚨 BUDGET NEGATIVE (-€{deficit / 1_000_000:.1f}M)"
+                f" — ZERO POINTS AT KICKOFF IF NOT FIXED! "
+                f"[/bold red on white]"
+            )
+            console.print("[red]→ Sell recommendations below to recover budget[/red]\n")
+
         # Position needs indicator
         position_needs = squad_summary.get("position_needs")
         if position_needs:
@@ -85,6 +96,7 @@ class CompactDisplay:
         console.print()
 
         # BUY NOW Section
+        trade_pairs = []
         if buy_opportunities:
             if is_emergency:
                 console.print(
@@ -93,6 +105,11 @@ class CompactDisplay:
                 console.print(
                     f"[yellow]Squad critically low ({squad_size}/11) - relaxed quality standards to fill roster[/yellow]\n"
                 )
+            elif squad_size >= 15:
+                console.print(
+                    f"[bold green]🔄 TRADE MOVES ({len(buy_opportunities[:5])} swaps)[/bold green]"
+                )
+                console.print("[dim]Squad full (15/15) — sell first, then buy[/dim]\n")
             else:
                 console.print(
                     f"[bold green]🟢 BUY NOW ({len(buy_opportunities)} opportunities)[/bold green]"
@@ -100,7 +117,11 @@ class CompactDisplay:
                 console.print(
                     "[dim]Rising/stable, healthy, only very difficult schedules filtered out[/dim]\n"
                 )
-            self._display_buy_table(buy_opportunities[: 8 if is_emergency else 5])
+            if squad_size >= 15 and not is_emergency:
+                trade_pairs = self._build_trade_pairs(buy_opportunities[:5], sell_candidates or [])
+                self._display_trade_table(trade_pairs)
+            else:
+                self._display_buy_table(buy_opportunities[: 8 if is_emergency else 5])
         else:
             if is_emergency:
                 console.print(
@@ -130,25 +151,49 @@ class CompactDisplay:
 
         # Budget summary after buy recommendations
         if buy_opportunities and current_budget != 0:
-            displayed = buy_opportunities[: 8 if is_emergency else 5]
-            cumulative_cost = 0
-            for analysis in displayed:
-                if self.bidding:
-                    bid_rec = self.bidding.calculate_bid(
-                        asking_price=analysis.current_price,
-                        market_value=analysis.market_value,
-                        value_score=analysis.value_score,
-                        confidence=analysis.confidence,
-                        player_id=analysis.player.id,
-                    )
-                    cumulative_cost += bid_rec.recommended_bid
-                else:
-                    cumulative_cost += analysis.current_price
-            remaining = current_budget - cumulative_cost
-            console.print(
-                f"\n[dim]Budget if buying all {len(displayed)}: €{remaining / 1_000_000:+.1f}M remaining "
-                f"(spending €{cumulative_cost / 1_000_000:.1f}M)[/dim]"
-            )
+            if squad_size >= 15 and not is_emergency:
+                # Trade mode: show net spend accounting for sell proceeds
+                total_net = 0
+                for pair in trade_pairs:
+                    analysis = pair["buy"]
+                    if self.bidding:
+                        bid_rec = self.bidding.calculate_bid(
+                            asking_price=analysis.current_price,
+                            market_value=analysis.market_value,
+                            value_score=analysis.value_score,
+                            confidence=analysis.confidence,
+                            player_id=analysis.player.id,
+                        )
+                        bid_amount = bid_rec.recommended_bid
+                    else:
+                        bid_amount = analysis.current_price
+                    total_net += bid_amount - pair["sell_value"]
+                remaining = current_budget - total_net
+                console.print(
+                    f"\n[dim]Net spend for all {len(trade_pairs)} trades: "
+                    f"€{total_net / 1_000_000:.1f}M | "
+                    f"Budget after: €{remaining / 1_000_000:+.1f}M[/dim]"
+                )
+            else:
+                displayed = buy_opportunities[: 8 if is_emergency else 5]
+                cumulative_cost = 0
+                for analysis in displayed:
+                    if self.bidding:
+                        bid_rec = self.bidding.calculate_bid(
+                            asking_price=analysis.current_price,
+                            market_value=analysis.market_value,
+                            value_score=analysis.value_score,
+                            confidence=analysis.confidence,
+                            player_id=analysis.player.id,
+                        )
+                        cumulative_cost += bid_rec.recommended_bid
+                    else:
+                        cumulative_cost += analysis.current_price
+                remaining = current_budget - cumulative_cost
+                console.print(
+                    f"\n[dim]Budget if buying all {len(displayed)}: €{remaining / 1_000_000:+.1f}M remaining "
+                    f"(spending €{cumulative_cost / 1_000_000:.1f}M)[/dim]"
+                )
 
         # WATCHLIST Section (near-threshold players)
         if watchlist:
@@ -288,76 +333,7 @@ class CompactDisplay:
                 else:
                     impact_str = "[dim]= depth[/dim]"
 
-            # Compact reason - extract key points
-            reason_parts = []
-
-            # Trend is most important - show it first
-            if analysis.trend and analysis.trend_change_pct:
-                if "rising" in analysis.trend.lower():
-                    if analysis.trend_change_pct > 15:
-                        reason_parts.append(f"🚀 +{analysis.trend_change_pct:.0f}%")
-                    elif analysis.trend_change_pct > 5:
-                        reason_parts.append(f"↗ +{analysis.trend_change_pct:.0f}%")
-                    else:
-                        reason_parts.append(f"↗ +{analysis.trend_change_pct:.0f}%")
-                elif "falling" in analysis.trend.lower():
-                    # Falling players should be rare now, but mark them clearly
-                    reason_parts.append(f"⚠️ {analysis.trend_change_pct:.0f}%")
-            elif analysis.trend_change_pct is not None and abs(analysis.trend_change_pct) >= 3:
-                # Show trend even without explicit trend label
-                if analysis.trend_change_pct > 0:
-                    reason_parts.append(f"↗ +{analysis.trend_change_pct:.0f}%")
-                else:
-                    reason_parts.append(f"↘ {analysis.trend_change_pct:.0f}%")
-
-            # Add market discount if significant
-            if analysis.value_change_pct >= 15:
-                reason_parts.append(f"Cheap {analysis.value_change_pct:+.0f}%")
-
-            # Add meaningful factors (skip "Base Value" - that's implicit)
-            if hasattr(analysis, "factors") and analysis.factors:
-                for factor in analysis.factors:
-                    # Skip base value - we want to show WHY they're good
-                    if "Base Value" in factor.name:
-                        continue
-                    if abs(factor.score) > 8:  # Lower threshold to catch more factors
-                        # Shorten and clean up factor names
-                        factor_name = (
-                            factor.name.replace("Schedule Strength", "SOS")
-                            .replace("Form Trajectory", "Form")
-                            .replace("Rising Trend", "Rising")
-                            .replace("Falling Trend", "Falling")
-                            .replace("Market Discount", "Discount")
-                        )
-                        reason_parts.append(factor_name)
-                        break
-
-            # Show performance metrics if no other reasons
-            if not reason_parts:
-                if analysis.points_per_million >= 10:
-                    reason_parts.append(f"{analysis.points_per_million:.1f} pts/M€")
-                elif analysis.average_points >= 50:
-                    reason_parts.append(f"{analysis.average_points:.0f} avg pts")
-
-            # Add demand signal from metadata
-            demand_score = 0
-            if hasattr(analysis, "metadata") and analysis.metadata:
-                demand_score = analysis.metadata.get("demand_score", 0)
-            if demand_score >= 70:
-                reason_parts.append("Hot")
-            elif demand_score >= 50:
-                reason_parts.append("In demand")
-
-            # Add timing hint based on schedule
-            sos_rating_val = None
-            if hasattr(analysis, "metadata") and analysis.metadata:
-                sos_rating_val = analysis.metadata.get("sos_rating")
-            if sos_rating_val in ["Very Easy", "Easy"]:
-                reason_parts.append("Buy now")
-            elif sos_rating_val in ["Difficult"] and analysis.value_score >= 60:
-                reason_parts.append("Wait for dip?")
-
-            reason = " | ".join(reason_parts[:3]) if reason_parts else "High value"
+            reason = self._build_compact_reason(analysis)
 
             # 7d prediction from metadata
             pred_str = "[dim]-[/dim]"
@@ -375,6 +351,207 @@ class CompactDisplay:
                 pred_str,
                 impact_str,
                 sos_indicator,
+                reason,
+            )
+
+        console.print(table)
+
+    def _build_compact_reason(self, analysis) -> str:
+        """Build a compact reason string for a buy recommendation."""
+        reason_parts = []
+
+        # Trend is most important - show it first
+        if analysis.trend and analysis.trend_change_pct:
+            if "rising" in analysis.trend.lower():
+                if analysis.trend_change_pct > 15:
+                    reason_parts.append(f"🚀 +{analysis.trend_change_pct:.0f}%")
+                elif analysis.trend_change_pct > 5:
+                    reason_parts.append(f"↗ +{analysis.trend_change_pct:.0f}%")
+                else:
+                    reason_parts.append(f"↗ +{analysis.trend_change_pct:.0f}%")
+            elif "falling" in analysis.trend.lower():
+                reason_parts.append(f"⚠️ {analysis.trend_change_pct:.0f}%")
+        elif analysis.trend_change_pct is not None and abs(analysis.trend_change_pct) >= 3:
+            if analysis.trend_change_pct > 0:
+                reason_parts.append(f"↗ +{analysis.trend_change_pct:.0f}%")
+            else:
+                reason_parts.append(f"↘ {analysis.trend_change_pct:.0f}%")
+
+        # Add market discount if significant
+        if analysis.value_change_pct >= 15:
+            reason_parts.append(f"Cheap {analysis.value_change_pct:+.0f}%")
+
+        # Add meaningful factors (skip "Base Value" - that's implicit)
+        if hasattr(analysis, "factors") and analysis.factors:
+            for factor in analysis.factors:
+                if "Base Value" in factor.name:
+                    continue
+                if abs(factor.score) > 8:
+                    factor_name = (
+                        factor.name.replace("Schedule Strength", "SOS")
+                        .replace("Form Trajectory", "Form")
+                        .replace("Rising Trend", "Rising")
+                        .replace("Falling Trend", "Falling")
+                        .replace("Market Discount", "Discount")
+                    )
+                    reason_parts.append(factor_name)
+                    break
+
+        # Show performance metrics if no other reasons
+        if not reason_parts:
+            if analysis.points_per_million >= 10:
+                reason_parts.append(f"{analysis.points_per_million:.1f} pts/M€")
+            elif analysis.average_points >= 50:
+                reason_parts.append(f"{analysis.average_points:.0f} avg pts")
+
+        # Add demand signal from metadata
+        demand_score = 0
+        if hasattr(analysis, "metadata") and analysis.metadata:
+            demand_score = analysis.metadata.get("demand_score", 0)
+        if demand_score >= 70:
+            reason_parts.append("Hot")
+        elif demand_score >= 50:
+            reason_parts.append("In demand")
+
+        # Add timing hint based on schedule
+        sos_rating_val = None
+        if hasattr(analysis, "metadata") and analysis.metadata:
+            sos_rating_val = analysis.metadata.get("sos_rating")
+        if sos_rating_val in ["Very Easy", "Easy"]:
+            reason_parts.append("Buy now")
+        elif sos_rating_val in ["Difficult"] and analysis.value_score >= 60:
+            reason_parts.append("Wait for dip?")
+
+        return " | ".join(reason_parts[:3]) if reason_parts else "High value"
+
+    def _build_trade_pairs(self, opportunities, sell_candidates):
+        """Pair each buy with a sell when squad is full."""
+        pairs = []
+        used_sell_ids = set()
+
+        for analysis in opportunities:
+            sell_name = None
+            sell_value = 0
+            sell_candidate = None
+
+            # Case 1: "upgrade" — natural swap from roster_impact
+            if (
+                analysis.roster_impact
+                and analysis.roster_impact.impact_type == "upgrade"
+                and analysis.roster_impact.replaces_player
+            ):
+                sell_name = analysis.roster_impact.replaces_player
+                sell_value = analysis.current_price - analysis.roster_impact.net_cost
+                # Find matching SellCandidate for protection info
+                for c in sell_candidates:
+                    full = f"{c.player.first_name} {c.player.last_name}"
+                    if (
+                        c.player.last_name in sell_name or full == sell_name
+                    ) and c.player.id not in used_sell_ids:
+                        sell_candidate = c
+                        sell_value = c.market_value
+                        break
+
+            # Case 2: no natural swap — pick most expendable non-protected
+            if sell_candidate is None:
+                for c in sell_candidates:
+                    if not c.is_protected and c.player.id not in used_sell_ids:
+                        sell_candidate = c
+                        sell_name = c.player.last_name
+                        sell_value = c.market_value
+                        break
+
+            if sell_candidate:
+                used_sell_ids.add(sell_candidate.player.id)
+
+            pairs.append(
+                {
+                    "buy": analysis,
+                    "sell_name": sell_name,
+                    "sell_value": sell_value,
+                    "sell_protected": (sell_candidate.is_protected if sell_candidate else False),
+                }
+            )
+        return pairs
+
+    def _display_trade_table(self, pairs):
+        """Display trade moves table (sell -> buy) when squad is full."""
+        table = Table(show_header=True, header_style="bold green", box=None)
+        table.add_column("Sell", style="red", no_wrap=True, width=14)
+        table.add_column("", style="dim", width=2)
+        table.add_column("Buy", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("Smart Bid", justify="right", style="yellow")
+        table.add_column("Score", justify="right", style="magenta", width=5)
+        table.add_column("Net", justify="right", width=8)
+        table.add_column("Why", style="dim")
+
+        for pair in pairs:
+            analysis = pair["buy"]
+            player = analysis.player
+            name = f"{player.first_name} {player.last_name}"
+
+            # NEW badge for fresh listings (< 24h)
+            if hasattr(player, "listed_at") and player.listed_at:
+                try:
+                    from datetime import datetime
+
+                    listed_dt = datetime.fromisoformat(player.listed_at.replace("Z", "+00:00"))
+                    hours_listed = (
+                        datetime.now(listed_dt.tzinfo) - listed_dt
+                    ).total_seconds() / 3600
+                    if hours_listed < 24:
+                        name = f"🆕 {name}"
+                except Exception:
+                    pass
+
+            # Calculate smart bid
+            if self.bidding:
+                bid_rec = self.bidding.calculate_bid(
+                    asking_price=analysis.current_price,
+                    market_value=analysis.market_value,
+                    value_score=analysis.value_score,
+                    confidence=analysis.confidence,
+                    player_id=player.id,
+                )
+                bid_amount = bid_rec.recommended_bid
+                bid_str = f"€{bid_amount:,}\n+{bid_rec.overbid_pct:.0f}%"
+            else:
+                bid_amount = analysis.current_price
+                bid_str = f"€{bid_amount:,}"
+
+            # Sell column
+            sell_name = pair["sell_name"]
+            sell_value = pair["sell_value"]
+            if sell_name:
+                # Show last name only + value on second line
+                short_sell = sell_name.split()[-1] if sell_name else "?"
+                sell_str = f"{short_sell}\n(€{sell_value / 1_000_000:.1f}M)"
+            else:
+                sell_str = "[yellow]⚠️ No sell[/yellow]"
+
+            # Net cost
+            net = bid_amount - sell_value
+            if net <= 0:
+                net_str = f"[green]€{net / 1_000_000:+.1f}M[/green]"
+            else:
+                net_str = f"[red]€{net / 1_000_000:+.1f}M[/red]"
+
+            # Reason
+            reason = self._build_compact_reason(analysis)
+
+            # Upgrade annotation
+            if analysis.roster_impact and analysis.roster_impact.impact_type == "upgrade":
+                reason += f" | Upgrade +{analysis.roster_impact.value_score_gain:.0f}"
+
+            table.add_row(
+                sell_str,
+                "→",
+                name,
+                player.position[:2],
+                bid_str,
+                f"{analysis.value_score:.0f}",
+                net_str,
                 reason,
             )
 
@@ -551,25 +728,40 @@ class CompactDisplay:
         console.print(f"[bold]Team Value:[/bold] €{team_value/1_000_000:.0f}M", end=" | ")
         console.print(f"[bold]Can Spend:[/bold] €{available/1_000_000:.1f}M")
 
-        console.print(f"\n[bold]Best 11:[/bold] {best_11_strength:.0f} pts/week", end=" | ")
+        console.print(
+            f"\n[bold]Best 11:[/bold] {best_11_strength:.0f} exp pts (next matchday)",
+            end=" | ",
+        )
         console.print(f"[bold]Bench:[/bold] {sell_count} SELL, {hold_count} HOLD")
 
         # Display best 11 lineup if available
         best_eleven = summary.get("best_eleven")
         player_values = summary.get("player_values", {})
+        ep_map = summary.get("ep_map", {})
+        dgw_player_ids = summary.get("dgw_player_ids", set())
         if best_eleven:
-            self._display_best_eleven(best_eleven, player_values)
+            self._display_best_eleven(best_eleven, player_values, ep_map, dgw_player_ids)
 
-    def _display_best_eleven(self, best_eleven: list, player_values: dict):
-        """Display the best 11 starting lineup"""
+    def _display_best_eleven(
+        self,
+        best_eleven: list,
+        player_values: dict,
+        ep_map: dict | None = None,
+        dgw_player_ids: set | None = None,
+    ):
+        """Display the best 11 starting lineup with expected points and DGW badges"""
         console.print("\n[bold]⭐ BEST 11 STARTING LINEUP[/bold]\n")
+
+        ep_map = ep_map or {}
+        dgw_player_ids = dgw_player_ids or set()
 
         table = Table(show_header=True, header_style="bold cyan", box=None)
         table.add_column("Player", style="cyan", no_wrap=True)
         table.add_column("Pos", style="blue", width=3)
-        table.add_column("Value", justify="right", style="yellow")
-        table.add_column("Avg Pts", justify="right", style="green")
-        table.add_column("Score", justify="right", style="magenta")
+        table.add_column("Avg Pts", justify="right", style="yellow", width=7)
+        table.add_column("Exp Pts", justify="right", style="green", width=7)
+        table.add_column("Lineup", justify="center", width=8)
+        table.add_column("Notes", style="dim")
 
         # Sort by position for display (GK, DEF, MID, FWD)
         position_order = {"Goalkeeper": 0, "Defender": 1, "Midfielder": 2, "Forward": 3}
@@ -577,13 +769,41 @@ class CompactDisplay:
 
         for player in sorted_eleven:
             name = f"{player.first_name} {player.last_name}"
-            value_score = player_values.get(player.id, 0)
+
+            # DGW badge
+            if player.id in dgw_player_ids:
+                name = f"2x {name}"
+
+            ep = ep_map.get(player.id)
+            if ep:
+                exp_pts_str = f"{ep.expected_points:.0f}"
+
+                # Lineup probability display
+                prob = ep.lineup_probability
+                if prob == 1:
+                    lineup_str = "[green]Starter[/green]"
+                elif prob == 2:
+                    lineup_str = "[yellow]Rotation[/yellow]"
+                elif prob == 3:
+                    lineup_str = "[yellow]Bench[/yellow]"
+                elif prob is not None and prob >= 4:
+                    lineup_str = "[red]Unlikely[/red]"
+                else:
+                    lineup_str = "[dim]-[/dim]"
+
+                notes = " | ".join(ep.notes[:3]) if ep.notes else ""
+            else:
+                exp_pts_str = "[dim]-[/dim]"
+                lineup_str = "[dim]-[/dim]"
+                notes = ""
+
             table.add_row(
                 name,
                 player.position[:2],
-                f"€{player.market_value / 1_000_000:.1f}M",
                 f"{player.average_points:.0f}",
-                f"{value_score:.0f}",
+                exp_pts_str,
+                lineup_str,
+                notes,
             )
 
         console.print(table)

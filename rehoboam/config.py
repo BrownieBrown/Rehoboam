@@ -56,8 +56,8 @@ class Settings(BaseSettings):
         description="Minimum profit percentage to trigger a sell (raised to keep winners longer)",
     )
     max_loss_pct: float = Field(
-        default=-8.0,
-        description="Maximum loss percentage before triggering sell (relaxed to avoid panic selling)",
+        default=-15.0,
+        description="Maximum loss percentage before triggering sell (relaxed — daily fluctuations of 3-10% are normal)",
     )
     min_buy_value_increase_pct: float = Field(
         default=10.0,

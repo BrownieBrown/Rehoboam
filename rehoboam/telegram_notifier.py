@@ -104,8 +104,8 @@ class TelegramNotifier:
         self,
         buy_analyses: list[PlayerAnalysis],
         sell_candidates: list[SellCandidate] | None,
-        squad_summary: SquadSummary | None,
         league_name: str,
+        trade_results: list | None = None,
     ) -> str:
         """
         Format a daily digest message for Telegram.
@@ -113,8 +113,8 @@ class TelegramNotifier:
         Args:
             buy_analyses: List of BUY recommendations
             sell_candidates: List of SELL recommendations (optional)
-            squad_summary: Squad summary data (optional)
             league_name: Name of the league
+            trade_results: List of AutoTradeResult from the session (optional)
 
         Returns:
             Formatted message string (MarkdownV2)
@@ -126,6 +126,22 @@ class TelegramNotifier:
         lines.append("*REHOBOAM DAILY DIGEST*")
         lines.append(f"_{self._escape_markdown(date_str)} | {self._escape_markdown(league_name)}_")
         lines.append("")
+
+        # Trades executed (or simulated)
+        if trade_results:
+            lines.append(self._section_divider())
+            lines.append("*TRADES EXECUTED*")
+            lines.append(self._section_divider())
+            lines.append("")
+
+            for r in trade_results:
+                action = r.action
+                status = "OK" if r.success else "FAIL"
+                price_str = f"{r.price:,}".replace(",", "\\.")
+                name = self._escape_markdown(r.player_name)
+                lines.append(f"`{action}` {name} \\- {price_str} \\[{status}\\]")
+
+            lines.append("")
 
         # Buy opportunities
         if buy_analyses:
@@ -157,25 +173,6 @@ class TelegramNotifier:
                     lines.extend(self._format_sell_player(i, candidate))
                     lines.append("")
 
-        # Squad summary
-        if squad_summary:
-            lines.append(self._section_divider())
-            lines.append("*SQUAD*")
-            lines.append(self._section_divider())
-            lines.append(f"`Budget:      {self._format_price(squad_summary.budget)}`")
-            lines.append(f"`Team Value: {self._format_price(squad_summary.team_value)}`")
-            lines.append(f"`Best 11:   {squad_summary.best_eleven_points} pts/wk`")
-            lines.append("")
-
-            if squad_summary.position_gaps:
-                gaps_str = ", ".join(squad_summary.position_gaps)
-                lines.append(f"Gaps: {self._escape_markdown(gaps_str)}")
-                lines.append("")
-
-        # Market intel summary
-        if buy_analyses:
-            lines.extend(self._format_market_intel(buy_analyses))
-
         return "\n".join(lines)
 
     def _format_buy_player(self, index: int, analysis: PlayerAnalysis) -> list[str]:
@@ -189,42 +186,26 @@ class TelegramNotifier:
         # Player name and position
         lines.append(f"*{index}\\. {self._escape_markdown(name)}* `{position}`")
 
-        # Smart bid price (use current_price as the bid amount)
-        bid_price = analysis.current_price
-        market_value = analysis.market_value
-        if market_value > 0:
-            bid_pct = ((bid_price - market_value) / market_value) * 100
-            bid_sign = "+" if bid_pct >= 0 else ""
-            lines.append(
-                f"`Smart Bid: {self._format_price(bid_price)}` \\({bid_sign}{bid_pct:.0f}%\\)"
-            )
-        else:
-            lines.append(f"`Smart Bid: {self._format_price(bid_price)}`")
+        # Smart bid price (from metadata if computed, else asking price)
+        smart_bid = (
+            analysis.metadata.get("smart_bid", analysis.current_price)
+            if analysis.metadata
+            else analysis.current_price
+        )
+        lines.append(f"`Bid: {self._format_price(smart_bid)}`")
 
-        # Score and confidence
-        confidence_pct = int(analysis.confidence * 100)
-        lines.append(f"`Score: {analysis.value_score:.0f}` | `Conf: {confidence_pct}%`")
-
-        # Trend and PPM
-        trend_str = self._format_trend(analysis.trend, analysis.trend_change_pct)
-        ppm_str = f"PPM: {analysis.avg_points_per_million:.1f}"
-        lines.append(f"{trend_str} | {self._escape_markdown(ppm_str)}")
-
-        # Risk and schedule
-        risk_str = self._format_risk(analysis.risk_metrics)
-        schedule_str = self._format_schedule(analysis.metadata)
-        lines.append(f"{risk_str} | {schedule_str}")
+        # Score and avg points
+        avg_pts = getattr(player, "average_points", 0) or 0
+        lines.append(f"`Score: {analysis.value_score:.0f}` | `Avg: {avg_pts:.0f} pts`")
 
         # Roster impact
         if analysis.roster_impact:
             impact = analysis.roster_impact
             if impact.impact_type == "fills_gap":
-                lines.append("\\-\\> _Fills position gap_")
+                lines.append("_Fills position gap_")
             elif impact.impact_type == "upgrade" and impact.replaces_player:
-                gain = impact.value_score_gain
-                lines.append(
-                    f"\\-\\> _Upgrades {self._escape_markdown(impact.replaces_player)} \\(\\+{gain:.0f} pts\\)_"
-                )
+                replaced = self._escape_markdown(impact.replaces_player)
+                lines.append(f"_Upgrades {replaced}_")
 
         return lines
 

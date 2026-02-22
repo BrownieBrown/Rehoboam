@@ -23,7 +23,9 @@ from rehoboam.enhanced_analyzer import EnhancedAnalyzer
 from rehoboam.matchup_analyzer import MatchupAnalyzer
 from rehoboam.risk_analyzer import RiskAnalyzer
 from rehoboam.roster_analyzer import RosterAnalyzer
+from rehoboam.services.trend_service import TrendService
 from rehoboam.value_calculator import PlayerValue
+from rehoboam.value_history import ValueHistoryCache
 
 logger = logging.getLogger(__name__)
 
@@ -161,18 +163,13 @@ async def get_player_detail(
         if not player_info:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        # Get trend history
+        # Get trend history via TrendService (365-day, cached 24h)
         trend_history = []
         try:
-            history = await run_sync(api.get_player_market_value_history, league, player_id)
-            if history:
-                for item in history[-30:]:  # Last 30 days
-                    trend_history.append(
-                        TrendDataPoint(
-                            date=item.get("date", ""),
-                            value=item.get("value", 0),
-                        )
-                    )
+            trend_service = TrendService(api.client, ValueHistoryCache())
+            mv_history = await run_sync(trend_service.get_history, player_id, league.id)
+            for pt in mv_history.points:
+                trend_history.append(TrendDataPoint(date=str(pt.date), value=pt.value))
         except Exception:
             pass
 
@@ -253,25 +250,15 @@ async def get_player_full_detail(
         if not player_info:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        # 2. Get market value history (30+ days) using competition endpoint
+        # 2. Get market value history via TrendService (365-day, cached 24h)
         trend_history = []
         price_history = []
         try:
-            # Use competition-based endpoint which returns complete historical data
-            raw_history = await run_sync(
-                api.client.get_player_market_value_history_v2, player_id, 92  # 3 months
-            )
-            items = raw_history.get("it", []) if raw_history else []
-            if items:
-                for item in items[-30:]:  # Last 30 days
-                    # dt is days since epoch, mv is market value
-                    trend_history.append(
-                        TrendDataPoint(
-                            date=str(item.get("dt", "")),
-                            value=item.get("mv", 0),
-                        )
-                    )
-                    price_history.append(item.get("mv", 0))
+            trend_service = TrendService(api.client, ValueHistoryCache())
+            mv_history = await run_sync(trend_service.get_history, player_id, league.id)
+            for pt in mv_history.points:
+                trend_history.append(TrendDataPoint(date=str(pt.date), value=pt.value))
+                price_history.append(pt.value)
         except Exception as e:
             logger.warning(f"Failed to get price history: {e}")
 

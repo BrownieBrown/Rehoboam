@@ -111,7 +111,10 @@ class AutoTrader:
         # Get market data and trends for compliance checks
         market = self.api.get_market(league)
         kickbase_market = [p for p in market if p.is_kickbase_seller()]
-        player_trends = trader._fetch_player_trends(kickbase_market, limit=50)
+        player_trends = {
+            p.id: trader.trend_service.get_trend(p.id, p.market_value, league.id).to_dict()
+            for p in kickbase_market[:50]
+        }
 
         # Run bid compliance check (adjust/cancel bids below market value)
         adjusted, canceled_compliance = compliance_checker.run_bid_compliance_check(
@@ -155,6 +158,23 @@ class AutoTrader:
             console.print("[dim]No profit opportunities found[/dim]")
             return results
 
+        # Recalculate buy prices with smart bidding (profit trades default to asking price)
+        for opp in opportunities:
+            try:
+                from .value_calculator import PlayerValue
+
+                value = PlayerValue.calculate(opp.player)
+                bid_rec = trader.bidding.calculate_bid(
+                    asking_price=opp.player.price,
+                    market_value=opp.player.market_value,
+                    value_score=value.value_score,
+                    confidence=min(value.value_score / 100.0, 0.95),
+                    trend_change_pct=None,  # ProfitOpportunity doesn't carry trend; uses conservative default
+                )
+                opp.buy_price = bid_rec.recommended_bid
+            except Exception:
+                pass  # Keep original price as fallback
+
         # Check active bids - we can have multiple bids simultaneously
         my_bids = self.api.get_my_bids(league)
 
@@ -168,6 +188,23 @@ class AutoTrader:
                     f"  - {bid_player.first_name} {bid_player.last_name}: Your bid €{bid_player.user_offer_price:,}"
                 )
             console.print("[dim]Note: You'll find out who won when auctions end[/dim]")
+
+        # Calculate available squad slots (enforce 15-player limit)
+        squad = self.api.get_squad(league)
+        current_squad_size = len(squad)
+        active_bid_count = len(my_bids)
+        max_squad_size = 15
+        available_slots = max_squad_size - current_squad_size - active_bid_count
+
+        console.print(
+            f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
+        )
+
+        if available_slots <= 0:
+            console.print(
+                f"[yellow]No squad slots available ({current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15)[/yellow]"
+            )
+            return results
 
         # Get current budget and team value for debt capacity
         team_info = self.api.get_team_info(league)
@@ -193,6 +230,10 @@ class AutoTrader:
 
             if self.daily_spend + opp.buy_price >= self.max_daily_spend:
                 console.print("[yellow]Would exceed daily spend limit, stopping[/yellow]")
+                break
+
+            if available_slots <= 0:
+                console.print("[yellow]No more squad slots available (15-player limit)[/yellow]")
                 break
 
             # Check if we already have a bid on this player
@@ -234,6 +275,9 @@ class AutoTrader:
                 executed_count += 1
                 self.daily_spend += opp.buy_price
                 flip_budget -= opp.buy_price
+                # Only consume a slot for new bids (not re-bids on existing players)
+                if not my_bid_amounts.get(opp.player.id, 0):
+                    available_slots -= 1
 
         console.print(f"\n[green]✓ Executed {executed_count} profit trades[/green]")
         return results
@@ -280,6 +324,16 @@ class AutoTrader:
         if my_bids:
             console.print(f"[cyan]📊 Active bids: {len(my_bids)}[/cyan]")
 
+        # Calculate available squad slots (enforce 15-player limit)
+        squad = self.api.get_squad(league)
+        current_squad_size = len(squad)
+        active_bid_count = len(my_bids)
+        max_squad_size = 15
+
+        console.print(
+            f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
+        )
+
         # Get current budget
         team_info = self.api.get_team_info(league)
         current_budget = team_info.get("budget", 0)
@@ -295,6 +349,16 @@ class AutoTrader:
             if self.daily_spend + trade.required_budget >= self.max_daily_spend:
                 console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
                 break
+
+            # Check 15-player limit with net squad change from trade
+            net_squad_change = len(trade.players_in) - len(trade.players_out)
+            if current_squad_size + active_bid_count + net_squad_change > max_squad_size:
+                console.print(
+                    f"[yellow]Trade would exceed 15-player limit "
+                    f"({current_squad_size} + {active_bid_count} bids + {net_squad_change} net = "
+                    f"{current_squad_size + active_bid_count + net_squad_change})[/yellow]"
+                )
+                continue
 
             # Show if trade includes players we already have bids on
             players_with_bids = [p for p in trade.players_in if p.id in my_bid_amounts]
@@ -474,7 +538,8 @@ class AutoTrader:
                         asking_price=fresh_player.price,
                         market_value=fresh_player.market_value,
                         value_score=value.value_score,
-                        confidence=0.8,
+                        confidence=min(value.value_score / 100.0, 0.95),
+                        trend_change_pct=None,  # Conservative default for refresh bids
                     )
 
                     buy_price = fresh_bid.recommended_bid

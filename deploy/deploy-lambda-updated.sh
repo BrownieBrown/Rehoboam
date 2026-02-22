@@ -10,23 +10,19 @@ echo "🚀 Deploying Rehoboam to AWS Lambda..."
 # ============================================================
 
 # Your AWS Account ID (get it with: aws sts get-caller-identity --query Account --output text)
-ACCOUNT_ID="REPLACE_WITH_YOUR_ACCOUNT_ID"
+ACCOUNT_ID="237612938195"
 
 # Lambda execution role ARN (from Step 2 of setup guide)
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/rehoboam-lambda-execution-role"
 
-# S3 bucket for learning database (created in Step 4)
-S3_BUCKET="rehoboam-REPLACE_WITH_YOUR_BUCKET_NAME"
-
-# Your Kickbase credentials
-KICKBASE_EMAIL="your-email@example.com"
-KICKBASE_PASSWORD="your-password"
+# S3 bucket for learning database
+S3_BUCKET="rehoboam-marco-2026"
 
 # League index (usually 0 for first league)
 LEAGUE_INDEX="0"
 
-# Dry run mode (set to false for real trades)
-DRY_RUN="false"
+# Dry run mode (true = analyze only, no real trades)
+DRY_RUN="true"
 
 # Lambda configuration
 FUNCTION_NAME="rehoboam-trading-bot"
@@ -46,12 +42,7 @@ fi
 
 if [[ "$S3_BUCKET" == "rehoboam-REPLACE_WITH_YOUR_BUCKET_NAME" ]]; then
     echo "❌ Error: Please update S3_BUCKET in this script"
-    echo "   Example: rehoboam-marco-2025"
-    exit 1
-fi
-
-if [[ "$KICKBASE_EMAIL" == "your-email@example.com" ]]; then
-    echo "❌ Error: Please update KICKBASE_EMAIL in this script"
+    echo "   Example: rehoboam-marco-2026"
     exit 1
 fi
 
@@ -67,7 +58,8 @@ mkdir -p deploy/package
 
 # Install dependencies
 echo "   Installing Python dependencies..."
-pip install -r deploy/requirements-lambda.txt -t deploy/package/ --quiet
+pip3 install -r deploy/requirements-lambda.txt -t deploy/package/ --quiet \
+    --platform manylinux2014_x86_64 --only-binary=:all: --implementation cp --python-version 3.11
 
 # Copy rehoboam code
 echo "   Copying source code..."
@@ -115,13 +107,7 @@ if aws lambda get-function --function-name $FUNCTION_NAME --region $REGION 2>/de
         --function-name $FUNCTION_NAME \
         --timeout $TIMEOUT \
         --memory-size $MEMORY_SIZE \
-        --environment "Variables={
-            KICKBASE_EMAIL=${KICKBASE_EMAIL},
-            KICKBASE_PASSWORD=${KICKBASE_PASSWORD},
-            LEAGUE_INDEX=${LEAGUE_INDEX},
-            DRY_RUN=${DRY_RUN},
-            S3_BUCKET=${S3_BUCKET}
-        }" \
+        --environment "Variables={LEAGUE_INDEX=${LEAGUE_INDEX},DRY_RUN=${DRY_RUN},S3_BUCKET=${S3_BUCKET}}" \
         --region $REGION > /dev/null
 
     echo "✅ Lambda function updated"
@@ -136,13 +122,7 @@ else
         --timeout $TIMEOUT \
         --memory-size $MEMORY_SIZE \
         --region $REGION \
-        --environment "Variables={
-            KICKBASE_EMAIL=${KICKBASE_EMAIL},
-            KICKBASE_PASSWORD=${KICKBASE_PASSWORD},
-            LEAGUE_INDEX=${LEAGUE_INDEX},
-            DRY_RUN=${DRY_RUN},
-            S3_BUCKET=${S3_BUCKET}
-        }" > /dev/null
+        --environment "Variables={LEAGUE_INDEX=${LEAGUE_INDEX},DRY_RUN=${DRY_RUN},S3_BUCKET=${S3_BUCKET}}" > /dev/null
 
     echo "✅ Lambda function created"
 fi
@@ -227,16 +207,18 @@ echo "  🌅 Morning: 10:30 AM CET (after market value updates)"
 echo "  🌆 Evening: 6:00 PM CET"
 echo ""
 echo "Next steps:"
-echo "  1. Test manually:"
+echo "  1. Set credentials (replace with your values):"
+echo "     aws lambda update-function-configuration \\"
+echo "       --function-name $FUNCTION_NAME --region $REGION \\"
+echo "       --environment 'Variables={KICKBASE_EMAIL=...,KICKBASE_PASSWORD=...,TELEGRAM_BOT_TOKEN=...,TELEGRAM_CHAT_ID=...,DRY_RUN=true,S3_BUCKET=${S3_BUCKET},LEAGUE_INDEX=0}'"
+echo ""
+echo "  2. Test manually:"
 echo "     aws lambda invoke --function-name $FUNCTION_NAME --region $REGION output.json && cat output.json"
 echo ""
-echo "  2. View logs:"
+echo "  3. View logs:"
 echo "     aws logs tail /aws/lambda/$FUNCTION_NAME --follow --region $REGION"
 echo ""
-echo "  3. Check schedule status:"
+echo "  4. Check schedule status:"
 echo "     aws events list-rules --region $REGION | grep rehoboam"
-echo ""
-echo "  4. Monitor S3 database:"
-echo "     aws s3 ls s3://${S3_BUCKET}/"
 echo ""
 echo "════════════════════════════════════════════════════════════"

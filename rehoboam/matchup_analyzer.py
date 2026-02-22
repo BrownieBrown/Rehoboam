@@ -57,6 +57,15 @@ class TeamStrength:
     strength_score: float  # 0-100 (higher = stronger team)
 
 
+@dataclass
+class DoubleGameweekInfo:
+    """Double gameweek detection result"""
+
+    is_dgw: bool
+    dgw_matchday: str | None = None
+    match_count: int = 1
+
+
 class MatchupAnalyzer:
     """Analyzes player matchups, team strength, and lineup status"""
 
@@ -75,6 +84,45 @@ class MatchupAnalyzer:
 
     def __init__(self):
         self.team_cache: dict[str, TeamStrength] = {}
+
+    def detect_double_gameweek(self, player_details: dict[str, Any]) -> DoubleGameweekInfo:
+        """
+        Detect if a player's team has a double gameweek (2+ matches in one matchday).
+
+        Reads mdsum from player_details, filters upcoming matches (mdst == 0),
+        and groups by mdid. If any matchday has 2+ matches, it's a DGW.
+
+        Args:
+            player_details: Response from get_player_details containing mdsum
+
+        Returns:
+            DoubleGameweekInfo with DGW status
+        """
+        matchups = player_details.get("mdsum", [])
+        if not matchups:
+            return DoubleGameweekInfo(is_dgw=False)
+
+        # Filter upcoming matches only (mdst == 0 means not played yet)
+        upcoming = [m for m in matchups if m.get("mdst") == 0]
+        if not upcoming:
+            return DoubleGameweekInfo(is_dgw=False)
+
+        # Group by matchday ID — if any matchday has 2+ matches, it's a DGW
+        matchday_counts: dict[str, int] = {}
+        for match in upcoming:
+            mdid = str(match.get("mdid", ""))
+            if mdid:
+                matchday_counts[mdid] = matchday_counts.get(mdid, 0) + 1
+
+        for mdid, count in matchday_counts.items():
+            if count >= 2:
+                return DoubleGameweekInfo(
+                    is_dgw=True,
+                    dgw_matchday=mdid,
+                    match_count=count,
+                )
+
+        return DoubleGameweekInfo(is_dgw=False)
 
     def analyze_player_status(self, player_details: dict[str, Any]) -> PlayerStatus:
         """

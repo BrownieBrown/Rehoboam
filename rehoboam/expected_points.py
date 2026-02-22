@@ -23,6 +23,7 @@ def calculate_expected_points(
     performance_data: dict | None = None,
     matchup_context: dict | None = None,
     player_details: dict | None = None,
+    is_dgw: bool = False,
 ) -> ExpectedPointsResult:
     """
     Calculate expected matchday points for a player.
@@ -139,6 +140,11 @@ def calculate_expected_points(
         + minutes_component
         + form_bonus
     )
+
+    # DGW multiplier: player plays twice, ~1.8x expected output (not 2.0 — rotation/fatigue risk)
+    if is_dgw:
+        total *= 1.8
+        notes.append("DOUBLE GAMEWEEK")
 
     # Clamp to 0-100
     total = max(0, min(100, total))

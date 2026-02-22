@@ -15,6 +15,7 @@ from .market_price_tracker import MarketPriceTracker
 from .matchup_analyzer import MatchupAnalyzer
 from .opportunity_cost import OpportunityCostAnalyzer
 from .risk_analyzer import RiskAnalyzer, RiskMetrics
+from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
 from .value_tracker import ValueTracker
 
@@ -32,13 +33,11 @@ class Trader:
         bid_learner=None,
         activity_feed_learner=None,
         factor_weight_learner=None,
-        sell_timing_optimizer=None,
     ):
         self.api = api
         self.settings = settings
         self.verbose = verbose
         self.factor_weight_learner = factor_weight_learner
-        self.sell_timing_optimizer = sell_timing_optimizer
 
         # Load learned weights if learner provided
         factor_weights = None
@@ -59,6 +58,7 @@ class Trader:
             factor_weights=factor_weights,
         )
         self.history_cache = ValueHistoryCache()
+        self.trend_service = TrendService(self.api.client, self.history_cache)
         # Store bid_learner for shared use across components
         self.bid_learner = bid_learner
         # Connect learners to bidding strategy for adaptive learning + competitive intelligence
@@ -89,7 +89,7 @@ class Trader:
         Args:
             league: League object
         """
-        if not self.factor_weight_learner and not self.sell_timing_optimizer:
+        if not self.factor_weight_learner:
             return  # No learning systems enabled
 
         try:
@@ -171,13 +171,6 @@ class Trader:
                         applied = [r for r in (buy_results + sell_results) if abs(r.change_pct) > 1]
                         if applied:
                             console.print(f"[dim]Applied {len(applied)} weight adjustments[/dim]")
-
-            # STEP 3: Update sell timing snapshots
-            if self.sell_timing_optimizer:
-                if self.verbose:
-                    console.print("[dim]Updating sell timing snapshots...[/dim]")
-
-                self.sell_timing_optimizer.update_hold_period_snapshots(self.api, league.id)
 
         except Exception as e:
             if self.verbose:
@@ -279,30 +272,15 @@ class Trader:
 
         # Calculate best 11 strength
         from .formation import select_best_eleven
-        from .value_calculator import PlayerValue
 
         squad = self.api.get_squad(league)
-        player_values = {}
-        for player in squad:
-            try:
-                value = PlayerValue.calculate(player)
-                player_values[player.id] = value.value_score
-            except Exception:
-                player_values[player.id] = 0
+        player_values = self._enrich_squad_values(squad, league)
 
-        best_eleven = select_best_eleven(squad, player_values)
-        best_eleven_ids = {p.id for p in best_eleven}
-        best_11_strength = sum(p.average_points for p in best_eleven)
-
-        # Get player stats for purchase prices using market value history endpoint
-        # This endpoint returns 'trp' (transfer price) which is the actual purchase price
+        # Get player stats for purchase prices (trp) via trend service cache
         player_stats = {}
         for player in squad:
             try:
-                # Use market value history v2 which includes trp (transfer price)
-                history = self.api.client.get_player_market_value_history_v2(
-                    player_id=player.id, timeframe=30
-                )
+                history = self.trend_service._get_raw_history(player.id, league.id)
                 player_stats[player.id] = history
             except Exception:
                 player_stats[player.id] = None
@@ -331,19 +309,26 @@ class Trader:
                         team_positions[player.team_id] = player_team.league_position
 
                 # Get trend data for recovery prediction
-                history_data = self._get_player_trend(league, player.id)
-                if history_data:
-                    trend_data = self.history_cache.get_trend_analysis(
-                        history_data, player.market_value
-                    )
-                    player_trend_data[player.id] = trend_data
-                else:
-                    player_trend_data[player.id] = {"has_data": False}
+                trend_analysis = self.trend_service.get_trend(
+                    player.id, player.market_value, league.id
+                )
+                player_trend_data[player.id] = trend_analysis.to_dict()
             except Exception as e:
                 if self.verbose:
                     console.print(f"[dim]Failed to get data for {player.last_name}: {e}[/dim]")
                 player_matchup_data[player.id] = {"has_data": False}
                 player_trend_data[player.id] = {"has_data": False}
+
+        # Calculate expected points for squad (reuse matchup data already fetched)
+        ep_map, dgw_player_ids = self._calculate_squad_expected_points(
+            squad, league, precomputed_matchup_data=player_matchup_data
+        )
+        ep_scores = {pid: ep.expected_points for pid, ep in ep_map.items()}
+
+        # Select best 11 by EXPECTED POINTS (not value score)
+        best_eleven = select_best_eleven(squad, ep_scores)
+        best_eleven_ids = {p.id for p in best_eleven}
+        best_11_strength = sum(ep_scores.get(p.id, 0) for p in best_eleven)
 
         # Rank squad for selling with SOS, team positions, and trend data
         sell_candidates, recovery_plan = self.analyzer.rank_squad_for_selling(
@@ -381,6 +366,8 @@ class Trader:
             "sell_count": sell_count,
             "hold_count": hold_count,
             "position_needs": position_needs,
+            "ep_map": ep_map,
+            "dgw_player_ids": dgw_player_ids,
         }
 
         # Generate market insights
@@ -450,27 +437,9 @@ class Trader:
                 from .enhanced_analyzer import EnhancedAnalyzer
 
                 enhanced = EnhancedAnalyzer()
-                history_data = self.api.client.get_player_market_value_history_v2(
-                    player_id=analysis.player.id, timeframe=92
-                )
-                it_array = history_data.get("it", [])
-                trend_analysis = {"has_data": False}
-                if it_array and len(it_array) >= 14:
-                    recent = it_array[-14:]
-                    first_value = recent[0].get("mv", 0)
-                    last_value = recent[-1].get("mv", 0)
-                    if first_value > 0:
-                        trend_pct = ((last_value - first_value) / first_value) * 100
-                        long_term_pct = 0
-                        if len(it_array) >= 30:
-                            month_ago = it_array[-30].get("mv", 0)
-                            if month_ago > 0:
-                                long_term_pct = ((last_value - month_ago) / month_ago) * 100
-                        trend_analysis = {
-                            "has_data": True,
-                            "trend_pct": trend_pct,
-                            "long_term_pct": long_term_pct,
-                        }
+                trend_analysis = self.trend_service.get_trend(
+                    analysis.player.id, analysis.player.market_value, league.id
+                ).to_dict()
 
                 perf_data = self.history_cache.get_cached_performance(
                     player_id=analysis.player.id, league_id=league.id, max_age_hours=24
@@ -569,29 +538,20 @@ class Trader:
         roster_contexts = {}
         try:
             from .roster_analyzer import RosterAnalyzer
-            from .value_calculator import PlayerValue
 
             squad = self.api.get_squad(league)
 
-            # Fetch player market value history for purchase prices (trp field)
+            # Get player stats for purchase prices (trp) via trend service cache
             player_stats = {}
             for player in squad:
                 try:
-                    history = self.api.client.get_player_market_value_history_v2(
-                        player_id=player.id, timeframe=30
-                    )
+                    history = self.trend_service._get_raw_history(player.id, league.id)
                     player_stats[player.id] = history
                 except Exception:
                     player_stats[player.id] = None
 
-            # Calculate value scores for squad members
-            player_values = {}
-            for player in squad:
-                try:
-                    pv = PlayerValue.calculate(player)
-                    player_values[player.id] = pv.value_score
-                except Exception:
-                    player_values[player.id] = 0.0
+            # Calculate value scores for squad members (with performance data)
+            player_values = self._enrich_squad_values(squad, league)
 
             # Build roster contexts by position (with pre-calculated values)
             roster_analyzer = RosterAnalyzer()
@@ -644,16 +604,10 @@ class Trader:
             except Exception:
                 perf_data = None  # Ensure None on failure
 
-            # Fetch historical trend data with caching
-            history_data = self._get_player_trend(league, player.id)
-
-            # Analyze trend with current market value
-            if history_data:
-                trend_data = self.history_cache.get_trend_analysis(
-                    history_data, player.market_value
-                )
-            else:
-                trend_data = {"has_data": False, "trend": "unknown"}
+            # Fetch historical trend data (365-day, cached 24h)
+            trend_data = self.trend_service.get_trend(
+                player.id, player.market_value, league.id
+            ).to_dict()
 
             # Fetch matchup context (team strength, opponent, player status)
             matchup_context = self._get_matchup_context(league, player.id)
@@ -673,11 +627,21 @@ class Trader:
 
             # Calculate risk metrics if enabled
             if calculate_risk:
+                expected_return = None
+                try:
+                    from .enhanced_analyzer import EnhancedAnalyzer
+
+                    enhanced = EnhancedAnalyzer()
+                    prediction = enhanced.predict_player_value(player, trend_data, perf_data)
+                    expected_return = prediction.value_change_30d_pct
+                except Exception:
+                    pass
+
                 risk_metrics = self._calculate_risk_metrics(
                     player=player,
                     league=league,
                     performance_volatility=performance_volatility,
-                    expected_return_30d=None,  # Could integrate with predictions later
+                    expected_return_30d=expected_return,
                 )
                 analysis.risk_metrics = risk_metrics
 
@@ -696,6 +660,156 @@ class Trader:
                         pass  # Silent failure for tracking
 
         return analyses
+
+    def _calculate_squad_expected_points(
+        self,
+        squad: list,
+        league: League,
+        precomputed_matchup_data: dict | None = None,
+    ) -> tuple[dict, set]:
+        """Calculate expected points for each squad player.
+
+        Mirrors the logic from the `lineup` CLI command but reuses matchup data
+        already fetched in display_compact_action_plan() to avoid duplicate API calls.
+
+        Args:
+            squad: List of Player objects
+            league: League object
+            precomputed_matchup_data: Dict mapping player_id -> matchup context
+                (from the matchup data loop in display_compact_action_plan)
+
+        Returns:
+            Tuple of (ep_map: dict[str, ExpectedPointsResult], dgw_player_ids: set[str])
+        """
+        from .expected_points import calculate_expected_points
+
+        ep_map = {}
+        dgw_player_ids = set()
+
+        for player in squad:
+            try:
+                # Get performance data (cached)
+                perf_data = self.history_cache.get_cached_performance(
+                    player_id=player.id, league_id=league.id, max_age_hours=24
+                )
+                if not perf_data:
+                    perf_data = self.api.client.get_player_performance(league.id, player.id)
+                    if perf_data:
+                        self.history_cache.cache_performance(
+                            player_id=player.id, league_id=league.id, data=perf_data
+                        )
+
+                # Reuse precomputed matchup context if available
+                matchup_context = None
+                if precomputed_matchup_data and player.id in precomputed_matchup_data:
+                    matchup_context = precomputed_matchup_data[player.id]
+
+                # Get player details for lineup probability and DGW detection
+                player_details = None
+                is_dgw = False
+                try:
+                    player_details = self.api.client.get_player_details(league.id, player.id)
+                    if player_details:
+                        dgw_info = self.matchup_analyzer.detect_double_gameweek(player_details)
+                        if dgw_info.is_dgw:
+                            is_dgw = True
+                            dgw_player_ids.add(player.id)
+
+                        # Build matchup context from player_details if not precomputed
+                        if not matchup_context or not matchup_context.get("has_data"):
+                            team_id = player_details.get("tid", "")
+                            if team_id:
+                                player_team_profile = self.api.client.get_team_profile(
+                                    league.id, team_id
+                                )
+                                player_team = self.matchup_analyzer.get_team_strength(
+                                    player_team_profile
+                                )
+                                next_matchup = self.matchup_analyzer.get_next_matchup(
+                                    player_details
+                                )
+                                opponent_team = None
+                                if next_matchup and next_matchup.opponent_id:
+                                    try:
+                                        opp_profile = self.api.client.get_team_profile(
+                                            league.id, next_matchup.opponent_id
+                                        )
+                                        opponent_team = self.matchup_analyzer.get_team_strength(
+                                            opp_profile
+                                        )
+                                    except Exception:
+                                        pass
+                                matchup_bonus = self.matchup_analyzer.get_matchup_bonus(
+                                    player_details, player_team, opponent_team
+                                )
+                                matchup_context = {
+                                    "has_data": True,
+                                    "matchup_bonus": matchup_bonus,
+                                    "player_team": player_team,
+                                }
+                except Exception:
+                    pass
+
+                ep = calculate_expected_points(
+                    player=player,
+                    performance_data=perf_data,
+                    matchup_context=matchup_context,
+                    player_details=player_details,
+                    is_dgw=is_dgw,
+                )
+                ep_map[player.id] = ep
+
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"[dim]EP calc failed for {player.last_name}: {e}[/dim]")
+
+        return ep_map, dgw_player_ids
+
+    def _enrich_squad_values(self, squad: list, league) -> dict[str, float]:
+        """Calculate performance-based scores for squad (with performance data).
+
+        Uses average_points scaled by sample-size confidence — NOT the market
+        value_score which rewards cheapness.  This is the right metric for
+        best-11 selection and roster-context comparisons where affordability
+        is irrelevant (you already own these players).
+
+        Returns dict mapping player.id -> performance score.
+        Side effect: updates player.points with real performance data.
+        """
+        from .value_calculator import PlayerValue
+
+        player_values = {}
+        for player in squad:
+            try:
+                perf_data = None
+                try:
+                    perf_data = self.history_cache.get_cached_performance(
+                        player_id=player.id, league_id=league.id, max_age_hours=6
+                    )
+                    if not perf_data:
+                        perf_data = self.api.client.get_player_performance(league.id, player.id)
+                        self.history_cache.cache_performance(player.id, league.id, perf_data)
+
+                    real_points = self._extract_total_points(perf_data)
+                    if real_points > 0:
+                        player.points = real_points
+                except Exception:
+                    perf_data = None
+
+                pv = PlayerValue.calculate(player, performance_data=perf_data)
+
+                # Performance score: avg_points scaled by sample-size confidence.
+                # Without perf data we trust the reported average as-is.
+                confidence = pv.sample_size_confidence
+                if confidence is not None:
+                    score = player.average_points * (0.5 + 0.5 * confidence)
+                else:
+                    score = player.average_points
+
+                player_values[player.id] = score
+            except Exception:
+                player_values[player.id] = 0.0
+        return player_values
 
     def _extract_total_points(self, performance_data: dict) -> int:
         """
@@ -749,44 +863,66 @@ class Trader:
 
         return total_points
 
-    def _get_player_trend(self, league: League, player_id: str, timeframe: int = 30) -> dict:
-        """
-        Get player trend data with caching
+    def _sync_tracked_purchases(self, squad: list) -> None:
+        """Detect new squad members and add them to tracked_purchases.json.
 
-        Args:
-            league: League object
-            player_id: Player ID
-            timeframe: Days to look back (default: 30)
+        This ensures manual purchases (not made through the bot) are tracked
+        so the holding period protection can apply to them too.
+        """
+        import json
+        import time
+        from pathlib import Path
+
+        purchases_file = Path("logs") / "tracked_purchases.json"
+        purchases = {}
+        if purchases_file.exists():
+            try:
+                with open(purchases_file) as f:
+                    purchases = json.load(f)
+            except Exception:
+                purchases = {}
+
+        changed = False
+        for player in squad:
+            if player.id not in purchases:
+                name = player.last_name or f"{player.first_name} {player.last_name}".strip()
+                purchases[player.id] = {
+                    "player_name": name,
+                    "buy_price": player.buy_price if player.buy_price > 0 else player.market_value,
+                    "buy_date": time.time(),
+                    "source": "detected",
+                }
+                changed = True
+
+        if changed:
+            purchases_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(purchases_file, "w") as f:
+                json.dump(purchases, f, indent=2)
+
+    def _load_purchase_dates(self) -> dict[str, int]:
+        """Load days_held for each tracked player from tracked_purchases.json.
 
         Returns:
-            Trend analysis dict
+            Dict mapping player_id -> days_held (int)
         """
-        # Check cache first
-        cached = self.history_cache.get_cached_history(
-            player_id=player_id,
-            league_id=league.id,
-            timeframe=timeframe,
-            max_age_hours=24,  # Cache for 24 hours
-        )
+        import json
+        import time
+        from pathlib import Path
 
-        if cached:
-            # Return raw cached data - caller will analyze with market value
-            return cached
-
-        # Fetch from API
-        try:
-            history_data = self.api.client.get_player_market_value_history(
-                league_id=league.id, player_id=player_id, timeframe=timeframe
-            )
-
-            # Cache the result
-            self.history_cache.cache_history(
-                player_id=player_id, league_id=league.id, timeframe=timeframe, data=history_data
-            )
-
-            return history_data  # Return raw data, will analyze with market value
-        except Exception:
-            return None  # Silent failure for trend data
+        purchases_file = Path("logs") / "tracked_purchases.json"
+        purchase_dates = {}
+        if purchases_file.exists():
+            try:
+                with open(purchases_file) as f:
+                    purchases = json.load(f)
+                for pid, pdata in purchases.items():
+                    buy_date = pdata.get("buy_date")
+                    if buy_date:
+                        days_held = int((time.time() - buy_date) / (24 * 3600))
+                        purchase_dates[pid] = days_held
+            except Exception:
+                pass
+        return purchase_dates
 
     def _get_matchup_context(self, league: League, player_id: str) -> dict:
         """
@@ -912,13 +1048,9 @@ class Trader:
                     confidence=0.8,  # Assume good confidence for cached data
                 )
 
-            # Get price history from API (92-day history)
-            history_data = self.api.client.get_player_market_value_history_v2(
-                player_id=player.id, timeframe=92
-            )
-
-            # Extract price history
-            price_history = self.risk_analyzer.extract_price_history_from_api_data(history_data)
+            # Get price history via TrendService (365-day, cached 24h)
+            mv_history = self.trend_service.get_history(player.id, league.id)
+            price_history = [pt.value for pt in reversed(mv_history.points)]
 
             # Also record daily price for future analysis
             self.value_tracker.record_daily_price(player.id, league.id, player.market_value)
@@ -1011,79 +1143,6 @@ class Trader:
             "replacement_score": best_replacement["value_score"],
         }
 
-    def _fetch_player_trends(self, players: list, limit: int = 50) -> dict:
-        """
-        Fetch market value trend data for a list of players
-
-        Args:
-            players: List of player objects
-            limit: Maximum number of players to analyze
-
-        Returns:
-            Dict mapping player_id -> trend data
-        """
-        player_trends = {}
-
-        for player in players[:limit]:
-            try:
-                # Use the new competition-based endpoint (v2) - much better data!
-                history_data = self.api.client.get_player_market_value_history_v2(
-                    player_id=player.id, timeframe=92  # 3 months of data
-                )
-
-                # Extract the "it" array with historical values
-                it_array = history_data.get("it", [])
-
-                if it_array and len(it_array) >= 14:  # Need at least 14 days
-                    # Calculate recent trend (last 14 days)
-                    recent = it_array[-14:]
-                    first_value = recent[0].get("mv", 0)
-                    last_value = recent[-1].get("mv", 0)
-
-                    if first_value > 0:
-                        trend_pct = ((last_value - first_value) / first_value) * 100
-
-                        # Also check longer-term trend (30 days if available)
-                        longer_term_falling = False
-                        if len(it_array) >= 30:
-                            month_ago_value = it_array[-30].get("mv", 0)
-                            if month_ago_value > 0:
-                                month_trend_pct = (
-                                    (last_value - month_ago_value) / month_ago_value
-                                ) * 100
-                                # If down >5% over 30 days, consider it falling
-                                if month_trend_pct < -5:
-                                    longer_term_falling = True
-
-                        if trend_pct > 5:
-                            trend_direction = "rising"
-                        elif trend_pct < -5 or longer_term_falling:
-                            trend_direction = "falling"
-                        else:
-                            trend_direction = "stable"
-
-                        # Get peak info from API
-                        peak_value = history_data.get("hmv", 0)
-                        low_value = history_data.get("lmv", 0)
-
-                        player_trends[player.id] = {
-                            "has_data": True,
-                            "trend": trend_direction,
-                            "trend_pct": trend_pct,
-                            "peak_value": peak_value,
-                            "low_value": low_value,
-                            "current_value": last_value,
-                        }
-                    else:
-                        player_trends[player.id] = {"has_data": False}
-                else:
-                    player_trends[player.id] = {"has_data": False}
-
-            except Exception:
-                player_trends[player.id] = {"has_data": False}
-
-        return player_trends
-
     def find_profit_opportunities(self, league: League) -> list:
         """
         Find profit trading opportunities - Buy low, sell high
@@ -1159,7 +1218,10 @@ class Trader:
             pass
 
         # Get trend data for all market players
-        player_trends = self._fetch_player_trends(kickbase_market, limit=50)
+        player_trends = {
+            p.id: self.trend_service.get_trend(p.id, p.market_value, league.id).to_dict()
+            for p in kickbase_market[:50]
+        }
 
         # Find profit opportunities
         profit_trader = ProfitTrader(
@@ -1211,7 +1273,10 @@ class Trader:
 
         # Fetch trend data for ALL players (squad + affordable market)
         all_players = list(squad) + affordable_market
-        player_trends = self._fetch_player_trends(all_players, limit=len(all_players))
+        player_trends = {
+            p.id: self.trend_service.get_trend(p.id, p.market_value, league.id).to_dict()
+            for p in all_players
+        }
 
         # Calculate value scores for all players
         player_values = {}
@@ -1317,20 +1382,20 @@ class Trader:
         from datetime import datetime
 
         from .formation import select_best_eleven
-        from .value_calculator import PlayerValue
 
         players = self.api.get_squad(league)
 
-        # Fetch market trends and player stats for all squad players
-        player_trends = self._fetch_player_trends(players, limit=len(players))
+        # Fetch market trends for all squad players
+        player_trends = {
+            p.id: self.trend_service.get_trend(p.id, p.market_value, league.id).to_dict()
+            for p in players
+        }
 
-        # Fetch player market value history for purchase prices (trp field)
+        # Get player stats for purchase prices (trp) via trend service cache
         player_stats = {}
         for player in players:
             try:
-                history = self.api.client.get_player_market_value_history_v2(
-                    player_id=player.id, timeframe=30
-                )
+                history = self.trend_service._get_raw_history(player.id, league.id)
                 player_stats[player.id] = history
             except Exception:
                 player_stats[player.id] = None
@@ -1370,21 +1435,19 @@ class Trader:
                 f"[yellow]⚠️  Squad below minimum ({len(players)}/{self.settings.min_squad_size}). Consider buying before next match[/yellow]"
             )
 
-        # STEP 1: Calculate preliminary value scores to determine best 11
-        # (This prevents selling players just because they're bench for real team)
-        player_values = {}
-        for player in players:
-            try:
-                player_value = PlayerValue.calculate(player)
-                player_values[player.id] = player_value.value_score
-            except Exception:
-                player_values[player.id] = 0
+        # STEP 1: Calculate enriched value scores to determine best 11
+        # Performance data ensures sample-size penalty applies correctly
+        player_values = self._enrich_squad_values(players, league)
 
         # STEP 2: Determine best 11 based on value scores
         best_eleven = select_best_eleven(players, player_values)
         best_eleven_ids = {p.id for p in best_eleven}
 
-        # STEP 3: Analyze each player with best 11 context
+        # STEP 3: Sync tracked purchases and load holding period data
+        self._sync_tracked_purchases(players)
+        purchase_dates = self._load_purchase_dates()
+
+        # STEP 4: Analyze each player with best 11 context
         analyses = []
         for player in players:
             try:
@@ -1432,14 +1495,8 @@ class Trader:
                             "peak_value": peak_value,
                         }
 
-                # Convert trend data to format expected by analyzer
-                trend_data = None
-                if trend.get("has_data"):
-                    trend_data = {
-                        "has_data": True,
-                        "direction": trend.get("trend"),
-                        "change_pct": trend.get("trend_pct", 0),
-                    }
+                # Pass full trend dict to analyzer (pattern flags needed for sell logic)
+                trend_data = trend if trend.get("has_data") else None
 
                 # Get matchup context (includes SOS!)
                 matchup_context = self._get_matchup_context(league, player.id)
@@ -1448,6 +1505,7 @@ class Trader:
                 is_in_best_eleven = player.id in best_eleven_ids
 
                 # Analyze the player with full context
+                days_held = purchase_dates.get(player.id)
                 analysis = self.analyzer.analyze_owned_player(
                     player,
                     purchase_price=purchase_price,
@@ -1455,6 +1513,7 @@ class Trader:
                     matchup_context=matchup_context,
                     peak_analysis=peak_dict,
                     is_in_best_eleven=is_in_best_eleven,
+                    days_held=days_held,
                 )
 
                 # Only override SELL if match is within 2 days AND squad is at minimum
@@ -1574,6 +1633,7 @@ class Trader:
                     confidence=analysis.confidence,
                     player_id=analysis.player.id,
                     roster_impact=roster_impact_score,
+                    trend_change_pct=analysis.trend_change_pct,
                 )
                 overbid_pct_color = "green" if bid_rec.overbid_pct >= 10 else "yellow"
                 smart_bid_str = f"€{bid_rec.recommended_bid:,}\n[{overbid_pct_color}]+{bid_rec.overbid_pct:.1f}%[/{overbid_pct_color}]"
@@ -1819,6 +1879,7 @@ class Trader:
                 confidence=0.7,  # Moderate confidence
                 is_replacement=False,
                 player_id=player.id,
+                trend_change_pct=None,  # Profit opps pre-filtered by trend; use conservative default
             )
             overbid_pct = bid_rec.overbid_pct
             overbid_color = "green" if overbid_pct >= 10 else "yellow"
@@ -1867,6 +1928,7 @@ class Trader:
                 confidence=0.7,
                 is_replacement=False,
                 player_id=opp.player.id,
+                trend_change_pct=None,
             )
             total_investment += bid_rec.recommended_bid
 
@@ -2040,6 +2102,7 @@ class Trader:
                 replacement_sell_value=best_replacement["sell_value"] if best_replacement else 0,
                 player_id=player.id,
                 roster_impact=roster_impact_score,
+                trend_change_pct=analysis.trend_change_pct,
             )
 
             # Check budget constraints

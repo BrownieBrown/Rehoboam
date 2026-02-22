@@ -351,39 +351,9 @@ def analyze(
             squad_predictions = []
             for analysis in team_analyses[:8]:  # Top 8 players
                 try:
-                    # Get trend data using v2 endpoint (has actual historical data)
-                    history_data = trader.api.client.get_player_market_value_history_v2(
-                        player_id=analysis.player.id, timeframe=92  # 3 months
-                    )
-
-                    # Extract trend from historical data
-                    it_array = history_data.get("it", [])
-                    trend_analysis = {"has_data": False}
-
-                    if it_array and len(it_array) >= 14:
-                        recent = it_array[-14:]
-                        first_value = recent[0].get("mv", 0)
-                        last_value = recent[-1].get("mv", 0)
-
-                        if first_value > 0:
-                            trend_pct = ((last_value - first_value) / first_value) * 100
-
-                            # Long-term trend
-                            long_term_pct = 0
-                            if len(it_array) >= 30:
-                                month_ago_value = it_array[-30].get("mv", 0)
-                                if month_ago_value > 0:
-                                    long_term_pct = (
-                                        (last_value - month_ago_value) / month_ago_value
-                                    ) * 100
-
-                            trend_analysis = {
-                                "has_data": True,
-                                "trend_pct": trend_pct,
-                                "long_term_pct": long_term_pct,
-                                "peak_value": history_data.get("hmv", 0),
-                                "current_value": last_value,
-                            }
+                    trend_analysis = trader.trend_service.get_trend(
+                        analysis.player.id, analysis.player.market_value, league.id
+                    ).to_dict()
 
                     # Get performance data
                     perf_data = trader.history_cache.get_cached_performance(
@@ -420,39 +390,9 @@ def analyze(
 
             for analysis in top_market_players:
                 try:
-                    # Get trend data using v2 endpoint (has actual historical data)
-                    history_data = trader.api.client.get_player_market_value_history_v2(
-                        player_id=analysis.player.id, timeframe=92  # 3 months
-                    )
-
-                    # Extract trend from historical data
-                    it_array = history_data.get("it", [])
-                    trend_analysis = {"has_data": False}
-
-                    if it_array and len(it_array) >= 14:
-                        recent = it_array[-14:]
-                        first_value = recent[0].get("mv", 0)
-                        last_value = recent[-1].get("mv", 0)
-
-                        if first_value > 0:
-                            trend_pct = ((last_value - first_value) / first_value) * 100
-
-                            # Long-term trend
-                            long_term_pct = 0
-                            if len(it_array) >= 30:
-                                month_ago_value = it_array[-30].get("mv", 0)
-                                if month_ago_value > 0:
-                                    long_term_pct = (
-                                        (last_value - month_ago_value) / month_ago_value
-                                    ) * 100
-
-                            trend_analysis = {
-                                "has_data": True,
-                                "trend_pct": trend_pct,
-                                "long_term_pct": long_term_pct,
-                                "peak_value": history_data.get("hmv", 0),
-                                "current_value": last_value,
-                            }
+                    trend_analysis = trader.trend_service.get_trend(
+                        analysis.player.id, analysis.player.market_value, league.id
+                    ).to_dict()
 
                     # Get performance data
                     perf_data = trader.history_cache.get_cached_performance(
