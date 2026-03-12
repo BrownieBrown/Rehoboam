@@ -142,6 +142,11 @@ def analyze(
         factor_weight_learner=factor_learner,
     )
 
+    # EP pipeline (default) — routes through scoring/collector → scorer → decision
+    if not detailed:
+        trader.run_ep_analysis(league)
+        return
+
     # Analyze market (suppress verbose output unless requested)
     if not verbose:
         import sys
@@ -158,12 +163,6 @@ def analyze(
     # Get team info early for budget display
     team_info = trader.api.get_team_info(league)
     current_budget = team_info.get("budget", 0)
-
-    # Use compact display by default, detailed only if requested
-    if not detailed:
-        # COMPACT MODE - Action plan focused display
-        trader.display_compact_action_plan(league, market_analyses, current_budget)
-        return
 
     # DETAILED MODE - Full analysis (original behavior)
     # SECTION 1: Market Opportunities
