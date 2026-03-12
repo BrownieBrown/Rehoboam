@@ -27,11 +27,9 @@ def extract_games_and_consistency(
         matches = current_season.get("ph", [])
 
         # Only count matches where player actually played.
-        # Exclude only when minutes are explicitly recorded as 0 (didn't play).
-        # If no "t" key, assume the match counts (minutes not tracked).
-        matches_played = [
-            m for m in matches if not ("t" in m and m["t"] == 0 and m.get("p", 0) == 0)
-        ]
+        # A player "played" if they scored points (even negative) OR had minutes > 0.
+        # This excludes upcoming/unplayed fixtures that have p=0 and no minutes.
+        matches_played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
         games_played = len(matches_played)
 
         if games_played == 0:
@@ -76,7 +74,8 @@ def extract_minutes_analysis(
         current_season = seasons_sorted[0]
         matches = current_season.get("ph", [])
 
-        minutes_data = [m.get("t") for m in matches if m.get("t") is not None]
+        # Only include matches where player actually had minutes (exclude future/unplayed)
+        minutes_data = [m.get("t") for m in matches if m.get("t") is not None and m["t"] > 0]
         if len(minutes_data) < 2:
             return None, None, None
 
@@ -161,7 +160,7 @@ def _extract_recent_avg(performance_data: dict | None, last_n: int = 5) -> float
             return None
         seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
         matches = seasons_sorted[0].get("ph", [])
-        played = [m for m in matches if not ("t" in m and m["t"] == 0 and m.get("p", 0) == 0)]
+        played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
         if not played:
             return None
         recent = played[-last_n:]  # Last N matches

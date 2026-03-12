@@ -1265,27 +1265,6 @@ class CompactDisplay:
             name = f"⚡DGW {name}"
         return name
 
-    def _ep_breakdown(self, ps) -> str:
-        """Return a compact string showing EP component scores."""
-        parts = [f"base={ps.base_points:.0f}"]
-        if ps.consistency_bonus:
-            parts.append(f"cons={ps.consistency_bonus:+.0f}")
-        if ps.lineup_bonus:
-            parts.append(f"line={ps.lineup_bonus:+.0f}")
-        if ps.fixture_bonus:
-            parts.append(f"fix={ps.fixture_bonus:+.0f}")
-        if ps.form_bonus:
-            parts.append(f"form={ps.form_bonus:+.0f}")
-        if ps.minutes_bonus:
-            parts.append(f"min={ps.minutes_bonus:+.0f}")
-        if ps.dgw_multiplier != 1.0:
-            parts.append(f"×{ps.dgw_multiplier}")
-        if ps.data_quality and ps.data_quality.grade == "F":
-            parts.append("×0.5(F)")
-        if ps.notes:
-            parts.append(f"[{', '.join(ps.notes)}]")
-        return " ".join(parts)
-
     def _display_ep_lineup(self, squad_scores: list, lineup_map: dict) -> None:
         """Display optimal starters sorted by EP descending."""
         console.print("[bold]⭐ OPTIMAL STARTING 11 (by EP)[/bold]\n")
@@ -1307,7 +1286,6 @@ class CompactDisplay:
         table.add_column("EP", justify="right", style="green", width=6)
         table.add_column("Avg", justify="right", style="yellow", width=6)
         table.add_column("Quality", justify="center", width=8)
-        table.add_column("Breakdown", style="dim")
 
         for i, (ep_val, ps) in enumerate(starters, 1):
             # Build player name with DGW badge
@@ -1322,7 +1300,6 @@ class CompactDisplay:
             badge = self._ep_quality_badge(ps.data_quality.grade) if ps.data_quality else "-"
             avg_str = f"{ps.average_points:.1f}" if ps.average_points else "-"
             pos_str = ps.position[:2] if ps.position else "-"
-            breakdown = self._ep_breakdown(ps)
 
             table.add_row(
                 str(i),
@@ -1331,7 +1308,6 @@ class CompactDisplay:
                 f"{ep_val:.1f}",
                 avg_str,
                 badge,
-                breakdown,
             )
 
         console.print(table)

@@ -64,8 +64,11 @@ class TestExtractGamesAndConsistency:
         assert consistency > 0.8
 
     def test_inconsistent_player(self):
-        # Wild swings — very inconsistent
-        perf = _make_performance([10, 120, 5, 150, 0, 200, 15, 100])
+        # Wild swings — very inconsistent (minutes provided so 0-point match counts)
+        perf = _make_performance(
+            [10, 120, 5, 150, 0, 200, 15, 100],
+            [90, 90, 90, 90, 90, 90, 90, 90],
+        )
         games, consistency = extract_games_and_consistency(perf)
         assert games == 8
         assert consistency < 0.4
@@ -75,6 +78,25 @@ class TestExtractGamesAndConsistency:
         perf = _make_performance([80, 0, 60, 0, 70], [90, 0, 85, 0, 88])
         games, consistency = extract_games_and_consistency(perf)
         assert games == 3  # Only 3 matches where player actually played
+
+    def test_excludes_unplayed_fixtures(self):
+        # Upcoming fixtures have no "t" key and p=0 — must be excluded
+        perf = {
+            "it": [
+                {
+                    "ti": "2025",
+                    "ph": [
+                        {"p": 80, "t": 90},
+                        {"p": 60, "t": 85},
+                        {"p": 70, "t": 88},
+                        {"p": 0},  # Upcoming fixture — no minutes key
+                        {"p": 0},  # Upcoming fixture
+                    ],
+                }
+            ]
+        }
+        games, consistency = extract_games_and_consistency(perf)
+        assert games == 3  # Only 3 real matches
 
 
 class TestExtractMinutesAnalysis:
@@ -279,8 +301,11 @@ class TestScorePlayer:
         assert "Hot streak" in ps.notes
 
     def test_form_not_scoring(self):
-        # Recent matches all zeros
-        perf = _make_performance([50, 60, 40, 0, 0, 0, 0, 0])
+        # Recent matches: player played full 90 but scored 0 points
+        perf = _make_performance(
+            [50, 60, 40, 0, 0, 0, 0, 0],
+            [90, 90, 90, 90, 90, 90, 90, 90],
+        )
         pd = _make_player_data(avg_points=15.0, points=150, performance=perf)
         ps = score_player(pd)
         assert ps.form_bonus == -10.0
