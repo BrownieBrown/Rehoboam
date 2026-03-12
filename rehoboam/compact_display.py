@@ -1345,7 +1345,7 @@ class CompactDisplay:
         table.add_column("EP", justify="right", style="green", width=6)
         table.add_column("Quality", justify="center", width=8)
         table.add_column("Price", justify="right", style="yellow", width=8)
-        table.add_column("Bid", justify="right", style="bold yellow", width=8)
+        table.add_column("Bid", justify="right", style="bold yellow", width=12)
         table.add_column("Reason", style="dim")
 
         for rec in buy_recs:
@@ -1355,8 +1355,8 @@ class CompactDisplay:
             badge = self._ep_quality_badge(score.data_quality.grade) if score.data_quality else "-"
             price_m = score.current_price / 1_000_000 if score.current_price else 0
             price_str = f"€{price_m:.1f}M"
-            bid_m = rec.recommended_bid / 1_000_000 if rec.recommended_bid else price_m
-            bid_str = f"€{bid_m:.1f}M"
+            bid = rec.recommended_bid if rec.recommended_bid else score.current_price
+            bid_str = f"€{bid:,}"
             pos_str = (
                 player.position[:2] if hasattr(player, "position") and player.position else "-"
             )
@@ -1381,7 +1381,7 @@ class CompactDisplay:
         table.add_column("Buy Player (EP)", style="cyan", no_wrap=True)
         table.add_column("EP Gain", justify="right", style="green", width=8)
         table.add_column("Net Cost", justify="right", width=9)
-        table.add_column("Bid", justify="right", style="bold yellow", width=8)
+        table.add_column("Bid", justify="right", style="bold yellow", width=12)
 
         for pair in trade_pairs:
             sell_name = self._ep_player_name(pair.sell_player, pair.sell_score)
@@ -1404,8 +1404,8 @@ class CompactDisplay:
             else:
                 net_str = f"[red]€{net_m:+.1f}M[/red]"
 
-            bid_m = pair.recommended_bid / 1_000_000 if pair.recommended_bid else 0
-            bid_str = f"€{bid_m:.1f}M"
+            bid = pair.recommended_bid if pair.recommended_bid else pair.buy_player.price
+            bid_str = f"€{bid:,}"
 
             table.add_row(sell_col, "→", buy_col, gain_str, net_str, bid_str)
 
