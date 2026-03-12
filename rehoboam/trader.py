@@ -2521,6 +2521,38 @@ class Trader:
             squad_players=squad_player_map,
         )
 
+        # --- Compute bid amounts for buy recommendations ---
+        for rec in buy_recs:
+            try:
+                # Map EP (0-180) to value_score (0-100) for bidding strategy
+                ep_as_value_score = min(100.0, rec.score.expected_points * (100.0 / 180.0))
+                bid_rec = self.bidding.calculate_bid(
+                    asking_price=rec.player.price,
+                    market_value=rec.player.market_value,
+                    value_score=ep_as_value_score,
+                    confidence=0.7,
+                    average_points=rec.score.average_points,
+                    roster_impact=rec.roster_bonus,
+                )
+                rec.recommended_bid = bid_rec.recommended_bid
+            except Exception:
+                rec.recommended_bid = rec.player.price  # Fallback: bid asking price
+        for pair in trade_pairs:
+            try:
+                ep_as_value_score = min(100.0, pair.buy_score.expected_points * (100.0 / 180.0))
+                bid_rec = self.bidding.calculate_bid(
+                    asking_price=pair.buy_player.price,
+                    market_value=pair.buy_player.market_value,
+                    value_score=ep_as_value_score,
+                    confidence=0.7,
+                    average_points=pair.buy_score.average_points,
+                    is_replacement=True,
+                    replacement_sell_value=pair.sell_score.market_value,
+                )
+                pair.recommended_bid = bid_rec.recommended_bid
+            except Exception:
+                pair.recommended_bid = pair.buy_player.price
+
         lineup_map = engine.select_lineup(squad_scores)
 
         # --- 6. Display ---

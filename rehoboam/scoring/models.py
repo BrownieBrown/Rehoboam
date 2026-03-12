@@ -63,6 +63,7 @@ class BuyRecommendation:
     score: PlayerScore
     roster_bonus: float
     reason: str
+    recommended_bid: int = 0
 
     @property
     def effective_ep(self) -> float:
@@ -88,6 +89,7 @@ class TradePair:
     sell_player: MarketPlayer | Player
     buy_score: PlayerScore
     sell_score: PlayerScore
+    recommended_bid: int = 0
 
     @property
     def net_cost(self) -> int:
