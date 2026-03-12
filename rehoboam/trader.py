@@ -2340,6 +2340,200 @@ class Trader:
         """
         return {a.player.id: a.value_score for a in analyses}
 
+    def run_ep_analysis(self, league: League) -> None:
+        """Run the EP-first scoring pipeline and display the action plan.
+
+        This is a new analysis path that routes through the scoring pipeline
+        (scoring/collector.py -> scoring/scorer.py -> scoring/decision.py).
+        It does NOT modify any existing methods — the trade command still uses
+        the old path.
+
+        Args:
+            league: League object
+        """
+        from .roster_analyzer import RosterAnalyzer
+        from .scoring.collector import DataCollector
+        from .scoring.decision import DecisionEngine
+        from .scoring.scorer import score_player
+
+        console.print("\n[bold cyan]EP Analysis (Expected Points Pipeline)[/bold cyan]\n")
+
+        # --- 1. Fetch squad and market ---
+        squad = self.api.get_squad(league)
+        squad_size = len(squad)
+        is_emergency = squad_size < self.settings.min_squad_size
+
+        market_players_list = self.api.get_market(league)
+        # Only Kickbase-owned players are buyable
+        kickbase_market = [p for p in market_players_list if p.is_kickbase_seller()]
+
+        team_info = self.api.get_team_info(league)
+        current_budget = team_info.get("budget", 0)
+
+        # --- 2. Collect performance + details + team profiles for every player ---
+        # Build a shared cache of team profiles keyed by team_id to avoid duplicate fetches.
+        team_profiles: dict[str, dict] = {}
+
+        def _get_team_profile_cached(team_id: str) -> dict | None:
+            if not team_id:
+                return None
+            if team_id not in team_profiles:
+                try:
+                    profile = self.api.client.get_team_profile(league.id, team_id)
+                    team_profiles[team_id] = profile
+                except Exception:
+                    team_profiles[team_id] = {}
+            return team_profiles[team_id] or None
+
+        def _fetch_player_data(player) -> tuple[dict | None, dict | None]:
+            """Fetch (performance, player_details) for a player, using cache."""
+            perf_data = None
+            try:
+                perf_data = self.history_cache.get_cached_performance(
+                    player_id=player.id, league_id=league.id, max_age_hours=6
+                )
+                if not perf_data:
+                    perf_data = self.api.client.get_player_performance(league.id, player.id)
+                    if perf_data:
+                        self.history_cache.cache_performance(player.id, league.id, perf_data)
+            except Exception:
+                if self.verbose:
+                    console.print(f"[dim]EP: perf fetch failed for {player.last_name}[/dim]")
+                perf_data = None
+
+            player_details = None
+            try:
+                player_details = self.api.client.get_player_details(league.id, player.id)
+            except Exception:
+                if self.verbose:
+                    console.print(f"[dim]EP: details fetch failed for {player.last_name}[/dim]")
+
+            # Pre-cache team profile so collector can use it
+            if player_details:
+                tid = player_details.get("tid", "")
+                _get_team_profile_cached(tid)
+                # Also cache opponent team if available
+                from .matchup_analyzer import MatchupAnalyzer as _MA  # noqa: F401
+
+                next_matchup = self.matchup_analyzer.get_next_matchup(player_details)
+                if next_matchup and next_matchup.opponent_id:
+                    _get_team_profile_cached(next_matchup.opponent_id)
+            else:
+                # Fall back to team_id on player object
+                _get_team_profile_cached(getattr(player, "team_id", ""))
+
+            return perf_data, player_details
+
+        # --- 3. Build DataCollector and score all players ---
+        collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
+
+        market_scores: list = []
+        market_player_map: dict = {}
+
+        for player in kickbase_market:
+            try:
+                perf, details = _fetch_player_data(player)
+                player_data = collector.collect(
+                    player=player,
+                    performance=perf,
+                    player_details=details,
+                    team_profiles=team_profiles,
+                )
+                ps = score_player(player_data)
+                market_scores.append(ps)
+                market_player_map[player.id] = player
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"[dim]EP: scoring failed for {player.last_name}: {e}[/dim]")
+
+        squad_scores: list = []
+        squad_player_map: dict = {}
+
+        for player in squad:
+            try:
+                perf, details = _fetch_player_data(player)
+                player_data = collector.collect(
+                    player=player,
+                    performance=perf,
+                    player_details=details,
+                    team_profiles=team_profiles,
+                )
+                ps = score_player(player_data)
+                squad_scores.append(ps)
+                squad_player_map[player.id] = player
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"[dim]EP: scoring failed for {player.last_name}: {e}[/dim]")
+
+        # --- 4. Build roster context for position-aware decisions ---
+        roster_context: dict = {}
+        try:
+            player_stats = {}
+            for player in squad:
+                try:
+                    history = self.trend_service._get_raw_history(player.id, league.id)
+                    player_stats[player.id] = history
+                except Exception:
+                    player_stats[player.id] = None
+
+            player_values = self._enrich_squad_values(squad, league)
+            roster_analyzer = RosterAnalyzer()
+            roster_context = roster_analyzer.analyze_roster(squad, player_stats, player_values)
+        except Exception as e:
+            if self.verbose:
+                console.print(f"[yellow]EP: roster context failed: {e}[/yellow]")
+
+        # --- 5. Make decisions ---
+        engine = DecisionEngine(
+            min_avg_points_to_buy=20.0,
+            min_avg_points_emergency=10.0,
+            min_expected_points_to_buy=30.0,
+            min_ep_upgrade_threshold=10.0,
+        )
+
+        if squad_size >= 15:
+            # Full squad — show trade pairs instead of plain buys
+            buy_recs = []
+            trade_pairs = engine.build_trade_pairs(
+                market_scores=market_scores,
+                squad_scores=squad_scores,
+                roster_context=roster_context,
+                budget=current_budget,
+                market_players=market_player_map,
+                squad_players=squad_player_map,
+                top_n=5,
+            )
+        else:
+            buy_recs = engine.recommend_buys(
+                market_scores=market_scores,
+                squad_scores=squad_scores,
+                roster_context=roster_context,
+                budget=current_budget,
+                market_players=market_player_map,
+                is_emergency=is_emergency,
+                top_n=8 if is_emergency else 5,
+            )
+            trade_pairs = []
+
+        sell_recs = engine.recommend_sells(
+            squad_scores=squad_scores,
+            roster_context=roster_context,
+            squad_players=squad_player_map,
+        )
+
+        lineup_map = engine.select_lineup(squad_scores)
+
+        # --- 6. Display ---
+        self.compact_display.display_ep_action_plan(
+            buy_recs=buy_recs,
+            sell_recs=sell_recs,
+            trade_pairs=trade_pairs,
+            squad_scores=squad_scores,
+            lineup_map=lineup_map,
+            budget=current_budget,
+            squad_size=squad_size,
+        )
+
     def auto_trade(self, league: League, max_trades: int = 5):
         """Run automated trading cycle"""
         console.print("\n[bold cyan]Starting Automated Trading Cycle[/bold cyan]\n")
