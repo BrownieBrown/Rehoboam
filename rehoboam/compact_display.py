@@ -5,6 +5,9 @@ from rich.table import Table
 
 console = Console()
 
+# Imported lazily in display_ep_action_plan to avoid circular imports at module level
+# from rehoboam.scoring.models import BuyRecommendation, SellRecommendation, TradePair, PlayerScore
+
 
 class CompactDisplay:
     """Compact display for trading analysis"""
@@ -1142,3 +1145,288 @@ class CompactDisplay:
             "[dim]Expected points based on avg performance, form, fixtures, and lineup probability[/dim]"
         )
         console.print("═" * 80 + "\n")
+
+    # ------------------------------------------------------------------
+    # EP-first action plan (new pipeline)
+    # ------------------------------------------------------------------
+
+    def display_ep_action_plan(
+        self,
+        buy_recs: list,
+        sell_recs: list,
+        trade_pairs: list,
+        squad_scores: list,
+        lineup_map: dict,
+        budget: int,
+        squad_size: int,
+    ) -> None:
+        """
+        Display an EP-first action plan produced by the scoring pipeline.
+
+        Args:
+            buy_recs: List of BuyRecommendation (squad < 15)
+            sell_recs: List of SellRecommendation
+            trade_pairs: List of TradePair (squad == 15)
+            squad_scores: List of PlayerScore for all squad members
+            lineup_map: Dict mapping player_id -> EP float for lineup display
+            budget: Current budget in raw units (e.g. cents/whole €)
+            squad_size: Current squad size
+        """
+        # ── Header ──────────────────────────────────────────────────────
+        console.print("\n" + "═" * 80)
+        console.print("[bold cyan]⚡  EP ACTION PLAN[/bold cyan]")
+        console.print("═" * 80)
+
+        budget_color = "green" if budget >= 0 else "red"
+        budget_m = budget / 1_000_000
+        console.print(
+            f"[bold]Budget:[/bold] [{budget_color}]€{budget_m:.1f}M[/{budget_color}]"
+            f"  |  [bold]Squad:[/bold] {squad_size}/15"
+        )
+
+        if budget < 0:
+            console.print(
+                f"\n[bold red on white]"
+                f" 🚨 BUDGET NEGATIVE (€{budget_m:.1f}M)"
+                f" — ZERO POINTS AT KICKOFF IF NOT FIXED! "
+                f"[/bold red on white]"
+            )
+            console.print("[red]→ Sell recommendations below to recover budget[/red]")
+
+        console.print()
+
+        # ── Lineup section ───────────────────────────────────────────────
+        if squad_scores:
+            self._display_ep_lineup(squad_scores, lineup_map)
+
+        # ── Buy / Trade section ──────────────────────────────────────────
+        if squad_size >= 15:
+            if trade_pairs:
+                console.print(
+                    f"\n[bold green]🔄 TRADE MOVES ({len(trade_pairs)} EP-improving swaps)[/bold green]"
+                )
+                console.print("[dim]Squad full (15/15) — sell first, then buy[/dim]\n")
+                self._display_ep_trade_table(trade_pairs)
+            else:
+                console.print("\n[bold yellow]🟡 NO TRADE RECOMMENDATIONS[/bold yellow]")
+                console.print(
+                    "[dim]No market players offer a significant EP improvement right now[/dim]\n"
+                )
+        else:
+            if buy_recs:
+                console.print(
+                    f"\n[bold green]🟢 BUY RECOMMENDATIONS ({len(buy_recs)} players)[/bold green]"
+                )
+                console.print("[dim]Ranked by expected matchday points[/dim]\n")
+                self._display_ep_buy_table(buy_recs)
+            else:
+                console.print("\n[bold yellow]🟡 NO BUY RECOMMENDATIONS TODAY[/bold yellow]")
+                console.print("[dim]No market players meet EP quality standards right now[/dim]\n")
+
+        # ── Sell / squad candidates section ─────────────────────────────
+        if sell_recs:
+            console.print(f"\n[bold red]🔴 SELL CANDIDATES ({len(sell_recs)} players)[/bold red]")
+            console.print("[dim]Lowest-EP squad members — consider selling[/dim]\n")
+            self._display_ep_sell_table(sell_recs)
+        else:
+            console.print("\n[bold green]✓ NO URGENT SELLS[/bold green]")
+            console.print("[dim]Your squad looks solid based on expected points[/dim]\n")
+
+        console.print("\n" + "═" * 80)
+        console.print(
+            "[dim]EP = Expected Points for next matchday "
+            "(form × fixture × lineup probability × DGW)[/dim]"
+        )
+        console.print("═" * 80 + "\n")
+
+    # ── EP helper display methods ────────────────────────────────────────
+
+    def _ep_quality_badge(self, grade: str) -> str:
+        """Return a compact data-quality badge string for a grade letter."""
+        badges = {
+            "A": "[bold green][A][/bold green]",
+            "B": "[green][B][/green]",
+            "C": "[yellow][C]⚠[/yellow]",
+            "F": "[red][F]⚠⚠[/red]",
+        }
+        return badges.get(grade, f"[dim][{grade}][/dim]")
+
+    def _ep_player_name(self, player, score) -> str:
+        """Return display name with optional DGW indicator."""
+        name = f"{player.first_name} {player.last_name}"
+        if getattr(score, "is_dgw", False):
+            name = f"⚡DGW {name}"
+        return name
+
+    def _display_ep_lineup(self, squad_scores: list, lineup_map: dict) -> None:
+        """Display optimal starters sorted by EP descending."""
+        console.print("[bold]⭐ OPTIMAL STARTING 11 (by EP)[/bold]\n")
+
+        # Sort all squad members by lineup_map EP, take top 11
+        scored = []
+        for ps in squad_scores:
+            ep_val = lineup_map.get(ps.player_id, ps.expected_points)
+            scored.append((ep_val, ps))
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        starters = scored[:11]
+        bench = scored[11:]
+
+        table = Table(show_header=True, header_style="bold cyan", box=None)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("EP", justify="right", style="green", width=6)
+        table.add_column("Avg", justify="right", style="yellow", width=6)
+        table.add_column("Quality", justify="center", width=8)
+
+        for i, (ep_val, ps) in enumerate(starters, 1):
+            # Build player name with DGW badge
+            name = ps.player_id  # fallback: use ID if no name attribute
+            if hasattr(ps, "is_dgw") and ps.is_dgw:
+                name = f"⚡DGW {name}"
+
+            badge = self._ep_quality_badge(ps.data_quality.grade) if ps.data_quality else "-"
+            avg_str = f"{ps.average_points:.1f}" if ps.average_points else "-"
+            pos_str = ps.position[:2] if ps.position else "-"
+
+            table.add_row(
+                str(i),
+                name,
+                pos_str,
+                f"{ep_val:.1f}",
+                avg_str,
+                badge,
+            )
+
+        console.print(table)
+
+        if bench:
+            console.print("\n[bold]📋 BENCH[/bold] (sorted by EP)\n")
+            bench_table = Table(show_header=True, header_style="bold dim", box=None)
+            bench_table.add_column("Player", style="dim cyan", no_wrap=True)
+            bench_table.add_column("Pos", style="dim blue", width=3)
+            bench_table.add_column("EP", justify="right", style="dim green", width=6)
+            bench_table.add_column("Avg", justify="right", style="dim yellow", width=6)
+
+            for ep_val, ps in bench:
+                name = ps.player_id
+                if hasattr(ps, "is_dgw") and ps.is_dgw:
+                    name = f"⚡DGW {name}"
+                pos_str = ps.position[:2] if ps.position else "-"
+                avg_str = f"{ps.average_points:.1f}" if ps.average_points else "-"
+
+                bench_table.add_row(
+                    name,
+                    pos_str,
+                    f"{ep_val:.1f}",
+                    avg_str,
+                )
+
+            console.print(bench_table)
+
+    def _display_ep_buy_table(self, buy_recs: list) -> None:
+        """Display buy recommendations from the EP pipeline."""
+        table = Table(show_header=True, header_style="bold green", box=None)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("EP", justify="right", style="green", width=6)
+        table.add_column("Quality", justify="center", width=8)
+        table.add_column("Price", justify="right", style="yellow", width=8)
+        table.add_column("Reason", style="dim")
+
+        for rec in buy_recs:
+            player = rec.player
+            score = rec.score
+            name = self._ep_player_name(player, score)
+            badge = self._ep_quality_badge(score.data_quality.grade) if score.data_quality else "-"
+            price_m = score.current_price / 1_000_000 if score.current_price else 0
+            price_str = f"€{price_m:.1f}M"
+            pos_str = (
+                player.position[:2] if hasattr(player, "position") and player.position else "-"
+            )
+
+            table.add_row(
+                name,
+                pos_str,
+                f"{rec.effective_ep:.1f}",
+                badge,
+                price_str,
+                rec.reason[:50] if rec.reason else "-",
+            )
+
+        console.print(table)
+
+    def _display_ep_trade_table(self, trade_pairs: list) -> None:
+        """Display trade pair recommendations (sell -> buy) from the EP pipeline."""
+        table = Table(show_header=True, header_style="bold green", box=None)
+        table.add_column("Sell Player (EP)", style="red", no_wrap=True)
+        table.add_column("", style="dim", width=2)
+        table.add_column("Buy Player (EP)", style="cyan", no_wrap=True)
+        table.add_column("EP Gain", justify="right", style="green", width=8)
+        table.add_column("Net Cost", justify="right", width=9)
+
+        for pair in trade_pairs:
+            sell_name = self._ep_player_name(pair.sell_player, pair.sell_score)
+            buy_name = self._ep_player_name(pair.buy_player, pair.buy_score)
+
+            sell_ep = pair.sell_score.expected_points
+            buy_ep = pair.buy_score.expected_points
+
+            sell_col = f"{sell_name}\n({sell_ep:.1f} EP)"
+            buy_col = f"{buy_name}\n({buy_ep:.1f} EP)"
+
+            ep_gain = pair.ep_gain
+            gain_color = "green" if ep_gain > 0 else "red"
+            gain_str = f"[{gain_color}]{ep_gain:+.1f}[/{gain_color}]"
+
+            net = pair.net_cost
+            net_m = net / 1_000_000
+            if net <= 0:
+                net_str = f"[green]€{net_m:+.1f}M[/green]"
+            else:
+                net_str = f"[red]€{net_m:+.1f}M[/red]"
+
+            table.add_row(sell_col, "→", buy_col, gain_str, net_str)
+
+        console.print(table)
+
+    def _display_ep_sell_table(self, sell_recs: list) -> None:
+        """Display sell recommendations from the EP pipeline."""
+        table = Table(show_header=True, header_style="bold red", box=None)
+        table.add_column("Player", style="cyan", no_wrap=True)
+        table.add_column("Pos", style="blue", width=3)
+        table.add_column("EP", justify="right", style="red", width=6)
+        table.add_column("Avg", justify="right", style="yellow", width=6)
+        table.add_column("Quality", justify="center", width=8)
+        table.add_column("Value", justify="right", style="magenta", width=8)
+        table.add_column("Status", justify="center", width=12)
+
+        for rec in sell_recs:
+            player = rec.player
+            score = rec.score
+            name = self._ep_player_name(player, score)
+            pos_str = (
+                player.position[:2] if hasattr(player, "position") and player.position else "-"
+            )
+            badge = self._ep_quality_badge(score.data_quality.grade) if score.data_quality else "-"
+            mv_m = score.market_value / 1_000_000 if score.market_value else 0
+            avg_str = f"{score.average_points:.1f}" if score.average_points else "-"
+
+            if rec.is_protected:
+                reason = rec.protection_reason or "Protected"
+                status_str = f"[yellow]🔒 {reason[:10]}[/yellow]"
+            else:
+                status_str = "[green]SELL[/green]"
+
+            table.add_row(
+                name,
+                pos_str,
+                f"{score.expected_points:.1f}",
+                avg_str,
+                badge,
+                f"€{mv_m:.1f}M",
+                status_str,
+            )
+
+        console.print(table)
