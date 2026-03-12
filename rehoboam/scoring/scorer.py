@@ -318,4 +318,5 @@ def score_player(data: PlayerData) -> PlayerScore:
         position=player.position,
         average_points=avg_points,
         status=status,
+        team_id=getattr(player, "team_id", ""),
     )

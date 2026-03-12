@@ -133,6 +133,34 @@ class TestRecommendBuys:
         recs = engine.recommend_buys(scores, [], {}, 5_000_000, players)
         assert len(recs) == 0
 
+    def test_filters_team_at_max(self):
+        """Cannot buy from a team if squad already has 3 players from it."""
+        engine = DecisionEngine()
+        # Market player from team "t1"
+        market_scores = [
+            _make_score("m1", ep=80.0, avg_points=25.0),  # team_id defaults to ""
+        ]
+        # Override team_id on the market score
+        market_scores[0].team_id = "t1"
+        # Squad already has 3 from team "t1"
+        squad_scores = [_make_score(f"s{i}", ep=50.0, avg_points=20.0) for i in range(3)]
+        for s in squad_scores:
+            s.team_id = "t1"
+        players = {"m1": _make_player(id="m1", team_id="t1", average_points=25.0)}
+        recs = engine.recommend_buys(market_scores, squad_scores, {}, 10_000_000, players)
+        assert len(recs) == 0
+
+    def test_allows_team_below_max(self):
+        """Can buy from a team if squad has fewer than 3 players from it."""
+        engine = DecisionEngine()
+        market_scores = [_make_score("m1", ep=80.0, avg_points=25.0)]
+        market_scores[0].team_id = "t1"
+        squad_scores = [_make_score("s1", ep=50.0, avg_points=20.0)]
+        squad_scores[0].team_id = "t1"
+        players = {"m1": _make_player(id="m1", team_id="t1", average_points=25.0)}
+        recs = engine.recommend_buys(market_scores, squad_scores, {}, 10_000_000, players)
+        assert len(recs) == 1
+
 
 class TestRecommendSells:
     def test_sorts_by_ep_ascending(self):

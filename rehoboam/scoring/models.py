@@ -40,6 +40,7 @@ class PlayerScore:
     position: str = ""
     average_points: float = 0.0
     status: int = 0
+    team_id: str = ""
 
 
 @dataclass

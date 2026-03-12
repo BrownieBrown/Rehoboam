@@ -20,6 +20,8 @@ class DecisionEngine:
         self.min_expected_points_to_buy = min_expected_points_to_buy
         self.min_ep_upgrade_threshold = min_ep_upgrade_threshold
 
+    MAX_PLAYERS_PER_TEAM = 3
+
     def recommend_buys(
         self,
         market_scores: list[PlayerScore],
@@ -32,6 +34,13 @@ class DecisionEngine:
     ) -> list[BuyRecommendation]:
         """Recommend players to buy, sorted by effective EP."""
         min_avg = self.min_avg_points_emergency if is_emergency else self.min_avg_points_to_buy
+
+        # Count players per team in current squad
+        squad_team_counts: dict[str, int] = {}
+        for sq in squad_scores:
+            if sq.team_id:
+                squad_team_counts[sq.team_id] = squad_team_counts.get(sq.team_id, 0) + 1
+
         recs = []
 
         for score in market_scores:
@@ -45,6 +54,9 @@ class DecisionEngine:
             if score.current_price > budget:
                 continue
             if score.status != 0:
+                continue
+            # Team limit: max 3 players from same team
+            if squad_team_counts.get(score.team_id, 0) >= self.MAX_PLAYERS_PER_TEAM:
                 continue
 
             player = market_players.get(score.player_id)
