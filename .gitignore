@@ -52,6 +52,9 @@ deploy/package/
 deploy/*.zip
 output.json
 
+# Worktrees
+.worktrees/
+
 # Web frontend (Node.js)
 web/node_modules/
 web/dist/
