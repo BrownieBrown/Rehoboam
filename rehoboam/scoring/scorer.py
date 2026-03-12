@@ -297,6 +297,7 @@ def score_player(data: PlayerData) -> PlayerScore:
     total = max(0, min(180, total))
 
     price = getattr(player, "price", player.market_value)
+    status = getattr(player, "status", 0)  # Player (squad) has no status field
 
     return PlayerScore(
         player_id=player.id,
@@ -316,5 +317,5 @@ def score_player(data: PlayerData) -> PlayerScore:
         market_value=player.market_value,
         position=player.position,
         average_points=avg_points,
-        status=player.status,
+        status=status,
     )

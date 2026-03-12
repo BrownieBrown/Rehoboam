@@ -1,7 +1,7 @@
 """DecisionEngine — buy/sell/lineup/trade-pair decisions from PlayerScore."""
 
 from ..analyzer import RosterContext
-from ..kickbase_client import MarketPlayer
+from ..kickbase_client import MarketPlayer, Player
 from .models import BuyRecommendation, PlayerScore, SellRecommendation, TradePair
 
 
@@ -77,7 +77,7 @@ class DecisionEngine:
         self,
         squad_scores: list[PlayerScore],
         roster_context: dict[str, RosterContext],
-        squad_players: dict[str, MarketPlayer],
+        squad_players: dict[str, MarketPlayer | Player],
     ) -> list[SellRecommendation]:
         """Recommend players to sell, sorted by lowest EP first."""
         recs = []
@@ -115,7 +115,7 @@ class DecisionEngine:
         roster_context: dict[str, RosterContext],
         budget: int,
         market_players: dict[str, MarketPlayer],
-        squad_players: dict[str, MarketPlayer],
+        squad_players: dict[str, MarketPlayer | Player],
         top_n: int = 5,
     ) -> list[TradePair]:
         """Build sell->buy swap pairs with positive EP gain."""

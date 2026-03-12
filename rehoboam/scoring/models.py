@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from ..kickbase_client import MarketPlayer
+from ..kickbase_client import MarketPlayer, Player
 from ..matchup_analyzer import DoubleGameweekInfo, TeamStrength
 
 
@@ -46,7 +46,7 @@ class PlayerScore:
 class PlayerData:
     """Raw data bundle for scoring a player."""
 
-    player: MarketPlayer
+    player: MarketPlayer | Player
     performance: dict | None
     player_details: dict | None
     team_strength: TeamStrength | None
@@ -73,7 +73,7 @@ class BuyRecommendation:
 class SellRecommendation:
     """A recommended player to sell."""
 
-    player: MarketPlayer
+    player: MarketPlayer | Player
     score: PlayerScore
     is_protected: bool
     protection_reason: str | None
@@ -85,7 +85,7 @@ class TradePair:
     """A sell->buy swap recommendation."""
 
     buy_player: MarketPlayer
-    sell_player: MarketPlayer
+    sell_player: MarketPlayer | Player
     buy_score: PlayerScore
     sell_score: PlayerScore
 

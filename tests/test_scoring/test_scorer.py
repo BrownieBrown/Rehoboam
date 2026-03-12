@@ -291,3 +291,31 @@ class TestScorePlayer:
         ps = score_player(pd)
         assert ps.current_price == 5_000_000
         assert ps.market_value == 5_000_000
+
+    def test_works_with_squad_player(self):
+        """Player (from get_squad) has no 'price' or 'status' fields."""
+        from rehoboam.kickbase_client import Player
+
+        squad_player = Player(
+            id="sp1",
+            first_name="Squad",
+            last_name="Player",
+            position="Midfielder",
+            team_id="t1",
+            team_name="Test FC",
+            market_value=5_000_000,
+            points=100,
+            average_points=15.0,
+        )
+        pd = PlayerData(
+            player=squad_player,
+            performance=None,
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            dgw_info=DoubleGameweekInfo(is_dgw=False),
+            missing=[],
+        )
+        ps = score_player(pd)
+        assert ps.current_price == 5_000_000  # Falls back to market_value
+        assert ps.status == 0  # Falls back to 0
