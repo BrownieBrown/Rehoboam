@@ -1159,6 +1159,7 @@ class CompactDisplay:
         lineup_map: dict,
         budget: int,
         squad_size: int,
+        squad_players: dict | None = None,
     ) -> None:
         """
         Display an EP-first action plan produced by the scoring pipeline.
@@ -1171,7 +1172,9 @@ class CompactDisplay:
             lineup_map: Dict mapping player_id -> EP float for lineup display
             budget: Current budget in raw units (e.g. cents/whole €)
             squad_size: Current squad size
+            squad_players: Dict mapping player_id -> MarketPlayer for name lookup
         """
+        self._squad_players = squad_players or {}
         # ── Header ──────────────────────────────────────────────────────
         console.print("\n" + "═" * 80)
         console.print("[bold cyan]⚡  EP ACTION PLAN[/bold cyan]")
@@ -1225,9 +1228,13 @@ class CompactDisplay:
 
         # ── Sell / squad candidates section ─────────────────────────────
         if sell_recs:
-            console.print(f"\n[bold red]🔴 SELL CANDIDATES ({len(sell_recs)} players)[/bold red]")
+            # Show only the bottom 5 sell candidates, not the entire squad
+            display_sells = sell_recs[:5]
+            console.print(
+                f"\n[bold red]🔴 SELL CANDIDATES ({len(display_sells)} lowest-EP players)[/bold red]"
+            )
             console.print("[dim]Lowest-EP squad members — consider selling[/dim]\n")
-            self._display_ep_sell_table(sell_recs)
+            self._display_ep_sell_table(display_sells)
         else:
             console.print("\n[bold green]✓ NO URGENT SELLS[/bold green]")
             console.print("[dim]Your squad looks solid based on expected points[/dim]\n")
@@ -1282,7 +1289,11 @@ class CompactDisplay:
 
         for i, (ep_val, ps) in enumerate(starters, 1):
             # Build player name with DGW badge
-            name = ps.player_id  # fallback: use ID if no name attribute
+            player = self._squad_players.get(ps.player_id)
+            if player:
+                name = f"{player.first_name} {player.last_name}"
+            else:
+                name = ps.player_id
             if hasattr(ps, "is_dgw") and ps.is_dgw:
                 name = f"⚡DGW {name}"
 
@@ -1310,7 +1321,8 @@ class CompactDisplay:
             bench_table.add_column("Avg", justify="right", style="dim yellow", width=6)
 
             for ep_val, ps in bench:
-                name = ps.player_id
+                player = self._squad_players.get(ps.player_id)
+                name = f"{player.first_name} {player.last_name}" if player else ps.player_id
                 if hasattr(ps, "is_dgw") and ps.is_dgw:
                     name = f"⚡DGW {name}"
                 pos_str = ps.position[:2] if ps.position else "-"

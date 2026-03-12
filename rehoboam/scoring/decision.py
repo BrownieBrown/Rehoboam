@@ -123,12 +123,14 @@ class DecisionEngine:
         sells = self.recommend_sells(squad_scores, roster_context, squad_players)
         sellable = [s for s in sells if not s.is_protected]
 
-        # Get buy candidates (relaxed budget — selling frees money)
+        # Get buy candidates with relaxed budget to find all candidates
+        # (actual affordability checked per-pair below)
+        max_sell_recovery = max((s.budget_recovery for s in sellable), default=0)
         buys = self.recommend_buys(
             market_scores,
             squad_scores,
             roster_context,
-            budget=budget + max((s.budget_recovery for s in sellable), default=0),
+            budget=budget + max_sell_recovery,
             market_players=market_players,
             top_n=20,
         )
@@ -145,7 +147,8 @@ class DecisionEngine:
                     break
 
                 ep_gain = buy_rec.score.expected_points - sell_rec.score.expected_points
-                net_cost = buy_rec.score.current_price - sell_rec.score.market_value
+                # Check affordability using THIS sell's recovery, not the max
+                net_cost = buy_rec.score.current_price - sell_rec.budget_recovery
 
                 if ep_gain >= self.min_ep_upgrade_threshold and net_cost <= budget:
                     pairs.append(

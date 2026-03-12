@@ -2487,8 +2487,8 @@ class Trader:
         engine = DecisionEngine(
             min_avg_points_to_buy=20.0,
             min_avg_points_emergency=10.0,
-            min_expected_points_to_buy=30.0,
-            min_ep_upgrade_threshold=10.0,
+            min_expected_points_to_buy=getattr(self.settings, "min_expected_points_to_buy", 30.0),
+            min_ep_upgrade_threshold=getattr(self.settings, "min_ep_upgrade_threshold", 10.0),
         )
 
         if squad_size >= 15:
@@ -2532,6 +2532,7 @@ class Trader:
             lineup_map=lineup_map,
             budget=current_budget,
             squad_size=squad_size,
+            squad_players=squad_player_map,
         )
 
     def auto_trade(self, league: League, max_trades: int = 5):
