@@ -128,6 +128,40 @@ class BidLearner:
             """
             )
 
+            # Matchday outcomes table for tracking EP accuracy
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS matchday_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id TEXT NOT NULL,
+                    player_position TEXT NOT NULL,
+                    matchday_date TEXT NOT NULL,
+                    predicted_ep REAL NOT NULL,
+                    actual_points REAL NOT NULL,
+                    was_in_best_11 INTEGER DEFAULT 0,
+                    opponent_strength TEXT,
+                    purchase_price INTEGER,
+                    marginal_ep_gain_at_purchase REAL,
+                    timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(player_id, matchday_date)
+                )
+            """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matchday_player
+                ON matchday_outcomes(player_id)
+            """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_matchday_position
+                ON matchday_outcomes(player_position)
+            """
+            )
+
             # Position-specific bidding statistics
             conn.execute(
                 """
@@ -208,6 +242,222 @@ class BidLearner:
                 ),
             )
             conn.commit()
+
+    def record_matchday_outcome(
+        self,
+        player_id: str,
+        player_position: str,
+        matchday_date: str,
+        predicted_ep: float,
+        actual_points: float,
+        was_in_best_11: bool = False,
+        opponent_strength: str | None = None,
+        purchase_price: int | None = None,
+        marginal_ep_gain_at_purchase: float | None = None,
+    ) -> None:
+        """Record actual matchday points vs predicted EP.
+
+        Uses INSERT OR REPLACE so duplicate (player_id, matchday_date) rows are
+        silently overwritten rather than raising an error.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO matchday_outcomes (
+                    player_id, player_position, matchday_date,
+                    predicted_ep, actual_points, was_in_best_11,
+                    opponent_strength, purchase_price, marginal_ep_gain_at_purchase
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    player_id,
+                    player_position,
+                    matchday_date,
+                    predicted_ep,
+                    actual_points,
+                    1 if was_in_best_11 else 0,
+                    opponent_strength,
+                    purchase_price,
+                    marginal_ep_gain_at_purchase,
+                ),
+            )
+            conn.commit()
+
+    def get_ep_accuracy_factor(
+        self,
+        player_id: str | None = None,
+        position: str | None = None,
+        min_matchdays: int = 3,
+    ) -> float:
+        """Return EP accuracy multiplier clamped to [0.5, 1.0].
+
+        Tries player-specific accuracy first.  Falls back to position-level
+        accuracy when the player has fewer than *min_matchdays* recorded games.
+        Returns 1.0 when there is insufficient data at both levels.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # 1. Try player-specific accuracy
+            if player_id is not None:
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(*), AVG(actual_points), AVG(predicted_ep)
+                    FROM matchday_outcomes
+                    WHERE player_id = ? AND predicted_ep > 0
+                    """,
+                    (player_id,),
+                )
+                row = cursor.fetchone()
+                count, avg_actual, avg_predicted = row if row else (0, None, None)
+
+                if (
+                    count is not None
+                    and count >= min_matchdays
+                    and avg_predicted
+                    and avg_predicted > 0
+                ):
+                    raw_factor = avg_actual / avg_predicted
+                    return max(0.5, min(1.0, raw_factor))
+
+            # 2. Fall back to position-level accuracy
+            if position is not None:
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(*), AVG(actual_points), AVG(predicted_ep)
+                    FROM matchday_outcomes
+                    WHERE player_position = ? AND predicted_ep > 0
+                    """,
+                    (position,),
+                )
+                row = cursor.fetchone()
+                count, avg_actual, avg_predicted = row if row else (0, None, None)
+
+                if (
+                    count is not None
+                    and count >= min_matchdays
+                    and avg_predicted
+                    and avg_predicted > 0
+                ):
+                    raw_factor = avg_actual / avg_predicted
+                    return max(0.5, min(1.0, raw_factor))
+
+        # 3. Insufficient data — return neutral multiplier
+        return 1.0
+
+    def _get_won_player_outcome_quality(self) -> float:
+        """How well did won-auction players perform on matchdays?
+
+        Joins *auction_outcomes* (won=1) with *matchday_outcomes* and computes
+        AVG(actual_points) / AVG(predicted_ep).  Returns a quality multiplier
+        clamped to [0.5, 1.2]; defaults to 1.0 when data is insufficient.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*), AVG(mo.actual_points), AVG(mo.predicted_ep)
+                FROM matchday_outcomes mo
+                INNER JOIN auction_outcomes ao ON ao.player_id = mo.player_id
+                WHERE ao.won = 1 AND mo.predicted_ep > 0
+                """
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return 1.0
+
+        count, avg_actual, avg_predicted = row
+        if not count or count < 3 or not avg_predicted or avg_predicted <= 0:
+            return 1.0
+
+        raw_quality = avg_actual / avg_predicted
+        return max(0.5, min(1.2, raw_quality))
+
+    def get_ep_recommended_overbid(
+        self,
+        asking_price: int,
+        marginal_ep_gain: float,
+        market_value: int,
+        budget_ceiling: int,
+    ) -> dict[str, Any]:
+        """EP-aware overbid recommendation.
+
+        Uses historical win rate from *auction_outcomes* and the outcome quality
+        from *_get_won_player_outcome_quality()* to calibrate aggressiveness.
+        The *marginal_ep_gain* (expected points gained by buying this player vs
+        the next-best alternative) sets a floor: higher EP gain justifies
+        paying more.
+
+        Returns a dict with ``recommended_overbid_pct`` (float) and ``reason``
+        (str).  The overbid is constrained so the final bid never exceeds
+        *budget_ceiling*.
+        """
+        # Maximum overbid allowed by budget
+        if asking_price <= 0:
+            return {"recommended_overbid_pct": 0.0, "reason": "Invalid asking price"}
+
+        max_extra = budget_ceiling - asking_price
+        if max_extra <= 0:
+            return {
+                "recommended_overbid_pct": 0.0,
+                "reason": "Budget ceiling at or below asking price",
+            }
+        max_overbid_pct = (max_extra / asking_price) * 100.0
+
+        # EP-gain-based minimum floor (each EP point of marginal gain is worth ~0.3% extra)
+        ep_floor_pct = marginal_ep_gain * 0.3
+
+        # Win-rate adjustment from historical auction data
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*), SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END)
+                FROM auction_outcomes
+                WHERE timestamp > ?
+                """,
+                (datetime.now().timestamp() - (90 * 24 * 3600),),
+            )
+            row = cursor.fetchone()
+
+        total_auctions, total_wins = row if row else (0, 0)
+        total_auctions = total_auctions or 0
+        total_wins = total_wins or 0
+
+        if total_auctions >= 5:
+            win_rate = total_wins / total_auctions
+            if win_rate < 0.30:
+                win_rate_adj = 1.20  # Losing too much — be more aggressive
+                rate_reason = f"low win rate ({win_rate:.0%})"
+            elif win_rate > 0.70:
+                win_rate_adj = 0.90  # Winning easily — can dial back slightly
+                rate_reason = f"high win rate ({win_rate:.0%})"
+            else:
+                win_rate_adj = 1.0
+                rate_reason = f"balanced win rate ({win_rate:.0%})"
+        else:
+            win_rate_adj = 1.0
+            rate_reason = "insufficient auction history"
+
+        # Outcome quality adjustment
+        outcome_quality = self._get_won_player_outcome_quality()
+
+        # Base overbid: use ep floor as the starting point, then scale
+        base_overbid = max(ep_floor_pct, 8.0)  # minimum sensible overbid
+        recommended = base_overbid * win_rate_adj * outcome_quality
+
+        # Cap to budget ceiling
+        recommended = min(recommended, max_overbid_pct)
+        recommended = max(0.0, recommended)
+
+        reason = (
+            f"EP-gain={marginal_ep_gain:.1f}pts → floor {ep_floor_pct:.1f}%"
+            f" | {rate_reason}"
+            f" | outcome quality {outcome_quality:.2f}"
+        )
+
+        return {
+            "recommended_overbid_pct": round(recommended, 1),
+            "reason": reason,
+        }
 
     def get_recommended_overbid(
         self,
