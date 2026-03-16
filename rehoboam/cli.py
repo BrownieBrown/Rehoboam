@@ -131,8 +131,13 @@ def analyze(
     team_info = trader.api.get_team_info(league)
     current_budget = team_info.get("budget", 0)
 
-    # Display compact action plan
-    trader.display_compact_action_plan(league, market_analyses, current_budget)
+    # Display EP-first action plan (fall back to legacy on error)
+    try:
+        trader.display_ep_action_plan(league, current_budget)
+    except Exception as e:
+        if verbose:
+            console.print(f"[yellow]EP pipeline error: {e}, falling back to legacy[/yellow]")
+        trader.display_compact_action_plan(league, market_analyses, current_budget)
 
     # Run learning updates silently
     try:
