@@ -1,88 +1,96 @@
-"""Pure scoring function for the EP-first pipeline.
+"""Pure EP scorer — no API calls, no side effects.
 
-score_player(PlayerData) -> PlayerScore — no API calls, no side effects.
+Receives PlayerData (assembled by DataCollector) and returns PlayerScore.
+All scoring logic is encapsulated here; callers only need to pass data in
+and read the result back out.
 """
 
-from .models import DataQuality, PlayerData, PlayerScore
+from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
-def extract_games_and_consistency(
-    performance_data: dict | None,
-) -> tuple[int, float]:
+def _extract_consistency(performance: dict) -> tuple[int, float | None]:
     """Extract games played and consistency score from performance data.
 
-    Returns:
-        (games_played, consistency_score 0-1 where 1 = very consistent)
-    """
-    if not performance_data:
-        return 0, 0.0
+    Parses ``performance["it"]`` — a list of season dicts each containing
+    ``"ph"`` (list of match dicts with ``"p"`` = points and ``"t"`` =
+    minutes).
 
+    Returns:
+        (games_played, consistency_score)
+            games_played: number of matches the player actually appeared in
+            consistency_score: 1 - CV  (0-1, where 1 = very consistent),
+                               None when no data, 0.5 for a single game
+    """
     try:
-        seasons = performance_data.get("it", [])
+        seasons = performance.get("it", [])
         if not seasons:
-            return 0, 0.0
+            return 0, None
 
         seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
-        current_season = seasons_sorted[0]
+        current_season = seasons_sorted[0] if seasons_sorted else None
+        if not current_season:
+            return 0, None
+
         matches = current_season.get("ph", [])
 
-        # Only count matches where player actually played.
-        # A player "played" if they scored points (even negative) OR had minutes > 0.
-        # This excludes upcoming/unplayed fixtures that have p=0 and no minutes.
+        # Only count matches where the player actually appeared
         matches_played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
         games_played = len(matches_played)
 
         if games_played == 0:
-            return 0, 0.0
+            return 0, None
+
         if games_played == 1:
-            return 1, 0.5
+            return 1, 0.5  # medium confidence for a single-game sample
 
         match_points = [m.get("p", 0) for m in matches_played]
-        mean_points = sum(match_points) / games_played
-        if mean_points == 0:
-            return games_played, 0.0
+        mean_pts = sum(match_points) / games_played
 
-        variance = sum((p - mean_points) ** 2 for p in match_points) / games_played
+        if mean_pts == 0:
+            return games_played, 0.0  # all zeros → no consistency signal
+
+        variance = sum((p - mean_pts) ** 2 for p in match_points) / games_played
         std_dev = variance**0.5
-        cv = std_dev / mean_points if mean_points > 0 else 1.0
+        cv = std_dev / mean_pts
 
-        # CV 0 = perfect consistency (1.0), CV 1.5+ = very inconsistent (0.0)
-        consistency = max(0.0, 1.0 - (cv / 1.5))
-        return games_played, consistency
+        # Convert CV to a 0-1 score (CV=0 → 1.0, CV≥2 → 0.0)
+        consistency_score = max(0.0, 1.0 - cv / 2.0)
+        return games_played, consistency_score
 
     except Exception:
-        return 0, 0.0
+        return 0, None
 
 
-def extract_minutes_analysis(
-    performance_data: dict | None,
-) -> tuple[str | None, float | None, bool | None]:
-    """Extract minutes trend, average minutes, and substitution pattern.
+def _extract_minutes_trend(performance: dict) -> tuple[str | None, float | None]:
+    """Compare first-half vs second-half of recent matches to derive a trend.
 
     Returns:
-        (minutes_trend, avg_minutes, is_substitute_pattern)
+        (trend, avg_minutes)
+            trend: "increasing" | "decreasing" | "stable" | None
+            avg_minutes: average minutes per game, or None when unavailable
     """
-    if not performance_data:
-        return None, None, None
-
     try:
-        seasons = performance_data.get("it", [])
+        seasons = performance.get("it", [])
         if not seasons:
-            return None, None, None
+            return None, None
 
         seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
-        current_season = seasons_sorted[0]
-        matches = current_season.get("ph", [])
+        current_season = seasons_sorted[0] if seasons_sorted else None
+        if not current_season:
+            return None, None
 
-        # Only include matches where player actually had minutes (exclude future/unplayed)
-        minutes_data = [m.get("t") for m in matches if m.get("t") is not None and m["t"] > 0]
+        matches = current_season.get("ph", [])
+        minutes_data = [m["t"] for m in matches if "t" in m]
+
         if len(minutes_data) < 2:
-            return None, None, None
+            return None, None
 
         avg_minutes = sum(minutes_data) / len(minutes_data)
 
-        # Trend: compare first half vs second half
-        minutes_trend = "stable"
         if len(minutes_data) >= 4:
             half = len(minutes_data) // 2
             first_avg = sum(minutes_data[:half]) / half
@@ -90,232 +98,233 @@ def extract_minutes_analysis(
             diff_pct = ((second_avg - first_avg) / max(first_avg, 1)) * 100
 
             if diff_pct > 15:
-                minutes_trend = "increasing"
+                trend = "increasing"
             elif diff_pct < -15:
-                minutes_trend = "decreasing"
+                trend = "decreasing"
+            else:
+                trend = "stable"
+        else:
+            trend = "stable"
 
-        # Substitute pattern
-        is_sub = avg_minutes < 60
-        if not is_sub and len(minutes_data) >= 3:
-            variance = sum((m - avg_minutes) ** 2 for m in minutes_data) / len(minutes_data)
-            if variance**0.5 > 25 and avg_minutes < 75:
-                is_sub = True
-
-        return minutes_trend, avg_minutes, is_sub
+        return trend, avg_minutes
 
     except Exception:
-        return None, None, None
+        return None, None
 
 
-def grade_data_quality(
+def _grade_data_quality(
     games_played: int,
-    consistency: float,
-    has_fixture_data: bool,
-    has_lineup_data: bool,
+    has_fixture: bool,
+    has_lineup: bool,
 ) -> DataQuality:
-    """Assign a data quality grade based on available data."""
-    warnings = []
+    """Grade data quality based on sample size and data availability.
 
-    if games_played == 0:
-        warnings.append("No games played")
-    elif games_played <= 1:
-        warnings.append(f"Only {games_played} game played")
-    elif games_played <= 4:
-        warnings.append(f"Only {games_played} games played")
+    Grades:
+        A — 10+ games played, fixture data present, lineup data present
+        B — 5–9 games played, at least one of fixture/lineup present
+        C — 2–4 games played, or both fixture and lineup missing
+        F — 0–1 games played (score will be halved)
+    """
+    warnings: list[str] = []
 
-    if not has_fixture_data:
+    if not has_fixture:
         warnings.append("No fixture data")
-    if not has_lineup_data:
-        warnings.append("No lineup data")
+    if not has_lineup:
+        warnings.append("No lineup probability data")
 
-    # Grade assignment
-    if games_played <= 1:
-        grade = "F"
-    elif games_played <= 4 or (not has_fixture_data and not has_lineup_data):
-        grade = "C"
-    elif games_played <= 9 or (has_fixture_data != has_lineup_data):
-        # 5-9 games, or has only one of fixture/lineup
-        grade = "B"
-    else:
-        # 10+ games with both fixture and lineup data
+    if games_played >= 10 and has_fixture and has_lineup:
         grade = "A"
+    elif games_played >= 5 and (has_fixture or has_lineup):
+        grade = "B"
+    elif games_played >= 2:
+        grade = "C"
+        if not has_fixture and not has_lineup:
+            warnings.append("Missing both fixture and lineup data")
+    else:
+        grade = "F"
+        warnings.append("Insufficient games played for reliable estimate")
 
     return DataQuality(
         grade=grade,
         games_played=games_played,
-        consistency=consistency,
-        has_fixture_data=has_fixture_data,
-        has_lineup_data=has_lineup_data,
+        consistency=0.0,  # will be filled by score_player
+        has_fixture_data=has_fixture,
+        has_lineup_data=has_lineup,
         warnings=warnings,
     )
 
 
-def _extract_recent_avg(performance_data: dict | None, last_n: int = 5) -> float | None:
-    """Extract average points from the last N matches where the player played."""
-    if not performance_data:
-        return None
-    try:
-        seasons = performance_data.get("it", [])
-        if not seasons:
-            return None
-        seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
-        matches = seasons_sorted[0].get("ph", [])
-        played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
-        if not played:
-            return None
-        recent = played[-last_n:]  # Last N matches
-        return sum(m.get("p", 0) for m in recent) / len(recent)
-    except Exception:
-        return None
+# ---------------------------------------------------------------------------
+# Main scorer
+# ---------------------------------------------------------------------------
 
 
 def score_player(data: PlayerData) -> PlayerScore:
-    """Score a player based on expected matchday points.
+    """Score a player from assembled PlayerData.  Pure function — no I/O.
 
-    Pure function — no API calls, no side effects.
-    Scale is 0-180 (not 0-100) to preserve DGW advantage.
+    Scoring bands (before DGW multiplier):
+        base_points       0 – 40   (avg_points * 2, capped at 40)
+        consistency_bonus -5 – +15
+        lineup_bonus      -20 – +20
+        fixture_bonus     -10 – +15
+        minutes_bonus     -10 – +10
+        form_bonus        -10 – +10
+        ─────────────────────────────
+        subtotal          ~-55 – 110  → clamped 0–100 pre-DGW
+        DGW ×1.8          0 – 180
     """
     player = data.player
-    avg_points = player.average_points
+    avg_pts: float = player.average_points or 0.0
+    current_pts: int = player.points or 0
+
     notes: list[str] = []
 
-    # 1. Base points (0-40) — PRIMARY DRIVER
-    base_points = min(avg_points * 2, 40)
+    # ------------------------------------------------------------------
+    # 1. Base points  (0–40)
+    # ------------------------------------------------------------------
+    base_points = min(avg_pts * 2.0, 40.0)
 
-    # 2. Consistency bonus (-5 to +15)
-    games_played, consistency = extract_games_and_consistency(data.performance)
+    # ------------------------------------------------------------------
+    # 2. Consistency bonus  (-5 to +15)
+    # ------------------------------------------------------------------
+    games_played, consistency = _extract_consistency(data.performance or {})
 
-    consistency_bonus = 0.0
-    if data.performance:
-        if consistency >= 0.7:
-            consistency_bonus = 15.0
-            notes.append("Very consistent")
-        elif consistency >= 0.3:
-            consistency_bonus = consistency * 15
-        else:
-            consistency_bonus = -5.0
-            notes.append("Inconsistent")
+    consistency_bonus: float
+    if consistency is None:
+        consistency_bonus = 0.0
+    elif consistency >= 0.7:
+        consistency_bonus = 15.0
+    elif consistency >= 0.3:
+        consistency_bonus = consistency * 15.0
+    else:
+        consistency_bonus = -5.0
 
-    # 3. Lineup probability (-20 to +20)
-    lineup_bonus = 0.0
-    has_lineup_data = False
+    # ------------------------------------------------------------------
+    # 3. Lineup bonus  (-20 to +20)
+    # ------------------------------------------------------------------
+    lineup_bonus: float = 0.0
+    has_lineup = False
     if data.player_details:
-        has_lineup_data = True
-        prob = data.player_details.get("prob", 5)
+        prob = data.player_details.get("prob")
+        has_lineup = prob is not None
         if prob == 1:
             lineup_bonus = 20.0
-            notes.append("Starter")
         elif prob == 2:
             lineup_bonus = 10.0
-            notes.append("Rotation")
         elif prob == 3:
             lineup_bonus = 0.0
-            notes.append("Bench")
-        elif prob >= 4:
+        elif prob is not None and prob >= 4:
             lineup_bonus = -20.0
-            notes.append("Unlikely to play")
 
-    # 4. Fixture bonus (-10 to +15)
-    fixture_bonus = 0.0
-    has_fixture_data = data.team_strength is not None
-    next_opponent = None
+    # ------------------------------------------------------------------
+    # 4. Fixture bonus  (-10 to +15)
+    # ------------------------------------------------------------------
+    fixture_bonus: float = 0.0
+    has_fixture = False
+    next_opponent: str | None = None
 
     if data.team_strength and data.opponent_strength:
-        # Difficulty based on relative strength
-        strength_diff = data.opponent_strength.strength_score - data.team_strength.strength_score
-        raw_bonus = -strength_diff / 5  # Scale: 50pt diff -> ±10 bonus
-        fixture_bonus = max(-10.0, min(15.0, raw_bonus))
+        has_fixture = True
         next_opponent = data.opponent_strength.team_name
+        # Positive when player's team is stronger than the opponent
+        diff = data.team_strength.strength_score - data.opponent_strength.strength_score
+        # Map diff (-100 to +100) → bonus (-10 to +15)
+        if diff >= 40:
+            fixture_bonus = 15.0
+        elif diff >= 20:
+            fixture_bonus = 8.0
+        elif diff >= 5:
+            fixture_bonus = 3.0
+        elif diff >= -5:
+            fixture_bonus = 0.0
+        elif diff >= -20:
+            fixture_bonus = -5.0
+        else:
+            fixture_bonus = -10.0
 
-        if fixture_bonus >= 5:
-            notes.append("Easy fixture")
-        elif fixture_bonus <= -5:
-            notes.append("Hard fixture")
+    # ------------------------------------------------------------------
+    # 5. Minutes trend bonus  (-10 to +10)
+    # ------------------------------------------------------------------
+    minutes_trend, avg_minutes = _extract_minutes_trend(data.performance or {})
 
-    # 5. Form bonus (-10 to +10) — recent matches vs season average
-    form_bonus = 0.0
-    recent_avg = _extract_recent_avg(data.performance, last_n=5)
-    if recent_avg is not None and avg_points > 0:
-        form_ratio = recent_avg / avg_points
-        if form_ratio > 2.0:
-            form_bonus = 10.0
-            notes.append("Hot streak")
-        elif form_ratio > 1.3:
-            form_bonus = 5.0
-        elif form_ratio < 0.5 and recent_avg > 0:
-            form_bonus = -5.0
-            notes.append("Below average")
-        elif recent_avg == 0:
-            form_bonus = -10.0
-            notes.append("Not scoring")
-    elif avg_points == 0:
-        form_bonus = -10.0
-        notes.append("Not scoring")
-
-    # 6. Minutes bonus (-10 to +10)
-    minutes_bonus = 0.0
-    if data.performance:
-        trend, avg_min, is_sub = extract_minutes_analysis(data.performance)
-        if trend == "increasing":
-            minutes_bonus = 10.0
-            notes.append("Minutes increasing")
-        elif trend == "decreasing":
-            minutes_bonus = -10.0
-            notes.append("Minutes decreasing")
-        elif trend == "stable" and avg_min is not None and avg_min < 30:
+    minutes_bonus: float = 0.0
+    if minutes_trend == "increasing":
+        minutes_bonus = 10.0
+    elif minutes_trend == "decreasing":
+        minutes_bonus = -10.0
+    elif minutes_trend == "stable":
+        if avg_minutes is not None and avg_minutes < 30:
             minutes_bonus = -8.0
-            notes.append("Rarely plays")
+        else:
+            minutes_bonus = 0.0
 
-    # Sum components
-    raw_total = (
-        base_points + consistency_bonus + lineup_bonus + fixture_bonus + form_bonus + minutes_bonus
-    )
+    # ------------------------------------------------------------------
+    # 6. Form bonus  (-10 to +10)
+    # ------------------------------------------------------------------
+    form_bonus: float = 0.0
+    if avg_pts > 0:
+        ratio = current_pts / avg_pts
+        if ratio > 2.0:
+            form_bonus = 10.0
+        elif ratio > 1.3:
+            form_bonus = 5.0
+        elif ratio < 0.5:
+            if current_pts == 0:
+                form_bonus = -10.0
+            else:
+                form_bonus = -5.0
+    else:
+        if current_pts == 0:
+            form_bonus = -10.0
 
-    # DGW multiplier
-    dgw_multiplier = 1.8 if data.dgw_info.is_dgw else 1.0
-    if data.dgw_info.is_dgw:
-        notes.append("DOUBLE GAMEWEEK")
-
-    total = raw_total * dgw_multiplier
-
-    # Data quality grading
-    data_quality = grade_data_quality(
+    # ------------------------------------------------------------------
+    # 7. Data quality grade
+    # ------------------------------------------------------------------
+    data_quality = _grade_data_quality(
         games_played=games_played,
-        consistency=consistency,
-        has_fixture_data=has_fixture_data,
-        has_lineup_data=has_lineup_data,
+        has_fixture=has_fixture,
+        has_lineup=has_lineup,
+    )
+    # Back-fill the consistency field now that we have it
+    data_quality.consistency = consistency if consistency is not None else 0.0
+
+    # ------------------------------------------------------------------
+    # 8. Assemble raw total and apply grade-F halving
+    # ------------------------------------------------------------------
+    raw_total = (
+        base_points + consistency_bonus + lineup_bonus + fixture_bonus + minutes_bonus + form_bonus
     )
 
-    # Grade F penalty: halve the score, but only when we have performance data
-    # showing the player has played very few games. When there is no performance
-    # data at all, grade F means "unknown" not "poor" — don't penalize.
-    if data_quality.grade == "F" and data.performance is not None:
-        total *= 0.5
+    if data_quality.grade == "F":
+        raw_total = raw_total / 2.0
+        notes.append("Score halved: insufficient data (grade F)")
 
-    # Clamp to 0-180
-    total = max(0, min(180, total))
+    # Clamp pre-DGW score to 0-100
+    pre_dgw = max(0.0, min(raw_total, 100.0))
 
-    price = getattr(player, "price", player.market_value)
-    status = getattr(player, "status", 0)  # Player (squad) has no status field
+    # ------------------------------------------------------------------
+    # 9. DGW multiplier
+    # ------------------------------------------------------------------
+    dgw_multiplier = 1.8 if data.is_dgw else 1.0
+    if data.is_dgw:
+        notes.append("DOUBLE GAMEWEEK ×1.8")
+
+    expected_points = min(pre_dgw * dgw_multiplier, 180.0)
 
     return PlayerScore(
         player_id=player.id,
-        expected_points=round(total, 1),
+        expected_points=round(expected_points, 2),
         data_quality=data_quality,
         base_points=base_points,
-        consistency_bonus=round(consistency_bonus, 1),
+        consistency_bonus=consistency_bonus,
         lineup_bonus=lineup_bonus,
-        fixture_bonus=round(fixture_bonus, 1),
+        fixture_bonus=fixture_bonus,
         form_bonus=form_bonus,
         minutes_bonus=minutes_bonus,
         dgw_multiplier=dgw_multiplier,
-        is_dgw=data.dgw_info.is_dgw,
+        is_dgw=data.is_dgw,
         next_opponent=next_opponent,
         notes=notes,
-        current_price=price,
+        current_price=player.price,
         market_value=player.market_value,
-        position=player.position,
-        average_points=avg_points,
-        status=status,
-        team_id=getattr(player, "team_id", ""),
     )

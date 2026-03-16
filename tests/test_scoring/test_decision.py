@@ -1,53 +1,26 @@
-"""Tests for DecisionEngine — buy/sell/lineup/trade-pair from PlayerScore."""
+"""Tests for DecisionEngine."""
 
-from rehoboam.analyzer import RosterContext
 from rehoboam.kickbase_client import MarketPlayer
 from rehoboam.scoring.decision import DecisionEngine
 from rehoboam.scoring.models import DataQuality, PlayerScore
 
 
-def _make_player(**overrides) -> MarketPlayer:
-    defaults = {
-        "id": "p1",
-        "first_name": "Test",
-        "last_name": "Player",
-        "position": "Midfielder",
-        "team_id": "t1",
-        "team_name": "Test FC",
-        "price": 5_000_000,
-        "market_value": 5_000_000,
-        "points": 100,
-        "average_points": 20.0,
-        "status": 0,
-    }
-    defaults.update(overrides)
-    return MarketPlayer(**defaults)
-
-
-def _make_score(
-    player_id: str = "p1",
-    ep: float = 60.0,
-    grade: str = "A",
-    avg_points: float = 20.0,
-    price: int = 5_000_000,
-    market_value: int = 5_000_000,
-    position: str = "Midfielder",
-    status: int = 0,
-) -> PlayerScore:
+def _make_score(player_id, ep, position="Midfielder", price=5_000_000, market_value=5_000_000):
+    dq = DataQuality(
+        grade="A",
+        games_played=15,
+        consistency=0.8,
+        has_fixture_data=True,
+        has_lineup_data=True,
+        warnings=[],
+    )
     return PlayerScore(
         player_id=player_id,
         expected_points=ep,
-        data_quality=DataQuality(
-            grade=grade,
-            games_played=15,
-            consistency=0.8,
-            has_fixture_data=True,
-            has_lineup_data=True,
-            warnings=[],
-        ),
-        base_points=30.0,
-        consistency_bonus=10.0,
-        lineup_bonus=20.0,
+        data_quality=dq,
+        base_points=ep * 0.5,
+        consistency_bonus=5.0,
+        lineup_bonus=10.0,
         fixture_bonus=0.0,
         form_bonus=0.0,
         minutes_bonus=0.0,
@@ -57,172 +30,213 @@ def _make_score(
         notes=[],
         current_price=price,
         market_value=market_value,
-        position=position,
-        average_points=avg_points,
-        status=status,
     )
 
 
-def _make_roster_context(position: str, current_count: int, minimum_count: int) -> RosterContext:
-    return RosterContext(
+def _make_player(player_id, position):
+    return MarketPlayer(
+        id=player_id,
+        first_name="Test",
+        last_name=player_id,
         position=position,
-        current_count=current_count,
-        minimum_count=minimum_count,
-        existing_players=[],
-        weakest_player=None,
-        is_below_minimum=current_count < minimum_count,
-        upgrade_potential=0.0,
+        team_id="t1",
+        team_name="Test FC",
+        price=5_000_000,
+        market_value=5_000_000,
+        points=100,
+        average_points=12.0,
+        status=0,
     )
 
 
-class TestRecommendBuys:
-    def test_sorts_by_ep_descending(self):
-        engine = DecisionEngine()
-        scores = [
-            _make_score("p1", ep=50.0, avg_points=20.0),
-            _make_score("p2", ep=80.0, avg_points=25.0),
-            _make_score("p3", ep=65.0, avg_points=22.0),
-        ]
-        players = {s.player_id: _make_player(id=s.player_id, average_points=20.0) for s in scores}
-        recs = engine.recommend_buys(scores, [], {}, 10_000_000, players)
-        assert recs[0].score.player_id == "p2"
-        assert recs[1].score.player_id == "p3"
+class TestMarginalEP:
+    def test_player_improves_best_11(self):
+        """New player with higher EP than weakest starter → positive marginal gain."""
+        squad = []
+        squad_scores = []
+        squad.append(_make_player("gk1", "Goalkeeper"))
+        squad_scores.append(_make_score("gk1", 40.0, "Goalkeeper"))
+        for i in range(3):
+            squad.append(_make_player(f"def{i}", "Defender"))
+            squad_scores.append(_make_score(f"def{i}", 35.0, "Defender"))
+        for i in range(6):
+            ep = 50.0 - i * 5  # 50, 45, 40, 35, 30, 25
+            squad.append(_make_player(f"mid{i}", "Midfielder"))
+            squad_scores.append(_make_score(f"mid{i}", ep, "Midfielder"))
+        squad.append(_make_player("fwd0", "Forward"))
+        squad_scores.append(_make_score("fwd0", 45.0, "Forward"))
 
-    def test_filters_grade_f(self):
         engine = DecisionEngine()
-        scores = [
-            _make_score("p1", ep=80.0, grade="F", avg_points=20.0),
-            _make_score("p2", ep=60.0, grade="A", avg_points=20.0),
-        ]
-        players = {s.player_id: _make_player(id=s.player_id, average_points=20.0) for s in scores}
-        recs = engine.recommend_buys(scores, [], {}, 10_000_000, players)
-        assert len(recs) == 1
-        assert recs[0].score.player_id == "p2"
+        candidate = _make_score("new_mid", 55.0, "Midfielder")
+        candidate_player = _make_player("new_mid", "Midfielder")
 
-    def test_filters_low_avg_points(self):
+        result = engine.calculate_marginal_ep(
+            candidate_score=candidate,
+            candidate_player=candidate_player,
+            squad=squad,
+            squad_scores=squad_scores,
+        )
+
+        assert result.marginal_ep_gain > 0
+        assert result.replaces_player_id is not None
+
+    def test_player_doesnt_crack_best_11(self):
+        """Player worse than all starters → marginal gain = 0."""
+        squad = []
+        squad_scores = []
+        squad.append(_make_player("gk1", "Goalkeeper"))
+        squad_scores.append(_make_score("gk1", 40.0, "Goalkeeper"))
+        for i in range(3):
+            squad.append(_make_player(f"def{i}", "Defender"))
+            squad_scores.append(_make_score(f"def{i}", 50.0, "Defender"))
+        for i in range(6):
+            squad.append(_make_player(f"mid{i}", "Midfielder"))
+            squad_scores.append(_make_score(f"mid{i}", 60.0, "Midfielder"))
+        squad.append(_make_player("fwd0", "Forward"))
+        squad_scores.append(_make_score("fwd0", 55.0, "Forward"))
+
         engine = DecisionEngine()
-        scores = [
-            _make_score("p1", ep=60.0, avg_points=15.0),  # Below 20 threshold
-        ]
-        players = {"p1": _make_player(id="p1", average_points=15.0)}
-        recs = engine.recommend_buys(scores, [], {}, 10_000_000, players)
-        assert len(recs) == 0
+        candidate = _make_score("weak", 20.0, "Midfielder")
+        candidate_player = _make_player("weak", "Midfielder")
 
-    def test_filters_low_ep(self):
-        engine = DecisionEngine(min_expected_points_to_buy=30.0)
-        scores = [
-            _make_score("p1", ep=20.0, avg_points=20.0),  # Below 30 EP threshold
-        ]
-        players = {"p1": _make_player(id="p1", average_points=20.0)}
-        recs = engine.recommend_buys(scores, [], {}, 10_000_000, players)
-        assert len(recs) == 0
+        result = engine.calculate_marginal_ep(
+            candidate_score=candidate,
+            candidate_player=candidate_player,
+            squad=squad,
+            squad_scores=squad_scores,
+        )
 
-    def test_fills_gap_bonus(self):
+        assert result.marginal_ep_gain == 0
+
+
+class TestSellPlan:
+    def test_viable_sell_plan(self):
+        squad = []
+        squad_scores = []
+        squad.append(_make_player("gk1", "Goalkeeper"))
+        squad_scores.append(_make_score("gk1", 40.0, "Goalkeeper", market_value=3_000_000))
+        for i in range(3):
+            squad.append(_make_player(f"def{i}", "Defender"))
+            squad_scores.append(_make_score(f"def{i}", 35.0, "Defender", market_value=5_000_000))
+        for i in range(6):
+            squad.append(_make_player(f"mid{i}", "Midfielder"))
+            squad_scores.append(
+                _make_score(f"mid{i}", 50.0 - i * 5, "Midfielder", market_value=8_000_000)
+            )
+        squad.append(_make_player("fwd0", "Forward"))
+        squad_scores.append(_make_score("fwd0", 45.0, "Forward", market_value=10_000_000))
+
         engine = DecisionEngine()
-        scores = [_make_score("p1", ep=60.0, avg_points=20.0, position="Goalkeeper")]
-        players = {"p1": _make_player(id="p1", position="Goalkeeper", average_points=20.0)}
-        roster_ctx = {"Goalkeeper": _make_roster_context("Goalkeeper", 0, 1)}
-        recs = engine.recommend_buys(scores, [], roster_ctx, 10_000_000, players)
-        assert recs[0].roster_bonus == 10.0
-        assert recs[0].reason == "fills_gap"
+        result = engine.build_sell_plan(
+            bid_amount=20_000_000,
+            current_budget=5_000_000,
+            squad=squad,
+            squad_scores=squad_scores,
+            best_11_ids={
+                "gk1",
+                "def0",
+                "def1",
+                "def2",
+                "mid0",
+                "mid1",
+                "mid2",
+                "mid3",
+                "mid4",
+                "mid5",
+                "fwd0",
+            },
+            displaced_player_id="mid5",
+        )
 
-    def test_respects_budget(self):
-        engine = DecisionEngine()
-        scores = [_make_score("p1", ep=80.0, price=10_000_000, avg_points=20.0)]
-        players = {"p1": _make_player(id="p1", price=10_000_000, average_points=20.0)}
-        recs = engine.recommend_buys(scores, [], {}, 5_000_000, players)
-        assert len(recs) == 0
+        assert result.is_viable
+        assert result.net_budget_after >= 0
 
-    def test_filters_team_at_max(self):
-        """Cannot buy from a team if squad already has 3 players from it."""
+    def test_within_budget_no_sells(self):
         engine = DecisionEngine()
-        # Market player from team "t1"
-        market_scores = [
-            _make_score("m1", ep=80.0, avg_points=25.0),  # team_id defaults to ""
-        ]
-        # Override team_id on the market score
-        market_scores[0].team_id = "t1"
-        # Squad already has 3 from team "t1"
-        squad_scores = [_make_score(f"s{i}", ep=50.0, avg_points=20.0) for i in range(3)]
-        for s in squad_scores:
-            s.team_id = "t1"
-        players = {"m1": _make_player(id="m1", team_id="t1", average_points=25.0)}
-        recs = engine.recommend_buys(market_scores, squad_scores, {}, 10_000_000, players)
-        assert len(recs) == 0
+        result = engine.build_sell_plan(
+            bid_amount=5_000_000,
+            current_budget=10_000_000,
+            squad=[],
+            squad_scores=[],
+            best_11_ids=set(),
+            displaced_player_id=None,
+        )
+        assert result.is_viable
+        assert len(result.players_to_sell) == 0
 
-    def test_allows_team_below_max(self):
-        """Can buy from a team if squad has fewer than 3 players from it."""
+    def test_sell_plan_not_viable_if_all_protected(self):
+        squad = [_make_player("gk1", "Goalkeeper")]
+        squad_scores = [_make_score("gk1", 40.0, "Goalkeeper", market_value=3_000_000)]
+
         engine = DecisionEngine()
-        market_scores = [_make_score("m1", ep=80.0, avg_points=25.0)]
-        market_scores[0].team_id = "t1"
-        squad_scores = [_make_score("s1", ep=50.0, avg_points=20.0)]
-        squad_scores[0].team_id = "t1"
-        players = {"m1": _make_player(id="m1", team_id="t1", average_points=25.0)}
-        recs = engine.recommend_buys(market_scores, squad_scores, {}, 10_000_000, players)
-        assert len(recs) == 1
+        result = engine.build_sell_plan(
+            bid_amount=50_000_000,
+            current_budget=1_000_000,
+            squad=squad,
+            squad_scores=squad_scores,
+            best_11_ids={"gk1"},
+            displaced_player_id=None,
+        )
+
+        assert not result.is_viable
 
 
 class TestRecommendSells:
-    def test_sorts_by_ep_ascending(self):
+    def test_bench_players_more_expendable(self):
+        """Bench players should have higher expendability than starters."""
+        squad = []
+        squad_scores = []
+        squad.append(_make_player("gk1", "Goalkeeper"))
+        squad_scores.append(_make_score("gk1", 40.0, "Goalkeeper"))
+        for i in range(3):
+            squad.append(_make_player(f"def{i}", "Defender"))
+            squad_scores.append(_make_score(f"def{i}", 35.0, "Defender"))
+        for i in range(4):
+            squad.append(_make_player(f"mid{i}", "Midfielder"))
+            squad_scores.append(_make_score(f"mid{i}", 50.0, "Midfielder"))
+        for i in range(3):
+            squad.append(_make_player(f"fwd{i}", "Forward"))
+            squad_scores.append(_make_score(f"fwd{i}", 45.0 if i == 0 else 20.0, "Forward"))
+
+        best_11_ids = {"gk1", "def0", "def1", "def2", "mid0", "mid1", "mid2", "mid3", "fwd0"}
         engine = DecisionEngine()
-        scores = [
-            _make_score("p1", ep=70.0),
-            _make_score("p2", ep=30.0),
-            _make_score("p3", ep=50.0),
-        ]
-        players = {s.player_id: _make_player(id=s.player_id) for s in scores}
-        recs = engine.recommend_sells(scores, {}, players)
-        assert recs[0].score.player_id == "p2"
+        recommendations = engine.recommend_sells(
+            squad=squad, squad_scores=squad_scores, best_11_ids=best_11_ids
+        )
 
-    def test_protects_position_minimum(self):
+        # bench players (fwd1, fwd2) should be more expendable than starter fwd0
+        bench_recs = [r for r in recommendations if r.score.player_id in ("fwd1", "fwd2")]
+        starter_fwd_recs = [r for r in recommendations if r.score.player_id == "fwd0"]
+        assert bench_recs
+        assert starter_fwd_recs
+        assert bench_recs[0].expendability > starter_fwd_recs[0].expendability
+
+    def test_position_minimum_players_protected(self):
+        """Only goalkeeper → should be marked as protected."""
+        squad = [_make_player("gk1", "Goalkeeper")]
+        squad_scores = [_make_score("gk1", 40.0, "Goalkeeper")]
+
         engine = DecisionEngine()
-        scores = [_make_score("p1", ep=20.0)]
-        players = {"p1": _make_player(id="p1", position="Goalkeeper")}
-        roster_ctx = {"Goalkeeper": _make_roster_context("Goalkeeper", 1, 1)}
-        recs = engine.recommend_sells(scores, roster_ctx, players)
-        assert recs[0].is_protected is True
-        assert recs[0].protection_reason is not None
-
-
-class TestBuildTradePairs:
-    def test_pairs_lowest_sell_with_highest_buy(self):
-        engine = DecisionEngine(min_ep_upgrade_threshold=10.0)
-        market_scores = [_make_score("m1", ep=80.0, price=8_000_000, avg_points=25.0)]
-        squad_scores = [_make_score("s1", ep=30.0, market_value=3_000_000)]
-        market_players = {"m1": _make_player(id="m1", price=8_000_000, average_points=25.0)}
-        squad_players = {"s1": _make_player(id="s1", market_value=3_000_000)}
-        pairs = engine.build_trade_pairs(
-            market_scores,
-            squad_scores,
-            {},
-            10_000_000,
-            market_players,
-            squad_players,
+        recommendations = engine.recommend_sells(
+            squad=squad, squad_scores=squad_scores, best_11_ids={"gk1"}
         )
-        assert len(pairs) == 1
-        assert pairs[0].ep_gain == 50.0
 
-    def test_no_pair_below_threshold(self):
-        engine = DecisionEngine(min_ep_upgrade_threshold=10.0)
-        market_scores = [_make_score("m1", ep=35.0, avg_points=20.0)]
-        squad_scores = [_make_score("s1", ep=30.0)]
-        market_players = {"m1": _make_player(id="m1", average_points=20.0)}
-        squad_players = {"s1": _make_player(id="s1")}
-        pairs = engine.build_trade_pairs(
-            market_scores,
-            squad_scores,
-            {},
-            10_000_000,
-            market_players,
-            squad_players,
-        )
-        assert len(pairs) == 0
+        gk_rec = next(r for r in recommendations if r.score.player_id == "gk1")
+        assert gk_rec.is_protected
 
 
 class TestSelectLineup:
-    def test_returns_player_id_to_ep_dict(self):
+    def test_returns_score_dict(self):
+        """select_lineup returns {player_id: ep} dict."""
+        squad_scores = [
+            _make_score("p1", 40.0),
+            _make_score("p2", 50.0),
+            _make_score("p3", 30.0),
+        ]
         engine = DecisionEngine()
-        scores = [_make_score(f"p{i}", ep=float(60 + i)) for i in range(15)]
-        result = engine.select_lineup(scores)
+        result = engine.select_lineup(squad_scores)
+
         assert isinstance(result, dict)
-        assert all(isinstance(v, float) for v in result.values())
+        assert result["p1"] == 40.0
+        assert result["p2"] == 50.0
+        assert result["p3"] == 30.0

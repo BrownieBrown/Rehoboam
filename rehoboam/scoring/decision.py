@@ -1,185 +1,344 @@
-"""DecisionEngine — buy/sell/lineup/trade-pair decisions from PlayerScore."""
+"""DecisionEngine — EP-first buy/sell decision logic.
 
-from ..analyzer import RosterContext
-from ..kickbase_client import MarketPlayer, Player
-from .models import BuyRecommendation, PlayerScore, SellRecommendation, TradePair
+Uses select_best_eleven from rehoboam.formation to determine the optimal
+starting 11 from a squad, then calculates marginal EP gain for candidates,
+builds sell plans to fund purchases, and ranks squad players by expendability.
+"""
+
+from rehoboam.config import POSITION_MINIMUMS
+from rehoboam.formation import select_best_eleven
+from rehoboam.kickbase_client import MarketPlayer
+
+from .models import (
+    MarginalEPResult,
+    PlayerScore,
+    SellPlan,
+    SellPlanEntry,
+    SellRecommendation,
+)
 
 
 class DecisionEngine:
-    """Makes buy/sell/lineup decisions from PlayerScore lists."""
+    """EP-based decision engine for buy/sell recommendations.
 
-    def __init__(
+    Args:
+        min_ep_to_buy:  Minimum expected points for a player to be worth buying.
+        min_ep_upgrade: Minimum marginal EP gain required to recommend a buy.
+    """
+
+    def __init__(self, min_ep_to_buy: float = 30.0, min_ep_upgrade: float = 10.0) -> None:
+        self.min_ep_to_buy = min_ep_to_buy
+        self.min_ep_upgrade = min_ep_upgrade
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    def select_lineup(self, squad_scores: list[PlayerScore]) -> dict[str, float]:
+        """Return a ``{player_id: expected_points}`` mapping for all scored players.
+
+        This dict is suitable as the ``player_values`` argument to
+        :func:`~rehoboam.formation.select_best_eleven`.
+        """
+        return {s.player_id: s.expected_points for s in squad_scores}
+
+    # ------------------------------------------------------------------
+    # Core decision methods
+    # ------------------------------------------------------------------
+
+    def calculate_marginal_ep(
         self,
-        min_avg_points_to_buy: float = 20.0,
-        min_avg_points_emergency: float = 10.0,
-        min_expected_points_to_buy: float = 30.0,
-        min_ep_upgrade_threshold: float = 10.0,
-    ):
-        self.min_avg_points_to_buy = min_avg_points_to_buy
-        self.min_avg_points_emergency = min_avg_points_emergency
-        self.min_expected_points_to_buy = min_expected_points_to_buy
-        self.min_ep_upgrade_threshold = min_ep_upgrade_threshold
-
-    MAX_PLAYERS_PER_TEAM = 3
-
-    def recommend_buys(
-        self,
-        market_scores: list[PlayerScore],
+        candidate_score: PlayerScore,
+        candidate_player: MarketPlayer,
+        squad: list[MarketPlayer],
         squad_scores: list[PlayerScore],
-        roster_context: dict[str, RosterContext],
-        budget: int,
-        market_players: dict[str, MarketPlayer],
-        is_emergency: bool = False,
-        top_n: int = 5,
-    ) -> list[BuyRecommendation]:
-        """Recommend players to buy, sorted by effective EP."""
-        min_avg = self.min_avg_points_emergency if is_emergency else self.min_avg_points_to_buy
+    ) -> MarginalEPResult:
+        """Calculate how much adding *candidate_player* improves the best-11 EP total.
 
-        # Count players per team in current squad
-        squad_team_counts: dict[str, int] = {}
-        for sq in squad_scores:
-            if sq.team_id:
-                squad_team_counts[sq.team_id] = squad_team_counts.get(sq.team_id, 0) + 1
+        Steps:
+        1. Build a score map for the current squad.
+        2. Select current best-11 and sum their EP.
+        3. Add the candidate to the squad (temporarily) and re-run best-11.
+        4. ``marginal_ep_gain = max(0, new_total - current_total)``.
+        5. Detect which player was displaced (in old best-11 but not in new).
 
-        recs = []
+        Returns a :class:`~rehoboam.scoring.models.MarginalEPResult`.
+        """
+        score_map = self.select_lineup(squad_scores)
 
-        for score in market_scores:
-            # Quality gates
-            if score.data_quality.grade == "F":
-                continue
-            if score.average_points < min_avg:
-                continue
-            if score.expected_points < self.min_expected_points_to_buy:
-                continue
-            if score.current_price > budget:
-                continue
-            if score.status != 0:
-                continue
-            # Team limit: max 3 players from same team
-            if squad_team_counts.get(score.team_id, 0) >= self.MAX_PLAYERS_PER_TEAM:
-                continue
+        # Current best-11
+        current_best = select_best_eleven(squad, score_map)
+        current_total = sum(score_map.get(p.id, 0.0) for p in current_best)
+        current_best_ids = {p.id for p in current_best}
 
-            player = market_players.get(score.player_id)
-            if not player:
+        # Augmented squad with candidate
+        augmented_squad = list(squad) + [candidate_player]
+        augmented_score_map = dict(score_map)
+        augmented_score_map[candidate_score.player_id] = candidate_score.expected_points
+
+        new_best = select_best_eleven(augmented_squad, augmented_score_map)
+        new_total = sum(augmented_score_map.get(p.id, 0.0) for p in new_best)
+        new_best_ids = {p.id for p in new_best}
+
+        marginal_gain = max(0.0, new_total - current_total)
+
+        # Find who was displaced: was in old best-11 but not in new, and is not
+        # the candidate itself.
+        displaced_ids = current_best_ids - new_best_ids - {candidate_score.player_id}
+        displaced_player_id: str | None = next(iter(displaced_ids), None)
+
+        # Resolve displaced player name from squad
+        displaced_player_name: str | None = None
+        displaced_player_ep: float = 0.0
+        if displaced_player_id:
+            displaced_player = next((p for p in squad if p.id == displaced_player_id), None)
+            if displaced_player:
+                displaced_player_name = (
+                    f"{displaced_player.first_name} {displaced_player.last_name}"
+                )
+            displaced_player_ep = score_map.get(displaced_player_id, 0.0)
+
+        return MarginalEPResult(
+            player_id=candidate_score.player_id,
+            expected_points=candidate_score.expected_points,
+            current_squad_ep=current_total,
+            new_squad_ep=new_total,
+            marginal_ep_gain=marginal_gain,
+            replaces_player_id=displaced_player_id if marginal_gain > 0 else None,
+            replaces_player_name=displaced_player_name if marginal_gain > 0 else None,
+            replaces_player_ep=displaced_player_ep,
+        )
+
+    def build_sell_plan(
+        self,
+        bid_amount: int,
+        current_budget: int,
+        squad: list[MarketPlayer],
+        squad_scores: list[PlayerScore],
+        best_11_ids: set[str],
+        displaced_player_id: str | None,
+    ) -> SellPlan:
+        """Build a sell plan that covers the budget shortfall for *bid_amount*.
+
+        Rules:
+        - If ``bid_amount <= current_budget``: viable, no sells needed.
+        - Otherwise greedily sell bench players (not in best-11) sorted by
+          lowest EP first, then add the displaced player if still short.
+        - Non-displaced best-11 starters are protected and cannot be sold.
+        - ``expected_sell_value = market_value * 0.95``.
+
+        Returns a :class:`~rehoboam.scoring.models.SellPlan`.
+        """
+        shortfall = bid_amount - current_budget
+
+        if shortfall <= 0:
+            return SellPlan(
+                players_to_sell=[],
+                total_recovery=0,
+                net_budget_after=current_budget - bid_amount,
+                is_viable=True,
+                ep_impact=0.0,
+                reasoning="Bid within current budget — no sells required.",
+            )
+
+        score_map = {s.player_id: s for s in squad_scores}
+
+        # Determine position counts to enforce minimums
+        position_counts: dict[str, int] = {}
+        for p in squad:
+            position_counts[p.position] = position_counts.get(p.position, 0) + 1
+
+        # Identify sell candidates
+        # Priority: displaced player first, then bench players sorted by lowest EP
+        # Protected: non-displaced best-11 starters + position-minimum holders
+
+        def _is_at_minimum(player: MarketPlayer) -> bool:
+            """True if selling this player would drop position below the minimum."""
+            minimum = POSITION_MINIMUMS.get(player.position, 0)
+            current = position_counts.get(player.position, 0)
+            return current <= minimum
+
+        def _ep(player: MarketPlayer) -> float:
+            ps = score_map.get(player.id)
+            return ps.expected_points if ps else 0.0
+
+        # Categorise squad members into three tiers:
+        #   1. displaced player — first candidate (no longer in new best-11)
+        #   2. bench players (not in best-11, excluding displaced)
+        #   3. non-displaced starters above their position minimum (last resort)
+        # Players at or below position minimum are never sold.
+        displaced_player: MarketPlayer | None = None
+        bench_candidates: list[MarketPlayer] = []
+        starter_surplus: list[MarketPlayer] = []
+
+        for player in squad:
+            if player.id == displaced_player_id:
+                displaced_player = player
                 continue
+            if player.id in best_11_ids:
+                # Starter (not displaced) — last-resort sell candidate
+                starter_surplus.append(player)
+            else:
+                # Bench player
+                bench_candidates.append(player)
 
-            # Roster bonus
-            roster_bonus = 0.0
-            reason = "additional"
-            ctx = roster_context.get(score.position)
-            if ctx and ctx.is_below_minimum:
-                roster_bonus = 10.0
-                reason = "fills_gap"
-            elif ctx and not ctx.is_below_minimum:
-                reason = "upgrade"
+        # Sort by ascending EP within each tier (most expendable first)
+        bench_candidates.sort(key=_ep)
+        starter_surplus.sort(key=_ep)
 
-            recs.append(
-                BuyRecommendation(
-                    player=player,
-                    score=score,
-                    roster_bonus=roster_bonus,
+        # Build ordered list: displaced → bench → starter surplus
+        ordered_candidates: list[MarketPlayer] = []
+        if displaced_player is not None:
+            ordered_candidates.append(displaced_player)
+        ordered_candidates.extend(bench_candidates)
+        ordered_candidates.extend(starter_surplus)
+
+        players_to_sell: list[SellPlanEntry] = []
+        total_recovery = 0
+        ep_impact = 0.0
+        # Track how many of each position we'd still have after sells
+        remaining_counts = dict(position_counts)
+
+        for player in ordered_candidates:
+            if total_recovery >= shortfall:
+                break
+
+            # Check position minimum with remaining counts
+            minimum = POSITION_MINIMUMS.get(player.position, 0)
+            if remaining_counts.get(player.position, 0) <= minimum:
+                continue  # selling would breach minimum — skip
+
+            ps = score_map.get(player.id)
+            player_ep = ps.expected_points if ps else 0.0
+            sell_value = int(player.market_value * 0.95)
+
+            players_to_sell.append(
+                SellPlanEntry(
+                    player_id=player.id,
+                    player_name=f"{player.first_name} {player.last_name}",
+                    expected_sell_value=sell_value,
+                    player_ep=player_ep,
+                    is_in_best_11=player.id in best_11_ids,
+                )
+            )
+            total_recovery += sell_value
+            ep_impact += player_ep
+            remaining_counts[player.position] = remaining_counts.get(player.position, 0) - 1
+
+        net_budget_after = current_budget + total_recovery - bid_amount
+        is_viable = net_budget_after >= 0
+
+        reasoning = (
+            f"Sell {len(players_to_sell)} player(s) to recover "
+            f"€{total_recovery:,} and cover €{shortfall:,} shortfall."
+            if players_to_sell
+            else "Cannot cover shortfall — all candidates are protected."
+        )
+
+        return SellPlan(
+            players_to_sell=players_to_sell,
+            total_recovery=total_recovery,
+            net_budget_after=net_budget_after,
+            is_viable=is_viable,
+            ep_impact=ep_impact,
+            reasoning=reasoning,
+        )
+
+    def recommend_sells(
+        self,
+        squad: list[MarketPlayer],
+        squad_scores: list[PlayerScore],
+        best_11_ids: set[str],
+    ) -> list[SellRecommendation]:
+        """Rank all squad players by expendability (highest = most expendable).
+
+        Formula::
+
+            expendability = 100 - expected_points + (20 if not in best-11 else 0)
+
+        Players at or below their position minimum are marked as protected.
+
+        Returns a sorted list of :class:`~rehoboam.scoring.models.SellRecommendation`
+        (most expendable first).
+        """
+        score_map = {s.player_id: s for s in squad_scores}
+
+        # Count positions to detect position minimums
+        position_counts: dict[str, int] = {}
+        for p in squad:
+            position_counts[p.position] = position_counts.get(p.position, 0) + 1
+
+        recommendations: list[SellRecommendation] = []
+        for player in squad:
+            ps = score_map.get(player.id)
+            ep = ps.expected_points if ps else 0.0
+            in_best_11 = player.id in best_11_ids
+
+            bench_bonus = 0.0 if in_best_11 else 20.0
+            expendability = 100.0 - ep + bench_bonus
+
+            minimum = POSITION_MINIMUMS.get(player.position, 0)
+            is_protected = position_counts.get(player.position, 0) <= minimum
+            protection_reason = (
+                f"Only {position_counts.get(player.position, 0)} "
+                f"{player.position}(s) — minimum is {minimum}"
+                if is_protected
+                else None
+            )
+
+            reason_parts = []
+            if not in_best_11:
+                reason_parts.append("bench player")
+            reason_parts.append(f"EP={ep:.1f}")
+            if is_protected:
+                reason_parts.append("position minimum")
+            reason = "; ".join(reason_parts)
+
+            recommendations.append(
+                SellRecommendation(
+                    score=ps if ps is not None else _dummy_score(player.id, ep),
+                    expendability=expendability,
+                    is_protected=is_protected,
+                    protection_reason=protection_reason,
                     reason=reason,
                 )
             )
 
-        recs.sort(key=lambda r: r.effective_ep, reverse=True)
-        return recs[:top_n]
+        recommendations.sort(key=lambda r: r.expendability, reverse=True)
+        return recommendations
 
-    def recommend_sells(
-        self,
-        squad_scores: list[PlayerScore],
-        roster_context: dict[str, RosterContext],
-        squad_players: dict[str, MarketPlayer | Player],
-    ) -> list[SellRecommendation]:
-        """Recommend players to sell, sorted by lowest EP first."""
-        recs = []
 
-        for score in squad_scores:
-            player = squad_players.get(score.player_id)
-            if not player:
-                continue
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-            # Check position protection — try score.position first, then player.position
-            is_protected = False
-            protection_reason = None
-            ctx = roster_context.get(score.position) or roster_context.get(player.position)
-            if ctx and ctx.current_count <= ctx.minimum_count:
-                is_protected = True
-                protection_reason = f"Min {score.position}"
 
-            recs.append(
-                SellRecommendation(
-                    player=player,
-                    score=score,
-                    is_protected=is_protected,
-                    protection_reason=protection_reason,
-                    budget_recovery=score.market_value,
-                )
-            )
+def _dummy_score(player_id: str, ep: float) -> PlayerScore:
+    """Minimal PlayerScore for players missing from score_map."""
+    from rehoboam.scoring.models import DataQuality
 
-        recs.sort(key=lambda r: r.score.expected_points)
-        return recs
-
-    def build_trade_pairs(
-        self,
-        market_scores: list[PlayerScore],
-        squad_scores: list[PlayerScore],
-        roster_context: dict[str, RosterContext],
-        budget: int,
-        market_players: dict[str, MarketPlayer],
-        squad_players: dict[str, MarketPlayer | Player],
-        top_n: int = 5,
-    ) -> list[TradePair]:
-        """Build sell->buy swap pairs with positive EP gain."""
-        # Get unprotected sell candidates sorted by lowest EP
-        sells = self.recommend_sells(squad_scores, roster_context, squad_players)
-        sellable = [s for s in sells if not s.is_protected]
-
-        # Get buy candidates with relaxed budget to find all candidates
-        # (actual affordability checked per-pair below)
-        max_sell_recovery = max((s.budget_recovery for s in sellable), default=0)
-        buys = self.recommend_buys(
-            market_scores,
-            squad_scores,
-            roster_context,
-            budget=budget + max_sell_recovery,
-            market_players=market_players,
-            top_n=20,
-        )
-
-        pairs = []
-        used_sells = set()
-        used_buys = set()
-
-        for buy_rec in buys:
-            for sell_rec in sellable:
-                if sell_rec.score.player_id in used_sells:
-                    continue
-                if buy_rec.score.player_id in used_buys:
-                    break
-
-                ep_gain = buy_rec.score.expected_points - sell_rec.score.expected_points
-                # Check affordability using THIS sell's recovery, not the max
-                net_cost = buy_rec.score.current_price - sell_rec.budget_recovery
-
-                if ep_gain >= self.min_ep_upgrade_threshold and net_cost <= budget:
-                    pairs.append(
-                        TradePair(
-                            buy_player=buy_rec.player,
-                            sell_player=sell_rec.player,
-                            buy_score=buy_rec.score,
-                            sell_score=sell_rec.score,
-                        )
-                    )
-                    used_sells.add(sell_rec.score.player_id)
-                    used_buys.add(buy_rec.score.player_id)
-                    break
-
-        return pairs[:top_n]
-
-    def select_lineup(
-        self,
-        squad_scores: list[PlayerScore],
-    ) -> dict[str, float]:
-        """Return {player_id: expected_points} for formation.select_best_eleven()."""
-        return {s.player_id: s.expected_points for s in squad_scores}
+    dq = DataQuality(
+        grade="F",
+        games_played=0,
+        consistency=0.0,
+        has_fixture_data=False,
+        has_lineup_data=False,
+        warnings=["No score data available"],
+    )
+    return PlayerScore(
+        player_id=player_id,
+        expected_points=ep,
+        data_quality=dq,
+        base_points=0.0,
+        consistency_bonus=0.0,
+        lineup_bonus=0.0,
+        fixture_bonus=0.0,
+        form_bonus=0.0,
+        minutes_bonus=0.0,
+        dgw_multiplier=1.0,
+        is_dgw=False,
+        next_opponent=None,
+        notes=[],
+        current_price=0,
+        market_value=0,
+    )

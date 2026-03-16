@@ -1,29 +1,29 @@
-"""Data models for the EP-first scoring pipeline."""
+"""Data models for the EP scoring pipeline."""
 
 from dataclasses import dataclass, field
 
-from ..kickbase_client import MarketPlayer, Player
-from ..matchup_analyzer import DoubleGameweekInfo, TeamStrength
+from rehoboam.kickbase_client import MarketPlayer
+from rehoboam.matchup_analyzer import TeamStrength
 
 
 @dataclass
 class DataQuality:
-    """Data quality assessment for a player's score."""
+    """Quality assessment of the data used for scoring."""
 
-    grade: str
+    grade: str  # "A", "B", "C", "F"
     games_played: int
-    consistency: float
+    consistency: float  # 0-1
     has_fixture_data: bool
     has_lineup_data: bool
-    warnings: list[str] = field(default_factory=list)
+    warnings: list[str]
 
 
 @dataclass
 class PlayerScore:
-    """Unified expected points score for a player (0-180 scale)."""
+    """Scored player — the ONE number driving all decisions."""
 
     player_id: str
-    expected_points: float
+    expected_points: float  # 0-180 scale (DGW can exceed 100)
     data_quality: DataQuality
     base_points: float
     consistency_bonus: float
@@ -31,71 +31,92 @@ class PlayerScore:
     fixture_bonus: float
     form_bonus: float
     minutes_bonus: float
-    dgw_multiplier: float
+    dgw_multiplier: float  # 1.0 normally, 1.8 for DGW
     is_dgw: bool
     next_opponent: str | None
-    notes: list[str] = field(default_factory=list)
-    current_price: int = 0
-    market_value: int = 0
-    position: str = ""
-    average_points: float = 0.0
-    status: int = 0
-    team_id: str = ""
+    notes: list[str]
+    current_price: int
+    market_value: int
 
 
 @dataclass
 class PlayerData:
-    """Raw data bundle for scoring a player."""
+    """Raw data assembled by DataCollector for a single player."""
 
-    player: MarketPlayer | Player
+    player: MarketPlayer
     performance: dict | None
     player_details: dict | None
     team_strength: TeamStrength | None
     opponent_strength: TeamStrength | None
-    dgw_info: DoubleGameweekInfo
+    is_dgw: bool
     missing: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BuyRecommendation:
-    """A recommended player to buy."""
+    """EP-based buy recommendation."""
 
-    player: MarketPlayer
     score: PlayerScore
-    roster_bonus: float
+    marginal_ep_gain: float
+    replaces_player_id: str | None
+    replaces_player_name: str | None
+    roster_impact: str  # "fills_gap", "upgrade", "additional"
     reason: str
-    recommended_bid: int = 0
-
-    @property
-    def effective_ep(self) -> float:
-        return self.score.expected_points + self.roster_bonus
 
 
 @dataclass
 class SellRecommendation:
-    """A recommended player to sell."""
+    """EP-based sell recommendation."""
 
-    player: MarketPlayer | Player
     score: PlayerScore
+    expendability: float  # 0-100 (higher = more expendable)
     is_protected: bool
     protection_reason: str | None
-    budget_recovery: int
+    reason: str
 
 
 @dataclass
 class TradePair:
-    """A sell->buy swap recommendation."""
+    """Sell->Buy swap recommendation."""
 
-    buy_player: MarketPlayer
-    sell_player: MarketPlayer | Player
-    buy_score: PlayerScore
-    sell_score: PlayerScore
-    recommended_bid: int = 0
+    buy: BuyRecommendation
+    sell: SellRecommendation
+    net_cost: int
+    ep_gain: float
 
-    @property
-    def net_cost(self) -> int:
-        return self.buy_score.current_price - self.sell_score.market_value
 
-    @property
-    def ep_gain(self) -> float:
-        return self.buy_score.expected_points - self.sell_score.expected_points
+@dataclass
+class MarginalEPResult:
+    """Result of marginal EP gain calculation for a potential buy."""
+
+    player_id: str
+    expected_points: float
+    current_squad_ep: float
+    new_squad_ep: float
+    marginal_ep_gain: float
+    replaces_player_id: str | None
+    replaces_player_name: str | None
+    replaces_player_ep: float
+
+
+@dataclass
+class SellPlanEntry:
+    """Single player in a sell plan."""
+
+    player_id: str
+    player_name: str
+    expected_sell_value: int  # market_value * 0.95
+    player_ep: float
+    is_in_best_11: bool
+
+
+@dataclass
+class SellPlan:
+    """Plan to recover budget after an expensive purchase."""
+
+    players_to_sell: list[SellPlanEntry]
+    total_recovery: int
+    net_budget_after: int
+    is_viable: bool
+    ep_impact: float
+    reasoning: str
