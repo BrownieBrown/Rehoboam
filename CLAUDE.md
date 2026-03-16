@@ -30,19 +30,20 @@ Since every matchday point accumulates toward the season total, the winning stra
 1. **Never lose points to penalties** — no empty slots (-100), no negative budget (0 pts for entire matchday)
 1. **Exploit double gameweeks** — DGW players play twice, effectively doubling their point contribution
 
-The bot started as a market value trader (buy low, sell high). Recent work has shifted toward matchday points optimization, but the core trade workflow is still driven by market value trends and `value_score`. **The strategic priority is to repoint decisions around expected matchday points, not market appreciation.**
+The bot started as a market value trader (buy low, sell high). The `analyze` command now uses an EP-first scoring pipeline with marginal EP gain for buy decisions and budget-aware bidding with sell plans. The `trade` command still uses `value_score` for profit-trading.
 
 Current state:
 
-- `value_score` (0-100): Still weighted toward market value factors (trend, discount, momentum) with average_points as a quality gate (max 40 pts)
-- `expected_points`: Calculator exists and powers the `lineup` command, but is NOT used in buy/sell decisions
-- Double gameweek awareness: Not implemented
+- `analyze` command: EP-first pipeline — scores players by expected matchday points, recommends buys by marginal EP gain (how much they improve best-11), supports sell plans for going negative
+- `trade` command: Still uses `value_score` for profit-trading (legacy path)
+- `SmartBidding`: Has both `calculate_bid()` (value-score-based, legacy) and `calculate_ep_bid()` (EP-based, used by analyze)
+- `BidLearner`: Tracks matchday outcomes (actual vs predicted EP), feeds EP accuracy factor back into bidding
+- Double gameweek awareness: EP calculator supports DGW multiplier (1.8x), but DGW detection not yet wired
 - Budget-at-kickoff safety: Basic 24-48h buffer exists
 
 ### Strategic Priorities (in order of impact)
 
-1. **Expected points in the main `analyze` flow** — The `lineup` command already computes EP per player, but `analyze` (the main command) still uses value_score for best-11 selection. Wire EP into analyze so the user sees the right data.
-1. **Buy/sell for matchday points** — Reweight trade decisions around expected_points, not market value appreciation. A player who scores 80 pts/game but is "overpriced" by market value is still a great buy.
+1. **Migrate `trade` command to EP** — The `trade`/`auto` commands still use `value_score`. Gradually sunset `MarketAnalyzer` in favor of the EP pipeline.
 1. **Double gameweek exploitation** — Detect DGW schedules, prioritize those players. Buy 7-10 days before DGW.
 1. **Budget safety** — Hard block on going negative before kickoff. Warn early (48h+), auto-suggest sells to stay solvent.
 1. **Squad size enforcement** — At 15/15, trade table (sell→buy swaps) is now shown instead of plain buy recommendations. Never suggest adding a 16th player without a paired sell.
@@ -56,8 +57,8 @@ pip install -e ".[dev]"
 # Run the CLI
 rehoboam --help
 rehoboam login              # Test credentials
-rehoboam analyze            # Compact action plan (default)
-rehoboam analyze --detailed # Full analysis with predictions
+rehoboam analyze            # EP-first action plan (buy/sell by matchday points)
+rehoboam analyze -v         # Same with debug output
 rehoboam trade --max 5      # Dry-run trading
 rehoboam trade --live       # Live trading (prompts for confirmation)
 
@@ -95,16 +96,25 @@ pre-commit run --all-files
 - Integrates multiple analyzers and learners via dependency injection
 - `auto_trade()` method executes the full trading workflow
 
-**Analysis Layer** (`analyzer.py`, `enhanced_analyzer.py`, `value_calculator.py`, `roster_analyzer.py`):
+**EP Scoring Pipeline** (`scoring/models.py`, `scoring/scorer.py`, `scoring/collector.py`, `scoring/decision.py`):
 
-- `MarketAnalyzer`: Core player evaluation with configurable factor weights
+- `score_player(PlayerData) -> PlayerScore`: Pure function computing expected matchday points (0-180 scale)
+- `DataCollector`: Assembles player data from pre-fetched API data, flags missing fields
+- `DecisionEngine`: Buy/sell/lineup decisions via marginal EP gain calculation and sell plans
+- `PlayerScore`: The ONE number driving all decisions — components: base points, consistency, lineup probability, fixture difficulty, form, minutes trend, DGW multiplier
+- Data quality grading (A-F) penalizes unreliable predictions
+
+**Legacy Analysis Layer** (`analyzer.py`, `enhanced_analyzer.py`, `value_calculator.py`, `roster_analyzer.py`):
+
+- `MarketAnalyzer`: Market-value-driven evaluation (still used by `trade` command)
 - `PlayerAnalysis`: Data class containing recommendation, confidence, value_score, factors
 - `RosterAnalyzer`: Roster-aware buy recommendations based on squad composition
-- Factor-based scoring system: base value, trends, matchups, discounts, roster impact
+- Being gradually replaced by the EP scoring pipeline
 
 **Learning System** (`bid_learner.py`, `factor_weight_learner.py`, `historical_tracker.py`, `activity_feed_learner.py`):
 
 - Adaptive bidding based on auction outcomes
+- **Matchday outcome tracking**: Records actual vs predicted EP, feeds back into bid aggressiveness via EP accuracy factor
 - Factor weight optimization from historical recommendation results
 - Competitor analysis from activity feed data
 
