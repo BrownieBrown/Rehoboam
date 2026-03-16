@@ -112,6 +112,16 @@ class Settings(BaseSettings):
         description="DEPRECATED - Bot now recommends sales based on value analysis, not raw points",
     )
 
+    # EP-First Settings
+    min_expected_points_to_buy: float = Field(
+        default=30.0,
+        description="Minimum expected points to consider buying a player",
+    )
+    min_ep_upgrade_threshold: float = Field(
+        default=10.0,
+        description="Minimum EP gain to consider a market player an upgrade",
+    )
+
     # Safety Settings
     dry_run: bool = Field(
         default=True,
