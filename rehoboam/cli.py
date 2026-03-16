@@ -52,36 +52,9 @@ def login():
 @app.command()
 def analyze(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
-    detailed: bool = typer.Option(
-        False, "--detailed", "-d", help="Show detailed analysis (default is compact action plan)"
-    ),
-    show_all: bool = typer.Option(
-        False, "--all", "-a", help="Show all players, not just opportunities (detailed mode only)"
-    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed debug information"),
-    simple: bool = typer.Option(
-        False, "--simple", "-s", help="Simple mode - skip predictions and advanced analysis"
-    ),
-    show_risk: bool = typer.Option(
-        False,
-        "--risk",
-        "-r",
-        help="Show risk metrics (volatility, VaR, Sharpe ratio) (detailed mode)",
-    ),
-    show_opportunity_cost: bool = typer.Option(
-        False,
-        "--opportunity-cost",
-        "-oc",
-        help="Show trade-off analysis for purchases (detailed mode)",
-    ),
-    show_portfolio: bool = typer.Option(
-        False,
-        "--portfolio",
-        "-p",
-        help="Show portfolio-level metrics (diversification, risk, projections) (detailed mode)",
-    ),
 ):
-    """Analyze the market for trading opportunities (compact action plan by default)"""
+    """Analyze the market for trading opportunities"""
 
     settings = get_settings()
     api = get_api()
@@ -122,16 +95,15 @@ def analyze(
     # Connect learners for adaptive bidding + competitive intelligence
     learner = get_learner()
 
-    # Initialize factor weight learner (unless simple mode)
+    # Initialize factor weight learner
     factor_learner = None
-    if not simple:
-        try:
-            from .factor_weight_learner import FactorWeightLearner
+    try:
+        from .factor_weight_learner import FactorWeightLearner
 
-            factor_learner = FactorWeightLearner()
-        except Exception as e:
-            if verbose:
-                console.print(f"[yellow]Could not initialize factor learner: {e}[/yellow]")
+        factor_learner = FactorWeightLearner()
+    except Exception as e:
+        if verbose:
+            console.print(f"[yellow]Could not initialize factor learner: {e}[/yellow]")
 
     trader = Trader(
         api,
@@ -150,7 +122,7 @@ def analyze(
         old_stdout = sys.stdout
         sys.stdout = StringIO()
 
-    market_analyses = trader.analyze_market(league, calculate_risk=show_risk)
+    market_analyses = trader.analyze_market(league)
 
     if not verbose:
         sys.stdout = old_stdout
@@ -159,358 +131,16 @@ def analyze(
     team_info = trader.api.get_team_info(league)
     current_budget = team_info.get("budget", 0)
 
-    # Use compact display by default, detailed only if requested
-    if not detailed:
-        # COMPACT MODE - Action plan focused display
-        trader.display_compact_action_plan(league, market_analyses, current_budget)
-        return
+    # Display compact action plan
+    trader.display_compact_action_plan(league, market_analyses, current_budget)
 
-    # DETAILED MODE - Full analysis (original behavior)
-    # SECTION 1: Market Opportunities
-    console.print("[bold cyan]📈 MARKET OPPORTUNITIES[/bold cyan]")
-    console.print("─" * 60 + "\n")
-
-    if show_all:
-        trader.display_analysis(market_analyses, title="All Market Players", show_risk=show_risk)
-    else:
-        opportunities = trader.analyzer.find_best_opportunities(market_analyses, top_n=8)
-        if opportunities:
-            trader.display_analysis(
-                opportunities,
-                title="Top Buy Recommendations",
-                show_risk=show_risk,
-                show_bids=True,
-            )
-
-            # Add helpful context about bidding and market timing
-            console.print("\n[dim]💡 Tips:[/dim]")
-            console.print(
-                "[dim]  • Smart Bid shows recommended bid amount (+% over asking price)[/dim]"
-            )
-            console.print(
-                "[dim]  • Days Listed shows time on market with predicted price change[/dim]"
-            )
-            console.print(
-                "[dim]  • Value Score combines performance, trends, and matchups (40+ = buy threshold)[/dim]"
-            )
-            console.print(
-                "[dim]  • Run 'rehoboam market-intel' to see learned price adjustment patterns[/dim]"
-            )
-
-            # Show opportunity cost analysis if enabled
-            if show_opportunity_cost:
-                console.print("\n" + "─" * 60)
-                console.print("[bold cyan]💡 OPPORTUNITY COST ANALYSIS[/bold cyan]")
-                console.print("─" * 60 + "\n")
-                trader.display_opportunity_costs(opportunities, league, max_opportunities=3)
-        else:
-            console.print("[yellow]No trading opportunities found[/yellow]")
-
-    # SECTION 2: Your Squad
-    console.print("\n" + "═" * 60)
-    console.print("[bold cyan]📊 YOUR SQUAD ANALYSIS[/bold cyan]")
-    console.print("═" * 60 + "\n")
-
-    team_analyses = trader.analyze_team(league)
-
-    # Squad Optimization - Get recommendations FIRST to coordinate with individual analysis
-    squad_optimization = None
+    # Run learning updates silently
     try:
-        squad_optimization = trader.optimize_squad_for_gameday(league)
-        if squad_optimization and squad_optimization.players_to_sell:
-            # Update recommendations to match squad optimizer
-            players_to_sell_ids = {p.id for p in squad_optimization.players_to_sell}
-            for analysis in team_analyses:
-                if analysis.player.id in players_to_sell_ids:
-                    # Override recommendation to SELL for budget management
-                    old_rec = analysis.recommendation
-                    analysis.recommendation = "SELL"
-                    if old_rec == "HOLD":
-                        # Update reason to explain why
-                        analysis.reason = f"Bench player - sell to clear debt | {analysis.reason}"
-                        analysis.confidence = 0.8
-    except Exception:
-        pass  # Silent failure for squad optimization
-
-    # Show squad analysis
-    trader.display_sell_analysis(team_analyses, title="Your Squad", league=league)
-
-    # Show recommendation breakdown
-    sell_count = sum(1 for a in team_analyses if a.recommendation == "SELL")
-    hold_count = sum(1 for a in team_analyses if a.recommendation == "HOLD")
-
-    console.print(f"\n[bold]Summary:[/bold] {sell_count} to sell, {hold_count} to hold")
-
-    if sell_count > 0:
-        console.print(f"[red]⚠️  {sell_count} player(s) recommended for sale[/red]")
-    else:
-        console.print("[green]✓ No urgent sell recommendations[/green]")
-
-    # Squad Balance & Composition (enhanced feature - always show unless simple mode)
-    if not simple:
-        try:
-            from .enhanced_analyzer import EnhancedAnalyzer
-
-            enhanced_analyzer = EnhancedAnalyzer()
-
-            console.print("\n" + "─" * 60)
-            squad_balance = enhanced_analyzer.analyze_squad_balance(team_analyses)
-            enhanced_analyzer.display_squad_balance(squad_balance, current_budget=current_budget)
-        except Exception as e:
-            if verbose:
-                console.print(f"[red]Squad balance error: {e}[/red]")
-
-    # Show Squad Optimization details
-    if squad_optimization:
-        try:
-            from .squad_optimizer import SquadOptimizer
-
-            optimizer = SquadOptimizer()
-            console.print("\n" + "─" * 60)
-            optimizer.display_optimization(
-                squad_optimization,
-                player_values=trader.get_player_values_from_analyses(team_analyses),
-            )
-        except Exception:
-            pass
-
-    # Portfolio Analysis
-    if show_portfolio:
-        try:
-            from .portfolio_analyzer import PortfolioAnalyzer
-
-            portfolio_analyzer = PortfolioAnalyzer()
-            console.print("\n" + "─" * 60)
-
-            # Analyze portfolio
-            portfolio_metrics = portfolio_analyzer.analyze_portfolio(
-                squad_analyses=team_analyses,
-                market_analyses=market_analyses,
-                current_budget=current_budget,
-            )
-
-            # Display metrics
-            portfolio_analyzer.display_portfolio_metrics(portfolio_metrics)
-        except Exception as e:
-            if verbose:
-                console.print(f"[red]Portfolio analysis error: {e}[/red]")
-
-    # SECTION 3: Trading Strategies
-    console.print("\n" + "═" * 60)
-    console.print("[bold cyan]💡 TRADING STRATEGIES[/bold cyan]")
-    console.print("═" * 60 + "\n")
-
-    # Profit trading opportunities (limit to top 5 for cleaner output)
-    try:
-        profit_opps = trader.find_profit_opportunities(league)
-        if profit_opps:
-            # Limit to top 5 opportunities for cleaner output
-            profit_opps = profit_opps[:5]
-            console.print("[bold]Strategy 1: Quick Profit Flips[/bold]")
-            console.print("Buy undervalued, hold 3-7 days, sell for profit\n")
-            trader.display_profit_opportunities(profit_opps, current_budget=current_budget)
+        if factor_learner:
+            trader.run_learning_update(league)
     except Exception as e:
         if verbose:
-            console.print(f"[red]Profit opportunities error: {e}[/red]")
-
-    # N-for-M trade opportunities (limit to top 3 for cleaner output)
-    try:
-        trades = trader.find_trade_opportunities(league)
-        if trades:
-            # Limit to top 3 trades for cleaner output
-            trades = trades[:3]
-            console.print("\n[bold]Strategy 2: Lineup Upgrades[/bold]")
-            console.print("Trade combinations to improve your best 11\n")
-            trader.display_trade_recommendations(trades)
-    except Exception as e:
-        if verbose:
-            console.print(f"[red]Trade opportunities error: {e}[/red]")
-
-    # SECTION 4: Predictions & Insights (enhanced - skip in simple mode)
-    if not simple:
-        console.print("\n" + "═" * 60)
-        console.print("[bold cyan]🔮 VALUE PREDICTIONS & INSIGHTS[/bold cyan]")
-        console.print("═" * 60 + "\n")
-
-        try:
-            from .enhanced_analyzer import EnhancedAnalyzer
-
-            enhanced_analyzer = EnhancedAnalyzer()
-
-            # Position Landscape Analysis
-            console.print("[bold]Market Analysis by Position[/bold]")
-            console.print("Compare opportunities across different positions\n")
-            position_comparisons = enhanced_analyzer.analyze_position_landscape(market_analyses)
-            enhanced_analyzer.display_position_comparison(position_comparisons)
-
-            # Value Predictions for your squad
-            console.print("\n" + "─" * 60)
-            console.print("[bold]Your Squad - Value Predictions[/bold]")
-            console.print("Predicted market value changes for your players\n")
-
-            squad_predictions = []
-            for analysis in team_analyses[:8]:  # Top 8 players
-                try:
-                    trend_analysis = trader.trend_service.get_trend(
-                        analysis.player.id, analysis.player.market_value, league.id
-                    ).to_dict()
-
-                    # Get performance data
-                    perf_data = trader.history_cache.get_cached_performance(
-                        player_id=analysis.player.id, league_id=league.id, max_age_hours=24
-                    )
-                    if not perf_data:
-                        perf_data = trader.api.client.get_player_performance(
-                            league.id, analysis.player.id
-                        )
-
-                    prediction = enhanced_analyzer.predict_player_value(
-                        analysis.player, trend_analysis, perf_data
-                    )
-                    squad_predictions.append(prediction)
-                except Exception as e:
-                    if verbose:
-                        console.print(
-                            f"[dim]Prediction error for {analysis.player.first_name}: {e}[/dim]"
-                        )
-                    pass
-
-            if squad_predictions:
-                enhanced_analyzer.display_predictions(squad_predictions, title="")
-            else:
-                console.print("[dim]No prediction data available for your squad[/dim]")
-
-            # Market Predictions for top opportunities
-            console.print("\n" + "─" * 60)
-            console.print("[bold]Market Opportunities - Value Predictions[/bold]")
-            console.print("Players expected to gain value - buy before they rise!\n")
-
-            market_predictions = []
-            top_market_players = trader.analyzer.find_best_opportunities(market_analyses, top_n=8)
-
-            for analysis in top_market_players:
-                try:
-                    trend_analysis = trader.trend_service.get_trend(
-                        analysis.player.id, analysis.player.market_value, league.id
-                    ).to_dict()
-
-                    # Get performance data
-                    perf_data = trader.history_cache.get_cached_performance(
-                        player_id=analysis.player.id, league_id=league.id, max_age_hours=24
-                    )
-                    if not perf_data:
-                        perf_data = trader.api.client.get_player_performance(
-                            league.id, analysis.player.id
-                        )
-
-                    prediction = enhanced_analyzer.predict_player_value(
-                        analysis.player, trend_analysis, perf_data
-                    )
-                    market_predictions.append(prediction)
-                except Exception as e:
-                    if verbose:
-                        console.print(
-                            f"[dim]Prediction error for {analysis.player.first_name}: {e}[/dim]"
-                        )
-                    pass
-
-            if market_predictions:
-                enhanced_analyzer.display_predictions(market_predictions, title="")
-            else:
-                console.print("[dim]No prediction data available for market opportunities[/dim]")
-
-            # Tips and recommendations
-            console.print("\n" + "─" * 60)
-            console.print("[bold]💡 Quick Tips[/bold]\n")
-            console.print("📈 [green]Improving[/green] - Strong upward momentum, buy now")
-            console.print("📉 [red]Declining[/red] - Losing value, sell or avoid")
-            console.print("➡️  [yellow]Stable[/yellow] - Predictable, safe hold")
-            console.print("🌊 [magenta]Volatile[/magenta] - Unpredictable, risky\n")
-
-        except Exception as e:
-            if verbose:
-                console.print(f"[red]Predictions error: {e}[/red]")
-            pass  # Silent failure for predictions
-
-    # Update learning system (background operation unless verbose)
-    if not simple and factor_learner:
-        try:
-            if verbose:
-                console.print("\n[dim]Running learning system updates...[/dim]")
-
-            # Update outcomes for historical recommendations
-            trader.historical_tracker.update_outcomes(league.id, api, days_after=30)
-
-            # Check if optimization is needed
-            should_optimize = factor_learner.should_run_optimization()
-
-            if should_optimize["baseline_needed"]:
-                # Count available recommendations
-                import sqlite3
-
-                with sqlite3.connect(factor_learner.db_path) as conn:
-                    cursor = conn.execute(
-                        """
-                        SELECT COUNT(*) FROM recommendation_history
-                        WHERE outcome_timestamp IS NOT NULL
-                        """
-                    )
-                    outcome_count = cursor.fetchone()[0]
-
-                if outcome_count >= 30:
-                    if verbose:
-                        console.print(
-                            f"[cyan]Running baseline optimization with {outcome_count} outcomes...[/cyan]"
-                        )
-
-                    # Run baseline optimization for both BUY and SELL
-                    buy_weights, buy_results = factor_learner.optimize_baseline_weights(
-                        "BUY", min_samples=15
-                    )
-                    sell_weights, sell_results = factor_learner.optimize_baseline_weights(
-                        "SELL", min_samples=10
-                    )
-
-                    if buy_results or sell_results:
-                        console.print(
-                            f"[green]✓ Baseline optimization complete! "
-                            f"Learned {len(buy_results) + len(sell_results)} weights[/green]"
-                        )
-                elif verbose:
-                    console.print(
-                        f"[dim]Note: Need {30 - outcome_count} more outcomes for baseline optimization[/dim]"
-                    )
-
-            elif should_optimize["incremental_needed"]:
-                if verbose:
-                    console.print("[cyan]Running incremental weight updates...[/cyan]")
-
-                # Run incremental updates for both BUY and SELL
-                buy_weights, buy_results = factor_learner.update_weights_incrementally(
-                    "BUY", window_days=30
-                )
-                sell_weights, sell_results = factor_learner.update_weights_incrementally(
-                    "SELL", window_days=30
-                )
-
-                total_updates = len(buy_results) + len(sell_results)
-                if total_updates > 0:
-                    console.print(
-                        f"[green]✓ Incremental update complete! Updated {total_updates} weights[/green]"
-                    )
-                elif verbose:
-                    console.print("[dim]Weights are well-tuned, no updates needed[/dim]")
-
-        except Exception as e:
-            if verbose:
-                console.print(f"[yellow]Learning update warning: {e}[/yellow]")
-
-    # Final summary
-    console.print("\n" + "═" * 60)
-    console.print("[bold]Analysis complete![/bold]")
-    if simple:
-        console.print("[dim]Run without --simple for predictions and insights[/dim]")
-    console.print("═" * 60 + "\n")
+            console.print(f"[yellow]Learning update warning: {e}[/yellow]")
 
 
 @app.command()
