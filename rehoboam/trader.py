@@ -506,6 +506,208 @@ class Trader:
             watchlist=watchlist,
         )
 
+    def display_ep_action_plan(self, league: League, current_budget: int):
+        """Display EP-first action plan using the new scoring pipeline.
+
+        Fetches squad and market data, scores all players via the EP pipeline,
+        calculates marginal EP gains for market candidates, and displays the
+        results through CompactDisplay.
+
+        Args:
+            league: League object.
+            current_budget: Current budget in euros.
+        """
+        from .formation import select_best_eleven
+        from .scoring import DataCollector, DecisionEngine, PlayerScore
+
+        # 1. Fetch squad and market
+        squad = self.api.get_squad(league)
+        market_players = self.api.get_market(league)
+        kickbase_players = [p for p in market_players if p.is_kickbase_seller()]
+
+        collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
+        decision = DecisionEngine()
+
+        # 2. Score all squad players
+        squad_scores: list[PlayerScore] = []
+        team_profiles: dict[str, dict] = {}  # cache team profiles
+
+        for player in squad:
+            try:
+                score = self._score_single_player(player, league, collector, team_profiles)
+                if score:
+                    squad_scores.append(score)
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"[dim]EP score failed for {player.last_name}: {e}[/dim]")
+
+        # 3. Build best-11 from squad scores
+        ep_values = decision.select_lineup(squad_scores)
+        best_eleven = select_best_eleven(squad, ep_values)
+        best_eleven_ids = {p.id for p in best_eleven}
+        best_11_ep = sum(ep_values.get(p.id, 0.0) for p in best_eleven)
+
+        # 4. Rank squad by expendability
+        sell_recs = decision.recommend_sells(squad, squad_scores, best_eleven_ids)
+
+        # 5. Score market candidates and calculate marginal EP
+        # Pre-filter: only score players with avg_points >= 10
+        candidates = [
+            p
+            for p in kickbase_players
+            if p.average_points and p.average_points >= 10 and p.status == 0
+        ]
+
+        if self.verbose:
+            console.print(
+                f"[dim]Scoring {len(candidates)} market candidates "
+                f"(from {len(kickbase_players)} listed)...[/dim]"
+            )
+
+        buy_candidates = []  # (MarginalEPResult, BidRecommendation, PlayerScore)
+
+        for player in candidates:
+            try:
+                score = self._score_single_player(player, league, collector, team_profiles)
+                if not score or score.expected_points < decision.min_ep_to_buy:
+                    continue
+
+                marginal = decision.calculate_marginal_ep(
+                    candidate_score=score,
+                    candidate_player=player,
+                    squad=squad,
+                    squad_scores=squad_scores,
+                )
+
+                if marginal.marginal_ep_gain <= 0:
+                    continue
+
+                # Build sell plan if needed
+                sell_plan = None
+                bid_rec = self.bidding.calculate_ep_bid(
+                    asking_price=player.price,
+                    market_value=player.market_value,
+                    expected_points=score.expected_points,
+                    marginal_ep_gain=marginal.marginal_ep_gain,
+                    confidence=min(1.0, score.data_quality.games_played / 10.0),
+                    current_budget=current_budget,
+                    player_id=player.id,
+                )
+
+                if bid_rec.recommended_bid > current_budget:
+                    sell_plan = decision.build_sell_plan(
+                        bid_amount=bid_rec.recommended_bid,
+                        current_budget=current_budget,
+                        squad=squad,
+                        squad_scores=squad_scores,
+                        best_11_ids=best_eleven_ids,
+                        displaced_player_id=marginal.replaces_player_id,
+                    )
+                    # Re-calculate bid with sell plan
+                    bid_rec = self.bidding.calculate_ep_bid(
+                        asking_price=player.price,
+                        market_value=player.market_value,
+                        expected_points=score.expected_points,
+                        marginal_ep_gain=marginal.marginal_ep_gain,
+                        confidence=min(1.0, score.data_quality.games_played / 10.0),
+                        current_budget=current_budget,
+                        sell_plan=sell_plan if sell_plan and sell_plan.is_viable else None,
+                        player_id=player.id,
+                    )
+
+                if bid_rec.recommended_bid > 0:
+                    buy_candidates.append((marginal, bid_rec, score))
+
+            except Exception as e:
+                if self.verbose:
+                    console.print(f"[dim]Skipping {player.last_name}: {e}[/dim]")
+
+        # Sort by marginal EP gain descending, take top 5
+        buy_candidates.sort(key=lambda x: x[0].marginal_ep_gain, reverse=True)
+        buy_candidates = buy_candidates[:5]
+
+        # Build squad summary
+        squad_summary = {
+            "squad_size": len(squad),
+            "budget": current_budget,
+            "best_11_ep": best_11_ep,
+            "formation": "",
+        }
+
+        # Display
+        self.compact_display.display_ep_action_plan(
+            buy_candidates=buy_candidates,
+            sell_candidates=sell_recs,
+            squad_summary=squad_summary,
+            current_budget=current_budget,
+        )
+
+    def _score_single_player(
+        self,
+        player,
+        league: League,
+        collector,
+        team_profiles: dict[str, dict],
+    ):
+        """Score a single player using the EP pipeline.
+
+        Fetches performance data and player details, resolves team profiles,
+        then runs DataCollector.collect() -> score_player().
+
+        Returns PlayerScore with _player_name and _position attached, or None.
+        """
+        from .scoring import score_player
+
+        # Performance data (cached)
+        perf_data = self.history_cache.get_cached_performance(
+            player_id=player.id, league_id=league.id, max_age_hours=24
+        )
+        if not perf_data:
+            perf_data = self.api.client.get_player_performance(league.id, player.id)
+            if perf_data:
+                self.history_cache.cache_performance(player.id, league.id, perf_data)
+
+        # Player details
+        player_details = None
+        try:
+            player_details = self.api.client.get_player_details(league.id, player.id)
+        except Exception:
+            pass
+
+        # Resolve team profiles (cached in dict)
+        if player_details:
+            team_id = player_details.get("tid", "")
+            if team_id and team_id not in team_profiles:
+                try:
+                    team_profiles[team_id] = self.api.client.get_team_profile(league.id, team_id)
+                except Exception:
+                    pass
+
+            # Also resolve opponent team
+            next_matchup = self.matchup_analyzer.get_next_matchup(player_details)
+            if next_matchup and next_matchup.opponent_id:
+                opp_id = next_matchup.opponent_id
+                if opp_id not in team_profiles:
+                    try:
+                        team_profiles[opp_id] = self.api.client.get_team_profile(league.id, opp_id)
+                    except Exception:
+                        pass
+
+        # Collect and score
+        player_data = collector.collect(
+            player=player,
+            performance=perf_data,
+            player_details=player_details,
+            team_profiles=team_profiles,
+        )
+        score = score_player(player_data)
+
+        # Attach name and position for display convenience
+        score._player_name = f"{player.first_name} {player.last_name}"
+        score._position = player.position
+
+        return score
+
     def analyze_market(
         self, league: League, calculate_risk: bool = False, track_history: bool = False
     ) -> list[PlayerAnalysis]:

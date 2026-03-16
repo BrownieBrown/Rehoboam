@@ -1,6 +1,7 @@
 """Compact, action-oriented display for analyze command"""
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
@@ -1014,6 +1015,147 @@ class CompactDisplay:
                     console.print(
                         f"\n[dim]💡 Tip: Selling top 3 expendable players frees {top_3_recovery / 1_000_000:.1f}M budget[/dim]"
                     )
+
+    def display_ep_action_plan(
+        self,
+        buy_candidates: list,
+        sell_candidates: list,
+        squad_summary: dict,
+        current_budget: int,
+    ):
+        """Display EP-based action plan.
+
+        Args:
+            buy_candidates: List of (MarginalEPResult, BidRecommendation, PlayerScore) tuples,
+                            sorted by marginal EP gain descending.
+            sell_candidates: List of SellRecommendation.
+            squad_summary: Dict with squad_size, budget, best_11_ep, formation.
+            current_budget: Current budget in euros.
+        """
+        console.print("\n" + "=" * 60)
+        console.print("[bold cyan]EP ACTION PLAN[/bold cyan]")
+        console.print("=" * 60)
+
+        # Budget negative warning
+        if current_budget < 0:
+            deficit = abs(current_budget)
+            console.print(
+                f"\n[bold red on white]"
+                f" BUDGET NEGATIVE (-{deficit:,})"
+                f" -- ZERO POINTS AT KICKOFF IF NOT FIXED! "
+                f"[/bold red on white]\n"
+            )
+
+        # Squad summary panel
+        squad_size = squad_summary.get("squad_size", 0)
+        best_11_ep = squad_summary.get("best_11_ep", 0.0)
+        formation = squad_summary.get("formation", "")
+
+        summary_parts = [
+            f"Squad: {squad_size}/15",
+            f"Budget: {current_budget:,}",
+            f"Best-11 EP: {best_11_ep:.0f}",
+        ]
+        if formation:
+            summary_parts.append(f"Formation: {formation}")
+        console.print(Panel(" | ".join(summary_parts), style="cyan"))
+
+        # BUY CANDIDATES table
+        if buy_candidates:
+            console.print(
+                f"\n[bold green]BUY CANDIDATES "
+                f"({len(buy_candidates)} by EP gain)[/bold green]\n"
+            )
+
+            buy_table = Table(show_header=True, header_style="bold green", box=None)
+            buy_table.add_column("Player", style="cyan", no_wrap=True)
+            buy_table.add_column("Pos", style="blue", width=3)
+            buy_table.add_column("EP", justify="right", style="yellow", width=5)
+            buy_table.add_column("EP Gain", justify="right", style="green", width=8)
+            buy_table.add_column("Price", justify="right", width=12)
+            buy_table.add_column("Bid", justify="right", width=12)
+            buy_table.add_column("Sell Plan", style="dim", width=20)
+            buy_table.add_column("Net Cost", justify="right", width=12)
+
+            for marginal, bid_rec, score in buy_candidates:
+                # Reconstruct player name from score — we stored it during collection
+                player_name = getattr(score, "_player_name", None)
+                if not player_name:
+                    player_name = score.player_id[:12]  # fallback
+                pos = getattr(score, "_position", "")[:2] if hasattr(score, "_position") else ""
+
+                ep_str = f"{score.expected_points:.0f}"
+                gain_str = f"+{marginal.marginal_ep_gain:.1f}"
+
+                price_str = f"{score.current_price:,}"
+                bid_str = f"{bid_rec.recommended_bid:,}" if bid_rec.recommended_bid > 0 else "-"
+
+                # Sell plan summary
+                sell_plan_str = "-"
+                net_cost = bid_rec.recommended_bid
+                if bid_rec.sell_plan and bid_rec.sell_plan.players_to_sell:
+                    names = [e.player_name.split()[-1] for e in bid_rec.sell_plan.players_to_sell]
+                    sell_plan_str = "Sell " + ", ".join(names[:2])
+                    if len(names) > 2:
+                        sell_plan_str += f" +{len(names) - 2}"
+                    net_cost = bid_rec.recommended_bid - bid_rec.sell_plan.total_recovery
+
+                net_str = f"{net_cost:,}" if net_cost != 0 else "0"
+
+                buy_table.add_row(
+                    player_name,
+                    pos,
+                    ep_str,
+                    gain_str,
+                    price_str,
+                    bid_str,
+                    sell_plan_str,
+                    net_str,
+                )
+
+            console.print(buy_table)
+        else:
+            console.print("\n[bold yellow]NO BUY CANDIDATES[/bold yellow]")
+            console.print("[dim]No market players would improve your best-11 EP[/dim]")
+
+        # SELL CANDIDATES table (non-protected, sorted by expendability)
+        non_protected = [s for s in sell_candidates if not s.is_protected]
+        if non_protected:
+            console.print(
+                f"\n[bold red]EXPENDABLE PLAYERS " f"({len(non_protected)} ranked)[/bold red]\n"
+            )
+
+            sell_table = Table(show_header=True, header_style="bold red", box=None)
+            sell_table.add_column("Player", style="cyan", no_wrap=True)
+            sell_table.add_column("Pos", style="blue", width=3)
+            sell_table.add_column("EP", justify="right", style="yellow", width=5)
+            sell_table.add_column("Expendability", justify="right", width=13)
+            sell_table.add_column("Value", justify="right", width=12)
+            sell_table.add_column("Status", width=12)
+
+            for sell_rec in non_protected[:8]:
+                ps = sell_rec.score
+                player_name = getattr(ps, "_player_name", ps.player_id[:12])
+                pos = getattr(ps, "_position", "")[:2] if hasattr(ps, "_position") else ""
+
+                ep_str = f"{ps.expected_points:.0f}"
+                exp_str = f"{sell_rec.expendability:.0f}"
+                val_str = f"{ps.market_value:,}"
+
+                # Status: bench or starting
+                is_bench = "bench player" in sell_rec.reason
+                status_str = "[dim]Bench[/dim]" if is_bench else "[green]Starting 11[/green]"
+
+                sell_table.add_row(player_name, pos, ep_str, exp_str, val_str, status_str)
+
+            console.print(sell_table)
+
+        console.print("\n" + "=" * 60)
+        console.print(
+            "[dim]EP = Expected Points for next matchday | "
+            "EP Gain = improvement to best-11 total[/dim]"
+        )
+        console.print("=" * 60 + "\n")
 
     def display_lineup(self, best_eleven: list, bench: list, expected_points_map: dict):
         """
