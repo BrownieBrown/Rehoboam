@@ -29,6 +29,13 @@
 - Changes to the `trade` command (still uses `value_score` for profit-trading)
 - Double gameweek detection (separate feature, EP pipeline handles the multiplier)
 
+## Implementation Order
+
+This spec **requires** the EP-First Scoring Pipeline (`scoring/` directory) to be implemented first. That pipeline provides `DataCollector`, `Scorer`, `DecisionEngine`, and `PlayerScore` — all of which this spec extends. The `scoring/` directory does not exist yet; it is created by the predecessor spec.
+
+**Phase 1** (prerequisite): Implement EP-First Scoring Pipeline spec → creates `rehoboam/scoring/`
+**Phase 2** (this spec): Wire EP into bidding, add outcome learning, remove `--detailed`
+
 ## Design
 
 ### Part 1: Remove `--detailed` mode
@@ -81,6 +88,10 @@ class MarginalEPResult:
 
 **Where this lives:** New method `calculate_marginal_ep()` in `scoring/decision.py` (`DecisionEngine`), since it already has `recommend_buys()` and roster context.
 
+**Performance:** For 200 market players, this means 200 calls to `select_best_eleven()`, each with ~16 players. This is fast (sub-millisecond per call) and needs no optimization.
+
+**Known limitation:** `select_best_eleven()` uses a greedy two-pass algorithm that is not globally optimal. For marginal EP calculations this means small inaccuracies (1-2 EP) are possible when a candidate creates complex position-swap chains. This is acceptable — the greedy approach is fast, deterministic, and correct for the vast majority of cases. If this becomes a problem, the algorithm can be improved independently without changing this spec's interfaces.
+
 #### Bid Aggressiveness Tiers (EP-based)
 
 | Marginal EP Gain | Tier           | Behavior                                             |
@@ -116,10 +127,14 @@ class SellPlan:
 class SellPlanEntry:
     player_id: str
     player_name: str
-    expected_sell_value: int  # Market value (conservative estimate)
+    expected_sell_value: (
+        int  # Market value * 0.95 (conservative — Kickbase sells at slight discount)
+    )
     player_ep: float  # EP of player being sold
     is_in_best_11: bool  # Warning flag if selling a starter
 ```
+
+**Sell value estimation:** In Kickbase, selling a player lists them on the market. The system typically buys them at or near market value, but not instantly. `expected_sell_value` uses `market_value * 0.95` as a conservative estimate. The sell plan's `is_viable` check uses this discounted value. If a sell plan's viability depends on getting full market value (margin \< 5%), it's flagged as risky in the reasoning.
 
 #### Budget flow
 
@@ -134,24 +149,52 @@ class SellPlanEntry:
 
 #### Integration with SmartBidding
 
-`SmartBidding.calculate_bid()` signature changes:
+**New method `calculate_ep_bid()`** — the old `calculate_bid()` is kept as-is for the `trade` command and other legacy callers. The new EP-based method lives alongside it:
 
 ```python
-def calculate_bid(
+def calculate_ep_bid(
     self,
     asking_price: int,
     market_value: int,
-    expected_points: float,          # NEW: player's EP score
-    marginal_ep_gain: float,         # NEW: how much this improves best-11
+    expected_points: float,          # Player's EP score
+    marginal_ep_gain: float,         # How much this improves best-11
     confidence: float,
-    current_budget: int,             # NEW: available budget
-    sell_plan: SellPlan | None,      # NEW: sell plan if going negative
+    current_budget: int,             # Available budget
+    sell_plan: SellPlan | None,      # Sell plan if going negative
     player_id: str | None = None,
     trend_change_pct: float | None = None,
-    # REMOVED: value_score, is_replacement, replacement_sell_value,
-    #          predicted_future_value, average_points, is_long_term_hold, roster_impact
 ) -> BidRecommendation:
 ```
+
+The old `calculate_bid()` (value_score-based) remains unchanged. Callers in `auto_trader.py`, `trader.py` (trade command path), `compact_display.py`, and `calculate_batch_bids()` continue using it. Only the `analyze` command path calls `calculate_ep_bid()`.
+
+**`calculate_batch_bids()` unchanged** — it uses the legacy `calculate_bid()` and is only called by the `trade` flow.
+
+**`BidRecommendation` dataclass update:**
+
+The `max_profitable_bid` field is kept as a property alias for backward compatibility, while the canonical field becomes `budget_ceiling`:
+
+```python
+@dataclass
+class BidRecommendation:
+    base_price: int
+    recommended_bid: int
+    overbid_amount: int
+    overbid_pct: float
+    reasoning: str
+    budget_ceiling: int  # Was max_profitable_bid — now means max available funds
+    sell_plan: (
+        SellPlan | None
+    )  # NEW: attached sell plan (if bid exceeds current budget)
+    marginal_ep_gain: float  # NEW: EP improvement to best-11
+
+    @property
+    def max_profitable_bid(self) -> int:
+        """Backward compat alias for api/routes/trading.py and other legacy callers."""
+        return self.budget_ceiling
+```
+
+The legacy `calculate_bid()` still populates `budget_ceiling` with `predicted_future_value`. The `@property` alias ensures `api/routes/trading.py` (line 253: `recommendation.max_profitable_bid`) continues working without changes.
 
 **Value ceiling replacement:**
 
@@ -160,8 +203,9 @@ Old: `max_profitable_bid = predicted_future_value` (never bid above what the pla
 New: No fixed market-value ceiling. Instead:
 
 - **Budget ceiling**: `current_budget + sell_plan.total_recovery` (can't spend more than you can recover)
-- **EP-proportional ceiling**: Higher EP gain justifies higher spend. A player adding 30 EP to best-11 can command more budget than one adding 5 EP.
-- **Diminishing returns**: As bid approaches total available funds, reduce aggressiveness. Don't go all-in if it leaves the squad with no liquidity for emergencies.
+- **EP-proportional ceiling**: Higher EP gain justifies higher spend, using a concrete formula:
+  `max_bid_fraction = min(0.8, 0.2 + (marginal_ep_gain / 50))` — this determines what fraction of the budget ceiling the bot is willing to spend. At EP gain = 30, that's `0.2 + 0.6 = 0.8` (80% of available budget). At EP gain = 5, that's `0.2 + 0.1 = 0.3` (30%). The floor of 0.2 ensures even marginal players can get a bid if cheap enough.
+- **Diminishing returns**: The formula naturally caps at 80% — always reserves 20% of available budget as liquidity buffer.
 
 The market value floor (Kickbase rule: can't bid below market value) remains unchanged.
 
@@ -192,8 +236,9 @@ After each matchday, record what players actually scored vs what was predicted.
 CREATE TABLE IF NOT EXISTS matchday_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id TEXT NOT NULL,
+    player_position TEXT NOT NULL,       -- GK/DEF/MID/FWD (for position-level accuracy fallback)
     matchday_date TEXT NOT NULL,
-    predicted_ep REAL NOT NULL,          -- EP at time of purchase/last analysis
+    predicted_ep REAL NOT NULL,          -- EP from most recent analyze before this matchday
     actual_points REAL NOT NULL,         -- What they actually scored
     was_in_best_11 INTEGER DEFAULT 0,    -- Were they in our starting lineup?
     opponent_strength TEXT,              -- Easy/Medium/Hard
@@ -202,6 +247,9 @@ CREATE TABLE IF NOT EXISTS matchday_outcomes (
     timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(player_id, matchday_date)
 );
+
+CREATE INDEX IF NOT EXISTS idx_matchday_player ON matchday_outcomes(player_id);
+CREATE INDEX IF NOT EXISTS idx_matchday_position ON matchday_outcomes(player_position);
 ```
 
 **New method: `BidLearner.record_matchday_outcome()`**
@@ -234,7 +282,7 @@ Logic:
 
 1. Query `matchday_outcomes` for player (or position if player has \< `min_matchdays`)
 1. Calculate `accuracy = avg(actual_points) / avg(predicted_ep)`
-1. Clamp to \[0.5, 1.2\] range
+1. Clamp to \[0.5, 1.0\] range — **capped at 1.0** to prevent tier inflation (an accuracy factor > 1.0 could artificially promote a `strong_upgrade` to `must_have`, causing overbidding). If we underpredict, the raw EP scores should be improved in the scorer, not compensated in bidding.
 1. Default to 1.0 if insufficient data
 
 #### Integration: Accuracy factor in bidding
@@ -257,23 +305,58 @@ adjusted_ep_gain = marginal_ep_gain * ep_accuracy
 
 If we historically overpredict EP for midfielders (accuracy = 0.7), we'll bid less aggressively for midfielders until predictions improve.
 
-#### Enhanced win-rate learning
+#### New method: `BidLearner.get_ep_recommended_overbid()`
 
-The existing `BidLearner.get_recommended_overbid()` stays but gets a new dimension:
-
-Current: adjusts overbid % based on win/loss rate.
-New: also considers **outcome quality** of won auctions:
+The existing `get_recommended_overbid()` stays unchanged for legacy callers (it takes `value_score` and `predicted_future_value`). A new parallel method is added:
 
 ```python
-# In get_recommended_overbid():
-# Factor 1: Win rate (existing)
+def get_ep_recommended_overbid(
+    self,
+    asking_price: int,
+    marginal_ep_gain: float,
+    market_value: int,
+    budget_ceiling: int,
+) -> dict:
+    """
+    EP-aware overbid recommendation.
+    Returns: {"recommended_overbid_pct": float, "reason": str}
+    """
+```
+
+This method:
+
+1. Queries historical auction win/loss data (same as existing)
+1. Uses `marginal_ep_gain` instead of `value_score` for minimum overbid floors
+1. Does NOT apply a predicted_future_value ceiling (replaced by budget ceiling)
+1. Adds an **outcome quality** factor from won auctions
+
+#### Outcome quality in overbid learning
+
+```python
+# In get_ep_recommended_overbid():
+# Factor 1: Win rate (existing logic)
 # Factor 2: Were our wins worth it?
 outcome_quality = self._get_won_player_outcome_quality()
 # outcome_quality > 1.0 = players we won are outperforming predictions → bid more
 # outcome_quality < 1.0 = players we won are underperforming → bid less
 ```
 
-**`_get_won_player_outcome_quality()`** joins `auction_outcomes` (wins) with `matchday_outcomes` to answer: "For players we won in auctions, how did their actual matchday points compare to predicted EP?"
+**`_get_won_player_outcome_quality()`** joins `auction_outcomes` (wins) with `matchday_outcomes` to answer: "For players we won in auctions, how did their actual matchday points compare to predicted EP?" Returns a value clamped to \[0.5, 1.2\]. Unlike the EP accuracy factor (capped at 1.0 to prevent tier inflation), outcome quality is allowed to exceed 1.0 because it only affects overbid %, not tier classification — a modest +20% to overbid percentage for proven-good picks is intentional and bounded.
+
+#### Trigger: When matchday outcomes are recorded
+
+Outcome recording happens **automatically during `analyze`**. The `analyze` command already fetches squad data and performance. The new flow adds:
+
+```python
+# In cli.py analyze command, after EP scoring:
+# 1. Check if any matchdays completed since last recording
+# 2. For each squad player, compare last predicted EP vs actual matchday points
+# 3. Call bid_learner.record_matchday_outcome() for each
+```
+
+This is lightweight — it only records outcomes for players currently in the squad, using performance data already fetched by the EP pipeline. No separate command needed. The `daemon` command also triggers this as part of its trading sessions.
+
+**Snapshot timing for `predicted_ep`:** The predicted EP stored in `matchday_outcomes` is the EP score computed during the `analyze` run **immediately preceding the matchday** (the most recent prediction before the game). This is stored in a transient `last_predicted_ep` cache (dict in BidLearner, keyed by player_id, overwritten each analyze run). When matchday results come in, we use this cached value. If no recent prediction exists (e.g., player was bought without running analyze), we use the EP at time of purchase from the scoring pipeline.
 
 ### Part 5: Changes to `analyze` Display
 
@@ -302,15 +385,15 @@ The compact display buy table gains new columns and loses old ones:
 
 ### Changed files
 
-| File                  | Change                                                                                                                                                                                         |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cli.py`              | Remove `--detailed` mode and all associated flags (lines 55-82 flags, lines 168-513 detailed branch). Move learning update into compact flow.                                                  |
-| `bidding_strategy.py` | Rewrite `calculate_bid()` to use `marginal_ep_gain` and `sell_plan`. Replace value_score tiers with EP gain tiers. Remove `predicted_future_value` ceiling, add budget-aware ceiling.          |
-| `bid_learner.py`      | Add `matchday_outcomes` table. Add `record_matchday_outcome()`, `get_ep_accuracy_factor()`, `_get_won_player_outcome_quality()`. Update `get_recommended_overbid()` to factor outcome quality. |
-| `scoring/decision.py` | Add `calculate_marginal_ep()` method to `DecisionEngine`. Add `build_sell_plan()` method.                                                                                                      |
-| `scoring/models.py`   | Add `MarginalEPResult`, `SellPlan`, `SellPlanEntry` dataclasses.                                                                                                                               |
-| `compact_display.py`  | Update buy table to show EP Gain, Sell Plan, Net Cost columns. Update sell table sort by EP-based expendability.                                                                               |
-| `trader.py`           | Wire EP pipeline into `display_compact_action_plan()`. Pass `marginal_ep_gain` and `sell_plan` to `SmartBidding`.                                                                              |
+| File                  | Change                                                                                                                                                                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli.py`              | Remove `--detailed` mode and all associated flags (lines 55-82 flags, lines 168-513 detailed branch). Move learning update into compact flow. Add matchday outcome recording to analyze flow.                                                            |
+| `bidding_strategy.py` | Add new `calculate_ep_bid()` method (EP-based). Update `BidRecommendation` dataclass (rename `max_profitable_bid` → `budget_ceiling`, add `sell_plan` and `marginal_ep_gain` fields). Keep `calculate_bid()` and `calculate_batch_bids()` unchanged.     |
+| `bid_learner.py`      | Add `matchday_outcomes` table with position column and indexes. Add `record_matchday_outcome()`, `get_ep_accuracy_factor()`, `get_ep_recommended_overbid()`, `_get_won_player_outcome_quality()`. Keep `get_recommended_overbid()` unchanged for legacy. |
+| `scoring/decision.py` | Add `calculate_marginal_ep()` method to `DecisionEngine`. Add `build_sell_plan()` method. (Requires scoring pipeline to be implemented first.)                                                                                                           |
+| `scoring/models.py`   | Add `MarginalEPResult`, `SellPlan`, `SellPlanEntry` dataclasses. (Requires scoring pipeline to be implemented first.)                                                                                                                                    |
+| `compact_display.py`  | Update buy table to show EP Gain, Sell Plan, Net Cost columns. Update sell table sort by EP-based expendability.                                                                                                                                         |
+| `trader.py`           | Wire EP pipeline into `display_compact_action_plan()`. Pass `marginal_ep_gain` and `sell_plan` to `SmartBidding.calculate_ep_bid()`.                                                                                                                     |
 
 ### Unchanged files
 
@@ -341,7 +424,7 @@ DataCollector -> Scorer -> DecisionEngine
   |                     build_sell_plan() where needed
   |                            |
   v                            v
-SmartBidding.calculate_bid(    BuyRecommendation
+SmartBidding.calculate_ep_bid(  BuyRecommendation
   marginal_ep_gain,              (with sell_plan attached)
   sell_plan,                      |
   ep_accuracy_factor)             v
@@ -388,16 +471,18 @@ DecisionEngine.build_sell_plan():
   Net budget after buy + sells: €8M (viable!)
   |
   v
-SmartBidding.calculate_bid():
-  Available budget = €5M + €33M = €38M
+SmartBidding.calculate_ep_bid():
+  Budget ceiling = €5M + €33M = €38M
   Tier: must_have → aggressive overbid
   EP accuracy factor: 0.9 (slight overpredictor)
   Adjusted EP gain: 25 * 0.9 = 22.5 → still must_have
+  EP-proportional max: 0.2 + (22.5/50) = 0.65 → 65% of €38M = €24.7M
+  Asking price = €30M > €24.7M → bid capped at asking + modest overbid
   |
   v
 BidRecommendation:
-  bid = €32M, sell_plan attached
-  Display: "Buy X €32M | Sell Y (€18M) + Z (€15M) | Net: +€1M, +25 EP"
+  bid = €31.5M, sell_plan attached
+  Display: "Buy X €31.5M | Sell Y (€18M) + Z (€15M) | Net: -€1.5M → +€1.5M after sells, +25 EP"
 ```
 
 ## Testing Strategy
@@ -408,3 +493,4 @@ BidRecommendation:
 - **Unit: `BidLearner` outcome tracking** — Record outcomes, verify accuracy factor calculation, test with insufficient data (should return 1.0)
 - **Integration: Full analyze flow** — Mock API data through EP pipeline → bidding → display, verify buy recommendations sorted by EP gain
 - **Edge cases:** Empty squad, squad at position minimums, budget exactly 0, all bench players protected
+- **Regression:** Compare EP-based bids vs value-score-based bids for same player set — verify they differ meaningfully and EP-based bids favor high-scoring players over high-market-value players
