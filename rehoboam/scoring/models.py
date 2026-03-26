@@ -37,6 +37,10 @@ class PlayerScore:
     notes: list[str]
     current_price: int
     market_value: int
+    average_points: float = 0.0
+    position: str = ""
+    lineup_probability: int | None = None  # 1=starter, 2-3=rotation, 4-5=unlikely
+    minutes_trend: str | None = None  # "increasing" | "decreasing" | "stable"
 
 
 @dataclass
@@ -50,6 +54,7 @@ class PlayerData:
     opponent_strength: TeamStrength | None
     is_dgw: bool
     missing: list[str] = field(default_factory=list)
+    upcoming_opponent_strengths: list[TeamStrength] = field(default_factory=list)
 
 
 @dataclass
@@ -57,11 +62,16 @@ class BuyRecommendation:
     """EP-based buy recommendation."""
 
     score: PlayerScore
+    player: MarketPlayer
     marginal_ep_gain: float
+    effective_ep: float  # Expected points used for ranking
     replaces_player_id: str | None
     replaces_player_name: str | None
     roster_impact: str  # "fills_gap", "upgrade", "additional"
+    roster_bonus: float  # Numeric bonus for bidding strategy
     reason: str
+    recommended_bid: int | None = None
+    sell_plan: "SellPlan | None" = None  # Paired sell plan when buy exceeds budget
 
 
 @dataclass
@@ -69,6 +79,7 @@ class SellRecommendation:
     """EP-based sell recommendation."""
 
     score: PlayerScore
+    player: MarketPlayer | None
     expendability: float  # 0-100 (higher = more expendable)
     is_protected: bool
     protection_reason: str | None
@@ -79,10 +90,13 @@ class SellRecommendation:
 class TradePair:
     """Sell->Buy swap recommendation."""
 
-    buy: BuyRecommendation
-    sell: SellRecommendation
+    buy_player: MarketPlayer
+    sell_player: MarketPlayer
+    buy_score: PlayerScore
+    sell_score: PlayerScore
     net_cost: int
     ep_gain: float
+    recommended_bid: int | None = None
 
 
 @dataclass

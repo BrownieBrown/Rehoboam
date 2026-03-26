@@ -2614,12 +2614,11 @@ class Trader:
             if player_details:
                 tid = player_details.get("tid", "")
                 _get_team_profile_cached(tid)
-                # Also cache opponent team if available
-                from .matchup_analyzer import MatchupAnalyzer as _MA  # noqa: F401
-
-                next_matchup = self.matchup_analyzer.get_next_matchup(player_details)
-                if next_matchup and next_matchup.opponent_id:
-                    _get_team_profile_cached(next_matchup.opponent_id)
+                # Cache next 3 opponents for multi-fixture lookahead
+                next_matchups = self.matchup_analyzer.get_next_matchups(player_details, n=3)
+                for m in next_matchups:
+                    if m.opponent_id:
+                        _get_team_profile_cached(m.opponent_id)
             else:
                 # Fall back to team_id on player object
                 _get_team_profile_cached(getattr(player, "team_id", ""))
@@ -2687,10 +2686,8 @@ class Trader:
 
         # --- 5. Make decisions ---
         engine = DecisionEngine(
-            min_avg_points_to_buy=20.0,
-            min_avg_points_emergency=10.0,
-            min_expected_points_to_buy=getattr(self.settings, "min_expected_points_to_buy", 30.0),
-            min_ep_upgrade_threshold=getattr(self.settings, "min_ep_upgrade_threshold", 10.0),
+            min_ep_to_buy=getattr(self.settings, "min_expected_points_to_buy", 30.0),
+            min_ep_upgrade=getattr(self.settings, "min_ep_upgrade_threshold", 10.0),
         )
 
         if squad_size >= 15:
@@ -2714,6 +2711,7 @@ class Trader:
                 market_players=market_player_map,
                 is_emergency=is_emergency,
                 top_n=8 if is_emergency else 5,
+                squad_players=squad_player_map,
             )
             trade_pairs = []
 
