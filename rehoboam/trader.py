@@ -1440,6 +1440,8 @@ class Trader:
             current_budget=flip_budget,
             player_trends=player_trends,
             max_opportunities=max_opps,
+            team_value=team_value,
+            max_debt_pct=self.settings.max_debt_pct_of_team_value,
         )
 
         return opportunities
@@ -2542,23 +2544,17 @@ class Trader:
         """
         return {a.player.id: a.value_score for a in analyses}
 
-    def run_ep_analysis(self, league: League) -> None:
-        """Run the EP-first scoring pipeline and display the action plan.
+    def get_ep_recommendations(self, league: League) -> dict:
+        """Run the EP scoring pipeline and return structured recommendations.
 
-        This is a new analysis path that routes through the scoring pipeline
-        (scoring/collector.py -> scoring/scorer.py -> scoring/decision.py).
-        It does NOT modify any existing methods — the trade command still uses
-        the old path.
-
-        Args:
-            league: League object
+        Returns a dict with keys:
+            buy_recs, trade_pairs, sell_recs, squad_scores, lineup_map,
+            budget, squad_size, squad_players, market_players
         """
         from .roster_analyzer import RosterAnalyzer
         from .scoring.collector import DataCollector
         from .scoring.decision import DecisionEngine
         from .scoring.scorer import score_player
-
-        console.print("\n[bold cyan]EP Analysis (Expected Points Pipeline)[/bold cyan]\n")
 
         # --- 1. Fetch squad and market ---
         squad = self.api.get_squad(league)
@@ -2566,14 +2562,12 @@ class Trader:
         is_emergency = squad_size < self.settings.min_squad_size
 
         market_players_list = self.api.get_market(league)
-        # Only Kickbase-owned players are buyable
         kickbase_market = [p for p in market_players_list if p.is_kickbase_seller()]
 
         team_info = self.api.get_team_info(league)
         current_budget = team_info.get("budget", 0)
 
-        # --- 2. Collect performance + details + team profiles for every player ---
-        # Build a shared cache of team profiles keyed by team_id to avoid duplicate fetches.
+        # --- 2. Collect performance + details + team profiles ---
         team_profiles: dict[str, dict] = {}
 
         def _get_team_profile_cached(team_id: str) -> dict | None:
@@ -2588,7 +2582,6 @@ class Trader:
             return team_profiles[team_id] or None
 
         def _fetch_player_data(player) -> tuple[dict | None, dict | None]:
-            """Fetch (performance, player_details) for a player, using cache."""
             perf_data = None
             try:
                 perf_data = self.history_cache.get_cached_performance(
@@ -2610,22 +2603,19 @@ class Trader:
                 if self.verbose:
                     console.print(f"[dim]EP: details fetch failed for {player.last_name}[/dim]")
 
-            # Pre-cache team profile so collector can use it
             if player_details:
                 tid = player_details.get("tid", "")
                 _get_team_profile_cached(tid)
-                # Cache next 3 opponents for multi-fixture lookahead
                 next_matchups = self.matchup_analyzer.get_next_matchups(player_details, n=3)
                 for m in next_matchups:
                     if m.opponent_id:
                         _get_team_profile_cached(m.opponent_id)
             else:
-                # Fall back to team_id on player object
                 _get_team_profile_cached(getattr(player, "team_id", ""))
 
             return perf_data, player_details
 
-        # --- 3. Build DataCollector and score all players ---
+        # --- 3. Score all players ---
         collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
 
         market_scores: list = []
@@ -2666,7 +2656,7 @@ class Trader:
                 if self.verbose:
                     console.print(f"[dim]EP: scoring failed for {player.last_name}: {e}[/dim]")
 
-        # --- 4. Build roster context for position-aware decisions ---
+        # --- 4. Build roster context ---
         roster_context: dict = {}
         try:
             player_stats = {}
@@ -2691,7 +2681,6 @@ class Trader:
         )
 
         if squad_size >= 15:
-            # Full squad — show trade pairs instead of plain buys
             buy_recs = []
             trade_pairs = engine.build_trade_pairs(
                 market_scores=market_scores,
@@ -2721,33 +2710,32 @@ class Trader:
             squad_players=squad_player_map,
         )
 
-        # --- Compute bid amounts for buy recommendations ---
+        # --- 6. Compute EP-based bid amounts ---
         for rec in buy_recs:
             try:
-                # Map EP (0-180) to value_score (0-100) for bidding strategy
-                ep_as_value_score = min(100.0, rec.score.expected_points * (100.0 / 180.0))
-                bid_rec = self.bidding.calculate_bid(
+                bid_rec = self.bidding.calculate_ep_bid(
                     asking_price=rec.player.price,
                     market_value=rec.player.market_value,
-                    value_score=ep_as_value_score,
+                    expected_points=rec.score.expected_points,
+                    marginal_ep_gain=rec.marginal_ep_gain,
                     confidence=0.7,
-                    average_points=rec.score.average_points,
-                    roster_impact=rec.roster_bonus,
+                    current_budget=int(current_budget),
+                    sell_plan=rec.sell_plan,
+                    player_id=rec.player.id,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
-                rec.recommended_bid = rec.player.price  # Fallback: bid asking price
+                rec.recommended_bid = rec.player.price
         for pair in trade_pairs:
             try:
-                ep_as_value_score = min(100.0, pair.buy_score.expected_points * (100.0 / 180.0))
-                bid_rec = self.bidding.calculate_bid(
+                bid_rec = self.bidding.calculate_ep_bid(
                     asking_price=pair.buy_player.price,
                     market_value=pair.buy_player.market_value,
-                    value_score=ep_as_value_score,
+                    expected_points=pair.buy_score.expected_points,
+                    marginal_ep_gain=pair.ep_gain,
                     confidence=0.7,
-                    average_points=pair.buy_score.average_points,
-                    is_replacement=True,
-                    replacement_sell_value=pair.sell_score.market_value,
+                    current_budget=int(current_budget),
+                    player_id=pair.buy_player.id,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -2755,16 +2743,33 @@ class Trader:
 
         lineup_map = engine.select_lineup(squad_scores)
 
-        # --- 6. Display ---
+        return {
+            "buy_recs": buy_recs,
+            "trade_pairs": trade_pairs,
+            "sell_recs": sell_recs,
+            "squad_scores": squad_scores,
+            "lineup_map": lineup_map,
+            "budget": current_budget,
+            "squad_size": squad_size,
+            "squad_players": squad_player_map,
+            "market_players": market_player_map,
+        }
+
+    def run_ep_analysis(self, league: League) -> None:
+        """Run the EP scoring pipeline and display the action plan."""
+        console.print("\n[bold cyan]EP Analysis (Expected Points Pipeline)[/bold cyan]\n")
+
+        result = self.get_ep_recommendations(league)
+
         self.compact_display.display_ep_action_plan(
-            buy_recs=buy_recs,
-            sell_recs=sell_recs,
-            trade_pairs=trade_pairs,
-            squad_scores=squad_scores,
-            lineup_map=lineup_map,
-            budget=current_budget,
-            squad_size=squad_size,
-            squad_players=squad_player_map,
+            buy_recs=result["buy_recs"],
+            sell_recs=result["sell_recs"],
+            trade_pairs=result["trade_pairs"],
+            squad_scores=result["squad_scores"],
+            lineup_map=result["lineup_map"],
+            budget=result["budget"],
+            squad_size=result["squad_size"],
+            squad_players=result["squad_players"],
         )
 
     def auto_trade(self, league: League, max_trades: int = 5):
