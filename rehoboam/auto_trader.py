@@ -151,29 +151,41 @@ class AutoTrader:
             console.print(f"[yellow]Daily spend limit reached (€{self.max_daily_spend:,})[/yellow]")
             return results
 
-        # Find opportunities
-        opportunities = trader.find_profit_opportunities(league)
-
-        if not opportunities:
-            console.print("[dim]No profit opportunities found[/dim]")
+        # Get EP-scored recommendations (same pipeline as `rehoboam analyze`)
+        try:
+            ep_result = trader.get_ep_recommendations(league)
+            buy_recs = ep_result["buy_recs"]
+            trade_pairs = ep_result["trade_pairs"]
+        except Exception as e:
+            console.print(f"[red]EP pipeline failed: {e}[/red]")
             return results
 
-        # Recalculate buy prices with smart bidding (profit trades default to asking price)
-        for opp in opportunities:
-            try:
-                from .value_calculator import PlayerValue
+        # Merge buy_recs and trade_pairs into a unified opportunity list
+        from types import SimpleNamespace
 
-                value = PlayerValue.calculate(opp.player)
-                bid_rec = trader.bidding.calculate_bid(
-                    asking_price=opp.player.price,
-                    market_value=opp.player.market_value,
-                    value_score=value.value_score,
-                    confidence=min(value.value_score / 100.0, 0.95),
-                    trend_change_pct=None,  # ProfitOpportunity doesn't carry trend; uses conservative default
+        opportunities = []
+        for rec in buy_recs:
+            if rec.recommended_bid and rec.recommended_bid > 0:
+                opportunities.append(
+                    SimpleNamespace(
+                        player=rec.player,
+                        buy_price=rec.recommended_bid,
+                        reason=rec.reason,
+                    )
                 )
-                opp.buy_price = bid_rec.recommended_bid
-            except Exception:
-                pass  # Keep original price as fallback
+        for pair in trade_pairs:
+            if pair.recommended_bid and pair.recommended_bid > 0:
+                opportunities.append(
+                    SimpleNamespace(
+                        player=pair.buy_player,
+                        buy_price=pair.recommended_bid,
+                        reason=f"Trade: sell {pair.sell_player.last_name} for EP +{pair.ep_gain:.1f}",
+                    )
+                )
+
+        ep_opportunity_count = len(opportunities)
+        if not opportunities:
+            console.print("[dim]No EP-based opportunities found[/dim]")
 
         # Check active bids - we can have multiple bids simultaneously
         my_bids = self.api.get_my_bids(league)
@@ -279,7 +291,62 @@ class AutoTrader:
                 if not my_bid_amounts.get(opp.player.id, 0):
                     available_slots -= 1
 
-        console.print(f"\n[green]✓ Executed {executed_count} profit trades[/green]")
+        console.print(f"\n[green]✓ Executed {executed_count} EP trades[/green]")
+
+        # --- Phase 2: Profit flip opportunities for remaining slots ---
+        if available_slots > 0 and self.daily_spend < self.max_daily_spend:
+            console.print("\n[bold cyan]💰 Profit Flip Opportunities[/bold cyan]")
+
+            try:
+                profit_opps = trader.find_profit_opportunities(league)
+            except Exception as e:
+                console.print(f"[yellow]Profit opportunity search failed: {e}[/yellow]")
+                profit_opps = []
+
+            # Filter out players we already bid on (EP or existing)
+            ep_player_ids = {opp.player.id for opp in opportunities}
+            profit_opps = [o for o in profit_opps if o.player.id not in ep_player_ids]
+
+            if profit_opps:
+                console.print(f"[cyan]Found {len(profit_opps)} profit flip candidates[/cyan]")
+
+                for opp in profit_opps:
+                    if available_slots <= 0:
+                        break
+                    if self.daily_spend + opp.buy_price >= self.max_daily_spend:
+                        break
+
+                    # Skip if already have a bid
+                    current_bid = my_bid_amounts.get(opp.player.id, 0)
+                    if current_bid > 0:
+                        continue
+
+                    if opp.buy_price > flip_budget:
+                        continue
+
+                    from types import SimpleNamespace
+
+                    flip_opp = SimpleNamespace(
+                        player=opp.player,
+                        buy_price=opp.buy_price,
+                        reason=f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
+                    )
+                    result = self._execute_buy(league, flip_opp)
+                    results.append(result)
+
+                    if result.success:
+                        executed_count += 1
+                        self.daily_spend += opp.buy_price
+                        flip_budget -= opp.buy_price
+                        available_slots -= 1
+
+                console.print(
+                    f"[green]✓ Total executed: {executed_count} trades "
+                    f"({ep_opportunity_count} EP + {executed_count - ep_opportunity_count} flips)[/green]"
+                )
+            else:
+                console.print("[dim]No profit flip opportunities found[/dim]")
+
         return results
 
     def run_lineup_improvement_session(self, league) -> list[AutoTradeResult]:
@@ -308,86 +375,75 @@ class AutoTrader:
             console.print(f"[yellow]Daily spend limit reached (€{self.max_daily_spend:,})[/yellow]")
             return results
 
-        # Find trades
-        trades = trader.find_trade_opportunities(league)
-
-        if not trades:
-            console.print("[dim]No lineup improvement trades found[/dim]")
+        # Get EP recommendations (same pipeline as `rehoboam analyze`)
+        try:
+            ep_result = trader.get_ep_recommendations(league)
+            buy_recs = ep_result["buy_recs"]
+            trade_pairs = ep_result["trade_pairs"]
+        except Exception as e:
+            console.print(f"[red]EP pipeline failed: {e}[/red]")
             return results
 
-        # Check active bids - we can have multiple bids simultaneously
-        my_bids = self.api.get_my_bids(league)
+        # For lineup improvement, use trade pairs (sell→buy swaps) or top buy
+        from types import SimpleNamespace
 
-        # Build map of player_id -> our bid amount
-        my_bid_amounts = {p.id: p.user_offer_price for p in my_bids}
+        opportunities = []
+        for pair in trade_pairs:
+            if pair.recommended_bid and pair.recommended_bid > 0:
+                opportunities.append(
+                    SimpleNamespace(
+                        player=pair.buy_player,
+                        buy_price=pair.recommended_bid,
+                        reason=f"Lineup upgrade: sell {pair.sell_player.last_name} → buy {pair.buy_player.last_name} (EP +{pair.ep_gain:.1f})",
+                    )
+                )
+        for rec in buy_recs:
+            if rec.recommended_bid and rec.recommended_bid > 0:
+                opportunities.append(
+                    SimpleNamespace(
+                        player=rec.player,
+                        buy_price=rec.recommended_bid,
+                        reason=rec.reason,
+                    )
+                )
+
+        if not opportunities:
+            console.print("[dim]No EP-based lineup improvements found[/dim]")
+            return results
+
+        # Check active bids
+        my_bids = self.api.get_my_bids(league)
 
         if my_bids:
             console.print(f"[cyan]📊 Active bids: {len(my_bids)}[/cyan]")
 
-        # Calculate available squad slots (enforce 15-player limit)
+        # Calculate available squad slots
         squad = self.api.get_squad(league)
         current_squad_size = len(squad)
         active_bid_count = len(my_bids)
-        max_squad_size = 15
 
         console.print(
             f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
         )
 
-        # Get current budget
-        team_info = self.api.get_team_info(league)
-        current_budget = team_info.get("budget", 0)
-        team_value = team_info.get("team_value", 0)
-        max_debt = int(team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        # Execute best opportunity (only 1 per session for safety)
+        opp = opportunities[0]
 
-        # Calculate effective budget (subtract pending bids)
-        pending_bid_total = sum(p.user_offer_price for p in my_bids)
-        available_budget = current_budget + max_debt - pending_bid_total
+        if self.daily_spend + opp.buy_price >= self.max_daily_spend:
+            console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
+            return results
 
-        # Execute best trade (only 1 lineup trade per session for safety)
-        for trade in trades[:1]:  # Only top trade
-            if self.daily_spend + trade.required_budget >= self.max_daily_spend:
-                console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
-                break
+        if current_squad_size + active_bid_count >= 15:
+            console.print("[yellow]No squad slots available (15-player limit)[/yellow]")
+            return results
 
-            # Check 15-player limit with net squad change from trade
-            net_squad_change = len(trade.players_in) - len(trade.players_out)
-            if current_squad_size + active_bid_count + net_squad_change > max_squad_size:
-                console.print(
-                    f"[yellow]Trade would exceed 15-player limit "
-                    f"({current_squad_size} + {active_bid_count} bids + {net_squad_change} net = "
-                    f"{current_squad_size + active_bid_count + net_squad_change})[/yellow]"
-                )
-                continue
+        # Execute the buy using same _execute_buy as profit session
+        result = self._execute_buy(league, opp)
+        results.append(result)
 
-            # Show if trade includes players we already have bids on
-            players_with_bids = [p for p in trade.players_in if p.id in my_bid_amounts]
-            if players_with_bids:
-                console.print(
-                    f"[yellow]⚠ Trade includes players you bid on: {', '.join(p.first_name + ' ' + p.last_name for p in players_with_bids)}[/yellow]"
-                )
-                console.print(
-                    "[dim]Bot will attempt trade anyway - you can have multiple bids[/dim]"
-                )
-
-            # Check if affordable
-            if trade.required_budget > available_budget:
-                console.print(
-                    f"[yellow]Cannot afford trade (needs €{trade.required_budget:,})[/yellow]"
-                )
-                continue
-
-            # Execute trade (buy all, then sell all)
-            trade_results = self._execute_lineup_trade(league, trade)
-            results.extend(trade_results)
-
-            if all(r.success for r in trade_results):
-                self.daily_spend += trade.required_budget
-                console.print("\n[green]✓ Executed lineup improvement trade[/green]")
-            else:
-                console.print("\n[red]✗ Lineup trade partially failed[/red]")
-
-            break  # Only one lineup trade per session
+        if result.success:
+            self.daily_spend += opp.buy_price
+            console.print("\n[green]✓ Executed lineup improvement trade[/green]")
 
         return results
 
@@ -595,6 +651,152 @@ class AutoTrader:
 
         return results
 
+    def run_profit_sell_monitoring(self, league) -> list[AutoTradeResult]:
+        """Check owned players for profit targets and sell to Kickbase.
+
+        Identifies non-starting players that have appreciated since purchase
+        and sells them instantly to Kickbase (~95% market value) to free budget.
+
+        Sell conditions:
+        - Profit >= 10%: take profit
+        - Held 7+ days and losing value: cut losses (stop-loss at -5%)
+        """
+        from .trader import Trader
+
+        results = []
+        trader = Trader(
+            self.api,
+            self.settings,
+            bid_learner=self.learner,
+            activity_feed_learner=self.activity_feed_learner,
+        )
+
+        console.print("\n[bold cyan]📈 Profit Sell Monitoring[/bold cyan]")
+
+        squad = self.api.get_squad(league)
+        if not squad:
+            console.print("[dim]No squad loaded[/dim]")
+            return results
+
+        # Get EP recommendations to identify best-11 (protected from selling)
+        try:
+            ep_result = trader.get_ep_recommendations(league)
+            squad_scores = ep_result["squad_scores"]
+            # Top 11 by EP are protected
+            sorted_by_ep = sorted(squad_scores, key=lambda s: s.expected_points, reverse=True)
+            best_11_ids = {s.player_id for s in sorted_by_ep[:11]}
+        except Exception:
+            # Fallback: protect all players if scoring fails
+            console.print("[yellow]Could not score squad — skipping sell monitoring[/yellow]")
+            return results
+
+        # Check if EP pipeline has buy replacements lined up
+        buy_recs = ep_result.get("buy_recs", [])
+        trade_pairs = ep_result.get("trade_pairs", [])
+        has_replacement = len(buy_recs) > 0 or len(trade_pairs) > 0
+
+        sell_candidates = []
+        for player in squad:
+            # Never sell best-11 starters
+            if player.id in best_11_ids:
+                continue
+
+            # Need buy_price to calculate profit
+            if not player.buy_price or player.buy_price <= 0:
+                continue
+
+            profit = player.market_value - player.buy_price
+            profit_pct = (profit / player.buy_price) * 100
+
+            # Always sell when profit target hit — take the money
+            if profit_pct >= 10.0:
+                sell_candidates.append(
+                    (player, profit_pct, f"Profit target hit: +{profit_pct:.1f}% (€{profit:,})")
+                )
+            # Only cut losses if there's a better player to buy
+            elif profit_pct <= -5.0 and has_replacement:
+                sell_candidates.append(
+                    (
+                        player,
+                        profit_pct,
+                        f"Stop-loss (replacement available): {profit_pct:.1f}% (€{profit:,})",
+                    )
+                )
+
+        if not sell_candidates:
+            console.print("[dim]No players meet sell criteria[/dim]")
+            return results
+
+        # Sort: highest profit first
+        sell_candidates.sort(key=lambda x: x[1], reverse=True)
+
+        console.print(f"[green]Found {len(sell_candidates)} player(s) to sell[/green]")
+
+        for player, profit_pct, reason in sell_candidates:
+            console.print(
+                f"\n[cyan]Selling {player.first_name} {player.last_name} to Kickbase "
+                f"(MV €{player.market_value:,}, bought €{player.buy_price:,}, "
+                f"{profit_pct:+.1f}%)[/cyan]"
+            )
+
+            if self.dry_run:
+                console.print("[yellow]DRY RUN: Sell not executed[/yellow]")
+                results.append(
+                    AutoTradeResult(
+                        success=True,
+                        player_name=f"{player.first_name} {player.last_name}",
+                        action="SELL",
+                        price=player.market_value,
+                        reason=reason,
+                        timestamp=time.time(),
+                    )
+                )
+                continue
+
+            try:
+                self.api.client.sell_to_kickbase(league.id, player.id)
+                console.print(f"[green]✓ Sold {player.first_name} {player.last_name}[/green]")
+
+                # Record flip outcome for learning
+                if self.learner:
+                    try:
+                        self.learner.record_flip_outcome(
+                            player_id=player.id,
+                            buy_price=player.buy_price,
+                            sell_price=player.market_value,
+                            profit_pct=profit_pct,
+                        )
+                    except Exception:
+                        pass
+
+                results.append(
+                    AutoTradeResult(
+                        success=True,
+                        player_name=f"{player.first_name} {player.last_name}",
+                        action="SELL",
+                        price=player.market_value,
+                        reason=reason,
+                        timestamp=time.time(),
+                    )
+                )
+            except Exception as e:
+                console.print(
+                    f"[red]✗ Failed to sell {player.first_name} {player.last_name}: {e}[/red]"
+                )
+                results.append(
+                    AutoTradeResult(
+                        success=False,
+                        player_name=f"{player.first_name} {player.last_name}",
+                        action="SELL",
+                        price=player.market_value,
+                        reason=reason,
+                        timestamp=time.time(),
+                        error=str(e),
+                    )
+                )
+
+        return results
+
     def run_full_session(self, league) -> AutoTradeSession:
         """
         Run a complete automated trading session
@@ -629,9 +831,18 @@ class AutoTrader:
 
         profit_results = []
         lineup_results = []
+        sell_results = []
         errors = []
 
-        # Step 0: Squad Optimization - Ensure best 11 and positive budget by gameday
+        # Step 0: Sell monitoring — realize profits on appreciated players
+        try:
+            sell_results = self.run_profit_sell_monitoring(league)
+        except Exception as e:
+            error_msg = f"Sell monitoring error: {str(e)}"
+            console.print(f"[red]{error_msg}[/red]")
+            errors.append(error_msg)
+
+        # Step 1: Squad Optimization - Ensure best 11 and positive budget by gameday
         console.print("\n[bold cyan]🎯 Squad Optimization[/bold cyan]")
         try:
             squad_optimization = self.optimize_and_execute_squad(league)
@@ -670,12 +881,9 @@ class AutoTrader:
             errors.append(error_msg)
 
         # Calculate totals
-        total_spent = sum(
-            r.price for r in profit_results + lineup_results if r.action == "BUY" and r.success
-        )
-        total_earned = sum(
-            r.price for r in profit_results + lineup_results if r.action == "SELL" and r.success
-        )
+        all_results = profit_results + lineup_results + sell_results
+        total_spent = sum(r.price for r in all_results if r.action == "BUY" and r.success)
+        total_earned = sum(r.price for r in all_results if r.action == "SELL" and r.success)
         net_change = total_earned - total_spent
 
         end_time = time.time()

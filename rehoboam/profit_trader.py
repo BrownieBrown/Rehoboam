@@ -59,7 +59,9 @@ class ProfitTrader:
         market_players: list,
         current_budget: int,
         player_trends: dict[str, dict],
-        max_opportunities: int = 10,  # Increased from 5 to 10 since we can use debt
+        max_opportunities: int = 10,
+        team_value: int = 0,
+        max_debt_pct: float = 60.0,
     ) -> list[ProfitOpportunity]:
         """
         Find players to buy and flip for profit
@@ -69,6 +71,8 @@ class ProfitTrader:
             current_budget: Available budget
             player_trends: Dict mapping player_id -> trend analysis
             max_opportunities: Max opportunities to return
+            team_value: Total team value (for debt capacity calculation)
+            max_debt_pct: Max debt as percentage of team value
 
         Returns:
             List of ProfitOpportunity sorted by best profit potential
@@ -79,20 +83,23 @@ class ProfitTrader:
         affordable = 0
         has_trend_data = 0
         meets_threshold = 0
-        small_sample_filtered = 0  # Count players filtered due to small sample size
+        small_sample_filtered = 0
+
+        # Use debt capacity for affordability (can go negative to flip)
+        max_debt = int(team_value * (max_debt_pct / 100)) if team_value > 0 else 0
+        max_affordable = current_budget + max_debt
 
         for player in market_players:
             checked += 1
 
             # Skip injured/unavailable players
-            # Status codes: 0=healthy, 2/4/256=injured/unavailable
             if player.status != 0:
                 continue
 
             healthy += 1
 
-            # Must be affordable
-            if player.price > current_budget:
+            # Must be affordable (including debt capacity)
+            if player.price > max_affordable:
                 continue
 
             affordable += 1
