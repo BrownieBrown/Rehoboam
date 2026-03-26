@@ -112,6 +112,34 @@ def _extract_minutes_trend(performance: dict) -> tuple[str | None, float | None]
         return None, None
 
 
+def _extract_recent_form(performance: dict, window: int = 5) -> float | None:
+    """Average points over the last *window* matches played.
+
+    Returns:
+        Average points over recent matches, or None if fewer than 2 matches.
+    """
+    try:
+        seasons = performance.get("it", [])
+        if not seasons:
+            return None
+
+        seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
+        current_season = seasons_sorted[0] if seasons_sorted else None
+        if not current_season:
+            return None
+
+        matches = current_season.get("ph", [])
+        matches_played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
+
+        if len(matches_played) < 2:
+            return None
+
+        recent = matches_played[-window:]
+        return sum(m.get("p", 0) for m in recent) / len(recent)
+    except Exception:
+        return None
+
+
 def _grade_data_quality(
     games_played: int,
     has_fixture: bool,
@@ -218,32 +246,49 @@ def score_player(data: PlayerData) -> PlayerScore:
 
     # ------------------------------------------------------------------
     # 4. Fixture bonus  (-10 to +15)
+    #    Weighted average over next 3 fixtures: 50% / 30% / 20%.
+    #    Falls back to single opponent if multi-fixture data unavailable.
     # ------------------------------------------------------------------
     fixture_bonus: float = 0.0
     has_fixture = False
     next_opponent: str | None = None
 
-    if data.team_strength and data.opponent_strength:
+    def _diff_to_bonus(diff: float) -> float:
+        if diff >= 40:
+            return 15.0
+        elif diff >= 20:
+            return 8.0
+        elif diff >= 5:
+            return 3.0
+        elif diff >= -5:
+            return 0.0
+        elif diff >= -20:
+            return -5.0
+        else:
+            return -10.0
+
+    if data.team_strength and data.upcoming_opponent_strengths:
+        has_fixture = True
+        next_opponent = data.upcoming_opponent_strengths[0].team_name
+        # Weighted average: next match 50%, second 30%, third 20%
+        weights = [0.50, 0.30, 0.20]
+        total_diff = 0.0
+        total_weight = 0.0
+        for i, opp in enumerate(data.upcoming_opponent_strengths[:3]):
+            w = weights[i] if i < len(weights) else 0.0
+            total_diff += w * (data.team_strength.strength_score - opp.strength_score)
+            total_weight += w
+        diff = total_diff / total_weight if total_weight > 0 else 0.0
+        fixture_bonus = _diff_to_bonus(diff)
+    elif data.team_strength and data.opponent_strength:
+        # Fallback: single opponent (backward compat)
         has_fixture = True
         next_opponent = data.opponent_strength.team_name
-        # Positive when player's team is stronger than the opponent
         diff = data.team_strength.strength_score - data.opponent_strength.strength_score
-        # Map diff (-100 to +100) → bonus (-10 to +15)
-        if diff >= 40:
-            fixture_bonus = 15.0
-        elif diff >= 20:
-            fixture_bonus = 8.0
-        elif diff >= 5:
-            fixture_bonus = 3.0
-        elif diff >= -5:
-            fixture_bonus = 0.0
-        elif diff >= -20:
-            fixture_bonus = -5.0
-        else:
-            fixture_bonus = -10.0
+        fixture_bonus = _diff_to_bonus(diff)
 
     # ------------------------------------------------------------------
-    # 5. Minutes trend bonus  (-10 to +10)
+    # 5. Minutes trend bonus  (-15 to +10)
     # ------------------------------------------------------------------
     minutes_trend, avg_minutes = _extract_minutes_trend(data.performance or {})
 
@@ -251,7 +296,11 @@ def score_player(data: PlayerData) -> PlayerScore:
     if minutes_trend == "increasing":
         minutes_bonus = 10.0
     elif minutes_trend == "decreasing":
-        minutes_bonus = -10.0
+        if avg_minutes is not None and avg_minutes < 30:
+            minutes_bonus = -15.0
+            notes.append(f"Minutes collapsing: avg {avg_minutes:.0f}min, trend decreasing")
+        else:
+            minutes_bonus = -10.0
     elif minutes_trend == "stable":
         if avg_minutes is not None and avg_minutes < 30:
             minutes_bonus = -8.0
@@ -260,19 +309,33 @@ def score_player(data: PlayerData) -> PlayerScore:
 
     # ------------------------------------------------------------------
     # 6. Form bonus  (-10 to +10)
+    #    Uses last-5-games average vs season average to detect streaks.
+    #    Falls back to season ratio if per-match data is unavailable.
     # ------------------------------------------------------------------
     form_bonus: float = 0.0
-    if avg_pts > 0:
+    recent_avg = _extract_recent_form(data.performance or {}, window=5)
+
+    if recent_avg is not None and avg_pts > 0:
+        form_ratio = recent_avg / avg_pts
+        if form_ratio > 1.5:
+            form_bonus = 10.0
+            notes.append(f"Hot streak: recent avg {recent_avg:.0f} vs season {avg_pts:.0f}")
+        elif form_ratio > 1.15:
+            form_bonus = 5.0
+        elif form_ratio < 0.5:
+            form_bonus = -10.0
+            notes.append(f"Cold slump: recent avg {recent_avg:.0f} vs season {avg_pts:.0f}")
+        elif form_ratio < 0.75:
+            form_bonus = -5.0
+    elif avg_pts > 0:
+        # Fallback: season ratio when per-match data unavailable
         ratio = current_pts / avg_pts
         if ratio > 2.0:
             form_bonus = 10.0
         elif ratio > 1.3:
             form_bonus = 5.0
         elif ratio < 0.5:
-            if current_pts == 0:
-                form_bonus = -10.0
-            else:
-                form_bonus = -5.0
+            form_bonus = -10.0 if current_pts == 0 else -5.0
     else:
         if current_pts == 0:
             form_bonus = -10.0
@@ -325,6 +388,10 @@ def score_player(data: PlayerData) -> PlayerScore:
         is_dgw=data.is_dgw,
         next_opponent=next_opponent,
         notes=notes,
-        current_price=player.price,
+        current_price=getattr(player, "price", player.market_value),
         market_value=player.market_value,
+        average_points=avg_pts,
+        position=player.position or "",
+        lineup_probability=data.player_details.get("prob") if data.player_details else None,
+        minutes_trend=minutes_trend,
     )

@@ -10,11 +10,13 @@ from rehoboam.formation import select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
 
 from .models import (
+    BuyRecommendation,
     MarginalEPResult,
     PlayerScore,
     SellPlan,
     SellPlanEntry,
     SellRecommendation,
+    TradePair,
 )
 
 
@@ -244,13 +246,257 @@ class DecisionEngine:
             reasoning=reasoning,
         )
 
+    def recommend_buys(
+        self,
+        market_scores: list[PlayerScore],
+        squad_scores: list[PlayerScore],
+        roster_context: dict,
+        budget: float,
+        market_players: dict[str, MarketPlayer],
+        is_emergency: bool = False,
+        top_n: int = 5,
+        squad_players: dict[str, MarketPlayer] | None = None,
+    ) -> list[BuyRecommendation]:
+        """Rank market players by marginal EP gain to the squad.
+
+        For each market player above the EP threshold, calculates how much
+        they would improve the best-11 total EP if added to the squad.
+        Players over budget get a paired sell plan instead of being filtered out.
+
+        Returns the top *top_n* recommendations sorted by marginal EP gain.
+        """
+        lineup_map = self.select_lineup(squad_scores)
+
+        # Compute best-11 IDs for sell plan generation
+        squad_list = list(squad_players.values()) if squad_players else []
+        if squad_list:
+            best_11 = select_best_eleven(squad_list, lineup_map)
+            best_11_ids = {p.id for p in best_11}
+        else:
+            best_11_ids = set()
+
+        recs: list[BuyRecommendation] = []
+        for ps in market_scores:
+            player = market_players.get(ps.player_id)
+            if not player:
+                continue
+
+            # Filter by minimum EP threshold
+            min_ep = 10.0 if is_emergency else self.min_ep_to_buy
+            if ps.expected_points < min_ep:
+                continue
+
+            # Skip players unlikely to start (prob 4-5)
+            from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY
+
+            if (
+                ps.lineup_probability is not None
+                and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
+            ):
+                continue
+
+            # Hard-block players with severely declining minutes
+            if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
+                continue
+
+            # Calculate marginal EP gain using a simplified approach:
+            # Find the weakest player in the position and compare
+            same_pos_scores = [s for s in squad_scores if s.position == player.position]
+            if same_pos_scores:
+                weakest_ep = min(s.expected_points for s in same_pos_scores)
+                marginal = ps.expected_points - weakest_ep
+                replaces_id = next(
+                    (s.player_id for s in same_pos_scores if s.expected_points == weakest_ep),
+                    None,
+                )
+            else:
+                # No one at this position — fills a gap
+                marginal = ps.expected_points
+                replaces_id = None
+
+            marginal = max(0.0, marginal)
+
+            # Determine roster impact
+            pos_counts: dict[str, int] = {}
+            for s in squad_scores:
+                pos_counts[s.position] = pos_counts.get(s.position, 0) + 1
+
+            pos_min = POSITION_MINIMUMS.get(player.position, 0)
+            current_count = pos_counts.get(player.position, 0)
+
+            if current_count < pos_min:
+                roster_impact = "fills_gap"
+                roster_bonus = 10.0
+            elif marginal > self.min_ep_upgrade:
+                roster_impact = "upgrade"
+                roster_bonus = 5.0
+            else:
+                roster_impact = "additional"
+                roster_bonus = 0.0
+
+            # Build reason string
+            reason_parts = [f"EP {ps.expected_points:.1f}"]
+            if marginal > 0:
+                reason_parts.append(f"+{marginal:.1f} marginal")
+            if roster_impact == "fills_gap":
+                reason_parts.append("fills gap")
+            elif replaces_id:
+                reason_parts.append("upgrades pos")
+
+            # Only recommend if marginal gain meets threshold (or emergency)
+            if not is_emergency and marginal < self.min_ep_upgrade and roster_impact != "fills_gap":
+                continue
+
+            recs.append(
+                BuyRecommendation(
+                    score=ps,
+                    player=player,
+                    marginal_ep_gain=marginal,
+                    effective_ep=ps.expected_points,
+                    replaces_player_id=replaces_id,
+                    replaces_player_name=None,
+                    roster_impact=roster_impact,
+                    roster_bonus=roster_bonus,
+                    reason="; ".join(reason_parts),
+                )
+            )
+
+        # For over-budget buys, generate sell plans instead of filtering
+        final_recs: list[BuyRecommendation] = []
+        for rec in recs:
+            if rec.player.price <= budget:
+                final_recs.append(rec)
+            elif squad_list:
+                # Player costs more than budget — generate sell plan
+                sell_plan = self.build_sell_plan(
+                    bid_amount=rec.player.price,
+                    current_budget=int(budget),
+                    squad=squad_list,
+                    squad_scores=squad_scores,
+                    best_11_ids=best_11_ids,
+                    displaced_player_id=rec.replaces_player_id,
+                )
+                if sell_plan.is_viable:
+                    rec.sell_plan = sell_plan
+                    final_recs.append(rec)
+            # else: skip — no squad data to generate sell plan
+
+        # Sort by marginal EP gain (primary), then by raw EP (secondary)
+        final_recs.sort(key=lambda r: (r.marginal_ep_gain, r.score.expected_points), reverse=True)
+        return final_recs[:top_n]
+
+    def build_trade_pairs(
+        self,
+        market_scores: list[PlayerScore],
+        squad_scores: list[PlayerScore],
+        roster_context: dict,
+        budget: float,
+        market_players: dict[str, MarketPlayer],
+        squad_players: dict[str, MarketPlayer],
+        top_n: int = 5,
+    ) -> list[TradePair]:
+        """Build sell->buy trade pairs for a full squad (15/15).
+
+        For each promising market player, finds the best squad member to sell
+        and calculates net cost and EP gain.
+        """
+        # Get sell candidates sorted by expendability
+        sell_recs = self.recommend_sells(
+            squad_scores=squad_scores,
+            roster_context=roster_context,
+            squad_players=squad_players,
+        )
+        sellable = [r for r in sell_recs if not r.is_protected]
+
+        pairs: list[TradePair] = []
+        used_sell_ids: set[str] = set()
+
+        # Score and sort market candidates by EP
+        candidates = sorted(market_scores, key=lambda s: s.expected_points, reverse=True)
+
+        for ps in candidates:
+            buy_player = market_players.get(ps.player_id)
+            if not buy_player:
+                continue
+            if ps.expected_points < self.min_ep_to_buy:
+                continue
+
+            # Skip players unlikely to start or with collapsing minutes
+            from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY
+
+            if (
+                ps.lineup_probability is not None
+                and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
+            ):
+                continue
+            if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
+                continue
+
+            # Find best sell target: same position preferred, then most expendable
+            best_sell: SellRecommendation | None = None
+            for sr in sellable:
+                if sr.score.player_id in used_sell_ids:
+                    continue
+                sell_mp = sr.player
+                if sell_mp is None:
+                    continue
+                # Prefer same-position swaps
+                if sell_mp.position == buy_player.position:
+                    best_sell = sr
+                    break
+            # Fallback: most expendable not yet used
+            if best_sell is None:
+                for sr in sellable:
+                    if sr.score.player_id in used_sell_ids:
+                        continue
+                    if sr.player is not None:
+                        best_sell = sr
+                        break
+
+            if best_sell is None or best_sell.player is None:
+                continue
+
+            sell_mp = best_sell.player
+            sell_value = int(sell_mp.market_value * 0.95)
+            net_cost = buy_player.price - sell_value
+            ep_gain = ps.expected_points - best_sell.score.expected_points
+
+            # Only recommend if EP gain is positive
+            if ep_gain < self.min_ep_upgrade:
+                continue
+
+            # Check affordability (budget + sell recovery)
+            if net_cost > budget:
+                continue
+
+            used_sell_ids.add(best_sell.score.player_id)
+
+            pairs.append(
+                TradePair(
+                    buy_player=buy_player,
+                    sell_player=sell_mp,
+                    buy_score=ps,
+                    sell_score=best_sell.score,
+                    net_cost=net_cost,
+                    ep_gain=ep_gain,
+                )
+            )
+
+            if len(pairs) >= top_n:
+                break
+
+        pairs.sort(key=lambda p: p.ep_gain, reverse=True)
+        return pairs[:top_n]
+
     def recommend_sells(
         self,
-        squad: list[MarketPlayer],
         squad_scores: list[PlayerScore],
-        best_11_ids: set[str],
+        roster_context: dict,
+        squad_players: dict[str, MarketPlayer],
     ) -> list[SellRecommendation]:
         """Rank all squad players by expendability (highest = most expendable).
+
+        Computes best-11 internally from squad_scores, then scores each player.
 
         Formula::
 
@@ -261,16 +507,22 @@ class DecisionEngine:
         Returns a sorted list of :class:`~rehoboam.scoring.models.SellRecommendation`
         (most expendable first).
         """
-        score_map = {s.player_id: s for s in squad_scores}
+        # Compute best-11 IDs from squad scores + squad players
+        score_map = self.select_lineup(squad_scores)
+        squad_list = list(squad_players.values())
+        best_11 = select_best_eleven(squad_list, score_map)
+        best_11_ids = {p.id for p in best_11}
 
         # Count positions to detect position minimums
         position_counts: dict[str, int] = {}
-        for p in squad:
+        for p in squad_list:
             position_counts[p.position] = position_counts.get(p.position, 0) + 1
 
+        score_lookup = {s.player_id: s for s in squad_scores}
+
         recommendations: list[SellRecommendation] = []
-        for player in squad:
-            ps = score_map.get(player.id)
+        for player in squad_list:
+            ps = score_lookup.get(player.id)
             ep = ps.expected_points if ps else 0.0
             in_best_11 = player.id in best_11_ids
 
@@ -297,6 +549,7 @@ class DecisionEngine:
             recommendations.append(
                 SellRecommendation(
                     score=ps if ps is not None else _dummy_score(player.id, ep),
+                    player=player,
                     expendability=expendability,
                     is_protected=is_protected,
                     protection_reason=protection_reason,
@@ -341,4 +594,8 @@ def _dummy_score(player_id: str, ep: float) -> PlayerScore:
         notes=[],
         current_price=0,
         market_value=0,
+        average_points=0.0,
+        position="",
+        lineup_probability=None,
+        minutes_trend=None,
     )

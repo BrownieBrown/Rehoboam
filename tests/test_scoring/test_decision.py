@@ -30,6 +30,7 @@ def _make_score(player_id, ep, position="Midfielder", price=5_000_000, market_va
         notes=[],
         current_price=price,
         market_value=market_value,
+        position=position,
     )
 
 
@@ -198,10 +199,10 @@ class TestRecommendSells:
             squad.append(_make_player(f"fwd{i}", "Forward"))
             squad_scores.append(_make_score(f"fwd{i}", 45.0 if i == 0 else 20.0, "Forward"))
 
-        best_11_ids = {"gk1", "def0", "def1", "def2", "mid0", "mid1", "mid2", "mid3", "fwd0"}
+        squad_players = {p.id: p for p in squad}
         engine = DecisionEngine()
         recommendations = engine.recommend_sells(
-            squad=squad, squad_scores=squad_scores, best_11_ids=best_11_ids
+            squad_scores=squad_scores, roster_context={}, squad_players=squad_players
         )
 
         # bench players (fwd1, fwd2) should be more expendable than starter fwd0
@@ -216,9 +217,10 @@ class TestRecommendSells:
         squad = [_make_player("gk1", "Goalkeeper")]
         squad_scores = [_make_score("gk1", 40.0, "Goalkeeper")]
 
+        squad_players = {p.id: p for p in squad}
         engine = DecisionEngine()
         recommendations = engine.recommend_sells(
-            squad=squad, squad_scores=squad_scores, best_11_ids={"gk1"}
+            squad_scores=squad_scores, roster_context={}, squad_players=squad_players
         )
 
         gk_rec = next(r for r in recommendations if r.score.player_id == "gk1")
