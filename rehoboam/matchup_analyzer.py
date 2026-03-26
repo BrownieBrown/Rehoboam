@@ -261,6 +261,30 @@ class MatchupAnalyzer:
             difficulty_score=50.0,  # Default medium difficulty
         )
 
+    def get_next_matchups(self, player_details: dict[str, Any], n: int = 3) -> list[MatchupInfo]:
+        """Return up to *n* upcoming MatchupInfo objects from mdsum."""
+        matchups = player_details.get("mdsum", [])
+        player_team_id = player_details.get("tid", "")
+        upcoming = [m for m in matchups if m.get("mdst") == 0]
+
+        results: list[MatchupInfo] = []
+        for match in upcoming[:n]:
+            t1_id = match.get("t1", "")
+            t2_id = match.get("t2", "")
+            is_home = t1_id == player_team_id
+            opponent_id = t2_id if is_home else t1_id
+            results.append(
+                MatchupInfo(
+                    opponent_id=opponent_id,
+                    opponent_name=f"Team {opponent_id}",
+                    is_home=is_home,
+                    match_date=match.get("md", ""),
+                    opponent_rank=None,
+                    difficulty_score=50.0,
+                )
+            )
+        return results
+
     def calculate_matchup_difficulty(
         self, player_team: TeamStrength, opponent_team: TeamStrength
     ) -> float:

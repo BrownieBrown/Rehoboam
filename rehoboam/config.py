@@ -18,6 +18,10 @@ POSITION_MINIMUMS = {
 # over an existing squad player
 MIN_UPGRADE_THRESHOLD = 10.0
 
+# Maximum lineup probability (1-5) to consider buying a player.
+# 1 = starter, 2 = rotation, 3 = bench; 4+ = unlikely to play
+MAX_LINEUP_PROB_FOR_BUY = 3
+
 
 # Find .env file - look in current directory first, then in home directory
 def find_env_file() -> Path:
