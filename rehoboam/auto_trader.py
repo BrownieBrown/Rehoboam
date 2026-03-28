@@ -880,6 +880,9 @@ class AutoTrader:
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
 
+        # Step 4: Set optimal lineup
+        self._set_optimal_lineup(league, errors)
+
         # Calculate totals
         all_results = profit_results + lineup_results + sell_results
         total_spent = sum(r.price for r in all_results if r.action == "BUY" and r.success)
@@ -919,6 +922,61 @@ class AutoTrader:
             total_earned=total_earned,
             net_change=net_change,
         )
+
+    def _set_optimal_lineup(self, league, errors: list[str]):
+        """Calculate and set the optimal starting 11 via API"""
+        from .expected_points import calculate_expected_points
+        from .formation import get_formation_string, select_best_eleven
+        from .value_history import ValueHistoryCache
+
+        console.print("\n[bold cyan]📋 Setting Optimal Lineup[/bold cyan]")
+
+        try:
+            squad = self.api.get_squad(league)
+            if not squad or len(squad) < 11:
+                console.print("[yellow]Not enough players to set lineup[/yellow]")
+                return
+
+            history_cache = ValueHistoryCache()
+
+            # Calculate expected points for each player
+            ep_scores = {}
+            for player in squad:
+                try:
+                    perf_data = history_cache.get_cached_performance(
+                        player_id=player.id, league_id=league.id, max_age_hours=24
+                    )
+                    if not perf_data:
+                        perf_data = self.api.client.get_player_performance(league.id, player.id)
+                        if perf_data:
+                            history_cache.cache_performance(
+                                player_id=player.id, league_id=league.id, data=perf_data
+                            )
+
+                    ep = calculate_expected_points(player=player, performance_data=perf_data)
+                    ep_scores[player.id] = ep.expected_points
+                except Exception:
+                    ep_scores[player.id] = 0
+
+            # Select best 11 and derive formation
+            best_eleven = select_best_eleven(squad, ep_scores)
+            formation = get_formation_string(best_eleven)
+            player_ids = [p.id for p in best_eleven]
+
+            names = [f"{p.first_name[0]}. {p.last_name}" for p in best_eleven]
+            console.print(f"[dim]Formation: {formation} | {', '.join(names)}[/dim]")
+
+            if self.dry_run:
+                console.print("[yellow]DRY RUN - Lineup not applied[/yellow]")
+                return
+
+            self.api.set_lineup(league, formation, player_ids)
+            console.print("[green]✓ Lineup set successfully[/green]")
+
+        except Exception as e:
+            error_msg = f"Set lineup error: {e!s}"
+            console.print(f"[red]{error_msg}[/red]")
+            errors.append(error_msg)
 
     def _record_bid_placed(self, player, our_bid: int):
         """Record that we placed a bid for learning"""

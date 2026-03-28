@@ -796,11 +796,14 @@ def record_purchase(
 def lineup(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed debug information"),
+    set_lineup: bool = typer.Option(
+        False, "--set", help="Apply the optimal lineup via API (not just display)"
+    ),
 ):
     """Show optimal starting 11 for next matchday based on expected points"""
     from .compact_display import CompactDisplay
     from .expected_points import calculate_expected_points
-    from .formation import select_best_eleven
+    from .formation import get_formation_string, select_best_eleven
     from .matchup_analyzer import MatchupAnalyzer
     from .value_history import ValueHistoryCache
 
@@ -908,6 +911,19 @@ def lineup(
     # Display
     display = CompactDisplay()
     display.display_lineup(best_eleven, bench, expected_points_map)
+
+    # Apply lineup via API if --set flag is used
+    if set_lineup:
+        formation = get_formation_string(best_eleven)
+        player_ids = [p.id for p in best_eleven]
+        console.print(
+            f"\n[bold yellow]Setting lineup: {formation} ({len(player_ids)} players)[/bold yellow]"
+        )
+        try:
+            api.set_lineup(league, formation, player_ids)
+            console.print("[bold green]Lineup set successfully![/bold green]")
+        except Exception as e:
+            console.print(f"[bold red]Failed to set lineup: {e}[/bold red]")
 
 
 @app.command()
