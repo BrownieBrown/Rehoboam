@@ -70,8 +70,13 @@ class DataCollector:
                     missing.append("opponent_strength")
 
             # DGW detection — players with 2+ matches in one matchday score ~1.8x
+            # Try per-player detection first, fall back to competition-level data
             dgw_info = self.matchup_analyzer.detect_double_gameweek(player_details)
             is_dgw = dgw_info.is_dgw
+            if not is_dgw:
+                team_id = player_details.get("tid", "")
+                if team_id:
+                    is_dgw = self.matchup_analyzer.is_dgw_team(team_id)
 
         return PlayerData(
             player=player,

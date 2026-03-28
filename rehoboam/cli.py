@@ -803,7 +803,7 @@ def lineup(
     """Show optimal starting 11 for next matchday based on expected points"""
     from .compact_display import CompactDisplay
     from .expected_points import calculate_expected_points
-    from .formation import get_formation_string, select_best_eleven
+    from .formation import get_formation_string, order_for_lineup, select_best_eleven
     from .matchup_analyzer import MatchupAnalyzer
     from .value_history import ValueHistoryCache
 
@@ -914,8 +914,9 @@ def lineup(
 
     # Apply lineup via API if --set flag is used
     if set_lineup:
-        formation = get_formation_string(best_eleven)
-        player_ids = [p.id for p in best_eleven]
+        ordered = order_for_lineup(best_eleven)
+        formation = get_formation_string(ordered)
+        player_ids = [p.id for p in ordered]
         console.print(
             f"\n[bold yellow]Setting lineup: {formation} ({len(player_ids)} players)[/bold yellow]"
         )
@@ -924,6 +925,48 @@ def lineup(
             console.print("[bold green]Lineup set successfully![/bold green]")
         except Exception as e:
             console.print(f"[bold red]Failed to set lineup: {e}[/bold red]")
+
+
+@app.command()
+def players(
+    position: str = typer.Option("", "--position", "-p", help="Filter: GK, DEF, MID, FWD"),
+    top: int = typer.Option(20, "--top", "-t", help="Number of players to show"),
+):
+    """Browse all Bundesliga players sorted by average points"""
+    api = get_api()
+    api.login()
+
+    pos_filter = {"GK": "1", "DEF": "2", "MID": "3", "FWD": "4"}.get(position.upper(), "")
+
+    try:
+        data = api.get_competition_players(position=pos_filter)
+    except Exception as e:
+        console.print(f"[red]Failed to fetch players: {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    items = data.get("it", data.get("p", []))
+    # Sort by average points descending
+    items.sort(key=lambda p: p.get("ap", 0), reverse=True)
+
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    console.print(f"\n[bold cyan]Top {top} Bundesliga Players by Avg Points[/bold cyan]")
+    if position:
+        console.print(f"[dim]Filtered: {position.upper()}[/dim]")
+    console.print()
+
+    console.print(f"{'#':>3}  {'Pos':4s} {'Name':25s} {'Avg':>5s} {'Pts':>6s} {'Value':>12s}")
+    console.print("─" * 62)
+
+    for i, p in enumerate(items[:top], 1):
+        pos = pos_map.get(p.get("pos", 0), "?")
+        name = p.get("n", p.get("fn", "?"))
+        avg = p.get("ap", 0)
+        pts = p.get("tp", p.get("p", 0))
+        mv = p.get("mv", 0)
+        console.print(f"{i:>3}  {pos:4s} {name:25s} {avg:>5.0f} {pts:>6} €{mv:>11,}")
+
+    console.print()
 
 
 @app.command()
@@ -1012,6 +1055,7 @@ def sync_activity_feed(
 def competitors(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
     competitor_name: str = typer.Option(None, "--name", "-n", help="Analyze specific competitor"),
+    squads: bool = typer.Option(False, "--squads", "-s", help="Show competitor squad compositions"),
 ):
     """Analyze competitor bidding patterns and threats"""
     from .activity_feed_learner import ActivityFeedLearner
@@ -1026,6 +1070,10 @@ def competitors(
 
     league = leagues[league_index]
     console.print(f"\n[bold cyan]Analyzing competitors in: {league.name}[/bold cyan]")
+
+    if squads:
+        _display_competitor_squads(api, league)
+        return
 
     learner = ActivityFeedLearner()
 
@@ -1053,6 +1101,39 @@ def competitors(
     else:
         # Display full competitor threat analysis
         learner.display_competitor_analysis()
+
+
+def _display_competitor_squads(api, league):
+    """Display all competitors' squad compositions"""
+    try:
+        ranking = api.get_league_ranking(league)
+    except Exception as e:
+        console.print(f"[red]Failed to get ranking: {e}[/red]")
+        return
+
+    managers = ranking.get("it", ranking.get("us", []))
+    my_id = api.user.id
+
+    for manager in managers:
+        mgr_id = manager.get("i", manager.get("id", ""))
+        mgr_name = manager.get("n", manager.get("name", "Unknown"))
+
+        if mgr_id == my_id:
+            continue
+
+        console.print(f"\n[bold yellow]{mgr_name}[/bold yellow]")
+        try:
+            squad_data = api.get_manager_squad(league, mgr_id)
+            players = squad_data.get("it", [])
+            pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+            for p in sorted(players, key=lambda x: x.get("pos", 0)):
+                pos = pos_map.get(p.get("pos", 0), "?")
+                name = p.get("n", p.get("fn", "?"))
+                avg = p.get("ap", 0)
+                mv = p.get("mv", 0)
+                console.print(f"  {pos:4s} {name:20s} avg:{avg:>4.0f}  €{mv:>12,}")
+        except Exception as e:
+            console.print(f"  [dim]Could not fetch: {e}[/dim]")
 
 
 @app.command()

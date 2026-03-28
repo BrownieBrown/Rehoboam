@@ -2615,6 +2615,40 @@ class Trader:
 
             return perf_data, player_details
 
+        # --- 2b. Collect competitor-owned player IDs for uncontested scoring ---
+        competitor_player_ids: set[str] = set()
+        try:
+            ranking = self.api.get_league_ranking(league)
+            managers = ranking.get("it", ranking.get("us", []))
+            my_id = self.api.user.id
+            for mgr in managers:
+                mgr_id = mgr.get("i", mgr.get("id", ""))
+                if mgr_id == my_id:
+                    continue
+                try:
+                    mgr_squad = self.api.get_manager_squad(league, mgr_id)
+                    for p in mgr_squad.get("it", []):
+                        pid = p.get("i", p.get("id", ""))
+                        if pid:
+                            competitor_player_ids.add(pid)
+                except Exception:
+                    pass
+            if competitor_player_ids and self.verbose:
+                console.print(
+                    f"[dim]Competitor scouting: {len(competitor_player_ids)} players owned by rivals[/dim]"
+                )
+        except Exception:
+            pass  # Competitor scouting is best-effort
+
+        # --- 2c. Load competition matchday schedule for DGW detection ---
+        try:
+            matchdays = self.api.get_competition_matchdays()
+            dgw_teams = self.matchup_analyzer.load_dgw_from_matchdays(matchdays)
+            if dgw_teams and self.verbose:
+                console.print(f"[dim]DGW teams detected: {len(dgw_teams)} teams[/dim]")
+        except Exception:
+            pass  # DGW detection is best-effort; per-player detection still works
+
         # --- 3. Score all players ---
         collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
 
@@ -2743,6 +2777,14 @@ class Trader:
 
         lineup_map = engine.select_lineup(squad_scores)
 
+        # Mark uncontested buy recommendations (no competitor owns the player)
+        for rec in buy_recs:
+            rec.metadata = getattr(rec, "metadata", {}) or {}
+            rec.metadata["uncontested"] = rec.player.id not in competitor_player_ids
+        for pair in trade_pairs:
+            pair.metadata = getattr(pair, "metadata", {}) or {}
+            pair.metadata["uncontested"] = pair.buy_player.id not in competitor_player_ids
+
         return {
             "buy_recs": buy_recs,
             "trade_pairs": trade_pairs,
@@ -2753,6 +2795,7 @@ class Trader:
             "squad_size": squad_size,
             "squad_players": squad_player_map,
             "market_players": market_player_map,
+            "competitor_player_ids": competitor_player_ids,
         }
 
     def run_ep_analysis(self, league: League) -> None:

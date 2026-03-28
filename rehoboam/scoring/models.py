@@ -72,6 +72,7 @@ class BuyRecommendation:
     reason: str
     recommended_bid: int | None = None
     sell_plan: "SellPlan | None" = None  # Paired sell plan when buy exceeds budget
+    metadata: dict | None = None
 
 
 @dataclass
@@ -97,6 +98,7 @@ class TradePair:
     net_cost: int
     ep_gain: float
     recommended_bid: int | None = None
+    metadata: dict | None = None
 
 
 @dataclass
