@@ -310,6 +310,21 @@ class KickbaseV4Client:
         else:
             raise Exception(f"Failed to fetch lineup: {response.status_code} - {response.text}")
 
+    def set_lineup(self, league_id: str, formation: str, player_ids: list[str]) -> dict[str, Any]:
+        """
+        Set starting lineup
+        POST /v4/leagues/{league_id}/lineup
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/lineup"
+        payload = {"type": formation, "players": player_ids}
+
+        response = self.session.post(url, json=payload)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to set lineup: {response.status_code} - {response.text}")
+
     def get_starting_eleven(self, league_id: str) -> dict[str, Any]:
         """
         Get your current starting eleven (always 11 players)

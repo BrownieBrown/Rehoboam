@@ -72,6 +72,13 @@ class KickbaseAPI:
         except Exception as e:
             raise Exception(f"Failed to fetch starting eleven: {e}") from e
 
+    def set_lineup(self, league: League, formation: str, player_ids: list[str]) -> dict:
+        """Set starting lineup with formation and player IDs"""
+        try:
+            return self.client.set_lineup(league.id, formation, player_ids)
+        except Exception as e:
+            raise Exception(f"Failed to set lineup: {e}") from e
+
     def buy_player(self, league: League, player: MarketPlayer, price: int) -> bool:
         """Make an offer to buy a player from the market"""
         try:

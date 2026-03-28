@@ -1,0 +1,15 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "KICKBASE_EMAIL": "your@email.com",
+    "KICKBASE_PASSWORD": "your-password",
+    "LEAGUE_INDEX": "0",
+    "DRY_RUN": "true",
+    "AZURE_STORAGE_CONNECTION_STRING": "your-connection-string",
+    "BLOB_CONTAINER": "rehoboam-data",
+    "TELEGRAM_BOT_TOKEN": "",
+    "TELEGRAM_CHAT_ID": ""
+  }
+}

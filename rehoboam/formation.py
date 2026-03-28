@@ -128,6 +128,15 @@ def select_best_eleven(squad: list, player_values: dict[str, float]) -> list:
     return selected[: requirements.starting_eleven_size]
 
 
+def get_formation_string(players: list) -> str:
+    """
+    Derive formation string (e.g. '4-3-3') from a list of 11 players.
+    Counts defenders, midfielders, and forwards (GK is always 1).
+    """
+    counts = get_position_counts(players)
+    return f"{counts['Defender']}-{counts['Midfielder']}-{counts['Forward']}"
+
+
 def validate_trade(current_squad: list, players_out: list, players_in: list) -> dict[str, any]:
     """
     Validate an N-for-M trade
