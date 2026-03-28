@@ -99,6 +99,15 @@ class TradingScheduler:
 
         logger.info("✓ Initialization complete")
 
+    def _ensure_authenticated(self):
+        """Refresh token or re-login if needed"""
+        if self.api.refresh_token():
+            logger.info("✓ Token refreshed")
+        else:
+            logger.info("Token refresh failed, re-logging in...")
+            self.api.login()
+            logger.info("✓ Re-logged in successfully")
+
     def _run_trading_session(self):
         """Run a single trading session"""
         if not self.api or not self.auto_trader:
@@ -106,6 +115,9 @@ class TradingScheduler:
             return
 
         try:
+            # Ensure auth is valid before each session
+            self._ensure_authenticated()
+
             # Get first league
             leagues = self.api.get_leagues()
             if not leagues:

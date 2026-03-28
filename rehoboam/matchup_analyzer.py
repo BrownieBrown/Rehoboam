@@ -84,6 +84,46 @@ class MatchupAnalyzer:
 
     def __init__(self):
         self.team_cache: dict[str, TeamStrength] = {}
+        self._dgw_teams: set[str] | None = None  # Cache of team IDs with DGW
+
+    def load_dgw_from_matchdays(self, matchdays_data: dict[str, Any]) -> set[str]:
+        """
+        Detect DGW teams from competition matchday schedule.
+        Call once per session with data from GET /v4/competitions/{id}/matchdays.
+
+        Returns set of team IDs that have double gameweeks.
+        """
+        dgw_teams: set[str] = set()
+        items = matchdays_data.get("it", matchdays_data.get("mds", []))
+
+        # Group matches by matchday, count per team
+        for matchday in items:
+            md_id = str(matchday.get("id", matchday.get("mdid", "")))
+            matches = matchday.get("m", matchday.get("matches", []))
+            if not md_id or not matches:
+                continue
+
+            team_counts: dict[str, int] = {}
+            for match in matches:
+                t1 = str(match.get("t1i", match.get("t1", "")))
+                t2 = str(match.get("t2i", match.get("t2", "")))
+                if t1:
+                    team_counts[t1] = team_counts.get(t1, 0) + 1
+                if t2:
+                    team_counts[t2] = team_counts.get(t2, 0) + 1
+
+            for team_id, count in team_counts.items():
+                if count >= 2:
+                    dgw_teams.add(team_id)
+
+        self._dgw_teams = dgw_teams
+        return dgw_teams
+
+    def is_dgw_team(self, team_id: str) -> bool:
+        """Check if a team has a DGW based on loaded matchday data."""
+        if self._dgw_teams is None:
+            return False
+        return team_id in self._dgw_teams
 
     def detect_double_gameweek(self, player_details: dict[str, Any]) -> DoubleGameweekInfo:
         """

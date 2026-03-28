@@ -72,6 +72,14 @@ class AutoTrader:
         self.learner = BidLearner()
         self.activity_feed_learner = ActivityFeedLearner()
 
+    def get_quick_budget(self, league) -> int | None:
+        """Lightweight budget check using the budget-only endpoint."""
+        try:
+            data = self.api.get_budget(league)
+            return data.get("b", data.get("budget", None))
+        except Exception:
+            return None
+
     def _reset_daily_limits_if_needed(self):
         """Reset daily limits at midnight"""
         today = datetime.now().date()
@@ -926,7 +934,7 @@ class AutoTrader:
     def _set_optimal_lineup(self, league, errors: list[str]):
         """Calculate and set the optimal starting 11 via API"""
         from .expected_points import calculate_expected_points
-        from .formation import get_formation_string, select_best_eleven
+        from .formation import get_formation_string, order_for_lineup, select_best_eleven
         from .value_history import ValueHistoryCache
 
         console.print("\n[bold cyan]📋 Setting Optimal Lineup[/bold cyan]")
@@ -958,12 +966,13 @@ class AutoTrader:
                 except Exception:
                     ep_scores[player.id] = 0
 
-            # Select best 11 and derive formation
+            # Select best 11, order by position for API (GK→DEF→MID→FWD)
             best_eleven = select_best_eleven(squad, ep_scores)
-            formation = get_formation_string(best_eleven)
-            player_ids = [p.id for p in best_eleven]
+            ordered = order_for_lineup(best_eleven)
+            formation = get_formation_string(ordered)
+            player_ids = [p.id for p in ordered]
 
-            names = [f"{p.first_name[0]}. {p.last_name}" for p in best_eleven]
+            names = [f"{p.first_name[0]}. {p.last_name}" for p in ordered]
             console.print(f"[dim]Formation: {formation} | {', '.join(names)}[/dim]")
 
             if self.dry_run:

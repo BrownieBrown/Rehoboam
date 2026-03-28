@@ -129,6 +129,52 @@ class KickbaseAPI:
         except Exception:
             return []
 
+    def refresh_token(self) -> bool:
+        """Refresh auth token without re-login. Falls back to full login on failure."""
+        if not self.client.refresh_tkn:
+            return False
+        try:
+            return self.client.refresh_token(self.client.refresh_tkn)
+        except Exception:
+            return False
+
+    def get_budget(self, league: League) -> dict:
+        """Get budget only (lightweight, no squad fetch)"""
+        try:
+            return self.client.get_budget(league.id)
+        except Exception as e:
+            raise Exception(f"Failed to fetch budget: {e}") from e
+
+    def get_competition_matchdays(self, competition_id: str = "1") -> dict:
+        """Get matchday schedule for DGW detection"""
+        try:
+            return self.client.get_competition_matchdays(competition_id)
+        except Exception as e:
+            raise Exception(f"Failed to fetch matchdays: {e}") from e
+
+    def get_competition_players(
+        self, competition_id: str = "1", position: str = "", sorting: str = ""
+    ) -> dict:
+        """Browse all players in a competition"""
+        try:
+            return self.client.get_competition_players(competition_id, position, sorting)
+        except Exception as e:
+            raise Exception(f"Failed to fetch competition players: {e}") from e
+
+    def get_manager_squad(self, league: League, manager_id: str) -> dict:
+        """View a competitor's squad"""
+        try:
+            return self.client.get_manager_squad(league.id, manager_id)
+        except Exception as e:
+            raise Exception(f"Failed to fetch manager squad: {e}") from e
+
+    def get_league_ranking(self, league: League) -> dict:
+        """Get league ranking/standings"""
+        try:
+            return self.client.get_league_ranking(league.id)
+        except Exception as e:
+            raise Exception(f"Failed to fetch league ranking: {e}") from e
+
     @property
     def user(self) -> User:
         """Get the logged-in user"""

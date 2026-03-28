@@ -171,6 +171,7 @@ class KickbaseV4Client:
     def __init__(self):
         self.token: str | None = None
         self.token_expire: str | None = None
+        self.refresh_tkn: str | None = None
         self.user: User | None = None
         self.leagues: list[League] = []
         self.session = requests.Session()
@@ -195,9 +196,10 @@ class KickbaseV4Client:
         if response.status_code == 200:
             data = response.json()
 
-            # Store authentication token
+            # Store authentication token and refresh token
             self.token = data.get("tkn")
             self.token_expire = data.get("tknex")
+            self.refresh_tkn = data.get("rtkn")
 
             # Update session headers with token
             if self.token:
@@ -677,4 +679,117 @@ class KickbaseV4Client:
         else:
             raise Exception(
                 f"Failed to fetch player market value history: {response.status_code} - {response.text}"
+            )
+
+    # ── New endpoints ──────────────────────────────────────────────
+
+    def refresh_token(self, refresh_token: str) -> bool:
+        """
+        Refresh authentication token without re-login
+        POST /v4/user/refreshtokens
+        """
+        url = f"{self.BASE_URL}/v4/user/refreshtokens"
+        payload = {"rtkn": refresh_token}
+
+        response = self.session.post(url, json=payload)
+
+        if response.status_code == 200:
+            data = response.json()
+            self.token = data.get("tkn")
+            self.token_expire = data.get("tknex")
+            self.refresh_tkn = data.get("rtkn", refresh_token)
+            if self.token:
+                self.session.headers.update({"Authorization": f"Bearer {self.token}"})
+            return True
+        else:
+            return False
+
+    def get_budget(self, league_id: str) -> dict[str, Any]:
+        """
+        Get budget only (lightweight)
+        GET /v4/leagues/{league_id}/me/budget
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/me/budget"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to fetch budget: {response.status_code} - {response.text}")
+
+    def get_competition_matchdays(self, competition_id: str = "1") -> dict[str, Any]:
+        """
+        Get matchday schedule for a competition (e.g. Bundesliga)
+        GET /v4/competitions/{competition_id}/matchdays
+
+        Use to detect double gameweeks (teams playing twice in one matchday).
+        """
+        url = f"{self.BASE_URL}/v4/competitions/{competition_id}/matchdays"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to fetch matchdays: {response.status_code} - {response.text}")
+
+    def get_competition_players(
+        self, competition_id: str = "1", position: str = "", sorting: str = ""
+    ) -> dict[str, Any]:
+        """
+        Browse all players in a competition sorted by stats
+        GET /v4/competitions/{competition_id}/players
+
+        Args:
+            competition_id: Competition ID (1 = Bundesliga)
+            position: Filter by position (optional)
+            sorting: Sort field (optional)
+        """
+        url = f"{self.BASE_URL}/v4/competitions/{competition_id}/players"
+        params = {}
+        if position:
+            params["position"] = position
+        if sorting:
+            params["sorting"] = sorting
+
+        response = self.session.get(url, params=params)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch competition players: {response.status_code} - {response.text}"
+            )
+
+    def get_manager_squad(self, league_id: str, manager_id: str) -> dict[str, Any]:
+        """
+        View a competitor's squad
+        GET /v4/leagues/{league_id}/managers/{manager_id}/squad
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/managers/{manager_id}/squad"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch manager squad: {response.status_code} - {response.text}"
+            )
+
+    def get_league_ranking(self, league_id: str) -> dict[str, Any]:
+        """
+        Get league ranking/standings
+        GET /v4/leagues/{league_id}/ranking
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/ranking"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch league ranking: {response.status_code} - {response.text}"
             )

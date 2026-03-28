@@ -137,6 +137,16 @@ def get_formation_string(players: list) -> str:
     return f"{counts['Defender']}-{counts['Midfielder']}-{counts['Forward']}"
 
 
+def order_for_lineup(players: list) -> list:
+    """
+    Order players by position for the set_lineup API: GK → DEF → MID → FWD.
+    The API assigns players to formation slots by index, so the order must
+    match the formation pattern.
+    """
+    position_order = {"Goalkeeper": 0, "Defender": 1, "Midfielder": 2, "Forward": 3}
+    return sorted(players, key=lambda p: position_order.get(p.position, 9))
+
+
 def validate_trade(current_squad: list, players_out: list, players_in: list) -> dict[str, any]:
     """
     Validate an N-for-M trade
