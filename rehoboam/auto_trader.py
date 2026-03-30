@@ -972,7 +972,10 @@ class AutoTrader:
             formation = get_formation_string(ordered)
             player_ids = [p.id for p in ordered]
 
-            names = [f"{p.first_name[0]}. {p.last_name}" for p in ordered]
+            names = [
+                f"{p.first_name[0]}. {p.last_name}" if p.first_name else p.last_name
+                for p in ordered
+            ]
             console.print(f"[dim]Formation: {formation} | {', '.join(names)}[/dim]")
 
             if self.dry_run:
