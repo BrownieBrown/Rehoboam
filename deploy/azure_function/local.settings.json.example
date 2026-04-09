@@ -8,8 +8,6 @@
     "LEAGUE_INDEX": "0",
     "DRY_RUN": "true",
     "AZURE_STORAGE_CONNECTION_STRING": "your-connection-string",
-    "BLOB_CONTAINER": "rehoboam-data",
-    "TELEGRAM_BOT_TOKEN": "",
-    "TELEGRAM_CHAT_ID": ""
+    "BLOB_CONTAINER": "rehoboam-data"
   }
 }

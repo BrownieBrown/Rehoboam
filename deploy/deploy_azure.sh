@@ -130,8 +130,6 @@ az functionapp config appsettings set \
         "DRY_RUN=${DRY_RUN:-true}" \
         "AZURE_STORAGE_CONNECTION_STRING=$CONNECTION_STRING" \
         "BLOB_CONTAINER=$BLOB_CONTAINER" \
-        "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}" \
-        "TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}" \
     --output none
 echo "  ✓ App settings configured"
 
@@ -171,7 +169,7 @@ echo "========================================="
 echo ""
 echo "Function App: $FUNCTION_APP"
 echo "Resource Group: $RESOURCE_GROUP"
-echo "Schedule: Every 3 hours (6:30, 9:30, 12:30, 15:30, 18:30, 21:30 UTC)"
+echo "Schedule: 2x daily at 08:00 and 20:00 UTC (10:00/22:00 Europe/Berlin summer)"
 echo ""
 echo "Next steps:"
 echo "  1. Verify credentials: az functionapp config appsettings list -n $FUNCTION_APP -g $RESOURCE_GROUP"
