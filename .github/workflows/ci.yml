@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install black ruff bandit[toml]
+          pip install "black>=25.1,<26" ruff bandit[toml]
 
       - name: Check code formatting with Black
         run: black --check --line-length=100 rehoboam/
