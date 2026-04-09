@@ -81,30 +81,10 @@ def upload_databases():
             logging.warning(f"Could not upload {db_file}: {e}")
 
 
-def send_telegram_notification(message: str):
-    """Send a Telegram notification"""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        return
-
-    import requests
-
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-    except Exception as e:
-        logging.warning(f"Telegram notification failed: {e}")
-
-
-# Timer trigger: runs 6 times daily during trading hours
-# 6:30, 9:30, 12:30, 15:30, 18:30, 21:30 UTC
+# Timer trigger: runs 2x daily at 08:00 and 20:00 UTC
+# (10:00 and 22:00 Europe/Berlin in summer, 09:00 and 21:00 in winter)
 @app.timer_trigger(
-    schedule="0 30 6,9,12,15,18,21 * * *",
+    schedule="0 0 8,20 * * *",
     arg_name="timer",
     run_on_startup=False,
 )
@@ -155,27 +135,14 @@ def trading_session(timer: func.TimerRequest):
         # Upload databases back to blob storage
         upload_databases()
 
-        # Send notification
         mode = "DRY RUN" if dry_run else "LIVE"
         profit_ok = len([r for r in session.profit_trades if r.success])
         lineup_ok = len([r for r in session.lineup_trades if r.success])
-        msg = (
-            f"*Rehoboam [{mode}]*\n"
-            f"League: {league.name}\n"
-            f"Profit trades: {profit_ok}/{len(session.profit_trades)}\n"
-            f"Lineup trades: {lineup_ok}/{len(session.lineup_trades)}\n"
-            f"Net: €{session.net_change:,}\n"
-            f"Lineup: set automatically"
-        )
-        if session.errors:
-            msg += f"\n⚠️ Errors: {len(session.errors)}"
-        send_telegram_notification(msg)
 
         logging.info(
-            f"Session complete: {profit_ok} profit + {lineup_ok} lineup trades, "
+            f"Session complete [{mode}]: {profit_ok} profit + {lineup_ok} lineup trades, "
             f"net €{session.net_change:,}"
         )
 
     except Exception as e:
         logging.error(f"Trading session failed: {e}", exc_info=True)
-        send_telegram_notification(f"*Rehoboam ERROR*\n{e!s}")

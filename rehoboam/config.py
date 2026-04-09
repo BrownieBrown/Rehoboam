@@ -132,16 +132,6 @@ class Settings(BaseSettings):
         description="If True, simulate trades without executing them",
     )
 
-    # Telegram Notifications (optional)
-    telegram_bot_token: str | None = Field(
-        default=None,
-        description="Telegram bot token from @BotFather",
-    )
-    telegram_chat_id: str | None = Field(
-        default=None,
-        description="Telegram chat ID to send notifications to",
-    )
-
 
 def get_settings() -> Settings:
     """Get application settings"""

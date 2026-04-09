@@ -156,26 +156,6 @@ Default requires 10% profit margin. To adjust:
 min_profit_margin = new_required_bid * 0.10  # Change to 0.15 for 15%
 ```
 
-## AWS Deployment
-
-When deploying to AWS, configure the daemon to run 3x daily:
-
-```yaml
-# docker-compose.yml
-command: >
-  daemon
-  --interval 240  # Every 4 hours
-  --start-hour 10  # After market value update
-  --end-hour 22
-  --max-trades 3
-```
-
-This ensures:
-
-1. 10:00-11:00 → First check after market value update
-1. 14:00-15:00 → Midday check
-1. 18:00-19:00 → Evening check
-
 ## Benefits
 
 ✅ **Never violate league rules** - Automatic compliance

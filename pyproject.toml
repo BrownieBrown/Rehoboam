@@ -51,7 +51,7 @@ rehoboam = "rehoboam.cli:app"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["rehoboam*"]
-exclude = ["tests*", "setup*", "docs*", "docker*"]
+exclude = ["tests*", "setup*", "docs*"]
 
 [tool.black]
 line-length = 100
