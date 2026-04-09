@@ -100,12 +100,21 @@ class KickbaseAPI:
             ) from e
 
     def sell_player(self, league: League, player: Player, price: int) -> bool:
-        """List a player for sale"""
+        """List a player for sale on the transfer market (auction)"""
         try:
             return self.client.add_to_market(league.id, player.id, price)
         except Exception as e:
             raise Exception(
                 f"Failed to sell player {player.first_name} {player.last_name}: {e}"
+            ) from e
+
+    def sell_player_instant(self, league: League, player: Player) -> dict:
+        """Sell a player instantly to Kickbase at market value. Frees the squad slot immediately."""
+        try:
+            return self.client.sell_to_kickbase(league.id, player.id)
+        except Exception as e:
+            raise Exception(
+                f"Failed to instant-sell player {player.first_name} {player.last_name}: {e}"
             ) from e
 
     def get_player_info(self, league: League, player_id: str) -> MarketPlayer | Player | None:

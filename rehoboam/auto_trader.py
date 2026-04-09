@@ -181,18 +181,13 @@ class AutoTrader:
                         reason=rec.reason,
                     )
                 )
-        for pair in trade_pairs:
-            if pair.recommended_bid and pair.recommended_bid > 0:
-                opportunities.append(
-                    SimpleNamespace(
-                        player=pair.buy_player,
-                        buy_price=pair.recommended_bid,
-                        reason=f"Trade: sell {pair.sell_player.last_name} for EP +{pair.ep_gain:.1f}",
-                    )
-                )
+        # Trade pairs handled separately below (need sell→buy execution)
+        actionable_trade_pairs = [
+            p for p in trade_pairs if p.recommended_bid and p.recommended_bid > 0
+        ]
 
         ep_opportunity_count = len(opportunities)
-        if not opportunities:
+        if not opportunities and not actionable_trade_pairs:
             console.print("[dim]No EP-based opportunities found[/dim]")
 
         # Check active bids - we can have multiple bids simultaneously
@@ -220,10 +215,69 @@ class AutoTrader:
             f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
         )
 
-        if available_slots <= 0:
+        # --- Phase 1: Trade pairs (sell→buy swaps for full squad) ---
+        if actionable_trade_pairs and available_slots <= 0:
             console.print(
-                f"[yellow]No squad slots available ({current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15)[/yellow]"
+                f"\n[bold cyan]🔄 Squad full — {len(actionable_trade_pairs)} trade pair(s) available[/bold cyan]"
             )
+            executed_pairs = 0
+            for pair in actionable_trade_pairs:
+                if executed_pairs >= self.max_trades_per_session:
+                    console.print(
+                        f"[yellow]Max trades per session reached ({self.max_trades_per_session})[/yellow]"
+                    )
+                    break
+                if self.daily_spend + pair.recommended_bid >= self.max_daily_spend:
+                    console.print("[yellow]Would exceed daily spend limit, stopping[/yellow]")
+                    break
+                if my_bid_amounts.get(pair.buy_player.id, 0):
+                    console.print(
+                        f"[dim]Skipping {pair.buy_player.last_name} — already have active bid[/dim]"
+                    )
+                    continue
+
+                console.print(
+                    f"\n[cyan]Trade: sell {pair.sell_player.first_name} {pair.sell_player.last_name}"
+                    f" → buy {pair.buy_player.first_name} {pair.buy_player.last_name}"
+                    f" (EP +{pair.ep_gain:.1f})[/cyan]"
+                )
+
+                # Step 1: Instant-sell the expendable player to free the slot
+                sell_result = self._execute_instant_sell(
+                    league,
+                    pair.sell_player,
+                    f"Trade pair: making room for {pair.buy_player.last_name} (EP +{pair.ep_gain:.1f})",
+                )
+                results.append(sell_result)
+                if not sell_result.success:
+                    console.print("[red]Sell failed, skipping this trade pair[/red]")
+                    continue
+
+                # Step 2: Buy the replacement
+                buy_opp = SimpleNamespace(
+                    player=pair.buy_player,
+                    buy_price=pair.recommended_bid,
+                    reason=f"Trade pair: sold {pair.sell_player.last_name} (EP +{pair.ep_gain:.1f})",
+                )
+                buy_result = self._execute_buy(league, buy_opp)
+                results.append(buy_result)
+                if buy_result.success:
+                    executed_pairs += 1
+                    self.daily_spend += pair.recommended_bid
+                else:
+                    console.print(
+                        f"[bold red]⚠ WARNING: Sold {pair.sell_player.last_name} but failed to buy "
+                        f"{pair.buy_player.last_name} — squad is now {current_squad_size - 1}/15[/bold red]"
+                    )
+
+            if executed_pairs > 0:
+                console.print(f"\n[green]✓ Executed {executed_pairs} trade pair(s)[/green]")
+
+        if available_slots <= 0:
+            if not actionable_trade_pairs:
+                console.print(
+                    f"[yellow]No squad slots available ({current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15)[/yellow]"
+                )
             return results
 
         # Get current budget and team value for debt capacity
@@ -392,19 +446,10 @@ class AutoTrader:
             console.print(f"[red]EP pipeline failed: {e}[/red]")
             return results
 
-        # For lineup improvement, use trade pairs (sell→buy swaps) or top buy
+        # For lineup improvement, use buy recs for open slots or trade pairs for full squad
         from types import SimpleNamespace
 
         opportunities = []
-        for pair in trade_pairs:
-            if pair.recommended_bid and pair.recommended_bid > 0:
-                opportunities.append(
-                    SimpleNamespace(
-                        player=pair.buy_player,
-                        buy_price=pair.recommended_bid,
-                        reason=f"Lineup upgrade: sell {pair.sell_player.last_name} → buy {pair.buy_player.last_name} (EP +{pair.ep_gain:.1f})",
-                    )
-                )
         for rec in buy_recs:
             if rec.recommended_bid and rec.recommended_bid > 0:
                 opportunities.append(
@@ -415,7 +460,10 @@ class AutoTrader:
                     )
                 )
 
-        if not opportunities:
+        # Trade pairs handled separately (need sell→buy execution)
+        actionable_pairs = [p for p in trade_pairs if p.recommended_bid and p.recommended_bid > 0]
+
+        if not opportunities and not actionable_pairs:
             console.print("[dim]No EP-based lineup improvements found[/dim]")
             return results
 
@@ -434,18 +482,63 @@ class AutoTrader:
             f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
         )
 
-        # Execute best opportunity (only 1 per session for safety)
+        if current_squad_size + active_bid_count >= 15:
+            # Squad full — try trade pairs (sell→buy swaps) instead
+            if not actionable_pairs:
+                console.print("[yellow]No squad slots available (15-player limit)[/yellow]")
+                return results
+
+            pair = actionable_pairs[0]
+            if self.daily_spend + pair.recommended_bid >= self.max_daily_spend:
+                console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
+                return results
+
+            console.print(
+                f"\n[cyan]Lineup trade: sell {pair.sell_player.first_name} {pair.sell_player.last_name}"
+                f" → buy {pair.buy_player.first_name} {pair.buy_player.last_name}"
+                f" (EP +{pair.ep_gain:.1f})[/cyan]"
+            )
+
+            # Instant-sell to free the slot
+            sell_result = self._execute_instant_sell(
+                league,
+                pair.sell_player,
+                f"Lineup upgrade: making room for {pair.buy_player.last_name} (EP +{pair.ep_gain:.1f})",
+            )
+            results.append(sell_result)
+            if not sell_result.success:
+                console.print("[red]Sell failed, cannot complete trade pair[/red]")
+                return results
+
+            # Buy the replacement
+            buy_opp = SimpleNamespace(
+                player=pair.buy_player,
+                buy_price=pair.recommended_bid,
+                reason=f"Lineup upgrade: sold {pair.sell_player.last_name} (EP +{pair.ep_gain:.1f})",
+            )
+            result = self._execute_buy(league, buy_opp)
+            results.append(result)
+            if result.success:
+                self.daily_spend += pair.recommended_bid
+                console.print("\n[green]✓ Executed lineup improvement trade pair[/green]")
+            else:
+                console.print(
+                    f"[bold red]⚠ WARNING: Sold {pair.sell_player.last_name} but failed to buy "
+                    f"{pair.buy_player.last_name} — squad is now {current_squad_size - 1}/15[/bold red]"
+                )
+
+            return results
+
+        # Execute best plain buy opportunity (only 1 per session for safety)
+        if not opportunities:
+            return results
+
         opp = opportunities[0]
 
         if self.daily_spend + opp.buy_price >= self.max_daily_spend:
             console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
             return results
 
-        if current_squad_size + active_bid_count >= 15:
-            console.print("[yellow]No squad slots available (15-player limit)[/yellow]")
-            return results
-
-        # Execute the buy using same _execute_buy as profit session
         result = self._execute_buy(league, opp)
         results.append(result)
 
@@ -553,6 +646,64 @@ class AutoTrader:
             error_msg = str(e)
             console.print(
                 f"[red]✗ Failed to sell {player.first_name} {player.last_name}: {error_msg}[/red]"
+            )
+
+            return AutoTradeResult(
+                success=False,
+                player_name=f"{player.first_name} {player.last_name}",
+                action="SELL",
+                price=price,
+                reason=reason,
+                timestamp=time.time(),
+                error=error_msg,
+            )
+
+    def _execute_instant_sell(self, league, player, reason: str) -> AutoTradeResult:
+        """Sell a player instantly to Kickbase at market value.
+
+        Unlike _execute_sell (which lists on the transfer market),
+        this immediately removes the player from the squad and frees the slot.
+        Used by trade pairs where the slot must be free before placing a buy bid.
+        """
+        price = player.market_value
+        console.print(
+            f"\n[cyan]Instant-selling {player.first_name} {player.last_name}"
+            f" to Kickbase for ~€{price:,}[/cyan]"
+        )
+
+        if self.dry_run:
+            console.print("[yellow]DRY RUN: Trade not executed[/yellow]")
+            return AutoTradeResult(
+                success=True,
+                player_name=f"{player.first_name} {player.last_name}",
+                action="SELL",
+                price=price,
+                reason=reason,
+                timestamp=time.time(),
+            )
+
+        try:
+            self.api.sell_player_instant(league=league, player=player)
+
+            console.print(
+                f"[green]✓ {player.first_name} {player.last_name} sold instantly to Kickbase[/green]"
+            )
+
+            self._record_flip_outcome(player, price)
+
+            return AutoTradeResult(
+                success=True,
+                player_name=f"{player.first_name} {player.last_name}",
+                action="SELL",
+                price=price,
+                reason=reason,
+                timestamp=time.time(),
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            console.print(
+                f"[red]✗ Failed to instant-sell {player.first_name} {player.last_name}: {error_msg}[/red]"
             )
 
             return AutoTradeResult(
