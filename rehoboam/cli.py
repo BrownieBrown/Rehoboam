@@ -1277,13 +1277,15 @@ def stats(
 def auto(
     league_index: int = typer.Option(0, help="League index (0 for first league)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate trades without executing"),
-    max_trades: int = typer.Option(5, "--max-trades", help="Max trades per session"),
+    max_trades: int = typer.Option(10, "--max-trades", help="Max trades per session"),
     max_spend: int = typer.Option(50_000_000, "--max-spend", help="Max daily spend"),
     aggressive: bool = typer.Option(
-        False, "--aggressive", help="Lower buy threshold by 5 and increase max spend by 50%"
+        False,
+        "--aggressive",
+        help="Up to 15 trades, lower EP threshold, increase spend 50%",
     ),
 ):
-    """Run a single automated trading session (profit + lineup)"""
+    """Run a single automated trading session (unified EP + profit flips)"""
     from .auto_trader import AutoTrader
 
     console.print("[bold cyan]🤖 Automated Trading Session[/bold cyan]")
@@ -1309,10 +1311,12 @@ def auto(
 
     # Apply aggressive mode
     if aggressive:
-        settings.min_value_score_to_buy = max(settings.min_value_score_to_buy - 5, 40)
+        settings.min_ep_upgrade_threshold = max(settings.min_ep_upgrade_threshold - 2, 3.0)
+        max_trades = settings.auto_max_trades_aggressive
         max_spend = int(max_spend * 1.5)
         console.print(
-            "[yellow]AGGRESSIVE MODE: Lowered buy threshold, increased spending limit[/yellow]"
+            f"[yellow]AGGRESSIVE MODE: EP threshold {settings.min_ep_upgrade_threshold:.0f}, "
+            f"max {max_trades} trades, €{max_spend:,} spend limit[/yellow]"
         )
 
     console.print()
@@ -1331,8 +1335,8 @@ def auto(
     # Show summary
     console.print("\n[bold]Session Complete![/bold]")
     console.print(f"Duration: {session.end_time - session.start_time:.1f}s")
-    console.print(f"Profit trades executed: {len([r for r in session.profit_trades if r.success])}")
-    console.print(f"Lineup trades executed: {len([r for r in session.lineup_trades if r.success])}")
+    total_trades = len([r for r in session.profit_trades + session.lineup_trades if r.success])
+    console.print(f"Trades executed: {total_trades}")
 
     if session.net_change != 0:
         color = "green" if session.net_change > 0 else "red"
