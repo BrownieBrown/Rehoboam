@@ -77,6 +77,89 @@ class Trader:
         self.market_price_tracker = MarketPriceTracker()
         self.compact_display = CompactDisplay(bidding_strategy=self.bidding)
 
+    def get_days_until_match(self, league) -> int | None:
+        """Return days until next match, or None if unknown."""
+        from datetime import datetime, timezone
+
+        try:
+            starting_eleven = self.api.get_starting_eleven(league)
+            next_match = starting_eleven.get("nm") or starting_eleven.get("nextMatch")
+            if not next_match:
+                return None
+            if isinstance(next_match, int | float):
+                next_match_date = datetime.fromtimestamp(next_match, tz=timezone.utc)
+            elif isinstance(next_match, str):
+                next_match_date = datetime.fromisoformat(next_match.replace("Z", "+00:00"))
+            else:
+                return None
+            # Use timezone-aware now() to avoid naive/aware comparison error
+            now = datetime.now(tz=timezone.utc)
+            days = (next_match_date - now).days
+            return max(days, 0)  # Don't return negative for past matches
+        except Exception:
+            return None
+
+    def get_ep_recommendations_with_trends(self, league) -> dict:
+        """get_ep_recommendations + wire trend data into bids.
+
+        Calls get_ep_recommendations once, then enriches each buy rec and
+        trade pair with market value trend data before recalculating bids.
+        This fixes the permanent 40% overbid penalty from missing trend_change_pct.
+        """
+        result = self.get_ep_recommendations(league)
+        current_budget = int(result.get("budget", 0))
+
+        for rec in result.get("buy_recs", []):
+            try:
+                trend = self.trend_service.get_trend(
+                    rec.player.id, rec.player.market_value, league.id
+                )
+                if not hasattr(rec, "metadata") or rec.metadata is None:
+                    rec.metadata = {}
+                rec.metadata["trend_7d_pct"] = trend.trend_7d_pct
+                rec.metadata["trend_14d_pct"] = trend.trend_14d_pct
+                rec.metadata["momentum"] = trend.momentum
+
+                bid_rec = self.bidding.calculate_ep_bid(
+                    asking_price=rec.player.price,
+                    market_value=rec.player.market_value,
+                    expected_points=rec.score.expected_points,
+                    marginal_ep_gain=rec.marginal_ep_gain,
+                    confidence=min(1.0, rec.score.data_quality.games_played / 10.0),
+                    current_budget=current_budget,
+                    sell_plan=rec.sell_plan,
+                    player_id=rec.player.id,
+                    trend_change_pct=trend.trend_7d_pct,
+                )
+                rec.recommended_bid = bid_rec.recommended_bid
+            except Exception:
+                pass  # Keep original bid if trend fetch fails
+
+        for pair in result.get("trade_pairs", []):
+            try:
+                trend = self.trend_service.get_trend(
+                    pair.buy_player.id, pair.buy_player.market_value, league.id
+                )
+                if not hasattr(pair, "metadata") or pair.metadata is None:
+                    pair.metadata = {}
+                pair.metadata["trend_7d_pct"] = trend.trend_7d_pct
+
+                bid_rec = self.bidding.calculate_ep_bid(
+                    asking_price=pair.buy_player.price,
+                    market_value=pair.buy_player.market_value,
+                    expected_points=pair.buy_score.expected_points,
+                    marginal_ep_gain=pair.ep_gain,
+                    confidence=0.7,
+                    current_budget=current_budget,
+                    player_id=pair.buy_player.id,
+                    trend_change_pct=trend.trend_7d_pct,
+                )
+                pair.recommended_bid = bid_rec.recommended_bid
+            except Exception:
+                pass
+
+        return result
+
     def run_learning_update(self, league: League):
         """
         Run learning system updates after analysis.
@@ -2714,29 +2797,27 @@ class Trader:
             min_ep_upgrade=getattr(self.settings, "min_ep_upgrade_threshold", 10.0),
         )
 
-        if squad_size >= 15:
-            buy_recs = []
-            trade_pairs = engine.build_trade_pairs(
-                market_scores=market_scores,
-                squad_scores=squad_scores,
-                roster_context=roster_context,
-                budget=current_budget,
-                market_players=market_player_map,
-                squad_players=squad_player_map,
-                top_n=5,
-            )
-        else:
-            buy_recs = engine.recommend_buys(
-                market_scores=market_scores,
-                squad_scores=squad_scores,
-                roster_context=roster_context,
-                budget=current_budget,
-                market_players=market_player_map,
-                is_emergency=is_emergency,
-                top_n=8 if is_emergency else 5,
-                squad_players=squad_player_map,
-            )
-            trade_pairs = []
+        # Always compute both buy recs and trade pairs so the unified
+        # trade phase can rank them against each other regardless of squad size.
+        buy_recs = engine.recommend_buys(
+            market_scores=market_scores,
+            squad_scores=squad_scores,
+            roster_context=roster_context,
+            budget=current_budget,
+            market_players=market_player_map,
+            is_emergency=is_emergency,
+            top_n=8 if is_emergency else 10,
+            squad_players=squad_player_map,
+        )
+        trade_pairs = engine.build_trade_pairs(
+            market_scores=market_scores,
+            squad_scores=squad_scores,
+            roster_context=roster_context,
+            budget=current_budget,
+            market_players=market_player_map,
+            squad_players=squad_player_map,
+            top_n=10,
+        )
 
         sell_recs = engine.recommend_sells(
             squad_scores=squad_scores,

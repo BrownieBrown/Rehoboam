@@ -103,14 +103,6 @@ class Settings(BaseSettings):
         default=15.0,
         description="Minimum value score difference to consider a replacement an upgrade",
     )
-    min_expected_points_to_buy: float = Field(
-        default=30.0,
-        description="Minimum expected points (0-180 scale) to consider buying a player",
-    )
-    min_ep_upgrade_threshold: float = Field(
-        default=10.0,
-        description="Minimum EP gain to consider a trade pair worthwhile",
-    )
     min_points_to_keep: int = Field(
         default=50,
         description="DEPRECATED - Bot now recommends sales based on value analysis, not raw points",
@@ -122,8 +114,18 @@ class Settings(BaseSettings):
         description="Minimum expected points to consider buying a player",
     )
     min_ep_upgrade_threshold: float = Field(
-        default=10.0,
-        description="Minimum EP gain to consider a market player an upgrade",
+        default=5.0,
+        description="Minimum EP gain to consider a market player an upgrade (lower = more trades that compound over the season)",
+    )
+
+    # Auto Trading Limits
+    auto_max_trades_normal: int = Field(
+        default=10,
+        description="Max trades per auto session in normal mode",
+    )
+    auto_max_trades_aggressive: int = Field(
+        default=15,
+        description="Max trades per auto session in aggressive mode",
     )
 
     # Safety Settings

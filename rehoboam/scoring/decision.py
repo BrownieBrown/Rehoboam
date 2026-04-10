@@ -28,7 +28,7 @@ class DecisionEngine:
         min_ep_upgrade: Minimum marginal EP gain required to recommend a buy.
     """
 
-    def __init__(self, min_ep_to_buy: float = 30.0, min_ep_upgrade: float = 10.0) -> None:
+    def __init__(self, min_ep_to_buy: float = 30.0, min_ep_upgrade: float = 5.0) -> None:
         self.min_ep_to_buy = min_ep_to_buy
         self.min_ep_upgrade = min_ep_upgrade
 

@@ -35,11 +35,12 @@ The bot started as a market value trader (buy low, sell high). The `analyze` com
 Current state:
 
 - `analyze` command: EP-first pipeline — scores players by expected matchday points, recommends buys by marginal EP gain (how much they improve best-11), supports sell plans for going negative
+- `auto` command: Unified aggressive trading — single EP pipeline call, trade pairs compete with plain buys ranked by EP, matchday-aware aggressiveness (aggressive 5+d, moderate 2-4d, locked 0-1d), trend-aware profit selling, up to 10 trades/session (15 aggressive)
 - `trade` command: Still uses `value_score` for profit-trading (legacy path)
-- `SmartBidding`: Has both `calculate_bid()` (value-score-based, legacy) and `calculate_ep_bid()` (EP-based, used by analyze)
+- `SmartBidding`: Has both `calculate_bid()` (value-score-based, legacy) and `calculate_ep_bid()` (EP-based, used by analyze/auto). Trend data now wired through to EP bids.
 - `BidLearner`: Tracks matchday outcomes (actual vs predicted EP), feeds EP accuracy factor back into bidding
 - Double gameweek awareness: EP calculator supports DGW multiplier (1.8x), but DGW detection not yet wired
-- Budget-at-kickoff safety: Basic 24-48h buffer exists
+- Budget-at-kickoff safety: Basic 24-48h buffer exists, matchday-locked phase prevents trading 0-1 days before match
 
 ### Strategic Priorities (in order of impact)
 
