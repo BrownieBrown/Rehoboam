@@ -122,10 +122,11 @@ def trading_session(timer: func.TimerRequest):
 
         # Run trading session
         dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+        max_trades = int(os.getenv("MAX_TRADES", str(settings.auto_max_trades_normal)))
         trader = AutoTrader(
             api=api,
             settings=settings,
-            max_trades_per_session=5,
+            max_trades_per_session=max_trades,
             max_daily_spend=50_000_000,
             dry_run=dry_run,
         )
