@@ -145,5 +145,19 @@ def trading_session(timer: func.TimerRequest):
             f"net €{session.net_change:,}"
         )
 
+        # Per-trade detail so we can see what the bot actually did.
+        # The bot's internal Rich console output isn't captured by App Insights,
+        # so we log each result here.
+        for r in session.profit_trades + session.lineup_trades:
+            status = "OK" if r.success else "FAIL"
+            msg = f"  [{status}] {r.action} {r.player_name} " f"@ €{r.price:,} — {r.reason}"
+            if r.error:
+                msg += f" (error: {r.error})"
+            logging.info(msg)
+
+        if session.errors:
+            for err in session.errors:
+                logging.warning(f"Session error: {err}")
+
     except Exception as e:
         logging.error(f"Trading session failed: {e}", exc_info=True)
