@@ -91,12 +91,14 @@ class AutoTrader:
         self.daily_spend = 0
         self.last_reset = datetime.now().date()
 
-        # Learning system
+        # Learning system — file-based outcome tracking + adaptive bidding
         from .activity_feed_learner import ActivityFeedLearner
         from .bid_learner import BidLearner
+        from .learning import LearningTracker
 
         self.learner = BidLearner()
         self.activity_feed_learner = ActivityFeedLearner()
+        self.tracker = LearningTracker(self.learner)
 
     def get_quick_budget(self, league) -> int | None:
         """Lightweight budget check using the budget-only endpoint."""
@@ -223,8 +225,8 @@ class AutoTrader:
             )
 
             # Record auction outcome for learning (bid placed)
-            # Note: We don't know yet if we won or lost - that's determined later
-            self._record_bid_placed(player, price)
+            # Outcome (won/lost) is resolved later by tracker.resolve_auctions
+            self.tracker.record_bid_placed(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -277,7 +279,7 @@ class AutoTrader:
             )
 
             # Record flip outcome for learning (if we bought this player)
-            self._record_flip_outcome(player, price)
+            self.tracker.record_flip_outcome(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -335,7 +337,7 @@ class AutoTrader:
                 f"[green]✓ {player.first_name} {player.last_name} sold instantly to Kickbase[/green]"
             )
 
-            self._record_flip_outcome(player, price)
+            self.tracker.record_flip_outcome(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -812,8 +814,16 @@ class AutoTrader:
         trade_results: list[AutoTradeResult] = []
         errors: list[str] = []
 
-        # Step 1: Check resolved auctions for learning
-        self.check_resolved_auctions(league)
+        # Step 1: Reconcile any pending bids against current squad (won/lost)
+        try:
+            squad = self.api.get_squad(league)
+            bids = self.api.get_my_bids(league)
+            self.tracker.resolve_auctions(
+                squad_ids={p.id for p in squad},
+                active_bid_ids={p.id for p in bids},
+            )
+        except Exception as e:
+            console.print(f"[yellow]Auction resolution failed: {e}[/yellow]")
 
         # Step 2: Build session context (single EP pipeline + trends + matchday phase)
         try:
@@ -1040,264 +1050,45 @@ class AutoTrader:
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
 
-    def _record_bid_placed(self, player, our_bid: int):
-        """Record that we placed a bid for learning"""
-        try:
-            from .bid_learner import AuctionOutcome
-            from .value_calculator import PlayerValue
-
-            # Calculate overbid percentage
-            asking_price = player.price
-            overbid_pct = ((our_bid - asking_price) / asking_price * 100) if asking_price > 0 else 0
-
-            # Get value score
-            value = PlayerValue.calculate(player)
-
-            outcome = AuctionOutcome(
-                player_id=player.id,
-                player_name=f"{player.first_name} {player.last_name}",
-                our_bid=our_bid,
-                asking_price=asking_price,
-                our_overbid_pct=overbid_pct,
-                won=False,  # Will be updated when auction resolves
-                timestamp=time.time(),
-                player_value_score=value.value_score,
-                market_value=player.market_value,
-            )
-
-            # Don't record yet - we'll record when we know the outcome
-            # Store in a pending bids file for later resolution
-            import json
-            from pathlib import Path
-
-            pending_file = Path("logs") / "pending_bids.json"
-            pending_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Load existing pending bids
-            pending = []
-            if pending_file.exists():
-                with open(pending_file) as f:
-                    pending = json.load(f)
-
-            # Add new bid
-            pending.append(
-                {
-                    "player_id": outcome.player_id,
-                    "player_name": outcome.player_name,
-                    "our_bid": outcome.our_bid,
-                    "asking_price": outcome.asking_price,
-                    "our_overbid_pct": outcome.our_overbid_pct,
-                    "timestamp": outcome.timestamp,
-                    "player_value_score": outcome.player_value_score,
-                    "market_value": outcome.market_value,
-                }
-            )
-
-            # Save
-            with open(pending_file, "w") as f:
-                json.dump(pending, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for bid recording
-
-    def check_resolved_auctions(self, league):
-        """Check pending bids and record outcomes for learning"""
-        try:
-            import json
-            from pathlib import Path
-
-            from .bid_learner import AuctionOutcome
-
-            pending_file = Path("logs") / "pending_bids.json"
-            if not pending_file.exists():
-                return
-
-            # Load pending bids
-            with open(pending_file) as f:
-                pending = json.load(f)
-
-            if not pending:
-                return
-
-            # Get our current team and active bids
-            my_team = self.api.get_squad(league)
-            my_bids = self.api.get_my_bids(league)
-
-            my_player_ids = {p.id for p in my_team}
-            active_bid_ids = {p.id for p in my_bids}
-
-            resolved = []
-            still_pending = []
-
-            for bid_data in pending:
-                player_id = bid_data["player_id"]
-
-                # Check if auction resolved
-                if player_id in my_player_ids:
-                    # We won!
-                    outcome = AuctionOutcome(
-                        player_id=bid_data["player_id"],
-                        player_name=bid_data["player_name"],
-                        our_bid=bid_data["our_bid"],
-                        asking_price=bid_data["asking_price"],
-                        our_overbid_pct=bid_data["our_overbid_pct"],
-                        won=True,
-                        timestamp=bid_data["timestamp"],
-                        player_value_score=bid_data.get("player_value_score"),
-                        market_value=bid_data.get("market_value"),
-                    )
-                    self.learner.record_outcome(outcome)
-                    resolved.append(bid_data["player_name"])
-
-                    # Also track purchase for flip outcome recording
-                    self._track_purchase(player_id, bid_data)
-
-                elif player_id not in active_bid_ids:
-                    # Not in our team and not in active bids = we lost
-                    outcome = AuctionOutcome(
-                        player_id=bid_data["player_id"],
-                        player_name=bid_data["player_name"],
-                        our_bid=bid_data["our_bid"],
-                        asking_price=bid_data["asking_price"],
-                        our_overbid_pct=bid_data["our_overbid_pct"],
-                        won=False,
-                        timestamp=bid_data["timestamp"],
-                        player_value_score=bid_data.get("player_value_score"),
-                        market_value=bid_data.get("market_value"),
-                    )
-                    self.learner.record_outcome(outcome)
-                    resolved.append(bid_data["player_name"])
-
-                else:
-                    # Still active bid
-                    still_pending.append(bid_data)
-
-            # Update pending file
-            with open(pending_file, "w") as f:
-                json.dump(still_pending, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for auction outcome recording
-
-    def _track_purchase(self, player_id: str, bid_data: dict):
-        """Track a player purchase for flip outcome recording"""
-        try:
-            import json
-            from pathlib import Path
-
-            purchases_file = Path("logs") / "tracked_purchases.json"
-            purchases_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Load existing purchases
-            purchases = {}
-            if purchases_file.exists():
-                with open(purchases_file) as f:
-                    purchases = json.load(f)
-
-            # Add this purchase
-            purchases[player_id] = {
-                "player_name": bid_data["player_name"],
-                "buy_price": bid_data["our_bid"],
-                "buy_date": bid_data["timestamp"],
-            }
-
-            # Save
-            with open(purchases_file, "w") as f:
-                json.dump(purchases, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for purchase tracking
-
     def optimize_and_execute_squad(self, league):
-        """
-        Run squad optimization and execute recommended sales
+        """Run squad optimization and execute any forced sales.
 
-        Returns:
-            SquadOptimization result
+        Uses avg_points directly as the ranking signal for who to drop —
+        simpler and tighter than the legacy PlayerValue+matchup pipeline.
         """
         from .squad_optimizer import SquadOptimizer
         from .trader import Trader
 
-        # Use trader's full optimization method (includes all context: performance, SOS, matchups)
-        trader = Trader(self.api, self.settings, bid_learner=self.learner)
+        trader = Trader(
+            self.api,
+            self.settings,
+            bid_learner=self.learner,
+            activity_feed_learner=self.activity_feed_learner,
+        )
         optimization = trader.optimize_squad_for_gameday(league)
 
         if not optimization:
             return None
 
-        # Get player values for display
-        team_analyses = trader.analyze_team(league)
-        player_values = trader.get_player_values_from_analyses(team_analyses)
+        # Use avg_points as the player_values dict for display purposes
+        squad = self.api.get_squad(league)
+        player_values = {p.id: float(p.average_points or 0) for p in squad}
 
-        # Display optimization
         optimizer = SquadOptimizer(min_squad_size=11, max_squad_size=15)
         optimizer.display_optimization(optimization, player_values=player_values)
 
-        # Execute recommended sales if needed
         if optimization.players_to_sell and not optimization.is_gameday_ready:
             console.print(
-                f"\n[yellow]⚠️  Budget negative, selling {len(optimization.players_to_sell)} player(s)...[/yellow]"
+                f"\n[yellow]⚠️  Budget negative, selling "
+                f"{len(optimization.players_to_sell)} player(s)...[/yellow]"
             )
             results = optimizer.execute_sell_recommendations(
                 optimization, api=self.api, league=league, dry_run=self.dry_run
             )
-
             if results["sold"]:
+                total = sum(p.market_value for p in results["sold"])
                 console.print(
-                    f"[green]✓ Sold {len(results['sold'])} player(s) for €{sum(p.market_value for p in results['sold']):,}[/green]"
+                    f"[green]✓ Sold {len(results['sold'])} player(s) for €{total:,}[/green]"
                 )
 
         return optimization
-
-    def _record_flip_outcome(self, player, sell_price: int):
-        """Record a flip outcome when we sell a player we bought"""
-        try:
-            import json
-            from pathlib import Path
-
-            from .bid_learner import FlipOutcome
-
-            purchases_file = Path("logs") / "tracked_purchases.json"
-            if not purchases_file.exists():
-                return
-
-            # Load purchases
-            with open(purchases_file) as f:
-                purchases = json.load(f)
-
-            if player.id not in purchases:
-                return  # We didn't buy this player (or not tracked)
-
-            purchase_data = purchases[player.id]
-            buy_price = purchase_data["buy_price"]
-            buy_date = purchase_data["buy_date"]
-            sell_date = time.time()
-
-            profit = sell_price - buy_price
-            profit_pct = (profit / buy_price * 100) if buy_price > 0 else 0
-            hold_days = int((sell_date - buy_date) / (24 * 3600))
-
-            outcome = FlipOutcome(
-                player_id=player.id,
-                player_name=f"{player.first_name} {player.last_name}",
-                buy_price=buy_price,
-                sell_price=sell_price,
-                profit=profit,
-                profit_pct=profit_pct,
-                hold_days=hold_days,
-                buy_date=buy_date,
-                sell_date=sell_date,
-                average_points=getattr(player, "average_points", None),
-                position=getattr(player, "position", None),
-                was_injured=(player.status != 0) if hasattr(player, "status") else False,
-            )
-
-            self.learner.record_flip(outcome)
-
-            # Remove from purchases
-            del purchases[player.id]
-            with open(purchases_file, "w") as f:
-                json.dump(purchases, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for flip outcome recording
