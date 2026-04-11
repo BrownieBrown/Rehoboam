@@ -122,12 +122,32 @@ def trading_session(timer: func.TimerRequest):
 
         # Run trading session
         dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
-        max_trades = int(os.getenv("MAX_TRADES", str(settings.auto_max_trades_normal)))
+
+        # Mirror `rehoboam auto --aggressive` behaviour: higher trade cap,
+        # lower EP upgrade threshold, bigger spend limit.
+        # Set AGGRESSIVE=false in app settings to fall back to normal mode.
+        aggressive = os.getenv("AGGRESSIVE", "true").lower() == "true"
+
+        if aggressive:
+            settings.min_ep_upgrade_threshold = max(settings.min_ep_upgrade_threshold - 2, 3.0)
+            max_trades = settings.auto_max_trades_aggressive
+            max_spend = 75_000_000
+            logging.info(
+                f"AGGRESSIVE MODE: EP threshold {settings.min_ep_upgrade_threshold:.0f}, "
+                f"max {max_trades} trades, €{max_spend:,} spend limit"
+            )
+        else:
+            max_trades = settings.auto_max_trades_normal
+            max_spend = 50_000_000
+
+        # Environment overrides take precedence
+        max_trades = int(os.getenv("MAX_TRADES", str(max_trades)))
+
         trader = AutoTrader(
             api=api,
             settings=settings,
             max_trades_per_session=max_trades,
-            max_daily_spend=50_000_000,
+            max_daily_spend=max_spend,
             dry_run=dry_run,
         )
 
