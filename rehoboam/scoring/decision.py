@@ -398,8 +398,12 @@ class DecisionEngine:
         """Build sell->buy trade pairs for a full squad (15/15).
 
         For each promising market player, finds the best squad member to sell
-        and calculates net cost and EP gain.
+        and calculates net cost and EP gain. Always prefers bench players as
+        sell targets — starters are only sacrificed for significant upgrades
+        (2x the normal EP threshold).
         """
+        from rehoboam.formation import select_best_eleven
+
         # Get sell candidates sorted by expendability
         sell_recs = self.recommend_sells(
             squad_scores=squad_scores,
@@ -407,6 +411,17 @@ class DecisionEngine:
             squad_players=squad_players,
         )
         sellable = [r for r in sell_recs if not r.is_protected]
+
+        # Compute formation-aware best-11 so we can split bench from starters.
+        # Bench players are the preferred sell targets — selling starters
+        # destroys team value and usually makes no sense.
+        score_map = {s.player_id: s.expected_points for s in squad_scores}
+        squad_list = list(squad_players.values())
+        best_11 = select_best_eleven(squad_list, score_map)
+        best_11_ids = {p.id for p in best_11}
+
+        bench_sellable = [r for r in sellable if r.score.player_id not in best_11_ids]
+        starter_sellable = [r for r in sellable if r.score.player_id in best_11_ids]
 
         pairs: list[TradePair] = []
         used_sell_ids: set[str] = set()
@@ -432,26 +447,33 @@ class DecisionEngine:
             if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
                 continue
 
-            # Find best sell target: same position preferred, then most expendable
-            best_sell: SellRecommendation | None = None
-            for sr in sellable:
-                if sr.score.player_id in used_sell_ids:
-                    continue
-                sell_mp = sr.player
-                if sell_mp is None:
-                    continue
-                # Prefer same-position swaps
-                if sell_mp.position == buy_player.position:
-                    best_sell = sr
-                    break
-            # Fallback: most expendable not yet used
-            if best_sell is None:
-                for sr in sellable:
+            # Find best sell target — bench first, then starter as last resort.
+            # Selection order:
+            #   1. Same-position bench player (natural upgrade)
+            #   2. Any bench player (free slot for position shift)
+            #   3. Same-position starter (requires significant upgrade)
+            def _pick(
+                pool: list[SellRecommendation],
+                want_pos: str | None,
+            ) -> SellRecommendation | None:
+                for sr in pool:
                     if sr.score.player_id in used_sell_ids:
                         continue
-                    if sr.player is not None:
-                        best_sell = sr
-                        break
+                    if sr.player is None:
+                        continue
+                    if want_pos is not None and sr.player.position != want_pos:
+                        continue
+                    return sr
+                return None
+
+            best_sell = _pick(bench_sellable, buy_player.position)
+            if best_sell is None:
+                best_sell = _pick(bench_sellable, None)
+            is_starter_sell = False
+            if best_sell is None:
+                # Last resort: swap a same-position starter for a significant upgrade.
+                best_sell = _pick(starter_sellable, buy_player.position)
+                is_starter_sell = best_sell is not None
 
             if best_sell is None or best_sell.player is None:
                 continue
@@ -461,8 +483,10 @@ class DecisionEngine:
             net_cost = buy_player.price - sell_value
             ep_gain = ps.expected_points - best_sell.score.expected_points
 
-            # Only recommend if EP gain is positive
-            if ep_gain < self.min_ep_upgrade:
+            # Starter swaps churn team value — require a significant EP boost
+            # (2x the normal threshold) to justify the cost.
+            min_gain = self.min_ep_upgrade * 2 if is_starter_sell else self.min_ep_upgrade
+            if ep_gain < min_gain:
                 continue
 
             # Check affordability (budget + sell recovery)

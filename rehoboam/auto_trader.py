@@ -1156,9 +1156,11 @@ class AutoTrader:
     def run_profit_sell_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Trend-aware profit sell monitoring.
 
-        Uses EP scores from ctx to protect best-11, and trend data to
-        dynamically adjust sell thresholds.
+        Uses formation-aware best-11 to protect true starters, and trend data
+        to dynamically adjust sell thresholds. Only sells best-11 members when
+        a replacement is lined up in the EP pipeline.
         """
+        from .formation import select_best_eleven
         from .trader import Trader
 
         results = []
@@ -1174,11 +1176,22 @@ class AutoTrader:
             console.print("[yellow]Could not score squad — skipping sell monitoring[/yellow]")
             return results
 
-        # Top 11 by EP are protected
-        sorted_by_ep = sorted(squad_scores, key=lambda s: s.expected_points, reverse=True)
-        best_11_ids = {s.player_id for s in sorted_by_ep[:11]}
+        # Formation-aware best-11: respects position minimums (1 GK, 3 DEF, 2 MID, 1 FW)
+        # This matches what actually plays on matchday. A simple top-N-by-raw-EP sort
+        # can wrongly "protect" a 2nd GK and leave a starting midfielder exposed.
+        score_map = {s.player_id: s.expected_points for s in squad_scores}
+        best_11 = select_best_eleven(squad, score_map)
+        best_11_ids = {p.id for p in best_11}
 
-        # Check if replacements are lined up
+        # Position-minimum protection: never sell if it would break formation.
+        # A squad with 0 forwards loses -100 pts every matchday from empty slots.
+        from .config import POSITION_MINIMUMS
+
+        position_counts: dict[str, int] = {}
+        for p in squad:
+            position_counts[p.position] = position_counts.get(p.position, 0) + 1
+
+        # Check if replacements are lined up in the EP pipeline
         buy_recs = ctx.ep_result.get("buy_recs", [])
         trade_pairs = ctx.ep_result.get("trade_pairs", [])
         has_replacement = len(buy_recs) > 0 or len(trade_pairs) > 0
@@ -1197,6 +1210,16 @@ class AutoTrader:
                 continue
 
             if not player.buy_price or player.buy_price <= 0:
+                continue
+
+            # Hard block: never sell if it would drop a position below its
+            # formation minimum. A squad with 0 FW loses -100 pts every matchday.
+            pos_min = POSITION_MINIMUMS.get(player.position, 0)
+            if position_counts.get(player.position, 0) <= pos_min:
+                console.print(
+                    f"[dim]Protected {player.last_name} ({player.position}) — "
+                    f"at position minimum ({pos_min})[/dim]"
+                )
                 continue
 
             profit = player.market_value - player.buy_price

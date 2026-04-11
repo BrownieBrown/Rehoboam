@@ -2634,6 +2634,7 @@ class Trader:
             buy_recs, trade_pairs, sell_recs, squad_scores, lineup_map,
             budget, squad_size, squad_players, market_players
         """
+        from .config import POSITION_MINIMUMS
         from .roster_analyzer import RosterAnalyzer
         from .scoring.collector import DataCollector
         from .scoring.decision import DecisionEngine
@@ -2642,7 +2643,27 @@ class Trader:
         # --- 1. Fetch squad and market ---
         squad = self.api.get_squad(league)
         squad_size = len(squad)
-        is_emergency = squad_size < self.settings.min_squad_size
+
+        # Emergency triggers on either:
+        #   (a) squad too small overall, OR
+        #   (b) any position below its formation minimum — squad can't field a
+        #       valid lineup and is losing -100 pts per empty slot every matchday
+        position_counts: dict[str, int] = {}
+        for p in squad:
+            position_counts[p.position] = position_counts.get(p.position, 0) + 1
+        formation_broken = any(
+            position_counts.get(pos, 0) < minimum for pos, minimum in POSITION_MINIMUMS.items()
+        )
+        is_emergency = squad_size < self.settings.min_squad_size or formation_broken
+        if formation_broken:
+            missing = [
+                f"{pos} ({position_counts.get(pos, 0)}/{minimum})"
+                for pos, minimum in POSITION_MINIMUMS.items()
+                if position_counts.get(pos, 0) < minimum
+            ]
+            console.print(
+                f"[bold red]⚠ FORMATION EMERGENCY — missing: {', '.join(missing)}[/bold red]"
+            )
 
         market_players_list = self.api.get_market(league)
         kickbase_market = [p for p in market_players_list if p.is_kickbase_seller()]
