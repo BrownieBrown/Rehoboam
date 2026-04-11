@@ -1,8 +1,34 @@
 """Roster analysis for context-aware buy recommendations"""
 
-from .analyzer import RosterContext, RosterImpact
+from dataclasses import dataclass
+
 from .config import MIN_UPGRADE_THRESHOLD, POSITION_MINIMUMS
 from .value_calculator import PlayerValue
+
+
+@dataclass
+class RosterContext:
+    """Context about user's current roster for a position."""
+
+    position: str
+    current_count: int
+    minimum_count: int
+    existing_players: list
+    weakest_player: dict | None
+    is_below_minimum: bool
+    upgrade_potential: float
+
+
+@dataclass
+class RosterImpact:
+    """Roster impact information for a buy recommendation."""
+
+    is_upgrade: bool
+    impact_type: str  # "upgrade", "depth", "fills_gap", "redundant"
+    replaces_player: str | None
+    value_score_gain: float
+    net_cost: int
+    reason: str
 
 
 class RosterAnalyzer:

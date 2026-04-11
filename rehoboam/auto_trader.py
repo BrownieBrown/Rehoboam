@@ -91,12 +91,14 @@ class AutoTrader:
         self.daily_spend = 0
         self.last_reset = datetime.now().date()
 
-        # Learning system
+        # Learning system — file-based outcome tracking + adaptive bidding
         from .activity_feed_learner import ActivityFeedLearner
         from .bid_learner import BidLearner
+        from .learning import LearningTracker
 
         self.learner = BidLearner()
         self.activity_feed_learner = ActivityFeedLearner()
+        self.tracker = LearningTracker(self.learner)
 
     def get_quick_budget(self, league) -> int | None:
         """Lightweight budget check using the budget-only endpoint."""
@@ -194,466 +196,6 @@ class AutoTrader:
             flip_budget=flip_budget,
         )
 
-    def run_profit_trading_session(self, league) -> list[AutoTradeResult]:
-        """
-        Execute profit trading opportunities automatically
-
-        Returns:
-            List of AutoTradeResult
-        """
-        from .trader import Trader
-
-        results = []
-        # Pass learners to trader for adaptive bidding with competitive intelligence
-        trader = Trader(
-            self.api,
-            self.settings,
-            bid_learner=self.learner,
-            activity_feed_learner=self.activity_feed_learner,
-        )
-
-        console.print("\n[bold cyan]🤖 Auto-Trading: Profit Opportunities[/bold cyan]")
-
-        # Step 0: Check resolved auctions for learning
-        self.check_resolved_auctions(league)
-
-        # Step 0.5: Check bid compliance (league rule: no bids below market value)
-        from .league_compliance import LeagueComplianceChecker
-
-        compliance_checker = LeagueComplianceChecker(self.api, self.settings)
-
-        # Get market data and trends for compliance checks
-        market = self.api.get_market(league)
-        kickbase_market = [p for p in market if p.is_kickbase_seller()]
-        player_trends = {
-            p.id: trader.trend_service.get_trend(p.id, p.market_value, league.id).to_dict()
-            for p in kickbase_market[:50]
-        }
-
-        # Run bid compliance check (adjust/cancel bids below market value)
-        adjusted, canceled_compliance = compliance_checker.run_bid_compliance_check(
-            league, player_trends=player_trends, auto_resolve=True, dry_run=self.dry_run
-        )
-
-        if adjusted > 0 or canceled_compliance > 0:
-            console.print(
-                f"\n[cyan]Bid compliance: {adjusted} adjusted, {canceled_compliance} canceled[/cyan]"
-            )
-
-        # Step 1: Re-evaluate active bids for quality
-        from .bid_evaluator import BidEvaluator
-
-        bid_evaluator = BidEvaluator(self.api, self.settings)
-
-        bid_evaluations = bid_evaluator.evaluate_active_bids(
-            league, player_trends=player_trends, for_profit=True
-        )
-
-        if bid_evaluations:
-            bid_evaluator.display_bid_evaluations(bid_evaluations)
-
-            # Cancel bad bids automatically
-            canceled = bid_evaluator.cancel_bad_bids(league, bid_evaluations, dry_run=self.dry_run)
-            if canceled > 0:
-                console.print(
-                    f"\n[yellow]Canceled {canceled} bid(s) that no longer make sense[/yellow]"
-                )
-
-        # Check daily limits
-        self._reset_daily_limits_if_needed()
-        if self.daily_spend >= self.max_daily_spend:
-            console.print(f"[yellow]Daily spend limit reached (€{self.max_daily_spend:,})[/yellow]")
-            return results
-
-        # Get EP-scored recommendations (same pipeline as `rehoboam analyze`)
-        try:
-            ep_result = trader.get_ep_recommendations(league)
-            buy_recs = ep_result["buy_recs"]
-            trade_pairs = ep_result["trade_pairs"]
-        except Exception as e:
-            console.print(f"[red]EP pipeline failed: {e}[/red]")
-            return results
-
-        # Merge buy_recs and trade_pairs into a unified opportunity list
-        from types import SimpleNamespace
-
-        opportunities = []
-        for rec in buy_recs:
-            if rec.recommended_bid and rec.recommended_bid > 0:
-                opportunities.append(
-                    SimpleNamespace(
-                        player=rec.player,
-                        buy_price=rec.recommended_bid,
-                        reason=rec.reason,
-                    )
-                )
-        # Trade pairs handled separately below (need sell→buy execution)
-        actionable_trade_pairs = [
-            p for p in trade_pairs if p.recommended_bid and p.recommended_bid > 0
-        ]
-
-        ep_opportunity_count = len(opportunities)
-        if not opportunities and not actionable_trade_pairs:
-            console.print("[dim]No EP-based opportunities found[/dim]")
-
-        # Check active bids - we can have multiple bids simultaneously
-        my_bids = self.api.get_my_bids(league)
-
-        # Build map of player_id -> our bid amount
-        my_bid_amounts = {p.id: p.user_offer_price for p in my_bids}
-
-        if my_bids:
-            console.print(f"[cyan]📊 Active bids: {len(my_bids)}[/cyan]")
-            for bid_player in my_bids:
-                console.print(
-                    f"  - {bid_player.first_name} {bid_player.last_name}: Your bid €{bid_player.user_offer_price:,}"
-                )
-            console.print("[dim]Note: You'll find out who won when auctions end[/dim]")
-
-        # Calculate available squad slots (enforce 15-player limit)
-        squad = self.api.get_squad(league)
-        current_squad_size = len(squad)
-        active_bid_count = len(my_bids)
-        max_squad_size = 15
-        available_slots = max_squad_size - current_squad_size - active_bid_count
-
-        console.print(
-            f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
-        )
-
-        # --- Phase 1: Trade pairs (sell→buy swaps for full squad) ---
-        if actionable_trade_pairs and available_slots <= 0:
-            console.print(
-                f"\n[bold cyan]🔄 Squad full — {len(actionable_trade_pairs)} trade pair(s) available[/bold cyan]"
-            )
-            executed_pairs = 0
-            for pair in actionable_trade_pairs:
-                if executed_pairs >= self.max_trades_per_session:
-                    console.print(
-                        f"[yellow]Max trades per session reached ({self.max_trades_per_session})[/yellow]"
-                    )
-                    break
-                if self.daily_spend + pair.recommended_bid >= self.max_daily_spend:
-                    console.print("[yellow]Would exceed daily spend limit, stopping[/yellow]")
-                    break
-                if my_bid_amounts.get(pair.buy_player.id, 0):
-                    console.print(
-                        f"[dim]Skipping {pair.buy_player.last_name} — already have active bid[/dim]"
-                    )
-                    continue
-
-                console.print(
-                    f"\n[cyan]Trade: sell {pair.sell_player.first_name} {pair.sell_player.last_name}"
-                    f" → buy {pair.buy_player.first_name} {pair.buy_player.last_name}"
-                    f" (EP +{pair.ep_gain:.1f})[/cyan]"
-                )
-
-                # Step 1: Instant-sell the expendable player to free the slot
-                sell_result = self._execute_instant_sell(
-                    league,
-                    pair.sell_player,
-                    f"Trade pair: making room for {pair.buy_player.last_name} (EP +{pair.ep_gain:.1f})",
-                )
-                results.append(sell_result)
-                if not sell_result.success:
-                    console.print("[red]Sell failed, skipping this trade pair[/red]")
-                    continue
-
-                # Step 2: Buy the replacement
-                buy_opp = SimpleNamespace(
-                    player=pair.buy_player,
-                    buy_price=pair.recommended_bid,
-                    reason=f"Trade pair: sold {pair.sell_player.last_name} (EP +{pair.ep_gain:.1f})",
-                )
-                buy_result = self._execute_buy(league, buy_opp)
-                results.append(buy_result)
-                if buy_result.success:
-                    executed_pairs += 1
-                    self.daily_spend += pair.recommended_bid
-                else:
-                    console.print(
-                        f"[bold red]⚠ WARNING: Sold {pair.sell_player.last_name} but failed to buy "
-                        f"{pair.buy_player.last_name} — squad is now {current_squad_size - 1}/15[/bold red]"
-                    )
-
-            if executed_pairs > 0:
-                console.print(f"\n[green]✓ Executed {executed_pairs} trade pair(s)[/green]")
-
-        if available_slots <= 0:
-            if not actionable_trade_pairs:
-                console.print(
-                    f"[yellow]No squad slots available ({current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15)[/yellow]"
-                )
-            return results
-
-        # Get current budget and team value for debt capacity
-        team_info = self.api.get_team_info(league)
-        current_budget = team_info.get("budget", 0)
-        team_value = team_info.get("team_value", 0)
-
-        # Calculate debt capacity for profit flipping
-        max_debt_pct = self.settings.max_debt_pct_of_team_value
-        max_debt = int(team_value * (max_debt_pct / 100))
-
-        # For profit flipping, we can use debt capacity (will sell before match day)
-        pending_bid_total = sum(p.user_offer_price for p in my_bids)
-        flip_budget = current_budget + max_debt - pending_bid_total
-
-        # Execute top opportunities (up to max_trades_per_session)
-        executed_count = 0
-        for opp in opportunities:
-            if executed_count >= self.max_trades_per_session:
-                console.print(
-                    f"[yellow]Max trades per session reached ({self.max_trades_per_session})[/yellow]"
-                )
-                break
-
-            if self.daily_spend + opp.buy_price >= self.max_daily_spend:
-                console.print("[yellow]Would exceed daily spend limit, stopping[/yellow]")
-                break
-
-            if available_slots <= 0:
-                console.print("[yellow]No more squad slots available (15-player limit)[/yellow]")
-                break
-
-            # Check if we already have a bid on this player
-            current_bid = my_bid_amounts.get(opp.player.id, 0)
-
-            if current_bid > 0:
-                # We already bid on this player - should we increase our bid?
-                bid_increase_threshold = (
-                    current_bid * 1.02
-                )  # Need 2% higher to re-bid (more competitive)
-
-                if opp.buy_price <= current_bid:
-                    console.print(
-                        f"[dim]Skipping {opp.player.first_name} {opp.player.last_name} - already bid €{current_bid:,}[/dim]"
-                    )
-                    continue
-                elif opp.buy_price < bid_increase_threshold:
-                    console.print(
-                        f"[dim]Skipping {opp.player.first_name} {opp.player.last_name} - already bid €{current_bid:,}, new bid €{opp.buy_price:,} not enough higher[/dim]"
-                    )
-                    continue
-                else:
-                    console.print(
-                        f"[yellow]⚠ {opp.player.first_name} {opp.player.last_name} - increasing bid €{current_bid:,} → €{opp.buy_price:,}[/yellow]"
-                    )
-
-            # Check if affordable (use flip budget with debt capacity)
-            if opp.buy_price > flip_budget:
-                console.print(
-                    f"[yellow]Cannot afford {opp.player.first_name} {opp.player.last_name} (€{opp.buy_price:,})[/yellow]"
-                )
-                continue
-
-            # Execute trade
-            result = self._execute_buy(league, opp)
-            results.append(result)
-
-            if result.success:
-                executed_count += 1
-                self.daily_spend += opp.buy_price
-                flip_budget -= opp.buy_price
-                # Only consume a slot for new bids (not re-bids on existing players)
-                if not my_bid_amounts.get(opp.player.id, 0):
-                    available_slots -= 1
-
-        console.print(f"\n[green]✓ Executed {executed_count} EP trades[/green]")
-
-        # --- Phase 2: Profit flip opportunities for remaining slots ---
-        if available_slots > 0 and self.daily_spend < self.max_daily_spend:
-            console.print("\n[bold cyan]💰 Profit Flip Opportunities[/bold cyan]")
-
-            try:
-                profit_opps = trader.find_profit_opportunities(league)
-            except Exception as e:
-                console.print(f"[yellow]Profit opportunity search failed: {e}[/yellow]")
-                profit_opps = []
-
-            # Filter out players we already bid on (EP or existing)
-            ep_player_ids = {opp.player.id for opp in opportunities}
-            profit_opps = [o for o in profit_opps if o.player.id not in ep_player_ids]
-
-            if profit_opps:
-                console.print(f"[cyan]Found {len(profit_opps)} profit flip candidates[/cyan]")
-
-                for opp in profit_opps:
-                    if available_slots <= 0:
-                        break
-                    if self.daily_spend + opp.buy_price >= self.max_daily_spend:
-                        break
-
-                    # Skip if already have a bid
-                    current_bid = my_bid_amounts.get(opp.player.id, 0)
-                    if current_bid > 0:
-                        continue
-
-                    if opp.buy_price > flip_budget:
-                        continue
-
-                    from types import SimpleNamespace
-
-                    flip_opp = SimpleNamespace(
-                        player=opp.player,
-                        buy_price=opp.buy_price,
-                        reason=f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
-                    )
-                    result = self._execute_buy(league, flip_opp)
-                    results.append(result)
-
-                    if result.success:
-                        executed_count += 1
-                        self.daily_spend += opp.buy_price
-                        flip_budget -= opp.buy_price
-                        available_slots -= 1
-
-                console.print(
-                    f"[green]✓ Total executed: {executed_count} trades "
-                    f"({ep_opportunity_count} EP + {executed_count - ep_opportunity_count} flips)[/green]"
-                )
-            else:
-                console.print("[dim]No profit flip opportunities found[/dim]")
-
-        return results
-
-    def run_lineup_improvement_session(self, league) -> list[AutoTradeResult]:
-        """
-        Execute lineup improvement trades automatically
-
-        Returns:
-            List of AutoTradeResult
-        """
-        from .trader import Trader
-
-        results = []
-        # Pass learners to trader for adaptive bidding with competitive intelligence
-        trader = Trader(
-            self.api,
-            self.settings,
-            bid_learner=self.learner,
-            activity_feed_learner=self.activity_feed_learner,
-        )
-
-        console.print("\n[bold cyan]🤖 Auto-Trading: Lineup Improvements[/bold cyan]")
-
-        # Check daily limits
-        self._reset_daily_limits_if_needed()
-        if self.daily_spend >= self.max_daily_spend:
-            console.print(f"[yellow]Daily spend limit reached (€{self.max_daily_spend:,})[/yellow]")
-            return results
-
-        # Get EP recommendations (same pipeline as `rehoboam analyze`)
-        try:
-            ep_result = trader.get_ep_recommendations(league)
-            buy_recs = ep_result["buy_recs"]
-            trade_pairs = ep_result["trade_pairs"]
-        except Exception as e:
-            console.print(f"[red]EP pipeline failed: {e}[/red]")
-            return results
-
-        # For lineup improvement, use buy recs for open slots or trade pairs for full squad
-        from types import SimpleNamespace
-
-        opportunities = []
-        for rec in buy_recs:
-            if rec.recommended_bid and rec.recommended_bid > 0:
-                opportunities.append(
-                    SimpleNamespace(
-                        player=rec.player,
-                        buy_price=rec.recommended_bid,
-                        reason=rec.reason,
-                    )
-                )
-
-        # Trade pairs handled separately (need sell→buy execution)
-        actionable_pairs = [p for p in trade_pairs if p.recommended_bid and p.recommended_bid > 0]
-
-        if not opportunities and not actionable_pairs:
-            console.print("[dim]No EP-based lineup improvements found[/dim]")
-            return results
-
-        # Check active bids
-        my_bids = self.api.get_my_bids(league)
-
-        if my_bids:
-            console.print(f"[cyan]📊 Active bids: {len(my_bids)}[/cyan]")
-
-        # Calculate available squad slots
-        squad = self.api.get_squad(league)
-        current_squad_size = len(squad)
-        active_bid_count = len(my_bids)
-
-        console.print(
-            f"[cyan]📋 Squad slots: {current_squad_size} players + {active_bid_count} active bids = {current_squad_size + active_bid_count}/15[/cyan]"
-        )
-
-        if current_squad_size + active_bid_count >= 15:
-            # Squad full — try trade pairs (sell→buy swaps) instead
-            if not actionable_pairs:
-                console.print("[yellow]No squad slots available (15-player limit)[/yellow]")
-                return results
-
-            pair = actionable_pairs[0]
-            if self.daily_spend + pair.recommended_bid >= self.max_daily_spend:
-                console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
-                return results
-
-            console.print(
-                f"\n[cyan]Lineup trade: sell {pair.sell_player.first_name} {pair.sell_player.last_name}"
-                f" → buy {pair.buy_player.first_name} {pair.buy_player.last_name}"
-                f" (EP +{pair.ep_gain:.1f})[/cyan]"
-            )
-
-            # Instant-sell to free the slot
-            sell_result = self._execute_instant_sell(
-                league,
-                pair.sell_player,
-                f"Lineup upgrade: making room for {pair.buy_player.last_name} (EP +{pair.ep_gain:.1f})",
-            )
-            results.append(sell_result)
-            if not sell_result.success:
-                console.print("[red]Sell failed, cannot complete trade pair[/red]")
-                return results
-
-            # Buy the replacement
-            buy_opp = SimpleNamespace(
-                player=pair.buy_player,
-                buy_price=pair.recommended_bid,
-                reason=f"Lineup upgrade: sold {pair.sell_player.last_name} (EP +{pair.ep_gain:.1f})",
-            )
-            result = self._execute_buy(league, buy_opp)
-            results.append(result)
-            if result.success:
-                self.daily_spend += pair.recommended_bid
-                console.print("\n[green]✓ Executed lineup improvement trade pair[/green]")
-            else:
-                console.print(
-                    f"[bold red]⚠ WARNING: Sold {pair.sell_player.last_name} but failed to buy "
-                    f"{pair.buy_player.last_name} — squad is now {current_squad_size - 1}/15[/bold red]"
-                )
-
-            return results
-
-        # Execute best plain buy opportunity (only 1 per session for safety)
-        if not opportunities:
-            return results
-
-        opp = opportunities[0]
-
-        if self.daily_spend + opp.buy_price >= self.max_daily_spend:
-            console.print("[yellow]Would exceed daily spend limit, skipping[/yellow]")
-            return results
-
-        result = self._execute_buy(league, opp)
-        results.append(result)
-
-        if result.success:
-            self.daily_spend += opp.buy_price
-            console.print("\n[green]✓ Executed lineup improvement trade[/green]")
-
-        return results
-
     def _execute_buy(self, league, opportunity) -> AutoTradeResult:
         """Execute a buy order"""
         player = opportunity.player
@@ -683,8 +225,8 @@ class AutoTrader:
             )
 
             # Record auction outcome for learning (bid placed)
-            # Note: We don't know yet if we won or lost - that's determined later
-            self._record_bid_placed(player, price)
+            # Outcome (won/lost) is resolved later by tracker.resolve_auctions
+            self.tracker.record_bid_placed(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -737,7 +279,7 @@ class AutoTrader:
             )
 
             # Record flip outcome for learning (if we bought this player)
-            self._record_flip_outcome(player, price)
+            self.tracker.record_flip_outcome(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -795,7 +337,7 @@ class AutoTrader:
                 f"[green]✓ {player.first_name} {player.last_name} sold instantly to Kickbase[/green]"
             )
 
-            self._record_flip_outcome(player, price)
+            self.tracker.record_flip_outcome(player, price)
 
             return AutoTradeResult(
                 success=True,
@@ -821,100 +363,6 @@ class AutoTrader:
                 timestamp=time.time(),
                 error=error_msg,
             )
-
-    def _execute_lineup_trade(self, league, trade) -> list[AutoTradeResult]:
-        """Execute a lineup improvement trade (N-for-M) with dynamic bid refresh"""
-        results = []
-
-        console.print(
-            f"\n[cyan]Executing {len(trade.players_in)}-for-{len(trade.players_out)} lineup trade[/cyan]"
-        )
-
-        # Step 1: Buy all players first
-        console.print("\n[cyan]Step 1: Buying players...[/cyan]")
-        for player in trade.players_in:
-            # Dynamic bid refresh: recalculate smart bid before buying
-            original_bid = (
-                trade.smart_bids.get(player.id) if trade.smart_bids else player.market_value
-            )
-
-            # Refresh player data to get current market value
-            try:
-                from .trader import Trader
-                from .value_calculator import PlayerValue
-
-                # Get fresh market data
-                market_players = self.api.get_market(league)
-                fresh_player = next((p for p in market_players if p.id == player.id), None)
-
-                if fresh_player and fresh_player.market_value != player.market_value:
-                    console.print(
-                        f"[yellow]⚠ Market value changed: €{player.market_value:,} → €{fresh_player.market_value:,}[/yellow]"
-                    )
-
-                    # Recalculate smart bid with fresh market value
-                    trader = Trader(self.api, self.settings, bid_learner=self.learner)
-                    value = PlayerValue.calculate(fresh_player)
-                    fresh_bid = trader.bidding.calculate_bid(
-                        asking_price=fresh_player.price,
-                        market_value=fresh_player.market_value,
-                        value_score=value.value_score,
-                        confidence=min(value.value_score / 100.0, 0.95),
-                        trend_change_pct=None,  # Conservative default for refresh bids
-                    )
-
-                    buy_price = fresh_bid.recommended_bid
-                    price_increase_pct = (
-                        ((buy_price - original_bid) / original_bid) * 100 if original_bid else 0
-                    )
-
-                    if price_increase_pct > 10:
-                        console.print(
-                            f"[yellow]⚠ Bid increased by {price_increase_pct:.1f}% (€{original_bid:,} → €{buy_price:,})[/yellow]"
-                        )
-
-                    # Update player reference for buying
-                    player = fresh_player
-                else:
-                    buy_price = original_bid
-
-            except Exception as e:
-                console.print(f"[yellow]⚠ Could not refresh bid (using original): {e}[/yellow]")
-                buy_price = original_bid
-
-            result = self._execute_buy(
-                league,
-                type(
-                    "Opp",
-                    (),
-                    {
-                        "player": player,
-                        "buy_price": buy_price,
-                        "reason": f"Lineup improvement (+{trade.improvement_points:.1f} pts)",
-                    },
-                )(),
-            )
-            results.append(result)
-
-            if not result.success:
-                console.print("[red]Buy failed, aborting trade[/red]")
-                return results
-
-            # Wait between buys
-            time.sleep(2)
-
-        # Step 2: Sell all players
-        console.print("\n[cyan]Step 2: Selling players...[/cyan]")
-        for player in trade.players_out:
-            result = self._execute_sell(
-                league, player, player.market_value, "Lineup improvement (replaced)"
-            )
-            results.append(result)
-
-            # Wait between sells
-            time.sleep(2)
-
-        return results
 
     def run_unified_trade_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Execute all qualifying trades from a single ranked candidate list.
@@ -1325,152 +773,6 @@ class AutoTrader:
 
         return results
 
-    def run_profit_sell_monitoring(self, league) -> list[AutoTradeResult]:
-        """Check owned players for profit targets and sell to Kickbase.
-
-        Identifies non-starting players that have appreciated since purchase
-        and sells them instantly to Kickbase (~95% market value) to free budget.
-
-        Sell conditions:
-        - Profit >= 10%: take profit
-        - Held 7+ days and losing value: cut losses (stop-loss at -5%)
-        """
-        from .trader import Trader
-
-        results = []
-        trader = Trader(
-            self.api,
-            self.settings,
-            bid_learner=self.learner,
-            activity_feed_learner=self.activity_feed_learner,
-        )
-
-        console.print("\n[bold cyan]📈 Profit Sell Monitoring[/bold cyan]")
-
-        squad = self.api.get_squad(league)
-        if not squad:
-            console.print("[dim]No squad loaded[/dim]")
-            return results
-
-        # Get EP recommendations to identify best-11 (protected from selling)
-        try:
-            ep_result = trader.get_ep_recommendations(league)
-            squad_scores = ep_result["squad_scores"]
-            # Top 11 by EP are protected
-            sorted_by_ep = sorted(squad_scores, key=lambda s: s.expected_points, reverse=True)
-            best_11_ids = {s.player_id for s in sorted_by_ep[:11]}
-        except Exception:
-            # Fallback: protect all players if scoring fails
-            console.print("[yellow]Could not score squad — skipping sell monitoring[/yellow]")
-            return results
-
-        # Check if EP pipeline has buy replacements lined up
-        buy_recs = ep_result.get("buy_recs", [])
-        trade_pairs = ep_result.get("trade_pairs", [])
-        has_replacement = len(buy_recs) > 0 or len(trade_pairs) > 0
-
-        sell_candidates = []
-        for player in squad:
-            # Never sell best-11 starters
-            if player.id in best_11_ids:
-                continue
-
-            # Need buy_price to calculate profit
-            if not player.buy_price or player.buy_price <= 0:
-                continue
-
-            profit = player.market_value - player.buy_price
-            profit_pct = (profit / player.buy_price) * 100
-
-            # Always sell when profit target hit — take the money
-            if profit_pct >= 10.0:
-                sell_candidates.append(
-                    (player, profit_pct, f"Profit target hit: +{profit_pct:.1f}% (€{profit:,})")
-                )
-            # Only cut losses if there's a better player to buy
-            elif profit_pct <= -5.0 and has_replacement:
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Stop-loss (replacement available): {profit_pct:.1f}% (€{profit:,})",
-                    )
-                )
-
-        if not sell_candidates:
-            console.print("[dim]No players meet sell criteria[/dim]")
-            return results
-
-        # Sort: highest profit first
-        sell_candidates.sort(key=lambda x: x[1], reverse=True)
-
-        console.print(f"[green]Found {len(sell_candidates)} player(s) to sell[/green]")
-
-        for player, profit_pct, reason in sell_candidates:
-            console.print(
-                f"\n[cyan]Selling {player.first_name} {player.last_name} to Kickbase "
-                f"(MV €{player.market_value:,}, bought €{player.buy_price:,}, "
-                f"{profit_pct:+.1f}%)[/cyan]"
-            )
-
-            if self.dry_run:
-                console.print("[yellow]DRY RUN: Sell not executed[/yellow]")
-                results.append(
-                    AutoTradeResult(
-                        success=True,
-                        player_name=f"{player.first_name} {player.last_name}",
-                        action="SELL",
-                        price=player.market_value,
-                        reason=reason,
-                        timestamp=time.time(),
-                    )
-                )
-                continue
-
-            try:
-                self.api.client.sell_to_kickbase(league.id, player.id)
-                console.print(f"[green]✓ Sold {player.first_name} {player.last_name}[/green]")
-
-                # Record flip outcome for learning
-                if self.learner:
-                    try:
-                        self.learner.record_flip_outcome(
-                            player_id=player.id,
-                            buy_price=player.buy_price,
-                            sell_price=player.market_value,
-                            profit_pct=profit_pct,
-                        )
-                    except Exception:
-                        pass
-
-                results.append(
-                    AutoTradeResult(
-                        success=True,
-                        player_name=f"{player.first_name} {player.last_name}",
-                        action="SELL",
-                        price=player.market_value,
-                        reason=reason,
-                        timestamp=time.time(),
-                    )
-                )
-            except Exception as e:
-                console.print(
-                    f"[red]✗ Failed to sell {player.first_name} {player.last_name}: {e}[/red]"
-                )
-                results.append(
-                    AutoTradeResult(
-                        success=False,
-                        player_name=f"{player.first_name} {player.last_name}",
-                        action="SELL",
-                        price=player.market_value,
-                        reason=reason,
-                        timestamp=time.time(),
-                        error=str(e),
-                    )
-                )
-
-        return results
-
     def run_full_session(self, league) -> AutoTradeSession:
         """Run a complete automated trading session.
 
@@ -1512,8 +814,16 @@ class AutoTrader:
         trade_results: list[AutoTradeResult] = []
         errors: list[str] = []
 
-        # Step 1: Check resolved auctions for learning
-        self.check_resolved_auctions(league)
+        # Step 1: Reconcile any pending bids against current squad (won/lost)
+        try:
+            squad = self.api.get_squad(league)
+            bids = self.api.get_my_bids(league)
+            self.tracker.resolve_auctions(
+                squad_ids={p.id for p in squad},
+                active_bid_ids={p.id for p in bids},
+            )
+        except Exception as e:
+            console.print(f"[yellow]Auction resolution failed: {e}[/yellow]")
 
         # Step 2: Build session context (single EP pipeline + trends + matchday phase)
         try:
@@ -1740,264 +1050,45 @@ class AutoTrader:
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
 
-    def _record_bid_placed(self, player, our_bid: int):
-        """Record that we placed a bid for learning"""
-        try:
-            from .bid_learner import AuctionOutcome
-            from .value_calculator import PlayerValue
-
-            # Calculate overbid percentage
-            asking_price = player.price
-            overbid_pct = ((our_bid - asking_price) / asking_price * 100) if asking_price > 0 else 0
-
-            # Get value score
-            value = PlayerValue.calculate(player)
-
-            outcome = AuctionOutcome(
-                player_id=player.id,
-                player_name=f"{player.first_name} {player.last_name}",
-                our_bid=our_bid,
-                asking_price=asking_price,
-                our_overbid_pct=overbid_pct,
-                won=False,  # Will be updated when auction resolves
-                timestamp=time.time(),
-                player_value_score=value.value_score,
-                market_value=player.market_value,
-            )
-
-            # Don't record yet - we'll record when we know the outcome
-            # Store in a pending bids file for later resolution
-            import json
-            from pathlib import Path
-
-            pending_file = Path("logs") / "pending_bids.json"
-            pending_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Load existing pending bids
-            pending = []
-            if pending_file.exists():
-                with open(pending_file) as f:
-                    pending = json.load(f)
-
-            # Add new bid
-            pending.append(
-                {
-                    "player_id": outcome.player_id,
-                    "player_name": outcome.player_name,
-                    "our_bid": outcome.our_bid,
-                    "asking_price": outcome.asking_price,
-                    "our_overbid_pct": outcome.our_overbid_pct,
-                    "timestamp": outcome.timestamp,
-                    "player_value_score": outcome.player_value_score,
-                    "market_value": outcome.market_value,
-                }
-            )
-
-            # Save
-            with open(pending_file, "w") as f:
-                json.dump(pending, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for bid recording
-
-    def check_resolved_auctions(self, league):
-        """Check pending bids and record outcomes for learning"""
-        try:
-            import json
-            from pathlib import Path
-
-            from .bid_learner import AuctionOutcome
-
-            pending_file = Path("logs") / "pending_bids.json"
-            if not pending_file.exists():
-                return
-
-            # Load pending bids
-            with open(pending_file) as f:
-                pending = json.load(f)
-
-            if not pending:
-                return
-
-            # Get our current team and active bids
-            my_team = self.api.get_squad(league)
-            my_bids = self.api.get_my_bids(league)
-
-            my_player_ids = {p.id for p in my_team}
-            active_bid_ids = {p.id for p in my_bids}
-
-            resolved = []
-            still_pending = []
-
-            for bid_data in pending:
-                player_id = bid_data["player_id"]
-
-                # Check if auction resolved
-                if player_id in my_player_ids:
-                    # We won!
-                    outcome = AuctionOutcome(
-                        player_id=bid_data["player_id"],
-                        player_name=bid_data["player_name"],
-                        our_bid=bid_data["our_bid"],
-                        asking_price=bid_data["asking_price"],
-                        our_overbid_pct=bid_data["our_overbid_pct"],
-                        won=True,
-                        timestamp=bid_data["timestamp"],
-                        player_value_score=bid_data.get("player_value_score"),
-                        market_value=bid_data.get("market_value"),
-                    )
-                    self.learner.record_outcome(outcome)
-                    resolved.append(bid_data["player_name"])
-
-                    # Also track purchase for flip outcome recording
-                    self._track_purchase(player_id, bid_data)
-
-                elif player_id not in active_bid_ids:
-                    # Not in our team and not in active bids = we lost
-                    outcome = AuctionOutcome(
-                        player_id=bid_data["player_id"],
-                        player_name=bid_data["player_name"],
-                        our_bid=bid_data["our_bid"],
-                        asking_price=bid_data["asking_price"],
-                        our_overbid_pct=bid_data["our_overbid_pct"],
-                        won=False,
-                        timestamp=bid_data["timestamp"],
-                        player_value_score=bid_data.get("player_value_score"),
-                        market_value=bid_data.get("market_value"),
-                    )
-                    self.learner.record_outcome(outcome)
-                    resolved.append(bid_data["player_name"])
-
-                else:
-                    # Still active bid
-                    still_pending.append(bid_data)
-
-            # Update pending file
-            with open(pending_file, "w") as f:
-                json.dump(still_pending, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for auction outcome recording
-
-    def _track_purchase(self, player_id: str, bid_data: dict):
-        """Track a player purchase for flip outcome recording"""
-        try:
-            import json
-            from pathlib import Path
-
-            purchases_file = Path("logs") / "tracked_purchases.json"
-            purchases_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Load existing purchases
-            purchases = {}
-            if purchases_file.exists():
-                with open(purchases_file) as f:
-                    purchases = json.load(f)
-
-            # Add this purchase
-            purchases[player_id] = {
-                "player_name": bid_data["player_name"],
-                "buy_price": bid_data["our_bid"],
-                "buy_date": bid_data["timestamp"],
-            }
-
-            # Save
-            with open(purchases_file, "w") as f:
-                json.dump(purchases, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for purchase tracking
-
     def optimize_and_execute_squad(self, league):
-        """
-        Run squad optimization and execute recommended sales
+        """Run squad optimization and execute any forced sales.
 
-        Returns:
-            SquadOptimization result
+        Uses avg_points directly as the ranking signal for who to drop —
+        simpler and tighter than the legacy PlayerValue+matchup pipeline.
         """
         from .squad_optimizer import SquadOptimizer
         from .trader import Trader
 
-        # Use trader's full optimization method (includes all context: performance, SOS, matchups)
-        trader = Trader(self.api, self.settings, bid_learner=self.learner)
+        trader = Trader(
+            self.api,
+            self.settings,
+            bid_learner=self.learner,
+            activity_feed_learner=self.activity_feed_learner,
+        )
         optimization = trader.optimize_squad_for_gameday(league)
 
         if not optimization:
             return None
 
-        # Get player values for display
-        team_analyses = trader.analyze_team(league)
-        player_values = trader.get_player_values_from_analyses(team_analyses)
+        # Use avg_points as the player_values dict for display purposes
+        squad = self.api.get_squad(league)
+        player_values = {p.id: float(p.average_points or 0) for p in squad}
 
-        # Display optimization
         optimizer = SquadOptimizer(min_squad_size=11, max_squad_size=15)
         optimizer.display_optimization(optimization, player_values=player_values)
 
-        # Execute recommended sales if needed
         if optimization.players_to_sell and not optimization.is_gameday_ready:
             console.print(
-                f"\n[yellow]⚠️  Budget negative, selling {len(optimization.players_to_sell)} player(s)...[/yellow]"
+                f"\n[yellow]⚠️  Budget negative, selling "
+                f"{len(optimization.players_to_sell)} player(s)...[/yellow]"
             )
             results = optimizer.execute_sell_recommendations(
                 optimization, api=self.api, league=league, dry_run=self.dry_run
             )
-
             if results["sold"]:
+                total = sum(p.market_value for p in results["sold"])
                 console.print(
-                    f"[green]✓ Sold {len(results['sold'])} player(s) for €{sum(p.market_value for p in results['sold']):,}[/green]"
+                    f"[green]✓ Sold {len(results['sold'])} player(s) for €{total:,}[/green]"
                 )
 
         return optimization
-
-    def _record_flip_outcome(self, player, sell_price: int):
-        """Record a flip outcome when we sell a player we bought"""
-        try:
-            import json
-            from pathlib import Path
-
-            from .bid_learner import FlipOutcome
-
-            purchases_file = Path("logs") / "tracked_purchases.json"
-            if not purchases_file.exists():
-                return
-
-            # Load purchases
-            with open(purchases_file) as f:
-                purchases = json.load(f)
-
-            if player.id not in purchases:
-                return  # We didn't buy this player (or not tracked)
-
-            purchase_data = purchases[player.id]
-            buy_price = purchase_data["buy_price"]
-            buy_date = purchase_data["buy_date"]
-            sell_date = time.time()
-
-            profit = sell_price - buy_price
-            profit_pct = (profit / buy_price * 100) if buy_price > 0 else 0
-            hold_days = int((sell_date - buy_date) / (24 * 3600))
-
-            outcome = FlipOutcome(
-                player_id=player.id,
-                player_name=f"{player.first_name} {player.last_name}",
-                buy_price=buy_price,
-                sell_price=sell_price,
-                profit=profit,
-                profit_pct=profit_pct,
-                hold_days=hold_days,
-                buy_date=buy_date,
-                sell_date=sell_date,
-                average_points=getattr(player, "average_points", None),
-                position=getattr(player, "position", None),
-                was_injured=(player.status != 0) if hasattr(player, "status") else False,
-            )
-
-            self.learner.record_flip(outcome)
-
-            # Remove from purchases
-            del purchases[player.id]
-            with open(purchases_file, "w") as f:
-                json.dump(purchases, f, indent=2)
-
-        except Exception:
-            pass  # Silent failure for flip outcome recording
