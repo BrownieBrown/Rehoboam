@@ -161,11 +161,16 @@ jobs:
           cp -r rehoboam/ deploy_package/
           cp pyproject.toml deploy_package/
           cp README.md deploy_package/
-          # Install Python dependencies into the standard Azure Functions
-          # location so the Linux Consumption runtime picks them up
-          # (WEBSITE_RUN_FROM_PACKAGE skips the SCM build pipeline).
-          pip install --target="deploy_package/.python_packages/lib/site-packages" \
-            -r deploy_package/requirements.txt
+
+      - name: Install Python dependencies in Azure Functions runtime container
+        # Build deps inside the official Azure Functions Python image so the
+        # resulting binaries (esp. cryptography/_rust.abi3.so) match the glibc
+        # version of Azure's Linux Consumption runtime.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/deploy_package:/pkg" \
+            mcr.microsoft.com/azure-functions/python:4-python3.11 \
+            bash -c "pip install --target=/pkg/.python_packages/lib/site-packages -r /pkg/requirements.txt"
 
       - name: Login to Azure
         uses: azure/login@v2
