@@ -161,6 +161,11 @@ jobs:
           cp -r rehoboam/ deploy_package/
           cp pyproject.toml deploy_package/
           cp README.md deploy_package/
+          # Install Python dependencies into the standard Azure Functions
+          # location so the Linux Consumption runtime picks them up
+          # (WEBSITE_RUN_FROM_PACKAGE skips the SCM build pipeline).
+          pip install --target="deploy_package/.python_packages/lib/site-packages" \
+            -r deploy_package/requirements.txt
 
       - name: Login to Azure
         uses: azure/login@v2
