@@ -6,20 +6,9 @@ from datetime import datetime
 
 from rich.console import Console
 
+from .services import AutoTradeResult, ExecutionService
+
 console = Console()
-
-
-@dataclass
-class AutoTradeResult:
-    """Result of an automated trade"""
-
-    success: bool
-    player_name: str
-    action: str  # BUY, SELL
-    price: int
-    reason: str
-    timestamp: float
-    error: str | None = None
 
 
 @dataclass
@@ -100,13 +89,8 @@ class AutoTrader:
         self.activity_feed_learner = ActivityFeedLearner()
         self.tracker = LearningTracker(self.learner)
 
-    def get_quick_budget(self, league) -> int | None:
-        """Lightweight budget check using the budget-only endpoint."""
-        try:
-            data = self.api.get_budget(league)
-            return data.get("b", data.get("budget", None))
-        except Exception:
-            return None
+        # Execution service — owns dry-run/try-except/AutoTradeResult plumbing
+        self.execution = ExecutionService(api=api, tracker=self.tracker, dry_run=dry_run)
 
     def _reset_daily_limits_if_needed(self):
         """Reset daily limits at midnight"""
@@ -196,182 +180,12 @@ class AutoTrader:
             flip_budget=flip_budget,
         )
 
-    def _execute_buy(self, league, opportunity) -> AutoTradeResult:
-        """Execute a buy order"""
-        player = opportunity.player
-        price = opportunity.buy_price
-
-        console.print(
-            f"\n[cyan]Buying {player.first_name} {player.last_name} for €{price:,}[/cyan]"
-        )
-
-        if self.dry_run:
-            console.print("[yellow]DRY RUN: Trade not executed[/yellow]")
-            return AutoTradeResult(
-                success=True,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="BUY",
-                price=price,
-                reason=opportunity.reason,
-                timestamp=time.time(),
-            )
-
-        try:
-            # Place offer
-            self.api.buy_player(league, player, price)
-
-            console.print(
-                f"[green]✓ Buy order placed for {player.first_name} {player.last_name}[/green]"
-            )
-
-            # Record auction outcome for learning (bid placed)
-            # Outcome (won/lost) is resolved later by tracker.resolve_auctions
-            self.tracker.record_bid_placed(player, price)
-
-            return AutoTradeResult(
-                success=True,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="BUY",
-                price=price,
-                reason=opportunity.reason,
-                timestamp=time.time(),
-            )
-
-        except Exception as e:
-            error_msg = str(e)
-            console.print(
-                f"[red]✗ Failed to buy {player.first_name} {player.last_name}: {error_msg}[/red]"
-            )
-
-            return AutoTradeResult(
-                success=False,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="BUY",
-                price=price,
-                reason=opportunity.reason,
-                timestamp=time.time(),
-                error=error_msg,
-            )
-
-    def _execute_sell(self, league, player, price: int, reason: str) -> AutoTradeResult:
-        """Execute a sell order"""
-        console.print(
-            f"\n[cyan]Selling {player.first_name} {player.last_name} for €{price:,}[/cyan]"
-        )
-
-        if self.dry_run:
-            console.print("[yellow]DRY RUN: Trade not executed[/yellow]")
-            return AutoTradeResult(
-                success=True,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="SELL",
-                price=price,
-                reason=reason,
-                timestamp=time.time(),
-            )
-
-        try:
-            # List player on market
-            self.api.sell_player(league=league, player=player, price=price)
-
-            console.print(
-                f"[green]✓ {player.first_name} {player.last_name} listed for sale[/green]"
-            )
-
-            # Record flip outcome for learning (if we bought this player)
-            self.tracker.record_flip_outcome(player, price)
-
-            return AutoTradeResult(
-                success=True,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="SELL",
-                price=price,
-                reason=reason,
-                timestamp=time.time(),
-            )
-
-        except Exception as e:
-            error_msg = str(e)
-            console.print(
-                f"[red]✗ Failed to sell {player.first_name} {player.last_name}: {error_msg}[/red]"
-            )
-
-            return AutoTradeResult(
-                success=False,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="SELL",
-                price=price,
-                reason=reason,
-                timestamp=time.time(),
-                error=error_msg,
-            )
-
-    def _execute_instant_sell(self, league, player, reason: str) -> AutoTradeResult:
-        """Sell a player instantly to Kickbase at market value.
-
-        Unlike _execute_sell (which lists on the transfer market),
-        this immediately removes the player from the squad and frees the slot.
-        Used by trade pairs where the slot must be free before placing a buy bid.
-        """
-        price = player.market_value
-        console.print(
-            f"\n[cyan]Instant-selling {player.first_name} {player.last_name}"
-            f" to Kickbase for ~€{price:,}[/cyan]"
-        )
-
-        if self.dry_run:
-            console.print("[yellow]DRY RUN: Trade not executed[/yellow]")
-            return AutoTradeResult(
-                success=True,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="SELL",
-                price=price,
-                reason=reason,
-                timestamp=time.time(),
-            )
-
-        try:
-            self.api.sell_player_instant(league=league, player=player)
-
-            console.print(
-                f"[green]✓ {player.first_name} {player.last_name} sold instantly to Kickbase[/green]"
-            )
-
-            self.tracker.record_flip_outcome(player, price)
-
-            return AutoTradeResult(
-                success=True,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="SELL",
-                price=price,
-                reason=reason,
-                timestamp=time.time(),
-            )
-
-        except Exception as e:
-            error_msg = str(e)
-            console.print(
-                f"[red]✗ Failed to instant-sell {player.first_name} {player.last_name}: {error_msg}[/red]"
-            )
-
-            return AutoTradeResult(
-                success=False,
-                player_name=f"{player.first_name} {player.last_name}",
-                action="SELL",
-                price=price,
-                reason=reason,
-                timestamp=time.time(),
-                error=error_msg,
-            )
-
     def run_unified_trade_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Execute all qualifying trades from a single ranked candidate list.
 
         Trade pairs and plain buys compete head-to-head by EP gain.
         This replaces the old separate profit + lineup sessions.
         """
-        from types import SimpleNamespace
-
         results: list[AutoTradeResult] = []
         buy_recs = ctx.ep_result.get("buy_recs", [])
         trade_pairs = ctx.ep_result.get("trade_pairs", [])
@@ -474,14 +288,7 @@ class AutoTrader:
                     )
                     continue
 
-                result = self._execute_buy(
-                    league,
-                    SimpleNamespace(
-                        player=obj.player,
-                        buy_price=obj.recommended_bid,
-                        reason=obj.reason,
-                    ),
-                )
+                result = self.execution.buy(league, obj.player, obj.recommended_bid, obj.reason)
                 results.append(result)
                 if result.success:
                     ctx.executed_trade_count += 1
@@ -514,7 +321,7 @@ class AutoTrader:
                     f" (EP +{obj.ep_gain:.1f})[/cyan]"
                 )
 
-                sell_result = self._execute_instant_sell(
+                sell_result = self.execution.instant_sell(
                     league,
                     obj.sell_player,
                     f"Trade pair: making room for {obj.buy_player.last_name} (EP +{obj.ep_gain:.1f})",
@@ -524,13 +331,11 @@ class AutoTrader:
                     console.print("[red]Sell failed, skipping this trade pair[/red]")
                     continue
 
-                buy_result = self._execute_buy(
+                buy_result = self.execution.buy(
                     league,
-                    SimpleNamespace(
-                        player=obj.buy_player,
-                        buy_price=obj.recommended_bid,
-                        reason=f"Trade pair: EP +{obj.ep_gain:.1f}",
-                    ),
+                    obj.buy_player,
+                    obj.recommended_bid,
+                    f"Trade pair: EP +{obj.ep_gain:.1f}",
                 )
                 results.append(buy_result)
                 if buy_result.success:
@@ -562,13 +367,11 @@ class AutoTrader:
                 if opp.buy_price > ctx.flip_budget:
                     continue
 
-                result = self._execute_buy(
+                result = self.execution.buy(
                     league,
-                    SimpleNamespace(
-                        player=opp.player,
-                        buy_price=opp.buy_price,
-                        reason=f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
-                    ),
+                    opp.player,
+                    opp.buy_price,
+                    f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
                 )
                 results.append(result)
                 if result.success:
@@ -710,66 +513,11 @@ class AutoTrader:
         console.print(f"[green]Found {len(sell_candidates)} player(s) to sell[/green]")
 
         for player, profit_pct, reason in sell_candidates:
-            console.print(
-                f"\n[cyan]Selling {player.first_name} {player.last_name} to Kickbase "
-                f"(MV €{player.market_value:,}, bought €{player.buy_price:,}, "
-                f"{profit_pct:+.1f}%)[/cyan]"
+            full_reason = (
+                f"{reason} (bought €{player.buy_price:,}, "
+                f"now €{player.market_value:,}, {profit_pct:+.1f}%)"
             )
-
-            if self.dry_run:
-                console.print("[yellow]DRY RUN: Sell not executed[/yellow]")
-                results.append(
-                    AutoTradeResult(
-                        success=True,
-                        player_name=f"{player.first_name} {player.last_name}",
-                        action="SELL",
-                        price=player.market_value,
-                        reason=reason,
-                        timestamp=time.time(),
-                    )
-                )
-                continue
-
-            try:
-                self.api.client.sell_to_kickbase(league.id, player.id)
-                console.print(f"[green]✓ Sold {player.first_name} {player.last_name}[/green]")
-
-                if self.learner:
-                    try:
-                        self.learner.record_flip_outcome(
-                            player_id=player.id,
-                            buy_price=player.buy_price,
-                            sell_price=player.market_value,
-                            profit_pct=profit_pct,
-                        )
-                    except Exception:
-                        pass
-
-                results.append(
-                    AutoTradeResult(
-                        success=True,
-                        player_name=f"{player.first_name} {player.last_name}",
-                        action="SELL",
-                        price=player.market_value,
-                        reason=reason,
-                        timestamp=time.time(),
-                    )
-                )
-            except Exception as e:
-                console.print(
-                    f"[red]✗ Failed to sell {player.first_name} {player.last_name}: {e}[/red]"
-                )
-                results.append(
-                    AutoTradeResult(
-                        success=False,
-                        player_name=f"{player.first_name} {player.last_name}",
-                        action="SELL",
-                        price=player.market_value,
-                        reason=reason,
-                        timestamp=time.time(),
-                        error=str(e),
-                    )
-                )
+            results.append(self.execution.instant_sell(league, player, full_reason))
 
         return results
 
