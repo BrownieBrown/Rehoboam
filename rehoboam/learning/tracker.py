@@ -55,8 +55,18 @@ class LearningTracker:
     # Bid placed → pending
     # ------------------------------------------------------------------
 
-    def record_bid_placed(self, player, our_bid: int) -> None:
-        """Record a freshly-placed bid as pending (outcome TBD)."""
+    def record_bid_placed(
+        self,
+        player,
+        our_bid: int,
+        sell_plan_player_ids: list[str] | None = None,
+    ) -> None:
+        """Record a freshly-placed bid as pending (outcome TBD).
+
+        If the buy has a paired sell_plan (players to sell after winning to
+        recover budget), persist their IDs here so resolve_auctions can
+        execute the sells when we detect we won the auction.
+        """
         try:
             asking_price = player.price
             overbid_pct = ((our_bid - asking_price) / asking_price * 100) if asking_price > 0 else 0
@@ -70,6 +80,8 @@ class LearningTracker:
                 "timestamp": time.time(),
                 "market_value": getattr(player, "market_value", 0),
             }
+            if sell_plan_player_ids:
+                entry["sell_plan_player_ids"] = sell_plan_player_ids
 
             pending = _load_json(_PENDING_BIDS, [])
             pending.append(entry)
@@ -81,28 +93,41 @@ class LearningTracker:
     # Pending → resolved (won/lost)
     # ------------------------------------------------------------------
 
-    def resolve_auctions(self, squad_ids: set[str], active_bid_ids: set[str]) -> None:
+    def resolve_auctions(
+        self,
+        squad_ids: set[str],
+        active_bid_ids: set[str],
+    ) -> list[str]:
         """Reconcile pending bids against current squad + bids.
 
-        - If a pending bid's player is now in the squad → we won
-        - If a pending bid's player is not in squad AND not in active bids → we lost
+        Returns a list of player IDs that need to be sold (from sell plans
+        attached to bids we won). The caller is responsible for executing
+        those sells — this method only records outcomes and returns the IDs.
+
+        - If a pending bid's player is now in the squad → we won.
+          If the bid had sell_plan_player_ids, they're returned.
+        - If a pending bid's player is not in squad AND not in active bids → lost
         - Otherwise → still pending (keep for next check)
         """
+        sell_plan_ids: list[str] = []
         try:
             pending = _load_json(_PENDING_BIDS, [])
             if not pending:
-                return
+                return sell_plan_ids
 
             still_pending = []
             for bid_data in pending:
                 player_id = bid_data["player_id"]
 
                 if player_id in squad_ids:
-                    # Won — record the outcome AND track the purchase for flip calc
                     self._record_outcome(bid_data, won=True)
                     self._track_purchase(player_id, bid_data)
+                    # Collect sell plan IDs from bids we won — caller will
+                    # execute the sells to recover budget.
+                    for sp_id in bid_data.get("sell_plan_player_ids", []):
+                        if sp_id not in sell_plan_ids:
+                            sell_plan_ids.append(sp_id)
                 elif player_id not in active_bid_ids:
-                    # Lost — record the outcome and drop
                     self._record_outcome(bid_data, won=False)
                 else:
                     still_pending.append(bid_data)
@@ -110,6 +135,7 @@ class LearningTracker:
             _save_json(_PENDING_BIDS, still_pending)
         except Exception:
             pass
+        return sell_plan_ids
 
     def _record_outcome(self, bid_data: dict, won: bool) -> None:
         try:

@@ -57,8 +57,22 @@ class ExecutionService:
     # Public actions
     # ------------------------------------------------------------------
 
-    def buy(self, league, player, price: int, reason: str) -> AutoTradeResult:
-        """Place a buy offer at the given price."""
+    def buy(
+        self,
+        league,
+        player,
+        price: int,
+        reason: str,
+        sell_plan_player_ids: list[str] | None = None,
+    ) -> AutoTradeResult:
+        """Place a buy offer at the given price.
+
+        If the buy has a paired sell_plan (bench players to sell after winning
+        the auction to recover budget), pass their IDs here. They'll be
+        persisted alongside the pending bid and executed when resolve_auctions
+        detects we won. This ensures buy-first-sell-after semantics: we never
+        sell the old player before securing the new one.
+        """
         return self._do(
             action="BUY",
             player=player,
@@ -67,7 +81,9 @@ class ExecutionService:
             announce=f"Buying {player.first_name} {player.last_name} for €{price:,}",
             success_msg=f"Buy order placed for {player.first_name} {player.last_name}",
             api_call=lambda: self.api.buy_player(league, player, price),
-            on_success=lambda: self.tracker.record_bid_placed(player, price),
+            on_success=lambda: self.tracker.record_bid_placed(
+                player, price, sell_plan_player_ids=sell_plan_player_ids
+            ),
         )
 
     def instant_sell(self, league, player, reason: str) -> AutoTradeResult:

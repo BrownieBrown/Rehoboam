@@ -293,6 +293,22 @@ class Trader:
 
         for pair in trade_pairs:
             try:
+                # Trade pairs get a synthetic sell plan so calculate_ep_bid
+                # factors in the sell recovery when computing budget_ceiling.
+                # Without this, budget_ceiling = current_budget + 0 which
+                # caps the bid below asking price → recommended_bid=0 and
+                # perfectly affordable trade pairs get silently dropped.
+                from .scoring.models import SellPlan
+
+                sell_recovery = int(pair.sell_player.market_value * 0.95)
+                synthetic_sell_plan = SellPlan(
+                    players_to_sell=[],
+                    total_recovery=sell_recovery,
+                    net_budget_after=int(current_budget) + sell_recovery - pair.buy_player.price,
+                    is_viable=True,
+                    ep_impact=0.0,
+                    reasoning="Trade pair sell recovery",
+                )
                 bid_rec = self.bidding.calculate_ep_bid(
                     asking_price=pair.buy_player.price,
                     market_value=pair.buy_player.market_value,
@@ -300,6 +316,7 @@ class Trader:
                     marginal_ep_gain=pair.ep_gain,
                     confidence=0.7,
                     current_budget=int(current_budget),
+                    sell_plan=synthetic_sell_plan,
                     player_id=pair.buy_player.id,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
@@ -372,6 +389,17 @@ class Trader:
                 pair.metadata = pair.metadata or {}
                 pair.metadata["trend_7d_pct"] = trend.trend_7d_pct
 
+                from .scoring.models import SellPlan
+
+                sell_recovery = int(pair.sell_player.market_value * 0.95)
+                synthetic_sell_plan = SellPlan(
+                    players_to_sell=[],
+                    total_recovery=sell_recovery,
+                    net_budget_after=current_budget + sell_recovery - pair.buy_player.price,
+                    is_viable=True,
+                    ep_impact=0.0,
+                    reasoning="Trade pair sell recovery",
+                )
                 bid_rec = self.bidding.calculate_ep_bid(
                     asking_price=pair.buy_player.price,
                     market_value=pair.buy_player.market_value,
@@ -379,6 +407,7 @@ class Trader:
                     marginal_ep_gain=pair.ep_gain,
                     confidence=0.7,
                     current_budget=current_budget,
+                    sell_plan=synthetic_sell_plan,
                     player_id=pair.buy_player.id,
                     trend_change_pct=trend.trend_7d_pct,
                 )

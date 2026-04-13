@@ -118,17 +118,23 @@ class AutoTrader:
                 allow_flips=False,
                 reason=f"Match in {days_until_match}d — lineup improvements only",
             )
-        else:
+        elif days_until_match is not None:
             return MatchdayPhase(
                 days_until_match=days_until_match,
                 phase="aggressive",
                 max_trades=self.max_trades_per_session,
                 allow_flips=True,
-                reason=(
-                    f"Match in {days_until_match}d — full trading"
-                    if days_until_match
-                    else "Unknown schedule — full trading"
-                ),
+                reason=f"Match in {days_until_match}d — full trading",
+            )
+        else:
+            # Unknown schedule — default to moderate (not aggressive) to avoid
+            # accidentally going into debt right before a matchday we can't see.
+            return MatchdayPhase(
+                days_until_match=None,
+                phase="moderate",
+                max_trades=max(self.max_trades_per_session // 2, 2),
+                allow_flips=False,
+                reason="Unknown schedule — moderate trading (no flips)",
             )
 
     def _build_session_context(self, league) -> EPSessionContext:
@@ -288,7 +294,21 @@ class AutoTrader:
                     )
                     continue
 
-                result = self.execution.buy(league, obj.player, obj.recommended_bid, obj.reason)
+                # If buy exceeds current budget but has a sell plan, persist
+                # the sell plan IDs alongside the bid. Once the auction resolves
+                # (we won), the sells will be executed to recover the budget.
+                # This is buy-first-sell-after: never sell before securing the player.
+                sp_ids = None
+                if hasattr(obj, "sell_plan") and obj.sell_plan and obj.sell_plan.players_to_sell:
+                    sp_ids = [e.player_id for e in obj.sell_plan.players_to_sell]
+
+                result = self.execution.buy(
+                    league,
+                    obj.player,
+                    obj.recommended_bid,
+                    obj.reason,
+                    sell_plan_player_ids=sp_ids,
+                )
                 results.append(result)
                 if result.success:
                     ctx.executed_trade_count += 1
@@ -341,14 +361,26 @@ class AutoTrader:
                 if buy_result.success:
                     ctx.executed_trade_count += 1
                     self.daily_spend += obj.recommended_bid
-                    ctx.flip_budget -= net_cost
+                    # Use the actual sell proceeds (from sell_result.price) rather
+                    # than the estimated market value, to avoid budget drift.
+                    actual_net_cost = obj.recommended_bid - sell_result.price
+                    ctx.flip_budget -= actual_net_cost
                     # Trade pair: slot freed by sell, consumed by buy = net zero
                 else:
                     console.print(
                         f"[bold red]⚠ WARNING: Sold {obj.sell_player.last_name} but failed to buy "
-                        f"{obj.buy_player.last_name} — squad is now {current_squad_size - 1}/15[/bold red]"
+                        f"{obj.buy_player.last_name}[/bold red]"
                     )
-                    available_slots += 1  # Sell freed a slot but buy failed
+                    # Sell freed a slot but buy failed — re-fetch actual state
+                    # to avoid the counter drifting from reality.
+                    try:
+                        fresh = self.api.get_squad(league)
+                        fresh_bids = self.api.get_my_bids(league)
+                        current_squad_size = len(fresh)
+                        active_bid_count = len(fresh_bids)
+                        available_slots = 15 - current_squad_size - active_bid_count
+                    except Exception:
+                        available_slots += 1  # Fallback: optimistic increment
 
         # Execute profit flips with remaining slots
         if profit_flip_candidates and available_slots > 0:
@@ -417,7 +449,9 @@ class AutoTrader:
         results = []
         console.print("\n[bold cyan]📈 Profit Sell Monitoring (trend-aware)[/bold cyan]")
 
-        squad = ctx.squad
+        # Refresh squad — earlier phases (auction resolution, deferred sells)
+        # may have changed the squad since ctx was built.
+        squad = self.api.get_squad(league)
         if not squad:
             console.print("[dim]No squad loaded[/dim]")
             return results
@@ -562,14 +596,32 @@ class AutoTrader:
         trade_results: list[AutoTradeResult] = []
         errors: list[str] = []
 
-        # Step 1: Reconcile any pending bids against current squad (won/lost)
+        # Step 1: Reconcile pending bids (won/lost) + execute deferred sell plans
         try:
             squad = self.api.get_squad(league)
             bids = self.api.get_my_bids(league)
-            self.tracker.resolve_auctions(
+            deferred_sell_ids = self.tracker.resolve_auctions(
                 squad_ids={p.id for p in squad},
                 active_bid_ids={p.id for p in bids},
             )
+            # Execute any deferred sell plans from bids we won (buy-first-sell-after).
+            if deferred_sell_ids:
+                console.print(
+                    f"[cyan]Executing deferred sell plan for {len(deferred_sell_ids)} player(s)[/cyan]"
+                )
+                for sell_id in deferred_sell_ids:
+                    sell_player = next((p for p in squad if p.id == sell_id), None)
+                    if sell_player:
+                        result = self.execution.instant_sell(
+                            league,
+                            sell_player,
+                            "Deferred sell plan — recovering budget after winning auction",
+                        )
+                        sell_results.append(result)
+                    else:
+                        console.print(
+                            f"[yellow]Deferred sell target {sell_id} not in squad (already sold?)[/yellow]"
+                        )
         except Exception as e:
             console.print(f"[yellow]Auction resolution failed: {e}[/yellow]")
 
@@ -622,19 +674,8 @@ class AutoTrader:
         # Step 5: Squad Optimization (budget/size safety)
         console.print("\n[bold cyan]🎯 Squad Optimization[/bold cyan]")
         try:
-            squad_optimization = self.optimize_and_execute_squad(league)
-            if squad_optimization and squad_optimization.players_to_sell:
-                for player in squad_optimization.players_to_sell:
-                    sell_results.append(
-                        AutoTradeResult(
-                            success=True,
-                            player_name=f"{player.first_name} {player.last_name}",
-                            action="SELL",
-                            price=player.market_value,
-                            reason="Squad optimization - excess player",
-                            timestamp=time.time(),
-                        )
-                    )
+            optimization_sells = self.optimize_and_execute_squad(league)
+            sell_results.extend(optimization_sells)
         except Exception as e:
             error_msg = f"Squad optimization error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
@@ -798,14 +839,16 @@ class AutoTrader:
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
 
-    def optimize_and_execute_squad(self, league):
+    def optimize_and_execute_squad(self, league) -> list[AutoTradeResult]:
         """Run squad optimization and execute any forced sales.
 
-        Uses avg_points directly as the ranking signal for who to drop —
-        simpler and tighter than the legacy PlayerValue+matchup pipeline.
+        Returns a list of AutoTradeResult for actual sells executed (not
+        hypothetical). An empty list means no sells were needed.
         """
         from .squad_optimizer import SquadOptimizer
         from .trader import Trader
+
+        results: list[AutoTradeResult] = []
 
         trader = Trader(
             self.api,
@@ -816,9 +859,8 @@ class AutoTrader:
         optimization = trader.optimize_squad_for_gameday(league)
 
         if not optimization:
-            return None
+            return results
 
-        # Use avg_points as the player_values dict for display purposes
         squad = self.api.get_squad(league)
         player_values = {p.id: float(p.average_points or 0) for p in squad}
 
@@ -830,13 +872,14 @@ class AutoTrader:
                 f"\n[yellow]⚠️  Budget negative, selling "
                 f"{len(optimization.players_to_sell)} player(s)...[/yellow]"
             )
-            results = optimizer.execute_sell_recommendations(
-                optimization, api=self.api, league=league, dry_run=self.dry_run
-            )
-            if results["sold"]:
-                total = sum(p.market_value for p in results["sold"])
-                console.print(
-                    f"[green]✓ Sold {len(results['sold'])} player(s) for €{total:,}[/green]"
+            # Execute via our ExecutionService so dry_run, tracking, and real
+            # success/failure results all flow through the same path.
+            for player in optimization.players_to_sell:
+                result = self.execution.instant_sell(
+                    league,
+                    player,
+                    "Squad optimization — forced sell to recover budget",
                 )
+                results.append(result)
 
-        return optimization
+        return results
