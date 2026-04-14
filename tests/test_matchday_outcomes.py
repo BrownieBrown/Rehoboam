@@ -1,9 +1,26 @@
 """Tests for matchday outcome tracking and EP accuracy factor."""
 
+import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rehoboam.bid_learner import BidLearner
+
+
+def _set_outcome_timestamp(db_path: Path, player_id: str, days_ago: float) -> None:
+    """Overwrite timestamps for all outcomes of *player_id* to a past date.
+
+    SQLite's CURRENT_TIMESTAMP stores UTC text; we use the same format so the
+    decay calculation reads it back correctly.
+    """
+    ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE matchday_outcomes SET timestamp = ? WHERE player_id = ?",
+            (ts, player_id),
+        )
+        conn.commit()
 
 
 class TestMatchdayOutcomeRecording:
@@ -152,6 +169,65 @@ class TestEPAccuracyFactor:
             )
             # Should be 1.0 (capped), not 0.8 from position fallback
             assert factor == 1.0
+
+
+class TestTimeDecay:
+    """Recent matchday outcomes should weigh more than old ones."""
+
+    def test_recent_data_dominates_old_data(self):
+        """When a player's recent predictions are accurate but old ones were bad,
+        the returned factor should lean toward the recent (accurate) signal."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            learner = BidLearner(db_path=db_path)
+
+            # Old (inaccurate) records: 5 matchdays where actual = 50% of predicted
+            for i in range(5):
+                learner.record_matchday_outcome(
+                    player_id="p_old",
+                    player_position="MID",
+                    matchday_date=f"2025-10-{10 + i}",
+                    predicted_ep=80.0,
+                    actual_points=40.0,
+                )
+            _set_outcome_timestamp(db_path, "p_old", days_ago=180)
+
+            # Recent (accurate) records: 5 matchdays where actual = 95% of predicted
+            for i in range(5):
+                learner.record_matchday_outcome(
+                    player_id="p_old",
+                    player_position="MID",
+                    matchday_date=f"2026-04-{1 + i}",
+                    predicted_ep=80.0,
+                    actual_points=76.0,
+                )
+            # Recent records use CURRENT_TIMESTAMP (= now, age ~0)
+
+            factor = learner.get_ep_accuracy_factor(player_id="p_old", min_matchdays=3)
+            # Without decay: raw average would pull toward 0.725
+            # With 60-day half-life: 180-day-old rows decay to ~0.125x weight
+            # so factor should be ~0.93 — well above 0.8
+            assert factor > 0.85, (
+                f"Recent accurate data should dominate (got {factor:.3f}); "
+                "decay may not be applied."
+            )
+
+    def test_identical_data_same_age_gives_same_result_as_unweighted(self):
+        """Sanity check: when all rows have age ≈ 0 the decay weight is ≈ 1,
+        so the factor matches the old unweighted average."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            learner = BidLearner(db_path=Path(tmpdir) / "test.db")
+            for i in range(5):
+                learner.record_matchday_outcome(
+                    player_id="p1",
+                    player_position="FWD",
+                    matchday_date=f"2026-04-{1 + i}",
+                    predicted_ep=50.0,
+                    actual_points=45.0,
+                )
+            factor = learner.get_ep_accuracy_factor(player_id="p1", min_matchdays=3)
+            # 45/50 = 0.9 — no decay effect because all rows are fresh
+            assert 0.88 <= factor <= 0.92
 
 
 class TestWonPlayerOutcomeQuality:

@@ -2,7 +2,7 @@
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -284,6 +284,12 @@ class BidLearner:
             )
             conn.commit()
 
+    # Half-life (days) for exponential decay of historical EP accuracy data.
+    # Recent predictions count more — a 60-day half-life means 2-month-old
+    # predictions are weighted half as much as today's, and 4-month-old ones
+    # a quarter. Tuned for fantasy football's seasonal form cycles.
+    EP_ACCURACY_HALF_LIFE_DAYS = 60.0
+
     def get_ep_accuracy_factor(
         self,
         player_id: str | None = None,
@@ -292,57 +298,101 @@ class BidLearner:
     ) -> float:
         """Return EP accuracy multiplier clamped to [0.5, 1.0].
 
-        Tries player-specific accuracy first.  Falls back to position-level
-        accuracy when the player has fewer than *min_matchdays* recorded games.
-        Returns 1.0 when there is insufficient data at both levels.
+        Uses time-decayed weights — recent matchdays count more than old ones
+        (60-day half-life). Tries player-specific accuracy first, falls back
+        to position-level when the player has fewer than *min_matchdays*
+        recorded games. Returns 1.0 when data is insufficient at both levels.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            # 1. Try player-specific accuracy
-            if player_id is not None:
-                cursor = conn.execute(
-                    """
-                    SELECT COUNT(*), AVG(actual_points), AVG(predicted_ep)
-                    FROM matchday_outcomes
-                    WHERE player_id = ? AND predicted_ep > 0
-                    """,
-                    (player_id,),
-                )
-                row = cursor.fetchone()
-                count, avg_actual, avg_predicted = row if row else (0, None, None)
+        # 1. Try player-specific accuracy
+        if player_id is not None:
+            factor = self._decayed_accuracy(
+                filter_col="player_id",
+                filter_val=player_id,
+                min_matchdays=min_matchdays,
+            )
+            if factor is not None:
+                return factor
 
-                if (
-                    count is not None
-                    and count >= min_matchdays
-                    and avg_predicted
-                    and avg_predicted > 0
-                ):
-                    raw_factor = avg_actual / avg_predicted
-                    return max(0.5, min(1.0, raw_factor))
-
-            # 2. Fall back to position-level accuracy
-            if position is not None:
-                cursor = conn.execute(
-                    """
-                    SELECT COUNT(*), AVG(actual_points), AVG(predicted_ep)
-                    FROM matchday_outcomes
-                    WHERE player_position = ? AND predicted_ep > 0
-                    """,
-                    (position,),
-                )
-                row = cursor.fetchone()
-                count, avg_actual, avg_predicted = row if row else (0, None, None)
-
-                if (
-                    count is not None
-                    and count >= min_matchdays
-                    and avg_predicted
-                    and avg_predicted > 0
-                ):
-                    raw_factor = avg_actual / avg_predicted
-                    return max(0.5, min(1.0, raw_factor))
+        # 2. Fall back to position-level accuracy
+        if position is not None:
+            factor = self._decayed_accuracy(
+                filter_col="player_position",
+                filter_val=position,
+                min_matchdays=min_matchdays,
+            )
+            if factor is not None:
+                return factor
 
         # 3. Insufficient data — return neutral multiplier
         return 1.0
+
+    def _decayed_accuracy(
+        self,
+        filter_col: str,
+        filter_val: str,
+        min_matchdays: int,
+    ) -> float | None:
+        """Compute time-decayed EP accuracy for a filter (player_id or position).
+
+        Weights each matchday by ``0.5 ** (age_days / half_life)`` and returns
+        ``weighted_actual / weighted_predicted`` clamped to [0.5, 1.0]. Returns
+        None when there are fewer than *min_matchdays* qualifying records.
+
+        Only ``filter_col`` values listed above are accepted — the column name
+        is interpolated directly into the SQL, so callers must not pass
+        user-controlled input. The validation is a ValueError (not assert)
+        so it survives Python's -O optimization mode.
+        """
+        if filter_col not in ("player_id", "player_position"):
+            raise ValueError(f"invalid filter_col: {filter_col}")
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                f"""
+                SELECT predicted_ep, actual_points, timestamp
+                FROM matchday_outcomes
+                WHERE {filter_col} = ? AND predicted_ep > 0
+                """,
+                (filter_val,),
+            )
+            rows = cursor.fetchall()
+
+        if len(rows) < min_matchdays:
+            return None
+
+        now_ts = datetime.now(tz=timezone.utc).timestamp()
+        half_life_seconds = self.EP_ACCURACY_HALF_LIFE_DAYS * 86_400
+
+        weighted_actual = 0.0
+        weighted_predicted = 0.0
+        for predicted_ep, actual_points, ts in rows:
+            age_seconds = self._age_seconds(ts, now_ts)
+            weight = 0.5 ** (age_seconds / half_life_seconds)
+            weighted_actual += weight * actual_points
+            weighted_predicted += weight * predicted_ep
+
+        if weighted_predicted <= 0:
+            return None
+
+        raw_factor = weighted_actual / weighted_predicted
+        return max(0.5, min(1.0, raw_factor))
+
+    @staticmethod
+    def _age_seconds(timestamp_str: str | None, now_ts: float) -> float:
+        """Age in seconds of a matchday_outcomes.timestamp value.
+
+        SQLite's CURRENT_TIMESTAMP stores UTC as text ("YYYY-MM-DD HH:MM:SS").
+        We parse it as UTC-aware so the arithmetic against *now_ts* (also UTC)
+        is correct. Unparseable or missing timestamps return age=0 so they're
+        treated as fresh rather than discarded.
+        """
+        if not timestamp_str:
+            return 0.0
+        try:
+            dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return max(0.0, now_ts - dt.timestamp())
+        except (ValueError, TypeError):
+            return 0.0
 
     def _get_won_player_outcome_quality(self) -> float:
         """How well did won-auction players perform on matchdays?
