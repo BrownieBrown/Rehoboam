@@ -36,6 +36,22 @@ class MatchdayPhase:
     reason: str
 
 
+def _max_flip_hold_days(days_until_match: int | None) -> int | None:
+    """Cap on a profit-flip's hold_days to fit before the next matchday.
+
+    A flip we can't sell before kickoff risks both an unsellable position and
+    the value drop that often follows uncertain matchday outcomes. Returns
+    ``None`` when the schedule is unknown (no constraint applied — the
+    matchday-phase logic already defaults to no-flips in that case).
+
+    The "−1 day" buffer leaves a safety margin for the sell to actually clear
+    given Kickbase's auction mechanics.
+    """
+    if days_until_match is None:
+        return None
+    return max(1, days_until_match - 1)
+
+
 @dataclass
 class EPSessionContext:
     """Single-fetch context for the entire auto session."""
@@ -261,12 +277,29 @@ class AutoTrader:
                 ep_player_ids = {
                     rec.player.id for _, _, rec in candidates if hasattr(rec, "player")
                 } | {pair.buy_player.id for _, _, pair in candidates if hasattr(pair, "buy_player")}
+
+                # Cap flip hold time so we don't enter a position we can't exit
+                # before the next matchday — being caught at kickoff with a
+                # half-finished flip risks the lineup penalty AND market drop.
+                max_hold_days = _max_flip_hold_days(ctx.matchday_phase.days_until_match)
+
+                skipped_long_hold = 0
                 for opp in profit_opps:
-                    if opp.player.id not in ep_player_ids:
-                        profit_flip_candidates.append(opp)
+                    if opp.player.id in ep_player_ids:
+                        continue
+                    if max_hold_days is not None and opp.hold_days > max_hold_days:
+                        skipped_long_hold += 1
+                        continue
+                    profit_flip_candidates.append(opp)
+
                 if profit_flip_candidates:
                     console.print(
                         f"[cyan]💰 + {len(profit_flip_candidates)} profit flip candidate(s)[/cyan]"
+                    )
+                if skipped_long_hold > 0:
+                    console.print(
+                        f"[dim]Skipped {skipped_long_hold} flip(s) — "
+                        f"hold time would exceed matchday window[/dim]"
                     )
             except Exception as e:
                 console.print(f"[yellow]Profit flip search failed: {e}[/yellow]")

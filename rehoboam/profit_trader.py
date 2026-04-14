@@ -143,24 +143,40 @@ class ProfitTrader:
                     )
                     continue  # Skip small sample size anomalies
 
-                # Filter 3: Accept rising trends OR stable performers with good points
+                # Filter 3: Accept rising trends OR stable performers with good
+                # points OR dip-in-uptrend (mean reversion).
                 expected_appreciation = 0
+                is_dip_in_uptrend = trend.get("is_dip_in_uptrend", False)
+                is_secular_decline = trend.get("is_secular_decline", False)
+                is_recovery = trend.get("is_recovery", False)
+
                 if trend_direction == "rising" and trend_pct > 5:
                     # Expect trend to continue (cap at 20%)
                     expected_appreciation = min(trend_pct, 20)
+                elif is_recovery and player.average_points >= 30:
+                    # Recovery signal: short-term reversal after dip → catch the bounce
+                    expected_appreciation = 12
+                elif is_dip_in_uptrend and player.average_points >= 30:
+                    # Genuine dip in a longer uptrend — best mean-reversion play.
+                    # Trend service already filtered for: recent down + medium up.
+                    expected_appreciation = 10
                 elif trend_direction == "stable" and player.average_points >= 40:
                     # Stable good performers - conservative 8% appreciation
                     expected_appreciation = 8
                 elif trend_direction == "falling" and peak_value > 0:
-                    # Mean reversion for players significantly below peak
+                    # Hard mean reversion for high-quality players that crashed.
+                    # Stricter threshold than dip-in-uptrend because a falling
+                    # trend without uptrend context is riskier.
+                    if is_secular_decline:
+                        continue  # genuine decline, not a dip — avoid
                     current_vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
-                    if current_vs_peak_pct < -50 and player.average_points >= 40:
-                        # More than 50% below peak + good performer = mean reversion play
+                    if current_vs_peak_pct < -25 and player.average_points >= 40:
+                        # >25% below peak + high performer + not in secular decline
                         expected_appreciation = min(abs(current_vs_peak_pct) * 0.3, 15)
                     else:
-                        continue  # Skip falling players not far below peak
+                        continue  # Not deep enough or not high enough quality
                 else:
-                    # Not rising, not stable good performer, not recovery candidate
+                    # Not a recognized profit pattern — skip
                     continue
 
                 # Skip if no profit potential
