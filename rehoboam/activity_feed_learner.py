@@ -421,6 +421,20 @@ class ActivityFeedLearner:
                 "aggression_level": aggression,
             }
 
+    def has_aggressive_competitors(self, threat_score_threshold: float = 100.0) -> bool:
+        """Return True if the league has at least one high-threat competitor.
+
+        Threat score combines purchase frequency and average spend — a manager
+        with ``threat_score > 100`` is actively buying and paying premium prices.
+        Used by bidding logic to tighten the skip criteria on contested
+        mid-tier auctions (we won't outbid a whale for a solid-but-not-essential
+        upgrade).
+        """
+        for competitor in self.get_top_competitors(limit=5):
+            if competitor.get("threat_score", 0) > threat_score_threshold:
+                return True
+        return False
+
     def get_top_competitors(self, limit: int = 5) -> list[dict[str, Any]]:
         """
         Get the most active/aggressive competitors

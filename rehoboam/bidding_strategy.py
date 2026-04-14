@@ -16,6 +16,68 @@ except ImportError:
     ActivityFeedLearner = None
 
 
+# ---------------------------------------------------------------------------
+# Competitor-aware bidding helpers
+# ---------------------------------------------------------------------------
+
+
+def _contested_skip_reason(
+    ep_tier: str,
+    offer_count: int,
+    has_aggressive_competitors: bool,
+) -> str | None:
+    """Return a skip reason if the auction isn't worth joining, else None.
+
+    The league is won by matchday points, not by hoarding players. Paying a
+    premium in a contested auction for a marginal upgrade just inflates the
+    price for a rival without improving our chances of winning — this function
+    encodes that restraint.
+
+    Skip rules:
+    - Marginal tier + 2+ offers → skip. Never burn budget on a bidding war
+      for a player who barely moves our EP.
+    - Solid/strong upgrades + 4+ offers + aggressive whales in league → skip.
+      Our normal bid won't beat an aggressive competitor willing to overpay,
+      and the EP gain doesn't justify matching their premium.
+
+    *must_have* tier is never skipped — we need the player regardless.
+    """
+    if ep_tier == "marginal" and offer_count >= 2:
+        return f"Marginal EP + {offer_count} offers — skipping contested auction"
+
+    if has_aggressive_competitors and offer_count >= 4:
+        if ep_tier in ("solid_upgrade", "strong_upgrade"):
+            return (
+                f"{ep_tier} EP + {offer_count} offers + aggressive league — "
+                "won't outbid a whale for a non-essential upgrade"
+            )
+
+    return None
+
+
+def _contested_overbid_bump(ep_tier: str, offer_count: int) -> float:
+    """Extra overbid percentage to apply when we're contested but committing.
+
+    Pulls ahead of rival bids for players we actually want. Scaling by tier:
+    must_have defends hardest (bigger bump), marginal gets nothing (skipped
+    upstream anyway). A lone extra bidder barely moves the needle.
+    """
+    if offer_count <= 1:
+        return 0.0
+
+    # 2-3 offers: moderate pressure; 4+: heavy pressure
+    heavy = offer_count >= 4
+
+    if ep_tier == "must_have":
+        return 6.0 if heavy else 3.0
+    if ep_tier == "strong_upgrade":
+        return 3.0 if heavy else 2.0
+    if ep_tier == "solid_upgrade":
+        return 2.0 if heavy else 1.0
+    # marginal tier reached here only if skip logic didn't fire (shouldn't happen)
+    return 0.0
+
+
 @dataclass
 class BidRecommendation:
     """Recommended bid for a player"""
@@ -270,6 +332,8 @@ class SmartBidding:
         sell_plan: SellPlan | None = None,
         player_id: str | None = None,
         trend_change_pct: float | None = None,
+        offer_count: int = 0,
+        has_aggressive_competitors: bool = False,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -284,6 +348,13 @@ class SmartBidding:
             sell_plan: Optional plan to sell players to raise funds
             player_id: For activity feed demand lookup
             trend_change_pct: Market value trend (negative = falling)
+            offer_count: Number of other managers currently bidding on the player.
+                Controls competitor-aware bidding: contested marginal buys are
+                skipped (don't inflate rival auctions), must-haves are defended
+                harder.
+            has_aggressive_competitors: True when the league has known high-threat
+                buyers (from ActivityFeedLearner). Tightens the skip criteria for
+                mid-tier contested auctions.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -314,6 +385,26 @@ class SmartBidding:
         else:
             ep_tier = "marginal"
             tier_bonus = 0.0
+
+        # Competitor-aware skip: don't feed contested auctions for players that
+        # wouldn't meaningfully change our matchday output. We'd just inflate
+        # the price for a rival without improving our chances of winning the league.
+        contested_skip_reason = _contested_skip_reason(
+            ep_tier=ep_tier,
+            offer_count=offer_count,
+            has_aggressive_competitors=has_aggressive_competitors,
+        )
+        if contested_skip_reason is not None:
+            return BidRecommendation(
+                base_price=asking_price,
+                recommended_bid=0,
+                overbid_amount=0,
+                overbid_pct=0.0,
+                reasoning=contested_skip_reason,
+                budget_ceiling=current_budget,
+                sell_plan=sell_plan,
+                marginal_ep_gain=marginal_ep_gain,
+            )
 
         # Budget ceiling = current budget + any sell plan recovery
         budget_ceiling = current_budget + (sell_plan.total_recovery if sell_plan else 0)
@@ -372,6 +463,12 @@ class SmartBidding:
         else:
             overbid_pct *= 0.6  # Unknown trend: conservative
 
+        # Offer-count bump: when we're contested and the player is worth
+        # winning, bid harder to pull ahead of rival offers. Applied AFTER
+        # trend scaling so the "fight for this player" signal isn't dampened
+        # by a falling market value — contestedness doesn't care about trend.
+        overbid_pct += _contested_overbid_bump(ep_tier=ep_tier, offer_count=offer_count)
+
         # Cap overbid (must_have tier gets elite cap)
         max_overbid = self.elite_max_overbid_pct if ep_tier == "must_have" else self.max_overbid_pct
         overbid_pct = min(overbid_pct, max_overbid)
@@ -421,6 +518,8 @@ class SmartBidding:
             f"EP tier: {ep_tier} (+{marginal_ep_gain:.1f} pts)",
             f"overbid {actual_overbid_pct:.1f}%",
         ]
+        if offer_count >= 2:
+            reasoning_parts.append(f"contested ({offer_count} offers)")
         if sell_plan:
             reasoning_parts.append(f"sell plan: +€{sell_plan.total_recovery:,} recovery")
         reasoning = " | ".join(reasoning_parts)

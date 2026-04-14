@@ -45,6 +45,7 @@ class Trader:
         self.settings = settings
         self.verbose = verbose
         self.bid_learner = bid_learner
+        self.activity_feed_learner = activity_feed_learner
         self.history_cache = ValueHistoryCache()
         self.trend_service = TrendService(self.api.client, self.history_cache)
         self.matchup_analyzer = MatchupAnalyzer()
@@ -356,6 +357,15 @@ class Trader:
         result = self.get_ep_recommendations(league)
         current_budget = int(result.get("budget", 0))
 
+        # League-level competitor context: checked once per session so all bids
+        # in this run share the same "is the league aggressive today?" signal.
+        has_whales = False
+        if self.activity_feed_learner is not None:
+            try:
+                has_whales = self.activity_feed_learner.has_aggressive_competitors()
+            except Exception:
+                has_whales = False
+
         for rec in result.get("buy_recs", []):
             try:
                 trend = self.trend_service.get_trend(
@@ -365,17 +375,24 @@ class Trader:
                 rec.metadata["trend_7d_pct"] = trend.trend_7d_pct
                 rec.metadata["trend_14d_pct"] = trend.trend_14d_pct
                 rec.metadata["momentum"] = trend.momentum
+                rec.metadata["offer_count"] = rec.player.offer_count
 
+                # Floor confidence at 0.7 to match the non-trend path so a
+                # player with few recorded games doesn't produce a *lower*
+                # bid here than in the plain EP pipeline. Data-quality gaps
+                # already penalize the EP score upstream (grade F halving).
                 bid_rec = self.bidding.calculate_ep_bid(
                     asking_price=rec.player.price,
                     market_value=rec.player.market_value,
                     expected_points=rec.score.expected_points,
                     marginal_ep_gain=rec.marginal_ep_gain,
-                    confidence=min(1.0, rec.score.data_quality.games_played / 10.0),
+                    confidence=max(0.7, min(1.0, rec.score.data_quality.games_played / 10.0)),
                     current_budget=current_budget,
                     sell_plan=rec.sell_plan,
                     player_id=rec.player.id,
                     trend_change_pct=trend.trend_7d_pct,
+                    offer_count=rec.player.offer_count,
+                    has_aggressive_competitors=has_whales,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -388,6 +405,7 @@ class Trader:
                 )
                 pair.metadata = pair.metadata or {}
                 pair.metadata["trend_7d_pct"] = trend.trend_7d_pct
+                pair.metadata["offer_count"] = pair.buy_player.offer_count
 
                 from .scoring.models import SellPlan
 
@@ -410,6 +428,8 @@ class Trader:
                     sell_plan=synthetic_sell_plan,
                     player_id=pair.buy_player.id,
                     trend_change_pct=trend.trend_7d_pct,
+                    offer_count=pair.buy_player.offer_count,
+                    has_aggressive_competitors=has_whales,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:

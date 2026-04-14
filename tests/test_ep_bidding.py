@@ -233,3 +233,172 @@ class TestBidRecommendationBackwardCompat:
         max_bid = result.max_profitable_bid
         assert isinstance(max_bid, int)
         assert max_bid > 0
+
+
+class TestCompetitorAwareBidding:
+    """Tests for offer_count and has_aggressive_competitors bid modulation."""
+
+    def _must_have_bid(self, bidding: SmartBidding, **overrides):
+        """Shared setup for a must-have tier bid with knobs for competitor args."""
+        kwargs = {
+            "asking_price": 10_000_000,
+            "market_value": 10_000_000,
+            "expected_points": 80.0,
+            "marginal_ep_gain": 25.0,
+            "confidence": 0.8,
+            "current_budget": 30_000_000,
+            "sell_plan": None,
+            "trend_change_pct": 0.0,  # neutral trend, no scaling
+        }
+        kwargs.update(overrides)
+        return bidding.calculate_ep_bid(**kwargs)
+
+    def _marginal_bid(self, bidding: SmartBidding, **overrides):
+        """Shared setup for a marginal tier bid."""
+        kwargs = {
+            "asking_price": 5_000_000,
+            "market_value": 5_000_000,
+            "expected_points": 30.0,
+            "marginal_ep_gain": 3.0,
+            "confidence": 0.6,
+            "current_budget": 15_000_000,
+            "sell_plan": None,
+            "trend_change_pct": 0.0,
+        }
+        kwargs.update(overrides)
+        return bidding.calculate_ep_bid(**kwargs)
+
+    def test_no_competition_no_change(self):
+        """offer_count=0 should produce the same bid as baseline."""
+        bidding = SmartBidding()
+        baseline = self._must_have_bid(bidding, offer_count=0)
+        assert baseline.recommended_bid > 0
+
+    def test_contested_must_have_bids_higher(self):
+        """Heavily contested must-have → higher bid than uncontested."""
+        bidding = SmartBidding()
+        uncontested = self._must_have_bid(bidding, offer_count=0)
+        contested = self._must_have_bid(bidding, offer_count=4)
+        assert contested.recommended_bid > uncontested.recommended_bid
+        assert "contested" in contested.reasoning
+
+    def test_marginal_contested_skips(self):
+        """Marginal EP + 2+ offers → don't feed the auction, skip."""
+        bidding = SmartBidding()
+        result = self._marginal_bid(bidding, offer_count=2)
+        assert result.recommended_bid == 0
+        assert "Marginal" in result.reasoning
+        assert "skipping" in result.reasoning.lower()
+
+    def test_marginal_uncontested_still_bids(self):
+        """Marginal EP + 0 offers → still bid (nothing to avoid)."""
+        bidding = SmartBidding()
+        result = self._marginal_bid(bidding, offer_count=0)
+        assert result.recommended_bid > 0
+
+    def test_solid_upgrade_skipped_when_whales_and_heavy_contest(self):
+        """Solid upgrade + 4+ offers + aggressive league → don't outbid whales."""
+        bidding = SmartBidding()
+        result = bidding.calculate_ep_bid(
+            asking_price=8_000_000,
+            market_value=8_000_000,
+            expected_points=45.0,
+            marginal_ep_gain=7.0,  # solid_upgrade tier
+            confidence=0.7,
+            current_budget=20_000_000,
+            sell_plan=None,
+            trend_change_pct=0.0,
+            offer_count=5,
+            has_aggressive_competitors=True,
+        )
+        assert result.recommended_bid == 0
+        assert "whale" in result.reasoning.lower()
+
+    def test_solid_upgrade_bids_when_no_whales(self):
+        """Same solid upgrade + offers but no whales → still bids."""
+        bidding = SmartBidding()
+        result = bidding.calculate_ep_bid(
+            asking_price=8_000_000,
+            market_value=8_000_000,
+            expected_points=45.0,
+            marginal_ep_gain=7.0,
+            confidence=0.7,
+            current_budget=20_000_000,
+            sell_plan=None,
+            trend_change_pct=0.0,
+            offer_count=5,
+            has_aggressive_competitors=False,
+        )
+        assert result.recommended_bid > 0
+
+    def test_must_have_never_skipped_even_with_whales(self):
+        """must_have tier is always worth fighting for, regardless of competition."""
+        bidding = SmartBidding()
+        result = self._must_have_bid(
+            bidding,
+            offer_count=6,
+            has_aggressive_competitors=True,
+        )
+        assert result.recommended_bid > 0
+
+    def test_contested_bump_survives_falling_trend(self):
+        """Regression: contested bump must apply AFTER trend scaling.
+
+        A must_have player with a sharply falling trend (-15%) still needs
+        aggressive bidding when contested — the "fight this auction" signal
+        shouldn't be dampened by a value dip.
+        """
+        bidding = SmartBidding()
+        falling_uncontested = self._must_have_bid(bidding, offer_count=0, trend_change_pct=-15.0)
+        falling_contested = self._must_have_bid(bidding, offer_count=4, trend_change_pct=-15.0)
+        # Gap between contested/uncontested should be the full +6% heavy bump,
+        # not a trend-dampened fraction of it.
+        assert falling_contested.overbid_pct - falling_uncontested.overbid_pct >= 4.0, (
+            f"Contested bump was dampened by trend scaling "
+            f"(gap: {falling_contested.overbid_pct - falling_uncontested.overbid_pct:.1f}%)"
+        )
+
+
+class TestAggressiveCompetitorsHelper:
+    """Tests for ActivityFeedLearner.has_aggressive_competitors()."""
+
+    def test_no_data_returns_false(self, tmp_path):
+        from rehoboam.activity_feed_learner import ActivityFeedLearner
+
+        learner = ActivityFeedLearner(db_path=tmp_path / "test.db")
+        assert learner.has_aggressive_competitors() is False
+
+    def test_high_threat_detected(self, tmp_path):
+        """A manager with many purchases + high avg price → threat_score > 100."""
+        import sqlite3
+        import time
+
+        from rehoboam.activity_feed_learner import ActivityFeedLearner
+
+        db_path = tmp_path / "test.db"
+        learner = ActivityFeedLearner(db_path=db_path)
+
+        # Manually seed league_transfers with a "whale" manager
+        with sqlite3.connect(db_path) as conn:
+            for i in range(10):
+                conn.execute(
+                    """
+                    INSERT INTO league_transfers (
+                        activity_id, player_id, player_name, buyer_name,
+                        transfer_price, transfer_type, timestamp, processed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"act_{i}",
+                        f"p{i}",
+                        f"Player {i}",
+                        "Whale",
+                        15_000_000,
+                        1,
+                        "2026-04-01T10:00:00Z",
+                        time.time(),
+                    ),
+                )
+            conn.commit()
+
+        assert learner.has_aggressive_competitors() is True
