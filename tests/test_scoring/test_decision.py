@@ -5,7 +5,14 @@ from rehoboam.scoring.decision import DecisionEngine
 from rehoboam.scoring.models import DataQuality, PlayerScore
 
 
-def _make_score(player_id, ep, position="Midfielder", price=5_000_000, market_value=5_000_000):
+def _make_score(
+    player_id,
+    ep,
+    position="Midfielder",
+    price=5_000_000,
+    market_value=5_000_000,
+    fixture_bonus=0.0,
+):
     dq = DataQuality(
         grade="A",
         games_played=15,
@@ -21,7 +28,7 @@ def _make_score(player_id, ep, position="Midfielder", price=5_000_000, market_va
         base_points=ep * 0.5,
         consistency_bonus=5.0,
         lineup_bonus=10.0,
-        fixture_bonus=0.0,
+        fixture_bonus=fixture_bonus,
         form_bonus=0.0,
         minutes_bonus=0.0,
         dgw_multiplier=1.0,
@@ -225,6 +232,39 @@ class TestRecommendSells:
 
         gk_rec = next(r for r in recommendations if r.score.player_id == "gk1")
         assert gk_rec.is_protected
+
+    def test_tough_run_raises_expendability(self):
+        """Two identical-EP players — the one with a tough fixture run ahead
+        should be more expendable (selling now beats waiting for EP to drop)."""
+        squad = []
+        squad_scores = []
+        squad.append(_make_player("gk1", "Goalkeeper"))
+        squad_scores.append(_make_score("gk1", 40.0, "Goalkeeper"))
+        for i in range(3):
+            squad.append(_make_player(f"def{i}", "Defender"))
+            squad_scores.append(_make_score(f"def{i}", 35.0, "Defender"))
+        # Two midfielders with identical EP but different fixture runs
+        squad.append(_make_player("mid_easy", "Midfielder"))
+        squad_scores.append(_make_score("mid_easy", 45.0, "Midfielder", fixture_bonus=+5.0))
+        squad.append(_make_player("mid_tough", "Midfielder"))
+        squad_scores.append(_make_score("mid_tough", 45.0, "Midfielder", fixture_bonus=-10.0))
+        squad.append(_make_player("fwd0", "Forward"))
+        squad_scores.append(_make_score("fwd0", 50.0, "Forward"))
+
+        squad_players = {p.id: p for p in squad}
+        engine = DecisionEngine()
+        recommendations = engine.recommend_sells(
+            squad_scores=squad_scores, roster_context={}, squad_players=squad_players
+        )
+
+        tough = next(r for r in recommendations if r.score.player_id == "mid_tough")
+        easy = next(r for r in recommendations if r.score.player_id == "mid_easy")
+
+        assert tough.expendability > easy.expendability, (
+            "Tough fixture run should raise expendability vs an identical player "
+            f"with an easy run (tough={tough.expendability}, easy={easy.expendability})"
+        )
+        assert "tough run ahead" in tough.reason
 
 
 class TestSelectLineup:

@@ -546,7 +546,15 @@ class DecisionEngine:
             in_best_11 = player.id in best_11_ids
 
             bench_bonus = 0.0 if in_best_11 else 20.0
-            expendability = 100.0 - ep + bench_bonus
+
+            # Tough-run penalty: if the player's next fixtures are brutal, sell
+            # now before the value drops. fixture_bonus is already baked into
+            # `ep`, so we apply only HALF the negative component here to tilt
+            # the sort order without double-counting the signal.
+            fixture_bonus = ps.fixture_bonus if ps else 0.0
+            tough_run_penalty = max(0.0, -fixture_bonus) * 0.5
+
+            expendability = 100.0 - ep + bench_bonus + tough_run_penalty
 
             minimum = POSITION_MINIMUMS.get(player.position, 0)
             is_protected = position_counts.get(player.position, 0) <= minimum
@@ -561,6 +569,8 @@ class DecisionEngine:
             if not in_best_11:
                 reason_parts.append("bench player")
             reason_parts.append(f"EP={ep:.1f}")
+            if tough_run_penalty > 0:
+                reason_parts.append(f"tough run ahead ({fixture_bonus:+.0f} fixture bonus)")
             if is_protected:
                 reason_parts.append("position minimum")
             reason = "; ".join(reason_parts)

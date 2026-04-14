@@ -359,6 +359,53 @@ class TestCompetitorAwareBidding:
         )
 
 
+class TestDGWBidding:
+    """Tests for is_dgw flag in calculate_ep_bid()."""
+
+    def test_dgw_floors_confidence(self):
+        """DGW player bid should reflect higher confidence even when the
+        caller passes a low confidence (e.g. from small games_played sample).
+        """
+        bidding = SmartBidding()
+        non_dgw = bidding.calculate_ep_bid(
+            asking_price=10_000_000,
+            market_value=10_000_000,
+            expected_points=80.0,
+            marginal_ep_gain=25.0,
+            confidence=0.5,
+            current_budget=30_000_000,
+            trend_change_pct=0.0,
+            is_dgw=False,
+        )
+        # Same inputs but DGW: confidence gets floored at 0.9, triggering the
+        # +5% confidence bonus branch → higher overbid.
+        dgw = bidding.calculate_ep_bid(
+            asking_price=10_000_000,
+            market_value=10_000_000,
+            expected_points=80.0,
+            marginal_ep_gain=25.0,
+            confidence=0.5,
+            current_budget=30_000_000,
+            trend_change_pct=0.0,
+            is_dgw=True,
+        )
+        assert dgw.overbid_pct > non_dgw.overbid_pct
+        assert "DGW" in dgw.reasoning
+
+    def test_non_dgw_no_dgw_in_reasoning(self):
+        bidding = SmartBidding()
+        result = bidding.calculate_ep_bid(
+            asking_price=10_000_000,
+            market_value=10_000_000,
+            expected_points=80.0,
+            marginal_ep_gain=25.0,
+            confidence=0.8,
+            current_budget=30_000_000,
+            trend_change_pct=0.0,
+        )
+        assert "DGW" not in result.reasoning
+
+
 class TestAggressiveCompetitorsHelper:
     """Tests for ActivityFeedLearner.has_aggressive_competitors()."""
 
