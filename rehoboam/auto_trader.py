@@ -651,7 +651,7 @@ class AutoTrader:
                 f"[yellow]Match imminent ({ctx.matchday_phase.days_until_match}d) "
                 f"— setting lineup only, no trading[/yellow]"
             )
-            self._set_optimal_lineup(league, errors)
+            self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
             return AutoTradeSession(
                 start_time=start_time,
                 end_time=time.time(),
@@ -736,8 +736,10 @@ class AutoTrader:
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
 
-        # Step 8: Set optimal lineup
-        self._set_optimal_lineup(league, errors)
+        # Step 8: Set optimal lineup using EP pipeline scores from the session.
+        # Players acquired mid-session (if any) fall back to the legacy
+        # calculator inside _set_optimal_lineup.
+        self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
 
         # Calculate totals
         all_results = sell_results + trade_results
@@ -780,11 +782,21 @@ class AutoTrader:
             net_change=net_change,
         )
 
-    def _set_optimal_lineup(self, league, errors: list[str]):
-        """Calculate and set the optimal starting 11 via API"""
-        from .expected_points import calculate_expected_points
+    def _set_optimal_lineup(
+        self,
+        league,
+        errors: list[str],
+        squad_scores: list | None = None,
+    ):
+        """Calculate and set the optimal starting 11 via API.
+
+        Prefers the new EP scoring pipeline (via *squad_scores* when the caller
+        already computed them) so the lineup benefits from DGW multipliers,
+        injury penalties, 5-fixture SOS, and position-weighted scoring. Falls
+        back to the legacy calculator per-player only when scores are missing
+        (e.g. EP pipeline failed, or a player was just bought mid-session).
+        """
         from .formation import get_formation_string, order_for_lineup, select_best_eleven
-        from .value_history import ValueHistoryCache
 
         console.print("\n[bold cyan]📋 Setting Optimal Lineup[/bold cyan]")
 
@@ -794,26 +806,17 @@ class AutoTrader:
                 console.print("[yellow]Not enough players to set lineup[/yellow]")
                 return
 
-            history_cache = ValueHistoryCache()
+            # Build ep_scores from the new pipeline when available; fall back
+            # to the legacy per-player calculator only for uncovered squad
+            # members or when the caller didn't provide scores.
+            ep_scores: dict[str, float] = {}
+            if squad_scores:
+                ep_scores = {s.player_id: s.expected_points for s in squad_scores}
 
-            # Calculate expected points for each player
-            ep_scores = {}
-            for player in squad:
-                try:
-                    perf_data = history_cache.get_cached_performance(
-                        player_id=player.id, league_id=league.id, max_age_hours=24
-                    )
-                    if not perf_data:
-                        perf_data = self.api.client.get_player_performance(league.id, player.id)
-                        if perf_data:
-                            history_cache.cache_performance(
-                                player_id=player.id, league_id=league.id, data=perf_data
-                            )
-
-                    ep = calculate_expected_points(player=player, performance_data=perf_data)
-                    ep_scores[player.id] = ep.expected_points
-                except Exception:
-                    ep_scores[player.id] = 0
+            missing = [p for p in squad if p.id not in ep_scores]
+            if missing:
+                for player in missing:
+                    ep_scores[player.id] = self._legacy_expected_points(league, player)
 
             # Select best 11, order by position for API (GK→DEF→MID→FWD)
             best_eleven = select_best_eleven(squad, ep_scores)
@@ -838,6 +841,32 @@ class AutoTrader:
             error_msg = f"Set lineup error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
+
+    def _legacy_expected_points(self, league, player) -> float:
+        """Fallback per-player EP using the legacy calculator.
+
+        Only used when the new EP pipeline didn't score this player — e.g. a
+        mid-session purchase, or the pipeline failed upstream. Kept narrow so
+        the legacy path doesn't drift back into the main lineup flow.
+        """
+        from .expected_points import calculate_expected_points
+        from .value_history import ValueHistoryCache
+
+        try:
+            history_cache = ValueHistoryCache()
+            perf_data = history_cache.get_cached_performance(
+                player_id=player.id, league_id=league.id, max_age_hours=24
+            )
+            if not perf_data:
+                perf_data = self.api.client.get_player_performance(league.id, player.id)
+                if perf_data:
+                    history_cache.cache_performance(
+                        player_id=player.id, league_id=league.id, data=perf_data
+                    )
+            ep = calculate_expected_points(player=player, performance_data=perf_data)
+            return ep.expected_points
+        except Exception:
+            return 0.0
 
     def optimize_and_execute_squad(self, league) -> list[AutoTradeResult]:
         """Run squad optimization and execute any forced sales.

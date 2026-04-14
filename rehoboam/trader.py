@@ -287,6 +287,7 @@ class Trader:
                     current_budget=int(current_budget),
                     sell_plan=rec.sell_plan,
                     player_id=rec.player.id,
+                    is_dgw=rec.score.is_dgw,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -319,6 +320,7 @@ class Trader:
                     current_budget=int(current_budget),
                     sell_plan=synthetic_sell_plan,
                     player_id=pair.buy_player.id,
+                    is_dgw=pair.buy_score.is_dgw,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -393,6 +395,7 @@ class Trader:
                     trend_change_pct=trend.trend_7d_pct,
                     offer_count=rec.player.offer_count,
                     has_aggressive_competitors=has_whales,
+                    is_dgw=rec.score.is_dgw,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -430,6 +433,7 @@ class Trader:
                     trend_change_pct=trend.trend_7d_pct,
                     offer_count=pair.buy_player.offer_count,
                     has_aggressive_competitors=has_whales,
+                    is_dgw=pair.buy_score.is_dgw,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:

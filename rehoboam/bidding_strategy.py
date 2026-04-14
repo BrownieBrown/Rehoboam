@@ -334,6 +334,7 @@ class SmartBidding:
         trend_change_pct: float | None = None,
         offer_count: int = 0,
         has_aggressive_competitors: bool = False,
+        is_dgw: bool = False,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -355,10 +356,18 @@ class SmartBidding:
             has_aggressive_competitors: True when the league has known high-threat
                 buyers (from ActivityFeedLearner). Tightens the skip criteria for
                 mid-tier contested auctions.
+            is_dgw: True when the player has a double gameweek (2 matches in one
+                matchday). Averaging across two matches reduces outcome variance,
+                so we have higher confidence in the EP prediction — the bid
+                confidence is floored at 0.9 to reflect that certainty.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
         """
+        # DGW players have less variance (2 matches = averaged outcome), so
+        # we're more confident in the EP estimate regardless of data quality.
+        if is_dgw:
+            confidence = max(confidence, 0.9)
         # No improvement → no bid
         if marginal_ep_gain == 0:
             return BidRecommendation(
@@ -518,6 +527,8 @@ class SmartBidding:
             f"EP tier: {ep_tier} (+{marginal_ep_gain:.1f} pts)",
             f"overbid {actual_overbid_pct:.1f}%",
         ]
+        if is_dgw:
+            reasoning_parts.append("DGW")
         if offer_count >= 2:
             reasoning_parts.append(f"contested ({offer_count} offers)")
         if sell_plan:
