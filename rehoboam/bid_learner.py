@@ -290,6 +290,58 @@ class BidLearner:
     # a quarter. Tuned for fantasy football's seasonal form cycles.
     EP_ACCURACY_HALF_LIFE_DAYS = 60.0
 
+    # Minimum matchdays per position before the scorer calibration multiplier
+    # is trusted. Below this we return 1.0 (uncalibrated) so new seasons don't
+    # start with wildly swung scores from noisy small samples.
+    POSITION_CALIBRATION_MIN_MATCHDAYS = 10
+
+    def get_position_calibration_multiplier(self, position: str) -> float:
+        """Time-decayed actual/predicted EP ratio for a position, [0.5, 1.5].
+
+        Used by the scorer to correct systematic over/under-prediction at a
+        position level. E.g. if defenders consistently score 20% more than
+        we predict, this returns ~1.2 and the scorer boosts defender EPs.
+
+        Wider clamp than :meth:`get_ep_accuracy_factor` (which only dampens
+        bids) because here we want to raise scores when under-predicting, not
+        just lower them. Reuses the 60-day half-life decay so recent
+        matchdays dominate.
+
+        Returns 1.0 (uncalibrated) when there are fewer than
+        :attr:`POSITION_CALIBRATION_MIN_MATCHDAYS` records, or when total
+        weighted predicted EP is zero.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT predicted_ep, actual_points, timestamp
+                FROM matchday_outcomes
+                WHERE player_position = ? AND predicted_ep > 0
+                """,
+                (position,),
+            )
+            rows = cursor.fetchall()
+
+        if len(rows) < self.POSITION_CALIBRATION_MIN_MATCHDAYS:
+            return 1.0
+
+        now_ts = datetime.now(tz=timezone.utc).timestamp()
+        half_life_seconds = self.EP_ACCURACY_HALF_LIFE_DAYS * 86_400
+
+        weighted_actual = 0.0
+        weighted_predicted = 0.0
+        for predicted_ep, actual_points, ts in rows:
+            age_seconds = self._age_seconds(ts, now_ts)
+            weight = 0.5 ** (age_seconds / half_life_seconds)
+            weighted_actual += weight * actual_points
+            weighted_predicted += weight * predicted_ep
+
+        if weighted_predicted <= 0:
+            return 1.0
+
+        raw_factor = weighted_actual / weighted_predicted
+        return max(0.5, min(1.5, raw_factor))
+
     def get_ep_accuracy_factor(
         self,
         player_id: str | None = None,

@@ -204,6 +204,22 @@ class Trader:
         # --- 3. Score all players ---
         collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
 
+        # Pre-compute position calibration multipliers once per session
+        # (one SQL query per position vs once per player). Stays at 1.0
+        # without a bid_learner or with insufficient historical data.
+        position_calibrations: dict[str, float] = {}
+        if self.bid_learner is not None:
+            for pos in ("Goalkeeper", "Defender", "Midfielder", "Forward"):
+                try:
+                    position_calibrations[pos] = (
+                        self.bid_learner.get_position_calibration_multiplier(pos)
+                    )
+                except Exception:
+                    position_calibrations[pos] = 1.0
+
+        def _calibration_for(player) -> float:
+            return position_calibrations.get(player.position, 1.0)
+
         market_scores: list = []
         market_player_map: dict = {}
         for player in kickbase_market:
@@ -215,7 +231,9 @@ class Trader:
                     player_details=details,
                     team_profiles=team_profiles,
                 )
-                market_scores.append(score_player(data))
+                market_scores.append(
+                    score_player(data, calibration_multiplier=_calibration_for(player))
+                )
                 market_player_map[player.id] = player
             except Exception as e:
                 if self.verbose:
@@ -232,7 +250,9 @@ class Trader:
                     player_details=details,
                     team_profiles=team_profiles,
                 )
-                squad_scores.append(score_player(data))
+                squad_scores.append(
+                    score_player(data, calibration_multiplier=_calibration_for(player))
+                )
                 squad_player_map[player.id] = player
             except Exception as e:
                 if self.verbose:

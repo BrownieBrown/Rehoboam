@@ -230,6 +230,178 @@ class TestTimeDecay:
             assert 0.88 <= factor <= 0.92
 
 
+class TestPositionCalibrationMultiplier:
+    """Tests for get_position_calibration_multiplier()."""
+
+    def test_returns_1_with_no_data(self, tmp_path):
+        learner = BidLearner(db_path=tmp_path / "test.db")
+        assert learner.get_position_calibration_multiplier("Defender") == 1.0
+
+    def test_returns_1_with_too_few_records(self, tmp_path):
+        """Below POSITION_CALIBRATION_MIN_MATCHDAYS (10) → no calibration."""
+        learner = BidLearner(db_path=tmp_path / "test.db")
+        for i in range(5):
+            learner.record_matchday_outcome(
+                player_id=f"d{i}",
+                player_position="Defender",
+                matchday_date=f"2026-04-{1 + i:02d}",
+                predicted_ep=40.0,
+                actual_points=80.0,  # 2x — would trigger calibration if trusted
+            )
+        assert learner.get_position_calibration_multiplier("Defender") == 1.0
+
+    def test_under_predicting_returns_high_multiplier(self, tmp_path):
+        """Actual > predicted → multiplier > 1.0 (boost future predictions)."""
+        learner = BidLearner(db_path=tmp_path / "test.db")
+        for i in range(15):
+            learner.record_matchday_outcome(
+                player_id=f"d{i % 5}",
+                player_position="Defender",
+                matchday_date=f"2026-04-{1 + i:02d}",
+                predicted_ep=40.0,
+                actual_points=48.0,  # 20% over prediction
+            )
+        mult = learner.get_position_calibration_multiplier("Defender")
+        assert 1.15 <= mult <= 1.25
+
+    def test_over_predicting_returns_low_multiplier(self, tmp_path):
+        """Actual < predicted → multiplier < 1.0 (dampen future predictions)."""
+        learner = BidLearner(db_path=tmp_path / "test.db")
+        for i in range(15):
+            learner.record_matchday_outcome(
+                player_id=f"f{i % 5}",
+                player_position="Forward",
+                matchday_date=f"2026-04-{1 + i:02d}",
+                predicted_ep=60.0,
+                actual_points=42.0,  # 30% under
+            )
+        mult = learner.get_position_calibration_multiplier("Forward")
+        assert 0.65 <= mult <= 0.75
+
+    def test_clamped_at_upper_bound(self, tmp_path):
+        """Multiplier capped at 1.5 even when actual >> predicted."""
+        learner = BidLearner(db_path=tmp_path / "test.db")
+        for i in range(15):
+            learner.record_matchday_outcome(
+                player_id=f"d{i % 5}",
+                player_position="Defender",
+                matchday_date=f"2026-04-{1 + i:02d}",
+                predicted_ep=10.0,
+                actual_points=100.0,
+            )
+        assert learner.get_position_calibration_multiplier("Defender") == 1.5
+
+    def test_clamped_at_lower_bound(self, tmp_path):
+        """Multiplier floored at 0.5 even when actual << predicted."""
+        learner = BidLearner(db_path=tmp_path / "test.db")
+        for i in range(15):
+            learner.record_matchday_outcome(
+                player_id=f"f{i % 5}",
+                player_position="Forward",
+                matchday_date=f"2026-04-{1 + i:02d}",
+                predicted_ep=100.0,
+                actual_points=10.0,
+            )
+        assert learner.get_position_calibration_multiplier("Forward") == 0.5
+
+
+class TestScorerCalibration:
+    """Tests for calibration_multiplier in score_player()."""
+
+    def test_default_multiplier_no_change(self):
+        """calibration_multiplier=1.0 (default) leaves the EP unchanged."""
+        from rehoboam.kickbase_client import MarketPlayer
+        from rehoboam.scoring.models import PlayerData
+        from rehoboam.scoring.scorer import score_player
+
+        player = MarketPlayer(
+            id="p1",
+            first_name="Test",
+            last_name="Player",
+            position="Defender",
+            team_id="t1",
+            team_name="Test FC",
+            price=5_000_000,
+            market_value=5_000_000,
+            points=20,
+            average_points=15.0,
+            status=0,
+        )
+        data = PlayerData(
+            player=player,
+            performance=None,
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        baseline = score_player(data)
+        explicit_one = score_player(data, calibration_multiplier=1.0)
+        assert explicit_one.expected_points == baseline.expected_points
+
+    def test_high_multiplier_boosts_score(self):
+        from rehoboam.kickbase_client import MarketPlayer
+        from rehoboam.scoring.models import PlayerData
+        from rehoboam.scoring.scorer import score_player
+
+        player = MarketPlayer(
+            id="p1",
+            first_name="Test",
+            last_name="Player",
+            position="Defender",
+            team_id="t1",
+            team_name="Test FC",
+            price=5_000_000,
+            market_value=5_000_000,
+            points=20,
+            average_points=15.0,
+            status=0,
+        )
+        data = PlayerData(
+            player=player,
+            performance=None,
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        baseline = score_player(data)
+        boosted = score_player(data, calibration_multiplier=1.3)
+        # 30% higher (clamped at 180)
+        assert boosted.expected_points > baseline.expected_points
+        assert any("calibration" in n.lower() for n in boosted.notes)
+
+    def test_clamped_at_180_with_dgw_and_high_calibration(self):
+        from rehoboam.kickbase_client import MarketPlayer
+        from rehoboam.scoring.models import PlayerData
+        from rehoboam.scoring.scorer import score_player
+
+        player = MarketPlayer(
+            id="p1",
+            first_name="Test",
+            last_name="Player",
+            position="Forward",
+            team_id="t1",
+            team_name="Test FC",
+            price=5_000_000,
+            market_value=5_000_000,
+            points=200,
+            average_points=50.0,
+            status=0,
+        )
+        data = PlayerData(
+            player=player,
+            performance=None,
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=True,
+        )
+        result = score_player(data, calibration_multiplier=1.5)
+        # base ~40 → pre_dgw 100 → ×1.8 ×1.5 = 270 → clamped at 180
+        assert result.expected_points <= 180.0
+
+
 class TestWonPlayerOutcomeQuality:
     def test_returns_default_with_no_data(self):
         with tempfile.TemporaryDirectory() as tmpdir:
