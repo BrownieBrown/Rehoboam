@@ -90,6 +90,85 @@ class TestFormBonus:
         assert result.form_bonus == -10.0
 
 
+class TestPositionWeightedScoring:
+    def _consistent_perf(self):
+        """Performance data with very consistent output (high consistency)."""
+        return {"it": [{"ti": "2024", "ph": [{"p": 20, "t": 90}] * 10}]}
+
+    def _hot_streak_perf(self):
+        """Recent 5 games >> season average."""
+        # Season avg will be ~15; last 5 games avg = 30 → form_ratio = 2.0
+        matches = [{"p": 5, "t": 90}] * 5 + [{"p": 30, "t": 90}] * 5
+        return {"it": [{"ti": "2024", "ph": matches}]}
+
+    def test_defender_rewards_consistency_more_than_forward(self):
+        """Defender with high consistency scores higher consistency_bonus than forward."""
+        perf = self._consistent_perf()
+        def_player = _make_player(position="Defender", average_points=15.0)
+        fwd_player = _make_player(position="Forward", average_points=15.0)
+
+        def_score = score_player(_make_player_data(player=def_player, performance=perf))
+        fwd_score = score_player(_make_player_data(player=fwd_player, performance=perf))
+
+        assert def_score.consistency_bonus > fwd_score.consistency_bonus
+
+    def test_forward_rewards_hot_streak_more_than_defender(self):
+        """Forward on a hot streak scores higher form_bonus than a defender on same streak."""
+        perf = self._hot_streak_perf()
+        # Use season avg 15 to match the perf data (5*5 + 30*5) / 10 = 17.5
+        def_player = _make_player(position="Defender", average_points=17.5)
+        fwd_player = _make_player(position="Forward", average_points=17.5)
+
+        def_score = score_player(_make_player_data(player=def_player, performance=perf))
+        fwd_score = score_player(_make_player_data(player=fwd_player, performance=perf))
+
+        assert fwd_score.form_bonus > def_score.form_bonus
+
+
+class TestInjuryPenalty:
+    def test_healthy_player_no_penalty(self):
+        player = _make_player()
+        details = {"prob": 1, "st": 0}
+        result = score_player(_make_player_data(player=player, player_details=details))
+        # No penalty note should appear
+        assert not any("injury" in n.lower() or "uncertain" in n.lower() for n in result.notes)
+
+    def test_long_term_injury_large_penalty(self):
+        """Player with status 256 gets -30 deducted from raw total."""
+        player = _make_player(average_points=20.0)  # base_points=40 (capped)
+        details_healthy = {"prob": 1, "st": 0}
+        details_injured = {"prob": 1, "st": 256}
+
+        healthy = score_player(_make_player_data(player=player, player_details=details_healthy))
+        injured = score_player(_make_player_data(player=player, player_details=details_injured))
+
+        # Long-term injury should push score down by 30 points (clamped at 0 min)
+        assert injured.expected_points < healthy.expected_points
+        assert any("Long-term injury" in n for n in injured.notes)
+
+    def test_short_term_injury_medium_penalty(self):
+        player = _make_player(average_points=20.0)
+        details_healthy = {"prob": 1, "st": 0}
+        details_injured = {"prob": 1, "st": 4}
+
+        healthy = score_player(_make_player_data(player=player, player_details=details_healthy))
+        injured = score_player(_make_player_data(player=player, player_details=details_injured))
+
+        assert injured.expected_points < healthy.expected_points
+        assert any("Injured" in n for n in injured.notes)
+
+    def test_uncertain_status_small_penalty(self):
+        player = _make_player(average_points=20.0)
+        details_healthy = {"prob": 1, "st": 0}
+        details_uncertain = {"prob": 1, "st": 2}
+
+        healthy = score_player(_make_player_data(player=player, player_details=details_healthy))
+        uncertain = score_player(_make_player_data(player=player, player_details=details_uncertain))
+
+        assert uncertain.expected_points < healthy.expected_points
+        assert any("uncertain" in n.lower() for n in uncertain.notes)
+
+
 class TestDGW:
     def test_dgw_multiplies_score(self):
         player = _make_player(average_points=15.0)

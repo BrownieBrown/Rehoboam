@@ -5,7 +5,7 @@ starting 11 from a squad, then calculates marginal EP gain for candidates,
 builds sell plans to fund purchases, and ranks squad players by expendability.
 """
 
-from rehoboam.config import POSITION_MINIMUMS
+from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY, POSITION_MINIMUMS
 from rehoboam.formation import select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
 
@@ -287,8 +287,6 @@ class DecisionEngine:
                 continue
 
             # Skip players unlikely to start (prob 4-5)
-            from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY
-
             if (
                 ps.lineup_probability is not None
                 and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
@@ -299,27 +297,28 @@ class DecisionEngine:
             if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
                 continue
 
-            # Calculate marginal EP gain using a simplified approach:
-            # Find the weakest player in the position and compare
-            same_pos_scores = [s for s in squad_scores if s.position == player.position]
-            if same_pos_scores:
-                weakest_ep = min(s.expected_points for s in same_pos_scores)
-                marginal = ps.expected_points - weakest_ep
-                replaces_id = next(
-                    (s.player_id for s in same_pos_scores if s.expected_points == weakest_ep),
-                    None,
+            # Calculate marginal EP gain using formation-aware logic
+            if squad_list:
+                mep = self.calculate_marginal_ep(
+                    candidate_score=ps,
+                    candidate_player=player,
+                    squad=squad_list,
+                    squad_scores=squad_scores,
                 )
+                marginal = mep.marginal_ep_gain
+                replaces_id = mep.replaces_player_id
+                replaces_name = mep.replaces_player_name
             else:
-                # No one at this position — fills a gap
+                # No squad data — treat as pure EP gain
                 marginal = ps.expected_points
                 replaces_id = None
+                replaces_name = None
 
-            marginal = max(0.0, marginal)
-
-            # Determine roster impact
+            # Determine roster impact — count by actual squad composition,
+            # not by scored players, so positions without scores still count.
             pos_counts: dict[str, int] = {}
-            for s in squad_scores:
-                pos_counts[s.position] = pos_counts.get(s.position, 0) + 1
+            for p in squad_list:
+                pos_counts[p.position] = pos_counts.get(p.position, 0) + 1
 
             pos_min = POSITION_MINIMUMS.get(player.position, 0)
             current_count = pos_counts.get(player.position, 0)
@@ -354,7 +353,7 @@ class DecisionEngine:
                     marginal_ep_gain=marginal,
                     effective_ep=ps.expected_points,
                     replaces_player_id=replaces_id,
-                    replaces_player_name=None,
+                    replaces_player_name=replaces_name,
                     roster_impact=roster_impact,
                     roster_bonus=roster_bonus,
                     reason="; ".join(reason_parts),
@@ -402,8 +401,6 @@ class DecisionEngine:
         sell targets — starters are only sacrificed for significant upgrades
         (2x the normal EP threshold).
         """
-        from rehoboam.formation import select_best_eleven
-
         # Get sell candidates sorted by expendability
         sell_recs = self.recommend_sells(
             squad_scores=squad_scores,
@@ -437,8 +434,6 @@ class DecisionEngine:
                 continue
 
             # Skip players unlikely to start or with collapsing minutes
-            from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY
-
             if (
                 ps.lineup_probability is not None
                 and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY

@@ -51,8 +51,8 @@ class DataCollector:
             if team_id and team_id in team_profiles:
                 team_strength = self.matchup_analyzer.get_team_strength(team_profiles[team_id])
 
-            # Resolve next 3 opponents for multi-fixture lookahead
-            next_matchups = self.matchup_analyzer.get_next_matchups(player_details, n=3)
+            # Resolve next 5 opponents for multi-fixture lookahead (strength of schedule)
+            next_matchups = self.matchup_analyzer.get_next_matchups(player_details, n=5)
             for matchup in next_matchups:
                 if matchup.opponent_id and matchup.opponent_id in team_profiles:
                     opp_str = self.matchup_analyzer.get_team_strength(

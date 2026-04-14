@@ -8,6 +8,29 @@ and read the result back out.
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
 
 # ---------------------------------------------------------------------------
+# Position-specific scoring scales
+# ---------------------------------------------------------------------------
+# Defenders/GKs: clean-sheet + tackle points → reward consistency, shallow form
+# Forwards:      goal-driven spikes → tolerate variance, reward hot streaks
+# Midfielders:   balanced contribution → unchanged from original scale
+#
+# Each tuple is (max_bonus, min_penalty) for that component.
+
+_CONSISTENCY_SCALE: dict[str, tuple[float, float]] = {
+    "Defender": (15.0, -5.0),
+    "Goalkeeper": (15.0, -5.0),
+    "Forward": (8.0, -2.0),
+}
+_FORM_SCALE: dict[str, tuple[float, float]] = {
+    "Defender": (7.0, 3.0),
+    "Goalkeeper": (7.0, 3.0),
+    "Forward": (14.0, 7.0),
+}
+_DEFAULT_CONSISTENCY: tuple[float, float] = (15.0, -5.0)
+_DEFAULT_FORM: tuple[float, float] = (10.0, 5.0)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -191,14 +214,15 @@ def score_player(data: PlayerData) -> PlayerScore:
     """Score a player from assembled PlayerData.  Pure function — no I/O.
 
     Scoring bands (before DGW multiplier):
-        base_points       0 – 40   (avg_points * 2, capped at 40)
-        consistency_bonus -5 – +15
+        base_points       0 – 40    (avg_points * 2, capped at 40)
+        consistency_bonus -5 – +15  (forwards: -2 – +8; see _CONSISTENCY_SCALE)
         lineup_bonus      -20 – +20
         fixture_bonus     -10 – +15
-        minutes_bonus     -10 – +10
-        form_bonus        -10 – +10
+        minutes_bonus     -15 – +10
+        form_bonus        -10 – +10 (forwards: up to +14; see _FORM_SCALE)
+        status_penalty    -30 – 0   (injury/health penalty)
         ─────────────────────────────
-        subtotal          ~-55 – 110  → clamped 0–100 pre-DGW
+        subtotal          ~-90 – 114  → clamped 0–100 pre-DGW
         DGW ×1.8          0 – 180
     """
     player = data.player
@@ -213,19 +237,25 @@ def score_player(data: PlayerData) -> PlayerScore:
     base_points = min(avg_pts * 2.0, 40.0)
 
     # ------------------------------------------------------------------
-    # 2. Consistency bonus  (-5 to +15)
+    # 2. Consistency bonus  (position-scaled; bounded by _CONSISTENCY_SCALE)
+    #    Forwards score from goals — spike variance is their nature, so both
+    #    the ceiling bonus and the floor penalty are softened for them.
+    #    Defenders, GKs, and midfielders use the full ±15/-5 range.
     # ------------------------------------------------------------------
     games_played, consistency = _extract_consistency(data.performance or {})
+
+    position = player.position or ""
+    max_consistency, min_consistency = _CONSISTENCY_SCALE.get(position, _DEFAULT_CONSISTENCY)
 
     consistency_bonus: float
     if consistency is None:
         consistency_bonus = 0.0
     elif consistency >= 0.7:
-        consistency_bonus = 15.0
+        consistency_bonus = max_consistency
     elif consistency >= 0.3:
-        consistency_bonus = consistency * 15.0
+        consistency_bonus = consistency * max_consistency
     else:
-        consistency_bonus = -5.0
+        consistency_bonus = min_consistency
 
     # ------------------------------------------------------------------
     # 3. Lineup bonus  (-20 to +20)
@@ -246,8 +276,9 @@ def score_player(data: PlayerData) -> PlayerScore:
 
     # ------------------------------------------------------------------
     # 4. Fixture bonus  (-10 to +15)
-    #    Weighted average over next 3 fixtures: 50% / 30% / 20%.
-    #    Falls back to single opponent if multi-fixture data unavailable.
+    #    Weighted average over next 5 fixtures: 40/25/15/12/8.
+    #    Heavier weight on the next match (most certain), decaying to minor
+    #    weight on 5th fixture. Falls back gracefully to fewer fixtures.
     # ------------------------------------------------------------------
     fixture_bonus: float = 0.0
     has_fixture = False
@@ -270,16 +301,30 @@ def score_player(data: PlayerData) -> PlayerScore:
     if data.team_strength and data.upcoming_opponent_strengths:
         has_fixture = True
         next_opponent = data.upcoming_opponent_strengths[0].team_name
-        # Weighted average: next match 50%, second 30%, third 20%
-        weights = [0.50, 0.30, 0.20]
+        # Weighted average over next 5 matches, decayed: closer = heavier.
+        # Weights sum to 1.0 and degrade gracefully if fewer fixtures exist.
+        weights = [0.40, 0.25, 0.15, 0.12, 0.08]
         total_diff = 0.0
         total_weight = 0.0
-        for i, opp in enumerate(data.upcoming_opponent_strengths[:3]):
+        for i, opp in enumerate(data.upcoming_opponent_strengths[:5]):
             w = weights[i] if i < len(weights) else 0.0
             total_diff += w * (data.team_strength.strength_score - opp.strength_score)
             total_weight += w
         diff = total_diff / total_weight if total_weight > 0 else 0.0
         fixture_bonus = _diff_to_bonus(diff)
+
+        # Flag a notably favorable or brutal run over the next 5 matches.
+        num_fixtures = len(data.upcoming_opponent_strengths[:5])
+        if num_fixtures >= 3:
+            if diff >= 20:
+                notes.append(
+                    f"Favorable run: next {num_fixtures} fixtures avg "
+                    f"{diff:+.0f} strength vs team"
+                )
+            elif diff <= -20:
+                notes.append(
+                    f"Tough run: next {num_fixtures} fixtures avg " f"{diff:+.0f} strength vs team"
+                )
     elif data.team_strength and data.opponent_strength:
         # Fallback: single opponent (backward compat)
         has_fixture = True
@@ -308,20 +353,25 @@ def score_player(data: PlayerData) -> PlayerScore:
             minutes_bonus = 0.0
 
     # ------------------------------------------------------------------
-    # 6. Form bonus  (-10 to +10)
+    # 6. Form bonus  (position-scaled; bounded by _FORM_SCALE)
     #    Uses last-5-games average vs season average to detect streaks.
+    #    Forwards on a hot streak are high-leverage (goal spikes compound),
+    #    so they get a larger ceiling bonus. Defenders get a shallower ceiling
+    #    since clean-sheet streaks are team-driven, not individual.
     #    Falls back to season ratio if per-match data is unavailable.
     # ------------------------------------------------------------------
+    hot_bonus, warm_bonus = _FORM_SCALE.get(position, _DEFAULT_FORM)
+
     form_bonus: float = 0.0
     recent_avg = _extract_recent_form(data.performance or {}, window=5)
 
     if recent_avg is not None and avg_pts > 0:
         form_ratio = recent_avg / avg_pts
         if form_ratio > 1.5:
-            form_bonus = 10.0
+            form_bonus = hot_bonus
             notes.append(f"Hot streak: recent avg {recent_avg:.0f} vs season {avg_pts:.0f}")
         elif form_ratio > 1.15:
-            form_bonus = 5.0
+            form_bonus = warm_bonus
         elif form_ratio < 0.5:
             form_bonus = -10.0
             notes.append(f"Cold slump: recent avg {recent_avg:.0f} vs season {avg_pts:.0f}")
@@ -331,9 +381,9 @@ def score_player(data: PlayerData) -> PlayerScore:
         # Fallback: season ratio when per-match data unavailable
         ratio = current_pts / avg_pts
         if ratio > 2.0:
-            form_bonus = 10.0
+            form_bonus = hot_bonus
         elif ratio > 1.3:
-            form_bonus = 5.0
+            form_bonus = warm_bonus
         elif ratio < 0.5:
             form_bonus = -10.0 if current_pts == 0 else -5.0
     else:
@@ -341,7 +391,26 @@ def score_player(data: PlayerData) -> PlayerScore:
             form_bonus = -10.0
 
     # ------------------------------------------------------------------
-    # 7. Data quality grade
+    # 7. Injury / status penalty  (-30 to 0)
+    #    Kickbase status codes: 0=healthy, 2=uncertain, 4=short-term injury,
+    #    256=long-term injury. Players flagged unavailable shouldn't score
+    #    near healthy starters regardless of their other attributes.
+    # ------------------------------------------------------------------
+    status_penalty: float = 0.0
+    if data.player_details:
+        status_code = data.player_details.get("st", 0)
+        if status_code == 256:
+            status_penalty = -30.0
+            notes.append("Long-term injury — score heavily penalized")
+        elif status_code == 4:
+            status_penalty = -20.0
+            notes.append("Injured — score penalized")
+        elif status_code == 2:
+            status_penalty = -10.0
+            notes.append("Status uncertain — score penalized")
+
+    # ------------------------------------------------------------------
+    # 8. Data quality grade
     # ------------------------------------------------------------------
     data_quality = _grade_data_quality(
         games_played=games_played,
@@ -352,10 +421,16 @@ def score_player(data: PlayerData) -> PlayerScore:
     data_quality.consistency = consistency if consistency is not None else 0.0
 
     # ------------------------------------------------------------------
-    # 8. Assemble raw total and apply grade-F halving
+    # 9. Assemble raw total and apply grade-F halving
     # ------------------------------------------------------------------
     raw_total = (
-        base_points + consistency_bonus + lineup_bonus + fixture_bonus + minutes_bonus + form_bonus
+        base_points
+        + consistency_bonus
+        + lineup_bonus
+        + fixture_bonus
+        + minutes_bonus
+        + form_bonus
+        + status_penalty
     )
 
     if data_quality.grade == "F":
@@ -366,7 +441,7 @@ def score_player(data: PlayerData) -> PlayerScore:
     pre_dgw = max(0.0, min(raw_total, 100.0))
 
     # ------------------------------------------------------------------
-    # 9. DGW multiplier
+    # 10. DGW multiplier
     # ------------------------------------------------------------------
     dgw_multiplier = 1.8 if data.is_dgw else 1.0
     if data.is_dgw:
