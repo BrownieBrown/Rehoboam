@@ -694,38 +694,3 @@ class SmartBidding:
             reasons.append("⚠️ AT VALUE CEILING")
 
         return " | ".join(reasons) if reasons else "Standard bid"
-
-    def calculate_batch_bids(
-        self, opportunities: list, total_budget: int
-    ) -> list[tuple[any, BidRecommendation]]:
-        """
-        Calculate bids for multiple players considering total budget
-
-        Args:
-            opportunities: List of (player_analysis, ...) tuples
-            total_budget: Total available budget
-
-        Returns:
-            List of (player_analysis, bid_recommendation) tuples
-        """
-        recommendations = []
-        remaining_budget = total_budget
-
-        for analysis in opportunities:
-            bid = self.calculate_bid(
-                asking_price=analysis.current_price,
-                market_value=analysis.market_value,
-                value_score=analysis.value_score,
-                confidence=analysis.confidence,
-                is_replacement=False,  # TODO: integrate replacement logic
-            )
-
-            # Check if we can afford this bid
-            if bid.recommended_bid <= remaining_budget:
-                recommendations.append((analysis, bid))
-                remaining_budget -= bid.recommended_bid
-            else:
-                # Can't afford - skip
-                continue
-
-        return recommendations
