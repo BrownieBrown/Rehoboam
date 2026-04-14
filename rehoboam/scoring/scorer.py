@@ -210,10 +210,18 @@ def _grade_data_quality(
 # ---------------------------------------------------------------------------
 
 
-def score_player(data: PlayerData) -> PlayerScore:
+def score_player(data: PlayerData, calibration_multiplier: float = 1.0) -> PlayerScore:
     """Score a player from assembled PlayerData.  Pure function — no I/O.
 
-    Scoring bands (before DGW multiplier):
+    Args:
+        data: Assembled per-player data (already pre-fetched by DataCollector).
+        calibration_multiplier: Position-level correction factor from
+            BidLearner.get_position_calibration_multiplier(). When the scorer
+            systematically over/under-predicts for a position (e.g. defenders
+            scoring 20% more than we predict), this multiplier closes the gap.
+            Default 1.0 (uncalibrated). Applied to the final EP alongside DGW.
+
+    Scoring bands (before DGW / calibration multipliers):
         base_points       0 – 40    (avg_points * 2, capped at 40)
         consistency_bonus -5 – +15  (forwards: -2 – +8; see _CONSISTENCY_SCALE)
         lineup_bonus      -20 – +20
@@ -224,6 +232,7 @@ def score_player(data: PlayerData) -> PlayerScore:
         ─────────────────────────────
         subtotal          ~-90 – 114  → clamped 0–100 pre-DGW
         DGW ×1.8          0 – 180
+        calibration       ×0.5 – ×1.5 (final output still clamped to 0–180)
     """
     player = data.player
     avg_pts: float = player.average_points or 0.0
@@ -447,7 +456,10 @@ def score_player(data: PlayerData) -> PlayerScore:
     if data.is_dgw:
         notes.append("DOUBLE GAMEWEEK ×1.8")
 
-    expected_points = min(pre_dgw * dgw_multiplier, 180.0)
+    if calibration_multiplier != 1.0:
+        notes.append(f"Position calibration ×{calibration_multiplier:.2f}")
+
+    expected_points = min(pre_dgw * dgw_multiplier * calibration_multiplier, 180.0)
 
     return PlayerScore(
         player_id=player.id,
