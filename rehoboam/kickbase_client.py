@@ -103,16 +103,6 @@ class MarketPlayer:
         """Check if specific user has made an offer on this player"""
         return self.user_offer_id == user_id
 
-    def get_user_offer_amount(self, user_id: str) -> int | None:
-        """Get the offer amount from a specific user"""
-        if self.has_user_offer(user_id):
-            return self.user_offer_price
-        # Check in offers list
-        for offer in self.offers or []:
-            if offer.get("u") == user_id or offer.get("uoid") == user_id:
-                return offer.get("uop")
-        return None
-
     @staticmethod
     def _parse_position(pos: int) -> str:
         """Convert position code to name"""
@@ -434,50 +424,6 @@ class KickbaseV4Client:
         else:
             raise Exception(f"Failed to sell to KICKBASE: {response.status_code} - {response.text}")
 
-    def accept_offer(self, league_id: str, player_id: str, offer_id: str) -> dict[str, Any]:
-        """
-        Accept an offer from another manager
-        POST /v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}/accept
-
-        Args:
-            league_id: League ID
-            player_id: Player ID
-            offer_id: Offer ID to accept
-
-        Returns:
-            Response data from acceptance
-        """
-        url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/offers/{offer_id}/accept"
-
-        response = self.session.post(url, json={})
-
-        if response.status_code in [200, 201]:
-            return response.json()
-        else:
-            raise Exception(f"Failed to accept offer: {response.status_code} - {response.text}")
-
-    def get_player_offers(self, league_id: str, player_id: str) -> list[dict[str, Any]]:
-        """
-        Get all offers for a player on the market
-        GET /v4/leagues/{league_id}/market/{player_id}/offers
-
-        Args:
-            league_id: League ID
-            player_id: Player ID
-
-        Returns:
-            List of offers
-        """
-        url = f"{self.BASE_URL}/v4/leagues/{league_id}/market/{player_id}/offers"
-
-        response = self.session.get(url)
-
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("it", [])  # Offers likely in 'it' field
-        else:
-            raise Exception(f"Failed to get offers: {response.status_code} - {response.text}")
-
     def get_player_market_value_history(
         self, league_id: str, player_id: str, timeframe: int = 30
     ) -> dict[str, Any]:
@@ -612,38 +558,6 @@ class KickbaseV4Client:
         else:
             raise Exception(
                 f"Failed to fetch activities feed: {response.status_code} - {response.text}"
-            )
-
-    def get_player_statistics(self, player_id: str, league_id: str) -> dict[str, Any]:
-        """
-        Get detailed player statistics (competition-based endpoint)
-        GET /v4/competitions/1/players/{player_id}?leagueId={league_id}
-
-        Returns rich player data including:
-        - Current market value (mv)
-        - Total points (tp), Average points (ap)
-        - Status (st): 0=Fit, others=injured/etc
-        - Performance history (ph): Recent match points
-        - Match data (mdsum): Past and upcoming fixtures
-        - Position, team, etc.
-
-        Args:
-            player_id: Player ID
-            league_id: League ID (as query parameter)
-
-        Returns:
-            dict with comprehensive player statistics
-        """
-        url = f"{self.BASE_URL}/v4/competitions/1/players/{player_id}"
-        params = {"leagueId": league_id}
-
-        response = self.session.get(url, params=params)
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(
-                f"Failed to fetch player statistics: {response.status_code} - {response.text}"
             )
 
     def get_player_market_value_history_v2(

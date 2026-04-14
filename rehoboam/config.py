@@ -91,21 +91,9 @@ class Settings(BaseSettings):
         default=10,
         description="Minimum squad size to maintain on match day (enforced only within 2 days of next match)",
     )
-    never_sell_starters: bool = Field(
-        default=False,
-        description="DEPRECATED - Bot now recommends sales based on value, not lineup position",
-    )
-    allow_starter_upgrades: bool = Field(
-        default=True,
-        description="DEPRECATED - Bot always recommends sales to improve team value",
-    )
     min_upgrade_value_score_diff: float = Field(
         default=15.0,
         description="Minimum value score difference to consider a replacement an upgrade",
-    )
-    min_points_to_keep: int = Field(
-        default=50,
-        description="DEPRECATED - Bot now recommends sales based on value analysis, not raw points",
     )
 
     # EP-First Settings
