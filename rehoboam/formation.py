@@ -17,6 +17,17 @@ class FormationRequirements:
 
 POSITION_MAPPING = {"Goalkeeper": "GK", "Defender": "DEF", "Midfielder": "MID", "Forward": "FWD"}
 
+# Maximum players per position that can ever start across all valid Kickbase
+# formations. GK is always 1. DEF tops out at 5 (5-x-x), MID at 5 (x-5-x),
+# FWD at 3 (x-x-3). Used to detect "dead weight" — a player who can never
+# enter any starting 11 because the position is already saturated.
+_POSITION_MAX_STARTERS = {
+    "Goalkeeper": 1,
+    "Defender": 5,
+    "Midfielder": 5,
+    "Forward": 3,
+}
+
 
 def get_position_counts(players: list) -> dict[str, int]:
     """Count players by position"""

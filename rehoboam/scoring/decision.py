@@ -6,7 +6,7 @@ builds sell plans to fund purchases, and ranks squad players by expendability.
 """
 
 from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY, POSITION_MINIMUMS
-from rehoboam.formation import select_best_eleven
+from rehoboam.formation import _POSITION_MAX_STARTERS, select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
 
 from .models import (
@@ -119,6 +119,7 @@ class DecisionEngine:
         squad_scores: list[PlayerScore],
         best_11_ids: set[str],
         displaced_player_id: str | None,
+        incoming_position: str | None = None,
     ) -> SellPlan:
         """Build a sell plan that covers the budget shortfall for *bid_amount*.
 
@@ -128,6 +129,12 @@ class DecisionEngine:
           lowest EP first, then add the displaced player if still short.
         - Non-displaced best-11 starters are protected and cannot be sold.
         - ``expected_sell_value = market_value * 0.95``.
+
+        *incoming_position* (optional): the position of the player being
+        bought.  When set, the position count for that position is
+        incremented by 1 before checking minimums.  This allows selling a
+        same-position player that would otherwise be at the minimum (e.g.
+        selling the old GK when buying a new GK).
 
         Returns a :class:`~rehoboam.scoring.models.SellPlan`.
         """
@@ -145,10 +152,14 @@ class DecisionEngine:
 
         score_map = {s.player_id: s for s in squad_scores}
 
-        # Determine position counts to enforce minimums
+        # Determine position counts to enforce minimums.
+        # When incoming_position is set, account for the buy that will add
+        # one player at that position, making a same-position sell safe.
         position_counts: dict[str, int] = {}
         for p in squad:
             position_counts[p.position] = position_counts.get(p.position, 0) + 1
+        if incoming_position:
+            position_counts[incoming_position] = position_counts.get(incoming_position, 0) + 1
 
         # Identify sell candidates
         # Priority: displaced player first, then bench players sorted by lowest EP
@@ -314,6 +325,13 @@ class DecisionEngine:
                 replaces_id = None
                 replaces_name = None
 
+            # Dead-weight guard: if buying this player would saturate their
+            # position (e.g. 2nd GK when max fieldable is 1), force a sell
+            # plan so the weakest same-position peer gets sold after auction.
+            force_sell_displaced = bool(squad_list) and _would_create_dead_weight(
+                player, squad_list
+            )
+
             # Determine roster impact — count by actual squad composition,
             # not by scored players, so positions without scores still count.
             pos_counts: dict[str, int] = {}
@@ -341,10 +359,66 @@ class DecisionEngine:
                 reason_parts.append("fills gap")
             elif replaces_id:
                 reason_parts.append("upgrades pos")
+            if force_sell_displaced:
+                reason_parts.append("sell old after auction")
 
             # Only recommend if marginal gain meets threshold (or emergency)
             if not is_emergency and marginal < self.min_ep_upgrade and roster_impact != "fills_gap":
                 continue
+
+            # Build forced sell plan for dead-weight buys upfront so it's
+            # attached to the recommendation before the budget filter below.
+            # The sell target is the weakest squad player at the candidate's
+            # position — NOT necessarily the player displaced from the best-11
+            # (which may be a different position entirely).
+            #
+            # Unlike budget sell plans, this isn't about funding the purchase —
+            # it's about removing the player who becomes permanently unfieldable.
+            # The sell is deferred until after the auction resolves.
+            forced_sell_plan: SellPlan | None = None
+            if force_sell_displaced:
+                score_lookup = {s.player_id: s.expected_points for s in squad_scores}
+                pos_peers = [p for p in squad_list if p.position == player.position]
+                pos_peers.sort(key=lambda p: score_lookup.get(p.id, 0.0))
+                dead_weight = pos_peers[0] if pos_peers else None
+
+                if dead_weight is None:
+                    continue
+
+                # Safety: don't sell the dead-weight player if it would drop the
+                # position below the formation minimum.  The incoming buy adds 1,
+                # so the post-trade count is ``len(pos_peers) + 1 - 1 = len(pos_peers)``.
+                # If that's still at or above the minimum, the sell is safe.
+                pos_min = POSITION_MINIMUMS.get(player.position, 0)
+                if len(pos_peers) < pos_min:
+                    # Selling would breach the minimum — skip this buy entirely.
+                    continue
+
+                dw_ep = score_lookup.get(dead_weight.id, 0.0)
+                dw_sell_value = int(dead_weight.market_value * 0.95)
+                net_after = int(budget) - player.price + dw_sell_value
+
+                forced_sell_plan = SellPlan(
+                    players_to_sell=[
+                        SellPlanEntry(
+                            player_id=dead_weight.id,
+                            player_name=(f"{dead_weight.first_name} {dead_weight.last_name}"),
+                            expected_sell_value=dw_sell_value,
+                            player_ep=dw_ep,
+                            is_in_best_11=dead_weight.id in best_11_ids,
+                        )
+                    ],
+                    total_recovery=dw_sell_value,
+                    net_budget_after=net_after,
+                    is_viable=net_after >= 0,
+                    ep_impact=dw_ep,
+                    reasoning=(
+                        f"Sell {dead_weight.first_name} {dead_weight.last_name} "
+                        f"(dead weight {player.position}) after winning auction."
+                    ),
+                )
+                if not forced_sell_plan.is_viable:
+                    continue
 
             recs.append(
                 BuyRecommendation(
@@ -357,13 +431,19 @@ class DecisionEngine:
                     roster_impact=roster_impact,
                     roster_bonus=roster_bonus,
                     reason="; ".join(reason_parts),
+                    sell_plan=forced_sell_plan,
                 )
             )
 
-        # For over-budget buys, generate sell plans instead of filtering
+        # For over-budget buys, generate sell plans instead of filtering.
+        # Buys that already have a forced sell plan (dead-weight guard) keep
+        # it — the budget shortfall is already covered by the forced plan.
         final_recs: list[BuyRecommendation] = []
         for rec in recs:
-            if rec.player.price <= budget:
+            if rec.sell_plan is not None:
+                # Already has a sell plan (forced dead-weight or pre-attached)
+                final_recs.append(rec)
+            elif rec.player.price <= budget:
                 final_recs.append(rec)
             elif squad_list:
                 # Player costs more than budget — generate sell plan
@@ -374,6 +454,7 @@ class DecisionEngine:
                     squad_scores=squad_scores,
                     best_11_ids=best_11_ids,
                     displaced_player_id=rec.replaces_player_id,
+                    incoming_position=rec.player.position,
                 )
                 if sell_plan.is_viable:
                     rec.sell_plan = sell_plan
@@ -593,6 +674,27 @@ class DecisionEngine:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _would_create_dead_weight(
+    candidate_player: MarketPlayer,
+    squad: list[MarketPlayer],
+) -> bool:
+    """True if buying *candidate_player* would saturate their position.
+
+    A position is "saturated" when the squad already has at least as many
+    players as the maximum any formation can start (1 GK, 5 DEF, 5 MID,
+    3 FWD).  Adding one more guarantees someone at that position can never
+    enter any starting 11 — permanent dead weight.
+
+    Note: this doesn't depend on *who* gets displaced from the best-11.
+    ``select_best_eleven`` may push out a player from a different position
+    (e.g. a new GK can push out a Forward), but the dead weight is still
+    the weakest player at the *candidate's* position.
+    """
+    pos_count = sum(1 for p in squad if p.position == candidate_player.position)
+    max_starters = _POSITION_MAX_STARTERS.get(candidate_player.position, 3)
+    return pos_count >= max_starters
 
 
 def _dummy_score(player_id: str, ep: float) -> PlayerScore:
