@@ -283,12 +283,28 @@ class AutoTrader:
                 # half-finished flip risks the lineup penalty AND market drop.
                 max_hold_days = _max_flip_hold_days(ctx.matchday_phase.days_until_match)
 
+                from .formation import validate_formation
+                from .scoring.decision import _would_create_dead_weight
+
                 skipped_long_hold = 0
+                skipped_unfieldable = 0
                 for opp in profit_opps:
                     if opp.player.id in ep_player_ids:
                         continue
                     if max_hold_days is not None and opp.hold_days > max_hold_days:
                         skipped_long_hold += 1
+                        continue
+                    # Fieldability guard: don't buy a flip that would make the
+                    # squad unable to field a valid starting 11.
+                    hypothetical = list(fresh_squad) + [opp.player]
+                    fieldability = validate_formation(hypothetical)
+                    if not fieldability["can_field_eleven"]:
+                        skipped_unfieldable += 1
+                        continue
+                    # Dead-weight guard: don't flip-buy a player whose position
+                    # is already saturated (e.g. 2nd GK, 6th DEF).
+                    if _would_create_dead_weight(opp.player, fresh_squad):
+                        skipped_unfieldable += 1
                         continue
                     profit_flip_candidates.append(opp)
 
@@ -300,6 +316,11 @@ class AutoTrader:
                     console.print(
                         f"[dim]Skipped {skipped_long_hold} flip(s) — "
                         f"hold time would exceed matchday window[/dim]"
+                    )
+                if skipped_unfieldable > 0:
+                    console.print(
+                        f"[dim]Skipped {skipped_unfieldable} flip(s) — "
+                        f"would make squad unfieldable[/dim]"
                     )
             except Exception as e:
                 console.print(f"[yellow]Profit flip search failed: {e}[/yellow]")
