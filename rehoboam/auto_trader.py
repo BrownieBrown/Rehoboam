@@ -593,6 +593,40 @@ class AutoTrader:
                     )
                 )
 
+        # Dead-weight sell: surplus-position bench players (e.g. 2nd/3rd GK)
+        # that block the squad from buying useful players.  Even at a small
+        # loss, freeing the slot is worth it when the EP pipeline has buy
+        # candidates waiting — the matchday points gained over a season
+        # vastly outweigh a one-time market value loss.
+        from .formation import _POSITION_MAX_STARTERS
+
+        already_selling = {p.id for p, _, _ in sell_candidates}
+        for player in squad:
+            if player.id in best_11_ids or player.id in already_selling:
+                continue
+            if not player.buy_price or player.buy_price <= 0:
+                continue
+
+            max_starters = _POSITION_MAX_STARTERS.get(player.position, 3)
+            if position_counts.get(player.position, 0) <= max_starters:
+                continue  # Position not saturated — not dead weight
+
+            profit = player.market_value - player.buy_price
+            profit_pct = (profit / player.buy_price) * 100
+
+            # Always sell dead weight at a profit.  At a loss, only sell
+            # when the EP pipeline has a replacement lined up — the freed
+            # slot is worth more than the loss.
+            if profit_pct >= 0 or has_replacement:
+                sell_candidates.append(
+                    (
+                        player,
+                        profit_pct,
+                        f"Dead weight ({player.position} surplus): "
+                        f"{profit_pct:+.1f}% (€{profit:,}), freeing slot",
+                    )
+                )
+
         if not sell_candidates:
             console.print("[dim]No players meet sell criteria[/dim]")
             return results

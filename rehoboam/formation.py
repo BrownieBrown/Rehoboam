@@ -128,11 +128,19 @@ def select_best_eleven(squad: list, player_values: dict[str, float]) -> list:
         if len(selected) >= requirements.starting_eleven_size:
             break
 
-    # Second pass: fill remaining spots with best available
+    # Second pass: fill remaining spots with best available, but respect
+    # position ceilings.  A 2nd GK can never play in any formation, so
+    # picking one here would block a useful outfield player and break
+    # marginal-EP calculations downstream.
     if len(selected) < requirements.starting_eleven_size:
         for player in sorted_squad:
             if player not in selected:
+                pos = player.position
+                max_at_pos = _POSITION_MAX_STARTERS.get(pos, 3)
+                if position_counts.get(pos, 0) >= max_at_pos:
+                    continue  # position saturated — skip
                 selected.append(player)
+                position_counts[pos] = position_counts.get(pos, 0) + 1
                 if len(selected) >= requirements.starting_eleven_size:
                     break
 

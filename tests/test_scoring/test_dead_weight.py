@@ -5,7 +5,7 @@ would permanently bench a same-position peer (e.g. 2nd GK), and that the
 fieldability guard in formation.py correctly identifies unfieldable squads.
 """
 
-from rehoboam.formation import _POSITION_MAX_STARTERS, validate_formation
+from rehoboam.formation import _POSITION_MAX_STARTERS, select_best_eleven, validate_formation
 from rehoboam.kickbase_client import MarketPlayer
 from rehoboam.scoring.decision import DecisionEngine, _would_create_dead_weight
 from rehoboam.scoring.models import DataQuality, PlayerScore
@@ -122,6 +122,89 @@ class TestPositionMaxStarters:
 
     def test_fwd_max_is_3(self):
         assert _POSITION_MAX_STARTERS["Forward"] == 3
+
+
+# ---------------------------------------------------------------------------
+# select_best_eleven position cap
+# ---------------------------------------------------------------------------
+
+
+class TestSelectBestElevenPositionCap:
+    def test_second_gk_never_in_best_11(self):
+        """With 12 players including 2 GKs, best-11 should only include 1 GK."""
+        squad = [
+            _make_player("gk1", "Goalkeeper"),
+            _make_player("gk2", "Goalkeeper"),
+            *[_make_player(f"def{i}", "Defender") for i in range(4)],
+            *[_make_player(f"mid{i}", "Midfielder") for i in range(4)],
+            *[_make_player(f"fwd{i}", "Forward") for i in range(2)],
+        ]
+        # GK1 has highest EP so both GKs would be picked without the cap
+        values = {p.id: 50.0 for p in squad}
+        values["gk1"] = 90.0
+        values["gk2"] = 80.0  # Higher than most outfield
+
+        best_11 = select_best_eleven(squad, values)
+        gk_count = sum(1 for p in best_11 if p.position == "Goalkeeper")
+        assert gk_count == 1, f"Expected 1 GK in best-11, got {gk_count}"
+        assert any(p.id == "gk1" for p in best_11), "Best GK should be selected"
+        assert not any(p.id == "gk2" for p in best_11), "2nd GK should NOT be in best-11"
+
+    def test_three_gks_only_one_selected(self):
+        """With 3 GKs in a 12-player squad, exactly 1 GK in best-11."""
+        squad = [
+            _make_player("gk1", "Goalkeeper"),
+            _make_player("gk2", "Goalkeeper"),
+            _make_player("gk3", "Goalkeeper"),
+            *[_make_player(f"def{i}", "Defender") for i in range(3)],
+            *[_make_player(f"mid{i}", "Midfielder") for i in range(3)],
+            *[_make_player(f"fwd{i}", "Forward") for i in range(3)],
+        ]
+        values = {p.id: 40.0 for p in squad}
+        values["gk1"] = 90.0
+        values["gk2"] = 85.0
+        values["gk3"] = 80.0
+
+        best_11 = select_best_eleven(squad, values)
+        gk_count = sum(1 for p in best_11 if p.position == "Goalkeeper")
+        assert gk_count == 1
+
+    def test_outfield_player_preferred_over_surplus_gk(self):
+        """A MID with lower EP should still beat a surplus GK for a best-11 spot."""
+        squad = [
+            _make_player("gk1", "Goalkeeper"),
+            _make_player("gk2", "Goalkeeper"),
+            *[_make_player(f"def{i}", "Defender") for i in range(3)],
+            *[_make_player(f"mid{i}", "Midfielder") for i in range(4)],
+            *[_make_player(f"fwd{i}", "Forward") for i in range(2)],
+        ]
+        values = {p.id: 50.0 for p in squad}
+        values["gk1"] = 90.0
+        values["gk2"] = 80.0  # Higher than mid3
+        values["mid3"] = 30.0  # Lowest, but should still beat surplus GK
+
+        best_11 = select_best_eleven(squad, values)
+        assert any(
+            p.id == "mid3" for p in best_11
+        ), "Outfield player should be preferred over surplus GK"
+        assert not any(p.id == "gk2" for p in best_11)
+
+    def test_six_defenders_only_five_in_best_11(self):
+        """Max 5 DEF can start. 6th DEF should be excluded."""
+        squad = [
+            _make_player("gk1", "Goalkeeper"),
+            *[_make_player(f"def{i}", "Defender") for i in range(6)],
+            *[_make_player(f"mid{i}", "Midfielder") for i in range(3)],
+            _make_player("fwd0", "Forward"),
+        ]
+        values = {p.id: 50.0 for p in squad}
+        # All defenders have high EP
+        for i in range(6):
+            values[f"def{i}"] = 70.0 - i
+
+        best_11 = select_best_eleven(squad, values)
+        def_count = sum(1 for p in best_11 if p.position == "Defender")
+        assert def_count == 5, f"Expected max 5 DEF, got {def_count}"
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +341,10 @@ class TestRecommendBuysDeadWeight:
         # No forced sell plan — position not saturated
         assert rec.sell_plan is None
 
-    def test_gk_upgrade_skipped_if_sell_plan_not_viable(self):
-        """If the forced sell plan is unviable (only 1 GK, can't sell it
-        without breaking minimums), the buy should be skipped entirely."""
-        # Minimal squad: only the GK, and the GK is protected
+    def test_gk_buy_with_one_existing_gk_gets_sell_plan(self):
+        """With exactly 1 GK in squad and buying a 2nd, the dead-weight guard
+        fires and attaches a viable sell plan for the old GK (because buying
+        the new GK means selling the old one is safe — count stays at 1)."""
         squad = [_make_player("gk1", "Goalkeeper", market_value=2_000_000)]
         scores = [_make_score("gk1", 35.0, "Goalkeeper", market_value=2_000_000)]
         squad_players = {p.id: p for p in squad}
@@ -278,15 +361,13 @@ class TestRecommendBuysDeadWeight:
             budget=50_000_000,
             market_players=market_players,
             squad_players=squad_players,
-            is_emergency=True,  # Allow lower thresholds
+            is_emergency=True,
         )
 
-        # The GK is the only one in squad → selling would break the minimum.
-        # build_sell_plan should refuse to sell a position-minimum player,
-        # BUT the old GK is the displaced player which goes first in the
-        # sell plan ordering. It would need to check position minimums.
-        # If sell plan is not viable → the rec should be filtered out.
-        for rec in recs:
-            if rec.player.id == "new_gk" and rec.sell_plan is not None:
-                # If it somehow passes, the sell plan should at least be viable
-                assert rec.sell_plan.is_viable
+        # The GK upgrade should be recommended with a forced sell plan
+        gk_rec = next((r for r in recs if r.player.id == "new_gk"), None)
+        assert gk_rec is not None, "GK upgrade should be recommended"
+        assert gk_rec.sell_plan is not None, "Must have forced sell plan"
+        assert gk_rec.sell_plan.is_viable, "Sell plan must be viable"
+        sell_ids = [e.player_id for e in gk_rec.sell_plan.players_to_sell]
+        assert "gk1" in sell_ids, "Old GK should be the sell target"
