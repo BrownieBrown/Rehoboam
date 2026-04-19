@@ -52,6 +52,22 @@ def _max_flip_hold_days(days_until_match: int | None) -> int | None:
     return max(1, days_until_match - 1)
 
 
+def _compute_flip_budget(
+    phase: str, current_budget: int, pending_bid_total: int, max_debt: int
+) -> int:
+    """Free budget for flip trading, by matchday phase.
+
+    Shared by session-context build and the trade-phase refresh so both
+    call sites agree on the formula after sells/bid-cancels mutate the
+    inputs mid-session.
+    """
+    if phase == "locked":
+        return 0
+    if phase == "moderate":
+        return current_budget - pending_bid_total
+    return current_budget + max_debt - pending_bid_total
+
+
 @dataclass
 class EPSessionContext:
     """Single-fetch context for the entire auto session."""
@@ -183,13 +199,7 @@ class AutoTrader:
         # Calculate flip budget based on matchday phase
         max_debt = int(team_value * (self.settings.max_debt_pct_of_team_value / 100))
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
-
-        if phase.phase == "locked":
-            flip_budget = 0
-        elif phase.phase == "moderate":
-            flip_budget = current_budget - pending_bid_total
-        else:
-            flip_budget = current_budget + max_debt - pending_bid_total
+        flip_budget = _compute_flip_budget(phase.phase, current_budget, pending_bid_total, max_debt)
 
         return EPSessionContext(
             ep_result=ep_result,
@@ -244,14 +254,24 @@ class AutoTrader:
             f"{sum(1 for c in candidates if c[0] == 'pair')} trade pairs)[/cyan]"
         )
 
-        # Refresh squad and bids — earlier phases (sell monitoring, squad optimization)
-        # may have changed the actual counts since ctx was built.
+        # Refresh squad, bids, and budget — sell monitoring, squad optimization,
+        # and bid compliance/evaluation can all mutate these between ctx build
+        # and the trade phase. Without re-running the flip-budget math against
+        # fresh numbers, we skip affordable candidates after a mid-session sell
+        # or bid cancel.
         fresh_squad = self.api.get_squad(league)
         fresh_bids = self.api.get_my_bids(league)
+        fresh_team_info = self.api.get_team_info(league)
         current_squad_size = len(fresh_squad)
         active_bid_count = len(fresh_bids)
         available_slots = 15 - current_squad_size - active_bid_count
-        # Update bid amounts map for duplicate-bid detection
+        ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
+        ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
+        pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
+        max_debt = int(ctx.team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        ctx.flip_budget = _compute_flip_budget(
+            ctx.matchday_phase.phase, ctx.current_budget, pending_bid_total, max_debt
+        )
         ctx.my_bid_amounts = {p.id: p.user_offer_price for p in fresh_bids}
 
         console.print(
