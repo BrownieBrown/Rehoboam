@@ -54,6 +54,7 @@ def _migrate_pending_bids(learner: BidLearner, path: Path) -> int:
 
     existing_ids = {b["player_id"] for b in learner.get_pending_bids()}
     imported = 0
+    failed = 0
     for bid in data:
         try:
             player_id = bid["player_id"]
@@ -72,9 +73,15 @@ def _migrate_pending_bids(learner: BidLearner, path: Path) -> int:
             )
             imported += 1
         except (KeyError, TypeError) as e:
+            failed += 1
             logger.warning("Skipping malformed pending_bid entry %r: %s", bid, e)
 
-    _archive(path)
+    # If every entry failed (corrupted/mid-write JSON) keep the file on
+    # disk for human inspection — silently archiving it would permanently
+    # discard state the operator believes was migrated. A successful
+    # import (or a clean dedup against existing DB rows) still archives.
+    if imported > 0 or failed == 0:
+        _archive(path)
     return imported
 
 
@@ -84,6 +91,7 @@ def _migrate_tracked_purchases(learner: BidLearner, path: Path) -> int:
         return 0
 
     imported = 0
+    failed = 0
     for player_id, info in data.items():
         try:
             if learner.get_tracked_purchase(player_id) is not None:
@@ -97,9 +105,11 @@ def _migrate_tracked_purchases(learner: BidLearner, path: Path) -> int:
             )
             imported += 1
         except (KeyError, TypeError) as e:
+            failed += 1
             logger.warning("Skipping malformed tracked_purchase %s=%r: %s", player_id, info, e)
 
-    _archive(path)
+    if imported > 0 or failed == 0:
+        _archive(path)
     return imported
 
 

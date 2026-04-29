@@ -173,6 +173,54 @@ class TestMigrateTrackedPurchases:
         assert learner.get_tracked_purchase("anything") is None
 
 
+class TestMigrationPreservesJsonOnPartialFailure:
+    """If a JSON file is malformed (mid-write, schema drift, corrupted),
+    the migration must NOT silently archive it — that would permanently
+    discard state the operator believes was migrated. We rename to .bak
+    only when every entry imported cleanly OR when at least one entry
+    succeeded and the rest were genuine schema-mismatch skips.
+    """
+
+    def test_archive_skipped_when_all_entries_malformed(self, tmp_path, learner):
+        purchases_path = tmp_path / "tracked_purchases.json"
+        # Every entry missing required `buy_price` — every row will fail.
+        _write_json(
+            purchases_path,
+            {
+                "1": {"player_name": "x", "buy_date": 1.0},
+                "2": {"player_name": "y", "buy_date": 2.0},
+            },
+        )
+
+        migrate_json_state_if_needed(
+            learner,
+            pending_bids_path=tmp_path / "missing.json",
+            tracked_purchases_path=purchases_path,
+        )
+
+        # JSON must still be on disk for human inspection / retry.
+        assert purchases_path.exists()
+        assert not purchases_path.with_suffix(".json.bak").exists()
+
+    def test_archive_skipped_when_pending_bids_all_malformed(self, tmp_path, learner):
+        pending_path = tmp_path / "pending_bids.json"
+        _write_json(
+            pending_path,
+            [
+                {"player_id": "x"},  # missing every other required field
+            ],
+        )
+
+        migrate_json_state_if_needed(
+            learner,
+            pending_bids_path=pending_path,
+            tracked_purchases_path=tmp_path / "missing.json",
+        )
+
+        assert pending_path.exists()
+        assert not pending_path.with_suffix(".json.bak").exists()
+
+
 class TestMigrationDoesNotOverwriteExistingDbRows:
     def test_skips_import_when_table_already_populated(self, tmp_path, learner):
         # If the DB already has rows (e.g. Azure restored a backup that
