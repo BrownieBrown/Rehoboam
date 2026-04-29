@@ -1,55 +1,61 @@
 """Learning tracker — persists bid/purchase/flip outcomes for the bid_learner.
 
-Separates the file I/O and outcome-reconciliation logic from AutoTrader so the
-trading code stays focused on decisions and execution.
+Separates the operational state from AutoTrader so the trading code stays
+focused on decisions and execution. Two slices of state are managed:
 
-Two JSON files are maintained under `logs/`:
+- pending bids — auctions placed but not yet known to be won/lost
+- tracked purchases — players we currently hold, with their cost basis
 
-- `pending_bids.json` — bids we placed but don't yet know if we won
-- `tracked_purchases.json` — players we bought (for later flip profit calc)
+Both used to live in JSON files (`pending_bids.json`,
+`tracked_purchases.json`) under `logs/`. Azure didn't sync those, so
+they were silently wiped between runs. Both now live in `bid_learning.db`
+alongside `auction_outcomes` and `flip_outcomes` (which are the
+historical archive — operational rows are deleted on lifecycle close).
 
-On each `resolve_auctions()` call, pending bids are checked against the current
-squad + active bids to determine won/lost, and outcomes are pushed into the
-BidLearner (which is the real storage layer).
+On `__init__`, any leftover JSON files are imported into the DB and
+renamed to `.bak` (one-time, idempotent — see `migration.py`).
+
+On each `resolve_auctions()` call, pending bids are checked against the
+current squad + active bids to determine won/lost; outcomes are pushed
+into the BidLearner's history tables.
 """
 
-import json
+import logging
 import time
 from pathlib import Path
-from typing import Any
 
 from ..bid_learner import AuctionOutcome, BidLearner, FlipOutcome
+from .migration import migrate_json_state_if_needed
+
+logger = logging.getLogger(__name__)
 
 _LOG_DIR = Path("logs")
-_PENDING_BIDS = _LOG_DIR / "pending_bids.json"
-_TRACKED_PURCHASES = _LOG_DIR / "tracked_purchases.json"
-
-
-def _load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def _save_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+_PENDING_BIDS_JSON = _LOG_DIR / "pending_bids.json"
+_TRACKED_PURCHASES_JSON = _LOG_DIR / "tracked_purchases.json"
 
 
 class LearningTracker:
     """Persists trade outcomes for the adaptive bidding feedback loop.
 
-    All methods silently swallow exceptions — learning side effects must never
-    block the main trading loop. A failed write is not worse than skipped data.
+    All public methods silently swallow exceptions — learning side effects
+    must never block the main trading loop. A failed write is not worse
+    than skipped data.
     """
 
     def __init__(self, bid_learner: BidLearner):
         self.bid_learner = bid_learner
+
+        # One-time migration from legacy JSON state files. Idempotent:
+        # missing files are no-ops, and successful imports rename the
+        # source to `.bak` so subsequent boots skip the work.
+        try:
+            migrate_json_state_if_needed(
+                bid_learner,
+                pending_bids_path=_PENDING_BIDS_JSON,
+                tracked_purchases_path=_TRACKED_PURCHASES_JSON,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("State migration failed (continuing): %s", e)
 
     # ------------------------------------------------------------------
     # Bid placed → pending
@@ -71,23 +77,18 @@ class LearningTracker:
             asking_price = player.price
             overbid_pct = ((our_bid - asking_price) / asking_price * 100) if asking_price > 0 else 0
 
-            entry = {
-                "player_id": player.id,
-                "player_name": f"{player.first_name} {player.last_name}",
-                "our_bid": our_bid,
-                "asking_price": asking_price,
-                "our_overbid_pct": overbid_pct,
-                "timestamp": time.time(),
-                "market_value": getattr(player, "market_value", 0),
-            }
-            if sell_plan_player_ids:
-                entry["sell_plan_player_ids"] = sell_plan_player_ids
-
-            pending = _load_json(_PENDING_BIDS, [])
-            pending.append(entry)
-            _save_json(_PENDING_BIDS, pending)
-        except Exception:
-            pass
+            self.bid_learner.add_pending_bid(
+                player_id=player.id,
+                player_name=f"{player.first_name} {player.last_name}",
+                our_bid=our_bid,
+                asking_price=asking_price,
+                our_overbid_pct=overbid_pct,
+                timestamp=time.time(),
+                market_value=getattr(player, "market_value", 0),
+                sell_plan_player_ids=sell_plan_player_ids,
+            )
+        except Exception as e:
+            logger.warning("Failed to record bid placement: %s", e)
 
     # ------------------------------------------------------------------
     # Pending → resolved (won/lost)
@@ -111,30 +112,26 @@ class LearningTracker:
         """
         sell_plan_ids: list[str] = []
         try:
-            pending = _load_json(_PENDING_BIDS, [])
+            pending = self.bid_learner.get_pending_bids()
             if not pending:
                 return sell_plan_ids
 
-            still_pending = []
             for bid_data in pending:
                 player_id = bid_data["player_id"]
 
                 if player_id in squad_ids:
                     self._record_outcome(bid_data, won=True)
                     self._track_purchase(player_id, bid_data)
-                    # Collect sell plan IDs from bids we won — caller will
-                    # execute the sells to recover budget.
                     for sp_id in bid_data.get("sell_plan_player_ids", []):
                         if sp_id not in sell_plan_ids:
                             sell_plan_ids.append(sp_id)
+                    self.bid_learner.delete_pending_bid(player_id)
                 elif player_id not in active_bid_ids:
                     self._record_outcome(bid_data, won=False)
-                else:
-                    still_pending.append(bid_data)
-
-            _save_json(_PENDING_BIDS, still_pending)
-        except Exception:
-            pass
+                    self.bid_learner.delete_pending_bid(player_id)
+                # else: still pending — leave the row in place
+        except Exception as e:
+            logger.warning("Auction resolution failed: %s", e)
         return sell_plan_ids
 
     def _record_outcome(self, bid_data: dict, won: bool) -> None:
@@ -151,8 +148,8 @@ class LearningTracker:
                 market_value=bid_data.get("market_value"),
             )
             self.bid_learner.record_outcome(outcome)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to record auction outcome: %s", e)
 
     # ------------------------------------------------------------------
     # Purchase tracking (for later flip profit calc)
@@ -161,15 +158,15 @@ class LearningTracker:
     def _track_purchase(self, player_id: str, bid_data: dict) -> None:
         """Record that we bought a player — used later to compute flip profit."""
         try:
-            purchases = _load_json(_TRACKED_PURCHASES, {})
-            purchases[player_id] = {
-                "player_name": bid_data["player_name"],
-                "buy_price": bid_data["our_bid"],
-                "buy_date": bid_data["timestamp"],
-            }
-            _save_json(_TRACKED_PURCHASES, purchases)
-        except Exception:
-            pass
+            self.bid_learner.add_tracked_purchase(
+                player_id=player_id,
+                player_name=bid_data["player_name"],
+                buy_price=bid_data["our_bid"],
+                buy_date=bid_data["timestamp"],
+                source="real",
+            )
+        except Exception as e:
+            logger.warning("Failed to track purchase: %s", e)
 
     # ------------------------------------------------------------------
     # Flip outcome (bought + sold → profit recorded)
@@ -181,11 +178,10 @@ class LearningTracker:
         Silently skips if we have no record of buying this player.
         """
         try:
-            purchases = _load_json(_TRACKED_PURCHASES, {})
-            if player.id not in purchases:
+            purchase = self.bid_learner.get_tracked_purchase(player.id)
+            if purchase is None:
                 return
 
-            purchase = purchases[player.id]
             buy_price = purchase["buy_price"]
             buy_date = purchase["buy_date"]
             sell_date = time.time()
@@ -209,9 +205,6 @@ class LearningTracker:
                 was_injured=(player.status != 0) if hasattr(player, "status") else False,
             )
             self.bid_learner.record_flip(outcome)
-
-            # Drop from tracked purchases now that flip is closed
-            del purchases[player.id]
-            _save_json(_TRACKED_PURCHASES, purchases)
-        except Exception:
-            pass
+            self.bid_learner.delete_tracked_purchase(player.id)
+        except Exception as e:
+            logger.warning("Failed to record flip outcome: %s", e)

@@ -179,6 +179,67 @@ class BidLearner:
             """
             )
 
+            # Operational state — bids placed but not yet resolved.
+            # Replaces the legacy `pending_bids.json` file, which Azure
+            # didn't sync between runs. One row per active auction; on
+            # win/loss, the row is deleted and the outcome is appended
+            # to `auction_outcomes` (which is the historical record).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_bids (
+                    player_id TEXT PRIMARY KEY,
+                    player_name TEXT NOT NULL,
+                    our_bid INTEGER NOT NULL,
+                    asking_price INTEGER NOT NULL,
+                    our_overbid_pct REAL NOT NULL,
+                    timestamp REAL NOT NULL,
+                    market_value INTEGER,
+                    player_value_score REAL
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pending_bids_timestamp
+                ON pending_bids(timestamp)
+            """
+            )
+
+            # Sell-plan join table: when a bid wins, the listed players
+            # are sold to recover budget. Normalized so we can answer
+            # "which auctions freed which slots" without parsing JSON.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_bid_sell_plans (
+                    pending_bid_player_id TEXT NOT NULL,
+                    sell_player_id TEXT NOT NULL,
+                    PRIMARY KEY (pending_bid_player_id, sell_player_id)
+                )
+            """
+            )
+
+            # Operational state — players we currently hold with their
+            # cost basis. Replaces `tracked_purchases.json`. On sell,
+            # the row is deleted and the closed flip is appended to
+            # `flip_outcomes` (which is the historical record).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tracked_purchases (
+                    player_id TEXT PRIMARY KEY,
+                    player_name TEXT NOT NULL,
+                    buy_price INTEGER NOT NULL,
+                    buy_date REAL NOT NULL,
+                    source TEXT
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_tracked_purchases_buy_date
+                ON tracked_purchases(buy_date)
+            """
+            )
+
             conn.commit()
 
     def record_outcome(self, outcome: AuctionOutcome):
@@ -240,6 +301,161 @@ class BidLearner:
                     outcome.position,
                     1 if outcome.was_injured else 0,
                 ),
+            )
+            conn.commit()
+
+    # ------------------------------------------------------------------
+    # Operational state: pending bids + tracked purchases
+    #
+    # These two table families used to live in JSON files (`pending_bids.json`,
+    # `tracked_purchases.json`) which Azure wiped between runs. They live
+    # here so they ride along with the existing `bid_learning.db` blob sync.
+    # On lifecycle close (auction resolved / player sold) the row is deleted
+    # and the historical outcome is appended to `auction_outcomes` /
+    # `flip_outcomes` — those tables are the durable archive.
+    # ------------------------------------------------------------------
+
+    def add_pending_bid(
+        self,
+        *,
+        player_id: str,
+        player_name: str,
+        our_bid: int,
+        asking_price: int,
+        our_overbid_pct: float,
+        timestamp: float,
+        market_value: int | None = None,
+        player_value_score: float | None = None,
+        sell_plan_player_ids: list[str] | None = None,
+    ) -> None:
+        """Record a freshly placed bid as pending (outcome TBD).
+
+        Re-bidding on the same player overwrites the existing row — there's
+        only ever one active auction per player from our side.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pending_bids (
+                    player_id, player_name, our_bid, asking_price,
+                    our_overbid_pct, timestamp, market_value, player_value_score
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    player_id,
+                    player_name,
+                    our_bid,
+                    asking_price,
+                    our_overbid_pct,
+                    timestamp,
+                    market_value,
+                    player_value_score,
+                ),
+            )
+            # Replace sell-plan rows: an INSERT OR REPLACE on pending_bids
+            # alone leaves stale join rows behind, so clear and reinsert.
+            conn.execute(
+                "DELETE FROM pending_bid_sell_plans WHERE pending_bid_player_id = ?",
+                (player_id,),
+            )
+            if sell_plan_player_ids:
+                conn.executemany(
+                    """
+                    INSERT INTO pending_bid_sell_plans (
+                        pending_bid_player_id, sell_player_id
+                    ) VALUES (?, ?)
+                """,
+                    [(player_id, sp) for sp in sell_plan_player_ids],
+                )
+            conn.commit()
+
+    def get_pending_bids(self) -> list[dict[str, Any]]:
+        """Return all pending bids, oldest first, with their sell plans inlined."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT player_id, player_name, our_bid, asking_price,
+                       our_overbid_pct, timestamp, market_value, player_value_score
+                FROM pending_bids
+                ORDER BY timestamp ASC
+            """
+            ).fetchall()
+
+            sell_plan_rows = conn.execute(
+                """
+                SELECT pending_bid_player_id, sell_player_id
+                FROM pending_bid_sell_plans
+            """
+            ).fetchall()
+
+        sell_plans: dict[str, list[str]] = {}
+        for r in sell_plan_rows:
+            sell_plans.setdefault(r["pending_bid_player_id"], []).append(r["sell_player_id"])
+
+        return [
+            {**dict(row), "sell_plan_player_ids": sell_plans.get(row["player_id"], [])}
+            for row in rows
+        ]
+
+    def delete_pending_bid(self, player_id: str) -> None:
+        """Remove the pending bid + its sell-plan rows. No-op if missing."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM pending_bid_sell_plans WHERE pending_bid_player_id = ?",
+                (player_id,),
+            )
+            conn.execute(
+                "DELETE FROM pending_bids WHERE player_id = ?",
+                (player_id,),
+            )
+            conn.commit()
+
+    def add_tracked_purchase(
+        self,
+        *,
+        player_id: str,
+        player_name: str,
+        buy_price: int,
+        buy_date: float,
+        source: str | None = None,
+    ) -> None:
+        """Record a player we now hold, with its cost basis.
+
+        Re-buying overwrites the existing row — the latest cost basis
+        wins so flip P&L always reflects the most recent purchase.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO tracked_purchases (
+                    player_id, player_name, buy_price, buy_date, source
+                )
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                (player_id, player_name, buy_price, buy_date, source),
+            )
+            conn.commit()
+
+    def get_tracked_purchase(self, player_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT player_id, player_name, buy_price, buy_date, source
+                FROM tracked_purchases
+                WHERE player_id = ?
+            """,
+                (player_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_tracked_purchase(self, player_id: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM tracked_purchases WHERE player_id = ?",
+                (player_id,),
             )
             conn.commit()
 
