@@ -510,6 +510,21 @@ class AutoTrader:
         else:
             return 5.0  # Falling fast — take any profit
 
+    @staticmethod
+    def _can_loss_sell_with_replacement(trend_7d_pct: float | None) -> bool:
+        """Loss-sell guard: don't realize a loss while the price is rebounding.
+
+        The stop-loss and dead-weight branches realize a market-value loss
+        when a buy candidate is available. That makes sense for a player
+        whose price keeps sliding, but not for one already bouncing back —
+        selling there just locks in a loss the recovery would erase.
+        Returns False to defer the sell when the 7-day trend is a real
+        rebound (≥+1%/wk); falls back to legacy behavior otherwise.
+        """
+        if trend_7d_pct is None:
+            return True
+        return trend_7d_pct < 1.0
+
     def run_profit_sell_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Trend-aware profit sell monitoring.
 
@@ -563,6 +578,11 @@ class AutoTrader:
             activity_feed_learner=self.activity_feed_learner,
         )
 
+        # Cache the 7d trend per player — used in both the stop-loss branch
+        # and the dead-weight loop below to keep loss-sells from firing while
+        # a player's price is rebounding.
+        trend_7d_by_id: dict[str, float | None] = {}
+
         sell_candidates = []
         for player in squad:
             if player.id in best_11_ids:
@@ -590,6 +610,7 @@ class AutoTrader:
                 trend_7d = trend.trend_7d_pct
             except Exception:
                 trend_7d = None
+            trend_7d_by_id[player.id] = trend_7d
 
             sell_threshold = self._sell_threshold_for_trend(trend_7d)
 
@@ -603,8 +624,14 @@ class AutoTrader:
                         f"Profit target ({sell_threshold:.0f}%) hit: +{profit_pct:.1f}% (€{profit:,}{trend_info})",
                     )
                 )
-            # Stop-loss: only if there's a better player to buy
-            elif profit_pct <= -5.0 and has_replacement:
+            # Stop-loss: only if there's a better player to buy AND the
+            # price isn't already rebounding (locking in a loss while the
+            # recovery is in progress is the worst possible exit).
+            elif (
+                profit_pct <= -5.0
+                and has_replacement
+                and self._can_loss_sell_with_replacement(trend_7d)
+            ):
                 sell_candidates.append(
                     (
                         player,
@@ -634,10 +661,29 @@ class AutoTrader:
             profit = player.market_value - player.buy_price
             profit_pct = (profit / player.buy_price) * 100
 
+            # Reuse the trend cached in the first loop. Every player that
+            # reaches this point passed the same best_11 + buy_price gates
+            # in loop 1 and either landed in `already_selling` (filtered
+            # above) or had its trend cached, so a missing key would mean
+            # an upstream filter changed — fetch defensively in that case.
+            if player.id in trend_7d_by_id:
+                trend_7d = trend_7d_by_id[player.id]
+            else:
+                try:
+                    trend_7d = trader.trend_service.get_trend(
+                        player.id, player.market_value, league.id
+                    ).trend_7d_pct
+                except Exception:
+                    trend_7d = None
+
             # Always sell dead weight at a profit.  At a loss, only sell
-            # when the EP pipeline has a replacement lined up — the freed
-            # slot is worth more than the loss.
-            if profit_pct >= 0 or has_replacement:
+            # when the EP pipeline has a replacement lined up *and* the
+            # price isn't already rebounding — the freed slot is worth
+            # more than the loss only if the loss isn't about to shrink
+            # on its own.
+            if profit_pct >= 0 or (
+                has_replacement and self._can_loss_sell_with_replacement(trend_7d)
+            ):
                 sell_candidates.append(
                     (
                         player,
