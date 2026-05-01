@@ -511,6 +511,33 @@ class AutoTrader:
             return 5.0  # Falling fast — take any profit
 
     @staticmethod
+    def _has_position_replacement(
+        position: str,
+        buy_recs: list,
+        trade_pairs: list,
+        min_ep_gain: float,
+    ) -> bool:
+        """True if a queued buy or trade pair would actually replace this position.
+
+        Loss-sells lock in a market-value loss, so they should only fire when
+        the EP pipeline has a same-position upgrade big enough to justify the
+        cost. The old global flag (``len(buy_recs) > 0 or len(trade_pairs) > 0``)
+        triggered a defender's loss-sell when only forward buys were queued —
+        the slot was freed but never filled, leaving cash idle.
+
+        Field names differ between the two collections: ``BuyRecommendation``
+        exposes ``player.position`` + ``marginal_ep_gain``; ``TradePair`` uses
+        ``buy_player.position`` + ``ep_gain``.
+        """
+        for rec in buy_recs:
+            if rec.player.position == position and rec.marginal_ep_gain >= min_ep_gain:
+                return True
+        for pair in trade_pairs:
+            if pair.buy_player.position == position and pair.ep_gain >= min_ep_gain:
+                return True
+        return False
+
+    @staticmethod
     def _can_loss_sell_with_replacement(trend_7d_pct: float | None) -> bool:
         """Loss-sell guard: don't realize a loss while the price is rebounding.
 
@@ -565,10 +592,12 @@ class AutoTrader:
         for p in squad:
             position_counts[p.position] = position_counts.get(p.position, 0) + 1
 
-        # Check if replacements are lined up in the EP pipeline
+        # Per-player same-position replacement check is applied below;
+        # see `_has_position_replacement`. We pull the EP pipeline output
+        # once here and pass it into each loss-sell decision.
         buy_recs = ctx.ep_result.get("buy_recs", [])
         trade_pairs = ctx.ep_result.get("trade_pairs", [])
-        has_replacement = len(buy_recs) > 0 or len(trade_pairs) > 0
+        min_ep_gain = self.settings.min_ep_upgrade_threshold
 
         # Build a Trader instance for trend lookups (uses cached data)
         trader = Trader(
@@ -624,19 +653,22 @@ class AutoTrader:
                         f"Profit target ({sell_threshold:.0f}%) hit: +{profit_pct:.1f}% (€{profit:,}{trend_info})",
                     )
                 )
-            # Stop-loss: only if there's a better player to buy AND the
+            # Stop-loss: only if a same-position upgrade is queued AND the
             # price isn't already rebounding (locking in a loss while the
             # recovery is in progress is the worst possible exit).
             elif (
                 profit_pct <= -5.0
-                and has_replacement
+                and self._has_position_replacement(
+                    player.position, buy_recs, trade_pairs, min_ep_gain
+                )
                 and self._can_loss_sell_with_replacement(trend_7d)
             ):
                 sell_candidates.append(
                     (
                         player,
                         profit_pct,
-                        f"Stop-loss (replacement available): {profit_pct:.1f}% (€{profit:,})",
+                        f"Stop-loss ({player.position} upgrade queued): "
+                        f"{profit_pct:.1f}% (€{profit:,})",
                     )
                 )
 
@@ -677,12 +709,13 @@ class AutoTrader:
                     trend_7d = None
 
             # Always sell dead weight at a profit.  At a loss, only sell
-            # when the EP pipeline has a replacement lined up *and* the
-            # price isn't already rebounding — the freed slot is worth
-            # more than the loss only if the loss isn't about to shrink
-            # on its own.
+            # when a same-position upgrade is queued *and* the price isn't
+            # already rebounding — the freed slot is worth more than the
+            # loss only if (a) we'll actually fill it with someone better
+            # and (b) the loss isn't about to shrink on its own.
             if profit_pct >= 0 or (
-                has_replacement and self._can_loss_sell_with_replacement(trend_7d)
+                self._has_position_replacement(player.position, buy_recs, trade_pairs, min_ep_gain)
+                and self._can_loss_sell_with_replacement(trend_7d)
             ):
                 sell_candidates.append(
                     (
