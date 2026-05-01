@@ -38,10 +38,12 @@ _DEFAULT_FORM: tuple[float, float] = (10.0, 5.0)
 def _parse_minutes(mp) -> int:
     """Parse Kickbase ``mp`` minutes-played values (e.g. ``"13'"``) to int.
 
-    Kickbase ships minutes as a string with a trailing apostrophe.  Anything
-    that doesn't match the expected pattern (None, empty string, future
-    matches without minutes, extra-time formats we've never observed)
-    degrades silently to 0 — a single oddly-formatted entry must not
+    Kickbase ships minutes as a string with a trailing apostrophe.
+    Extra-time matches arrive as ``"90+5'"`` per common football
+    convention (regulation + stoppage); both components are summed so
+    a 95-minute appearance counts as 95, not 0. Anything else (None,
+    empty string, future matches without minutes, truly malformed
+    entries) degrades silently to 0 — a single odd entry must not
     poison the whole player score.
     """
     if not mp:
@@ -50,7 +52,13 @@ def _parse_minutes(mp) -> int:
     try:
         return int(s)
     except ValueError:
-        return 0
+        pass
+    if "+" in s:
+        try:
+            return sum(int(part) for part in s.split("+"))
+        except ValueError:
+            return 0
+    return 0
 
 
 def _extract_consistency(performance: dict) -> tuple[int, float | None]:

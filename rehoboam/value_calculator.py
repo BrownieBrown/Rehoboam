@@ -194,11 +194,12 @@ class PlayerValue:
             # matches contains ALL team games, but player might not have played in all
             # A player "played" if they have points != 0 (even negative) OR minutes > 0
             # Filter to only matches where player was on the field
+            from .scoring.scorer import _parse_minutes
+
             matches_played = []
             for match in matches:
                 points = match.get("p", 0)
-                # Some matches might have "t" (minutes) field, check that too
-                minutes = match.get("t", 0)
+                minutes = _parse_minutes(match.get("mp"))
                 # If player had points (positive or negative) OR had minutes, they played
                 if points != 0 or minutes > 0:
                     matches_played.append(match)
@@ -267,12 +268,9 @@ class PlayerValue:
 
             matches = current_season.get("ph", [])
 
-            # Get minutes from each match (field "t" = time/minutes)
-            minutes_data = []
-            for match in matches:
-                minutes = match.get("t", None)
-                if minutes is not None:
-                    minutes_data.append(minutes)
+            from .scoring.scorer import _parse_minutes
+
+            minutes_data = [_parse_minutes(match["mp"]) for match in matches if "mp" in match]
 
             if len(minutes_data) < 2:
                 return None, None, None

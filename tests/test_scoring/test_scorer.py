@@ -317,11 +317,19 @@ class TestParseMinutes:
     def test_empty_string_returns_zero(self):
         assert _parse_minutes("") == 0
 
+    def test_extra_time_format_sums_components(self):
+        # `"90+5'"` means 90 minutes regulation + 5 stoppage = 95 played.
+        # We don't see this format in current cached data, but matches
+        # going to extra time can ship as `"N+M'"` per common football
+        # conventions — base + stoppage.
+        assert _parse_minutes("90+5'") == 95
+        assert _parse_minutes("45+2'") == 47
+
     def test_unexpected_format_returns_zero(self):
-        # Whatever Kickbase ships in extra time / abandoned matches —
-        # don't crash, don't guess.
-        assert _parse_minutes("90+5'") == 0
+        # Anything we genuinely can't make sense of degrades to 0
+        # rather than crashing.
         assert _parse_minutes("garbage") == 0
+        assert _parse_minutes("12abc'") == 0
 
     def test_plain_int_string(self):
         # Defensive: if Kickbase ever drops the apostrophe.
