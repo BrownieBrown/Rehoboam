@@ -6,6 +6,7 @@ from rehoboam.scoring.scorer import (
     _extract_consistency,
     _extract_minutes_trend,
     _grade_data_quality,
+    _parse_minutes,
     score_player,
 )
 
@@ -216,14 +217,14 @@ class TestExtractConsistency:
         assert consistency is None
 
     def test_single_game(self):
-        perf = self._make_perf([{"p": 30, "t": 90}])
+        perf = self._make_perf([{"p": 30, "mp": "90'"}])
         games, consistency = _extract_consistency(perf)
         assert games == 1
         assert consistency == 0.5  # medium confidence
 
     def test_consistent_player(self):
         # All same points → CV=0 → consistency=1.0
-        perf = self._make_perf([{"p": 20, "t": 90}] * 10)
+        perf = self._make_perf([{"p": 20, "mp": "90'"}] * 10)
         games, consistency = _extract_consistency(perf)
         assert games == 10
         assert consistency == 1.0
@@ -232,13 +233,27 @@ class TestExtractConsistency:
         # Games where player didn't play (0 points, 0 minutes) should be excluded
         perf = self._make_perf(
             [
-                {"p": 0, "t": 0},  # didn't play
-                {"p": 30, "t": 90},
-                {"p": 20, "t": 90},
+                {"p": 0, "mp": "0'"},  # didn't play
+                {"p": 30, "mp": "90'"},
+                {"p": 20, "mp": "90'"},
             ]
         )
         games, consistency = _extract_consistency(perf)
         assert games == 2
+
+    def test_brief_cameo_with_zero_points_still_counts(self):
+        # Player came in for 5 minutes, scored 0 — that IS playing.
+        # Pre-fix this was excluded because the t-field filter degraded
+        # to `p != 0`; with mp wired up, minutes>0 keeps the appearance.
+        perf = self._make_perf(
+            [
+                {"p": 0, "mp": "5'"},
+                {"p": 30, "mp": "90'"},
+                {"p": 20, "mp": "90'"},
+            ]
+        )
+        games, _ = _extract_consistency(perf)
+        assert games == 3
 
 
 class TestExtractMinutesTrend:
@@ -252,20 +267,70 @@ class TestExtractMinutesTrend:
 
     def test_increasing_minutes(self):
         # First half low, second half high
-        matches = [{"t": 30}] * 4 + [{"t": 90}] * 4
+        matches = [{"mp": "30'"}] * 4 + [{"mp": "90'"}] * 4
         perf = self._make_perf(matches)
         trend, avg = _extract_minutes_trend(perf)
         assert trend == "increasing"
 
     def test_decreasing_minutes(self):
-        matches = [{"t": 90}] * 4 + [{"t": 20}] * 4
+        matches = [{"mp": "90'"}] * 4 + [{"mp": "20'"}] * 4
         perf = self._make_perf(matches)
         trend, avg = _extract_minutes_trend(perf)
         assert trend == "decreasing"
 
     def test_stable_minutes(self):
-        matches = [{"t": 75}] * 8
+        matches = [{"mp": "75'"}] * 8
         perf = self._make_perf(matches)
         trend, avg = _extract_minutes_trend(perf)
         assert trend == "stable"
         assert avg == 75.0
+
+    def test_missing_mp_field_skipped(self):
+        # Future/scheduled matches in the API response have no `mp` —
+        # treat them as "no data" rather than letting them crash or
+        # falsely register as 0-minute appearances.
+        matches = [{"mp": "85'"}] * 4 + [{}, {"mp": "85'"}] + [{"mp": "85'"}] * 3
+        perf = self._make_perf(matches)
+        trend, avg = _extract_minutes_trend(perf)
+        # 8 valid minutes entries → still derives a trend
+        assert trend == "stable"
+        assert avg == 85.0
+
+
+class TestParseMinutes:
+    """The Kickbase API ships minutes as `mp` strings like `"13'"`.
+    Anything else we encounter should degrade to 0 rather than crash —
+    a single malformed match must not poison the whole player score.
+    """
+
+    def test_parses_apostrophe_suffix(self):
+        assert _parse_minutes("13'") == 13
+        assert _parse_minutes("90'") == 90
+        assert _parse_minutes("100'") == 100
+
+    def test_zero_minutes(self):
+        assert _parse_minutes("0'") == 0
+
+    def test_missing_returns_zero(self):
+        assert _parse_minutes(None) == 0
+
+    def test_empty_string_returns_zero(self):
+        assert _parse_minutes("") == 0
+
+    def test_extra_time_format_sums_components(self):
+        # `"90+5'"` means 90 minutes regulation + 5 stoppage = 95 played.
+        # We don't see this format in current cached data, but matches
+        # going to extra time can ship as `"N+M'"` per common football
+        # conventions — base + stoppage.
+        assert _parse_minutes("90+5'") == 95
+        assert _parse_minutes("45+2'") == 47
+
+    def test_unexpected_format_returns_zero(self):
+        # Anything we genuinely can't make sense of degrades to 0
+        # rather than crashing.
+        assert _parse_minutes("garbage") == 0
+        assert _parse_minutes("12abc'") == 0
+
+    def test_plain_int_string(self):
+        # Defensive: if Kickbase ever drops the apostrophe.
+        assert _parse_minutes("75") == 75

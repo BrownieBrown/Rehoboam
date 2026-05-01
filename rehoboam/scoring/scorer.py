@@ -35,12 +35,38 @@ _DEFAULT_FORM: tuple[float, float] = (10.0, 5.0)
 # ---------------------------------------------------------------------------
 
 
+def _parse_minutes(mp) -> int:
+    """Parse Kickbase ``mp`` minutes-played values (e.g. ``"13'"``) to int.
+
+    Kickbase ships minutes as a string with a trailing apostrophe.
+    Extra-time matches arrive as ``"90+5'"`` per common football
+    convention (regulation + stoppage); both components are summed so
+    a 95-minute appearance counts as 95, not 0. Anything else (None,
+    empty string, future matches without minutes, truly malformed
+    entries) degrades silently to 0 — a single odd entry must not
+    poison the whole player score.
+    """
+    if not mp:
+        return 0
+    s = str(mp).rstrip("'")
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    if "+" in s:
+        try:
+            return sum(int(part) for part in s.split("+"))
+        except ValueError:
+            return 0
+    return 0
+
+
 def _extract_consistency(performance: dict) -> tuple[int, float | None]:
     """Extract games played and consistency score from performance data.
 
     Parses ``performance["it"]`` — a list of season dicts each containing
-    ``"ph"`` (list of match dicts with ``"p"`` = points and ``"t"`` =
-    minutes).
+    ``"ph"`` (list of match dicts with ``"p"`` = points and ``"mp"`` =
+    minutes-played string).
 
     Returns:
         (games_played, consistency_score)
@@ -60,8 +86,12 @@ def _extract_consistency(performance: dict) -> tuple[int, float | None]:
 
         matches = current_season.get("ph", [])
 
-        # Only count matches where the player actually appeared
-        matches_played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
+        # Only count matches where the player actually appeared.  A 0-point
+        # appearance with non-zero minutes is still a played game (think
+        # late sub who didn't touch the ball) — keep those in the sample.
+        matches_played = [
+            m for m in matches if m.get("p", 0) != 0 or _parse_minutes(m.get("mp")) > 0
+        ]
         games_played = len(matches_played)
 
         if games_played == 0:
@@ -107,7 +137,7 @@ def _extract_minutes_trend(performance: dict) -> tuple[str | None, float | None]
             return None, None
 
         matches = current_season.get("ph", [])
-        minutes_data = [m["t"] for m in matches if "t" in m]
+        minutes_data = [_parse_minutes(m["mp"]) for m in matches if "mp" in m]
 
         if len(minutes_data) < 2:
             return None, None
@@ -152,7 +182,9 @@ def _extract_recent_form(performance: dict, window: int = 5) -> float | None:
             return None
 
         matches = current_season.get("ph", [])
-        matches_played = [m for m in matches if m.get("p", 0) != 0 or m.get("t", 0) > 0]
+        matches_played = [
+            m for m in matches if m.get("p", 0) != 0 or _parse_minutes(m.get("mp")) > 0
+        ]
 
         if len(matches_played) < 2:
             return None
