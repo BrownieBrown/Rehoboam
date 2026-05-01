@@ -597,7 +597,13 @@ class AutoTrader:
         # once here and pass it into each loss-sell decision.
         buy_recs = ctx.ep_result.get("buy_recs", [])
         trade_pairs = ctx.ep_result.get("trade_pairs", [])
-        min_ep_gain = self.settings.min_ep_upgrade_threshold
+        # Stop-loss locks in real cash loss against an EP gain that only
+        # accumulates if the replacement auction is won; require 2x the
+        # normal upgrade threshold to justify it. Mirrors the
+        # `min_ep_upgrade * 2` heuristic used for starter swaps in
+        # `decision.build_trade_pairs`.
+        stop_loss_min_ep_gain = self.settings.min_ep_upgrade_threshold * 2
+        any_buy_queued = bool(buy_recs) or bool(trade_pairs)
 
         # Build a Trader instance for trend lookups (uses cached data)
         trader = Trader(
@@ -659,7 +665,7 @@ class AutoTrader:
             elif (
                 profit_pct <= -5.0
                 and self._has_position_replacement(
-                    player.position, buy_recs, trade_pairs, min_ep_gain
+                    player.position, buy_recs, trade_pairs, stop_loss_min_ep_gain
                 )
                 and self._can_loss_sell_with_replacement(trend_7d)
             ):
@@ -708,14 +714,16 @@ class AutoTrader:
                 except Exception:
                     trend_7d = None
 
-            # Always sell dead weight at a profit.  At a loss, only sell
-            # when a same-position upgrade is queued *and* the price isn't
-            # already rebounding — the freed slot is worth more than the
-            # loss only if (a) we'll actually fill it with someone better
-            # and (b) the loss isn't about to shrink on its own.
+            # Always sell dead weight at a profit. At a loss, sell when
+            # *any* buy is queued and the price isn't rebounding. Unlike
+            # the stop-loss branch above we deliberately don't require a
+            # same-position match here: a position-saturated player can
+            # never enter best-11 in any formation, so the slot itself
+            # is the asset — freeing it for a buy of any position is a
+            # net win, even at a small loss. (Without this release valve
+            # a 5th GK at -3% with no GK on the market sits forever.)
             if profit_pct >= 0 or (
-                self._has_position_replacement(player.position, buy_recs, trade_pairs, min_ep_gain)
-                and self._can_loss_sell_with_replacement(trend_7d)
+                any_buy_queued and self._can_loss_sell_with_replacement(trend_7d)
             ):
                 sell_candidates.append(
                     (
