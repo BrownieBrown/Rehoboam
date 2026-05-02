@@ -1,5 +1,6 @@
 """Automated trading - Execute trades without manual intervention"""
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,6 +10,7 @@ from rich.console import Console
 from .services import AutoTradeResult, ExecutionService
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -201,6 +203,18 @@ class AutoTrader:
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
         flip_budget = _compute_flip_budget(phase.phase, current_budget, pending_bid_total, max_debt)
 
+        logger.info(
+            "session-context phase=%s days_to_match=%s squad=%d/15 "
+            "budget=%d team_value=%d flip_budget=%d pending_bids=%d",
+            phase.phase,
+            phase.days_until_match,
+            len(squad),
+            int(current_budget),
+            int(team_value),
+            flip_budget,
+            len(my_bids),
+        )
+
         return EPSessionContext(
             ep_result=ep_result,
             matchday_phase=phase,
@@ -253,10 +267,16 @@ class AutoTrader:
             if self._is_wash_trade(target_id):
                 wash_skipped += 1
                 console.print(f"[dim]Skip {target_name} — wash-trade block (sold recently)[/dim]")
+                logger.info(
+                    "guard-wash-trade: skipped %s (id=%s) — sold within block window",
+                    target_name,
+                    target_id,
+                )
                 continue
             filtered.append((kind, ep_val, obj))
         if wash_skipped:
             console.print(f"[yellow]Wash-trade guard: skipped {wash_skipped} candidate(s)[/yellow]")
+            logger.info("guard-wash-trade total_skipped=%d", wash_skipped)
         candidates = filtered
 
         # Sort by EP gain descending — trade pairs compete directly with plain buys
@@ -930,6 +950,14 @@ class AutoTrader:
             console.print("[yellow]DRY RUN MODE - No trades will be executed[/yellow]")
         console.print(f"{'=' * 70}")
 
+        logger.info(
+            "session-start league=%s dry_run=%s max_trades=%d max_spend=%d",
+            getattr(league, "name", league.id),
+            self.dry_run,
+            self.max_trades_per_session,
+            self.max_daily_spend,
+        )
+
         # Step 0: Sync activity feed for competitive intelligence
         try:
             console.print("\n[dim]Syncing league activity feed...[/dim]")
@@ -977,6 +1005,7 @@ class AutoTrader:
                         )
         except Exception as e:
             console.print(f"[yellow]Auction resolution failed: {e}[/yellow]")
+            logger.exception("Auction resolution failed")
 
         # Step 2: Build session context (single EP pipeline + trends + matchday phase)
         try:
@@ -985,6 +1014,7 @@ class AutoTrader:
             error_msg = f"EP pipeline failed: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
+            logger.exception("EP pipeline failed — falling back to lineup-only")
             # Fall back to just setting lineup
             self._set_optimal_lineup(league, errors)
             return AutoTradeSession(
@@ -1110,6 +1140,7 @@ class AutoTrader:
             error_msg = f"Trading error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
+            logger.exception("Unified trade phase failed")
 
         # Step 8: Set optimal lineup using EP pipeline scores from the session.
         # Players acquired mid-session (if any) fall back to the legacy
@@ -1145,6 +1176,20 @@ class AutoTrader:
             console.print(f"\n[red]Errors: {len(errors)}[/red]")
             for err in errors:
                 console.print(f"[red]  • {err}[/red]")
+
+        logger.info(
+            "session-end duration=%.1fs phase=%s sells=%d trades=%d/%d "
+            "spent=%d earned=%d net=%d errors=%d",
+            end_time - start_time,
+            ctx.matchday_phase.phase,
+            len([r for r in sell_results if r.success and r.action == "SELL"]),
+            len([r for r in trade_results if r.success]),
+            len(trade_results),
+            total_spent,
+            total_earned,
+            net_change,
+            len(errors),
+        )
 
         return AutoTradeSession(
             start_time=start_time,

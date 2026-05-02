@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,8 @@ try:
 except ImportError:
     BidLearner = None
     ActivityFeedLearner = None
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +373,10 @@ class SmartBidding:
             confidence = max(confidence, 0.9)
         # No improvement → no bid
         if marginal_ep_gain == 0:
+            logger.debug(
+                "ep-bid SKIP player=%s: marginal_ep_gain=0",
+                player_id,
+            )
             return BidRecommendation(
                 base_price=asking_price,
                 recommended_bid=0,
@@ -404,6 +411,14 @@ class SmartBidding:
             has_aggressive_competitors=has_aggressive_competitors,
         )
         if contested_skip_reason is not None:
+            logger.info(
+                "ep-bid SKIP player=%s tier=%s offers=%d aggressive=%s | %s",
+                player_id,
+                ep_tier,
+                offer_count,
+                has_aggressive_competitors,
+                contested_skip_reason,
+            )
             return BidRecommendation(
                 base_price=asking_price,
                 recommended_bid=0,
@@ -534,6 +549,29 @@ class SmartBidding:
         if sell_plan:
             reasoning_parts.append(f"sell plan: +€{sell_plan.total_recovery:,} recovery")
         reasoning = " | ".join(reasoning_parts)
+
+        logger.info(
+            "ep-bid player=%s tier=%s ep_gain=%+.1f conf=%.2f "
+            "ask=%d mv=%d bid=%d overbid=%.1f%% "
+            "trend=%s offers=%d dgw=%s demand_adj=%+.1f league_comp=%+.1f "
+            "ceiling=%d sell_plan=%s | %s",
+            player_id,
+            ep_tier,
+            marginal_ep_gain,
+            confidence,
+            asking_price,
+            market_value,
+            recommended_bid,
+            actual_overbid_pct,
+            trend_change_pct,
+            offer_count,
+            is_dgw,
+            demand_adjustment,
+            league_competitive_level,
+            budget_ceiling,
+            "yes" if sell_plan else "no",
+            reasoning,
+        )
 
         return BidRecommendation(
             base_price=asking_price,
