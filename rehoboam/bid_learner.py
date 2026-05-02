@@ -262,6 +262,32 @@ class BidLearner:
             """
             )
 
+            # Per-session EP prediction snapshots — required so post-matchday
+            # reconciliation can pair "what we predicted before kickoff" with
+            # "what actually happened" (matchday_outcomes). Without this
+            # table the scorer-self-calibration loop in
+            # get_position_calibration_multiplier has no input.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS predicted_eps (
+                    player_id TEXT NOT NULL,
+                    league_id TEXT NOT NULL,
+                    predicted_at REAL NOT NULL,
+                    predicted_ep REAL NOT NULL,
+                    position TEXT NOT NULL,
+                    was_in_best_11 INTEGER NOT NULL DEFAULT 0,
+                    marginal_ep_gain REAL,
+                    PRIMARY KEY (player_id, predicted_at)
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_predicted_eps_player_at
+                ON predicted_eps(player_id, predicted_at)
+            """
+            )
+
             conn.commit()
 
     def record_outcome(self, outcome: AuctionOutcome):
@@ -541,6 +567,80 @@ class BidLearner:
             cur = conn.execute("DELETE FROM recently_sold WHERE sold_at < ?", (cutoff,))
             conn.commit()
             return cur.rowcount
+
+    def snapshot_predictions(self, rows: list[dict]) -> int:
+        """Persist EP predictions for the current session.
+
+        Each row should provide: player_id, league_id, predicted_at (unix
+        seconds), predicted_ep, position, was_in_best_11, marginal_ep_gain.
+        Reconciliation later joins these against actual matchday points to
+        populate ``matchday_outcomes`` — without this snapshot, the scorer
+        has nothing to self-calibrate against.
+
+        Returns the number of rows inserted.
+        """
+        if not rows:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO predicted_eps (
+                    player_id, league_id, predicted_at, predicted_ep,
+                    position, was_in_best_11, marginal_ep_gain
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["player_id"],
+                        r["league_id"],
+                        r["predicted_at"],
+                        r["predicted_ep"],
+                        r["position"],
+                        1 if r.get("was_in_best_11") else 0,
+                        r.get("marginal_ep_gain"),
+                    )
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        return len(rows)
+
+    def get_latest_prediction_before(self, player_id: str, before_ts: float) -> dict | None:
+        """Return the most recent prediction snapshot for *player_id* with
+        ``predicted_at <= before_ts``, or None if none exists.
+
+        Used by the matchday reconciliation path to find "what did we predict
+        for this player before kickoff?".
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                """
+                SELECT player_id, league_id, predicted_at, predicted_ep,
+                       position, was_in_best_11, marginal_ep_gain
+                FROM predicted_eps
+                WHERE player_id = ? AND predicted_at <= ?
+                ORDER BY predicted_at DESC
+                LIMIT 1
+                """,
+                (player_id, before_ts),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def has_matchday_outcome(self, player_id: str, matchday_date: str) -> bool:
+        """True if ``matchday_outcomes`` already has a row for this player+date."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                SELECT 1 FROM matchday_outcomes
+                WHERE player_id = ? AND matchday_date = ?
+                LIMIT 1
+                """,
+                (player_id, matchday_date),
+            )
+            return cur.fetchone() is not None
 
     def record_matchday_outcome(
         self,

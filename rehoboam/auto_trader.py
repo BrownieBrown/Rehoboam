@@ -1028,6 +1028,38 @@ class AutoTrader:
                 net_change=0,
             )
 
+        # Step 2a: Matchday self-calibration (REH-20).
+        #
+        # Reconcile finished matchdays FIRST using snapshots from prior
+        # sessions, THEN snapshot the current session. Order matters:
+        # snapshotting first would make the current run's prediction the
+        # "latest snapshot before kickoff" for any matchday whose `md`
+        # lies between this snapshot and the next reconcile — corrupting
+        # the actual-vs-predicted pairing.
+        #
+        # Both calls swallow exceptions internally so a learning-side
+        # failure never blocks the trading loop.
+        try:
+            squad_perf = ctx.ep_result.get("squad_performance") or {}
+            self.tracker.reconcile_finished_matchdays(ctx.squad, squad_perf)
+        except Exception:
+            logger.exception("reconcile_finished_matchdays failed (non-fatal)")
+        try:
+            squad_scores = ctx.ep_result.get("squad_scores") or []
+            lineup_map = ctx.ep_result.get("lineup_map") or {}
+            # Best-11 = top 11 player_ids by EP. lineup_map is {pid: ep}.
+            best_11 = {
+                pid
+                for pid, _ep in sorted(lineup_map.items(), key=lambda kv: kv[1], reverse=True)[:11]
+            }
+            self.tracker.snapshot_predictions(
+                league_id=league.id,
+                squad_scores=squad_scores,
+                best_11_ids=best_11,
+            )
+        except Exception:
+            logger.exception("snapshot_predictions failed (non-fatal)")
+
         # Step 3: If locked (match imminent), set lineup and exit — UNLESS the
         # squad is short. An empty lineup slot is worth -100 pts at kickoff;
         # the no-trade safety rule has to yield to the larger penalty.
