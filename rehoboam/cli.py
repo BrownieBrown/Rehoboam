@@ -1,10 +1,15 @@
 """CLI interface for Rehoboam — minimal surface for auto + diagnostics."""
 
+import logging
+
 import typer
 from rich.console import Console
 
 from .api import KickbaseAPI
 from .config import get_settings
+from .logging_setup import setup_logging
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="rehoboam",
@@ -156,6 +161,14 @@ def status(
 
 
 @app.callback()
-def callback():
+def callback(
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable DEBUG logging on the console (file log is always DEBUG).",
+    ),
+):
     """Rehoboam — KICKBASE trading bot with aggressive auto mode."""
-    pass
+    setup_logging(verbose=verbose)
+    logger.debug("CLI invoked (verbose=%s)", verbose)

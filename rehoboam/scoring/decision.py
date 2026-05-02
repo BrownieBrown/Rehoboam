@@ -5,6 +5,8 @@ starting 11 from a squad, then calculates marginal EP gain for candidates,
 builds sell plans to fund purchases, and ranks squad players by expendability.
 """
 
+import logging
+
 from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY, POSITION_MINIMUMS
 from rehoboam.formation import _POSITION_MAX_STARTERS, select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
@@ -18,6 +20,8 @@ from .models import (
     SellRecommendation,
     TradePair,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionEngine:
@@ -295,6 +299,12 @@ class DecisionEngine:
             # Filter by minimum EP threshold
             min_ep = 10.0 if is_emergency else self.min_ep_to_buy
             if ps.expected_points < min_ep:
+                logger.debug(
+                    "buy-skip %s: EP %.1f < min %.1f",
+                    player.last_name,
+                    ps.expected_points,
+                    min_ep,
+                )
                 continue
 
             # Skip players unlikely to start (prob 4-5)
@@ -302,10 +312,21 @@ class DecisionEngine:
                 ps.lineup_probability is not None
                 and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
             ):
+                logger.debug(
+                    "buy-skip %s: lineup_probability=%s > %s (unlikely starter)",
+                    player.last_name,
+                    ps.lineup_probability,
+                    MAX_LINEUP_PROB_FOR_BUY,
+                )
                 continue
 
             # Hard-block players with severely declining minutes
             if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
+                logger.debug(
+                    "buy-skip %s: minutes_trend=decreasing, bonus=%.1f",
+                    player.last_name,
+                    ps.minutes_bonus,
+                )
                 continue
 
             # Calculate marginal EP gain using formation-aware logic
@@ -364,6 +385,12 @@ class DecisionEngine:
 
             # Only recommend if marginal gain meets threshold (or emergency)
             if not is_emergency and marginal < self.min_ep_upgrade and roster_impact != "fills_gap":
+                logger.debug(
+                    "buy-skip %s: marginal %.1f < threshold %.1f and not gap-fill",
+                    player.last_name,
+                    marginal,
+                    self.min_ep_upgrade,
+                )
                 continue
 
             # Build forced sell plan for dead-weight buys upfront so it's
@@ -463,7 +490,38 @@ class DecisionEngine:
 
         # Sort by marginal EP gain (primary), then by raw EP (secondary)
         final_recs.sort(key=lambda r: (r.marginal_ep_gain, r.score.expected_points), reverse=True)
-        return final_recs[:top_n]
+        top = final_recs[:top_n]
+        logger.info(
+            "recommend_buys: %d candidates considered, %d viable, returning top %d "
+            "(emergency=%s, budget=%d, min_ep=%.1f, min_upgrade=%.1f)",
+            len(market_scores),
+            len(final_recs),
+            len(top),
+            is_emergency,
+            int(budget),
+            self.min_ep_to_buy,
+            self.min_ep_upgrade,
+        )
+        for rec in top:
+            logger.info(
+                "  BUY %s (%s) price=%d EP=%.1f marginal=%+.1f impact=%s | %s",
+                rec.player.last_name,
+                rec.player.position,
+                rec.player.price,
+                rec.score.expected_points,
+                rec.marginal_ep_gain,
+                rec.roster_impact,
+                rec.reason,
+            )
+            if rec.sell_plan and rec.sell_plan.players_to_sell:
+                for entry in rec.sell_plan.players_to_sell:
+                    logger.info(
+                        "    + sell %s for ~€%d (EP=%.1f)",
+                        entry.player_name,
+                        entry.expected_sell_value,
+                        entry.player_ep,
+                    )
+        return top
 
     def build_trade_pairs(
         self,
@@ -586,6 +644,20 @@ class DecisionEngine:
                 break
 
         pairs.sort(key=lambda p: p.ep_gain, reverse=True)
+        logger.info(
+            "build_trade_pairs: built %d pair(s) from %d candidates / %d sellable",
+            len(pairs),
+            len(candidates),
+            len(sellable),
+        )
+        for pair in pairs[:top_n]:
+            logger.info(
+                "  TRADE %s -> %s | net €%d | EP %+.1f",
+                pair.sell_player.last_name,
+                pair.buy_player.last_name,
+                pair.net_cost,
+                pair.ep_gain,
+            )
         return pairs[:top_n]
 
     def recommend_sells(
@@ -668,6 +740,21 @@ class DecisionEngine:
             )
 
         recommendations.sort(key=lambda r: r.expendability, reverse=True)
+        protected_count = sum(1 for r in recommendations if r.is_protected)
+        logger.info(
+            "recommend_sells: ranked %d squad players (%d protected by position minimum)",
+            len(recommendations),
+            protected_count,
+        )
+        for r in recommendations[:5]:
+            tag = "[PROTECTED]" if r.is_protected else ""
+            logger.info(
+                "  SELL-rank %s expendability=%.1f %s | %s",
+                r.player.last_name if r.player else r.score.player_id,
+                r.expendability,
+                tag,
+                r.reason,
+            )
         return recommendations
 
 
