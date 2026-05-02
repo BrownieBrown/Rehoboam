@@ -240,6 +240,28 @@ class BidLearner:
             """
             )
 
+            # Wash-trade guard — every sell is recorded here so the buy path
+            # can refuse to re-bid on a player we just dumped. Without this
+            # the same player can be sold and re-bought within hours,
+            # paying the bid spread on both legs for no EP gain.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recently_sold (
+                    player_id TEXT PRIMARY KEY,
+                    player_name TEXT NOT NULL,
+                    sold_price INTEGER NOT NULL,
+                    sold_at REAL NOT NULL,
+                    reason TEXT
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_recently_sold_sold_at
+                ON recently_sold(sold_at)
+            """
+            )
+
             conn.commit()
 
     def record_outcome(self, outcome: AuctionOutcome):
@@ -458,6 +480,67 @@ class BidLearner:
                 (player_id,),
             )
             conn.commit()
+
+    # ------------------------------------------------------------------
+    # Wash-trade guard
+    # ------------------------------------------------------------------
+
+    def record_recent_sell(
+        self,
+        *,
+        player_id: str,
+        player_name: str,
+        sold_price: int,
+        sold_at: float,
+        reason: str | None = None,
+    ) -> None:
+        """Remember that we just sold this player.
+
+        Re-selling the same player overwrites the row — the latest sell
+        timestamp is what the wash-trade check needs.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO recently_sold (
+                    player_id, player_name, sold_price, sold_at, reason
+                )
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                (player_id, player_name, sold_price, sold_at, reason),
+            )
+            conn.commit()
+
+    def was_recently_sold(self, player_id: str, within_seconds: float) -> bool:
+        """True iff we sold this player within the last *within_seconds*."""
+        cutoff = datetime.now(tz=timezone.utc).timestamp() - within_seconds
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT sold_at FROM recently_sold WHERE player_id = ?",
+                (player_id,),
+            ).fetchone()
+        return bool(row and row[0] >= cutoff)
+
+    def get_recent_sell(self, player_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT player_id, player_name, sold_price, sold_at, reason
+                FROM recently_sold
+                WHERE player_id = ?
+            """,
+                (player_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def prune_recent_sells(self, older_than_seconds: float) -> int:
+        """Drop wash-trade-guard rows older than the given age. Returns rows deleted."""
+        cutoff = datetime.now(tz=timezone.utc).timestamp() - older_than_seconds
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute("DELETE FROM recently_sold WHERE sold_at < ?", (cutoff,))
+            conn.commit()
+            return cur.rowcount
 
     def record_matchday_outcome(
         self,
