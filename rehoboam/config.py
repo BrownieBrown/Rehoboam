@@ -116,6 +116,16 @@ class Settings(BaseSettings):
         description="Max trades per auto session in aggressive mode",
     )
 
+    # Wash-trade + churn guards
+    wash_trade_block_hours: float = Field(
+        default=168.0,  # 7 days
+        description="Refuse to re-bid on a player we sold within this window",
+    )
+    min_hold_hours_before_sell: float = Field(
+        default=48.0,
+        description="Refuse to instant-sell a player held less than this (overridden when budget is critically negative)",
+    )
+
     # Safety Settings
     dry_run: bool = Field(
         default=True,

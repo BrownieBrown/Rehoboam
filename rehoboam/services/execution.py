@@ -105,7 +105,7 @@ class ExecutionService:
             ),
             success_msg=f"{player.first_name} {player.last_name} sold instantly to Kickbase",
             api_call=lambda: self.api.sell_player_instant(league=league, player=player),
-            on_success=lambda: self.tracker.record_flip_outcome(player, price),
+            on_success=lambda: self.tracker.record_flip_outcome(player, price, reason=reason),
         )
 
     # ------------------------------------------------------------------

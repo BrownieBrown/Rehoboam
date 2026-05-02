@@ -172,11 +172,27 @@ class LearningTracker:
     # Flip outcome (bought + sold → profit recorded)
     # ------------------------------------------------------------------
 
-    def record_flip_outcome(self, player, sell_price: int) -> None:
+    def record_flip_outcome(self, player, sell_price: int, reason: str | None = None) -> None:
         """Compute and record a flip profit outcome for a sold player.
 
-        Silently skips if we have no record of buying this player.
+        Always records into ``recently_sold`` (the wash-trade guard) even when
+        we have no purchase record — selling a player we never tracked still
+        means we shouldn't re-bid on them within the guard window.
         """
+        sell_date = time.time()
+        player_name = f"{player.first_name} {player.last_name}"
+
+        try:
+            self.bid_learner.record_recent_sell(
+                player_id=player.id,
+                player_name=player_name,
+                sold_price=sell_price,
+                sold_at=sell_date,
+                reason=reason,
+            )
+        except Exception as e:
+            logger.warning("Failed to record recent sell: %s", e)
+
         try:
             purchase = self.bid_learner.get_tracked_purchase(player.id)
             if purchase is None:
@@ -184,7 +200,6 @@ class LearningTracker:
 
             buy_price = purchase["buy_price"]
             buy_date = purchase["buy_date"]
-            sell_date = time.time()
 
             profit = sell_price - buy_price
             profit_pct = (profit / buy_price * 100) if buy_price > 0 else 0
@@ -192,7 +207,7 @@ class LearningTracker:
 
             outcome = FlipOutcome(
                 player_id=player.id,
-                player_name=f"{player.first_name} {player.last_name}",
+                player_name=player_name,
                 buy_price=buy_price,
                 sell_price=sell_price,
                 profit=profit,

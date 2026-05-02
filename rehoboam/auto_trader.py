@@ -241,6 +241,24 @@ class AutoTrader:
             if pair.recommended_bid and pair.recommended_bid > 0:
                 candidates.append(("pair", pair.ep_gain, pair))
 
+        # Wash-trade guard: refuse to re-bid on a player we sold within the
+        # configured window. Without this, the same player can be sold and
+        # re-bought within hours — paying the bid spread on both legs for
+        # zero EP gain.
+        wash_skipped = 0
+        filtered: list = []
+        for kind, ep_val, obj in candidates:
+            target_id = obj.player.id if kind == "buy" else obj.buy_player.id
+            target_name = obj.player.last_name if kind == "buy" else obj.buy_player.last_name
+            if self._is_wash_trade(target_id):
+                wash_skipped += 1
+                console.print(f"[dim]Skip {target_name} — wash-trade block (sold recently)[/dim]")
+                continue
+            filtered.append((kind, ep_val, obj))
+        if wash_skipped:
+            console.print(f"[yellow]Wash-trade guard: skipped {wash_skipped} candidate(s)[/yellow]")
+        candidates = filtered
+
         # Sort by EP gain descending — trade pairs compete directly with plain buys
         candidates.sort(key=lambda x: x[1], reverse=True)
 
@@ -308,8 +326,12 @@ class AutoTrader:
 
                 skipped_long_hold = 0
                 skipped_unfieldable = 0
+                skipped_wash = 0
                 for opp in profit_opps:
                     if opp.player.id in ep_player_ids:
+                        continue
+                    if self._is_wash_trade(opp.player.id):
+                        skipped_wash += 1
                         continue
                     if max_hold_days is not None and opp.hold_days > max_hold_days:
                         skipped_long_hold += 1
@@ -342,6 +364,8 @@ class AutoTrader:
                         f"[dim]Skipped {skipped_unfieldable} flip(s) — "
                         f"would make squad unfieldable[/dim]"
                     )
+                if skipped_wash > 0:
+                    console.print(f"[dim]Skipped {skipped_wash} flip(s) — wash-trade block[/dim]")
             except Exception as e:
                 console.print(f"[yellow]Profit flip search failed: {e}[/yellow]")
 
@@ -491,6 +515,124 @@ class AutoTrader:
         )
         return results
 
+    def _run_emergency_squad_fill(
+        self,
+        league,
+        ctx: EPSessionContext,
+        fresh_squad: list,
+        slots_short: int,
+    ) -> list[AutoTradeResult]:
+        """Buy enough players to reach 11, even when phase is "locked".
+
+        Locked phase normally blocks all buys to keep budget liquid at kickoff,
+        but an empty lineup slot is -100 pts per match — a far worse failure
+        mode than a few hours of leftover debt. This path:
+
+        - Buys only plain in-budget candidates (no sell plans, no flips, no
+          trade pairs — those all add complexity right before kickoff).
+        - Prioritizes positions below the formation minimum.
+        - Honors wash-trade and active-bid guards.
+        - Caps spend at ``slots_short`` purchases.
+        """
+        from .config import POSITION_MINIMUMS
+
+        results: list[AutoTradeResult] = []
+        buy_recs = ctx.ep_result.get("buy_recs", [])
+        if not buy_recs:
+            console.print("[red]No buy candidates available — cannot fill emergency slots[/red]")
+            return results
+
+        position_counts: dict[str, int] = {}
+        for p in fresh_squad:
+            position_counts[p.position] = position_counts.get(p.position, 0) + 1
+        gap_positions = {
+            pos
+            for pos, minimum in POSITION_MINIMUMS.items()
+            if position_counts.get(pos, 0) < minimum
+        }
+
+        active_bid_ids = set(ctx.my_bid_amounts.keys())
+        budget_remaining = int(ctx.current_budget)
+
+        # Score each candidate: gap-filling positions first, then by EP.
+        # Tuple sort: (-fills_gap, -marginal_ep_gain) so gap fills sort to front.
+        scored = []
+        for rec in buy_recs:
+            if not rec.recommended_bid or rec.recommended_bid <= 0:
+                continue
+            if rec.player.id in active_bid_ids:
+                continue
+            if self._is_wash_trade(rec.player.id):
+                console.print(f"[dim]Skip {rec.player.last_name} — wash-trade block[/dim]")
+                continue
+            # Only plain in-budget candidates — sell plans add execution risk
+            # at kickoff that the emergency path explicitly avoids.
+            if rec.recommended_bid > budget_remaining:
+                continue
+            fills_gap = 1 if rec.player.position in gap_positions else 0
+            scored.append((fills_gap, rec.marginal_ep_gain or 0.0, rec))
+
+        scored.sort(key=lambda t: (-t[0], -t[1]))
+
+        if not scored:
+            console.print(
+                "[red]No affordable wash-trade-clean candidates " "to fill empty slot(s)[/red]"
+            )
+            return results
+
+        bought = 0
+        for _gap, _ep, rec in scored:
+            if bought >= slots_short:
+                break
+            if rec.recommended_bid > budget_remaining:
+                continue
+
+            result = self.execution.buy(
+                league,
+                rec.player,
+                rec.recommended_bid,
+                f"Emergency lineup fill (squad short by {slots_short})",
+            )
+            results.append(result)
+            if result.success:
+                bought += 1
+                budget_remaining -= rec.recommended_bid
+                self.daily_spend += rec.recommended_bid
+                # Track the position so subsequent picks deprioritize the gap.
+                gap_positions.discard(rec.player.position)
+
+        console.print(f"[green]✓ Emergency fill: bought {bought}/{slots_short} player(s)[/green]")
+        return results
+
+    def _wash_trade_block_seconds(self) -> float:
+        return float(getattr(self.settings, "wash_trade_block_hours", 168.0)) * 3600.0
+
+    def _min_hold_seconds(self) -> float:
+        return float(getattr(self.settings, "min_hold_hours_before_sell", 48.0)) * 3600.0
+
+    def _is_wash_trade(self, player_id: str) -> bool:
+        """True if we sold this player within the wash-trade block window."""
+        try:
+            return self.learner.was_recently_sold(player_id, self._wash_trade_block_seconds())
+        except Exception:
+            return False  # Guard never blocks trading on infrastructure errors
+
+    def _was_recently_bought(self, player_id: str) -> tuple[bool, float | None]:
+        """Return (held_too_briefly, hours_held). hours_held is None if untracked."""
+        try:
+            purchase = self.learner.get_tracked_purchase(player_id)
+        except Exception:
+            return (False, None)
+        if not purchase:
+            return (False, None)
+        buy_date = purchase.get("buy_date")
+        if not buy_date:
+            return (False, None)
+        held_seconds = time.time() - float(buy_date)
+        if held_seconds < self._min_hold_seconds():
+            return (True, held_seconds / 3600.0)
+        return (False, held_seconds / 3600.0)
+
     @staticmethod
     def _sell_threshold_for_trend(trend_7d_pct: float | None) -> float:
         """Profit% threshold required before selling, based on price momentum.
@@ -626,6 +768,18 @@ class AutoTrader:
             if not player.buy_price or player.buy_price <= 0:
                 continue
 
+            # Min-hold guard: refuse to sell a player we just bought. Same-
+            # session reversals (bid → win → instant-sell at -71% within 7h
+            # for Niang in production) cost both the bid spread and a
+            # market-value loss, with no signal change to justify them.
+            held_too_briefly, hours_held = self._was_recently_bought(player.id)
+            if held_too_briefly:
+                console.print(
+                    f"[dim]Hold-period guard {player.last_name} — "
+                    f"held {hours_held:.1f}h (< {self._min_hold_seconds() / 3600:.0f}h min)[/dim]"
+                )
+                continue
+
             # Hard block: never sell if it would drop a position below its
             # formation minimum. A squad with 0 FW loses -100 pts every matchday.
             pos_min = POSITION_MINIMUMS.get(player.position, 0)
@@ -691,6 +845,10 @@ class AutoTrader:
                 continue
             if not player.buy_price or player.buy_price <= 0:
                 continue
+
+            held_too_briefly, _ = self._was_recently_bought(player.id)
+            if held_too_briefly:
+                continue  # Already logged in the loop above; skip silently here.
 
             max_starters = _POSITION_MAX_STARTERS.get(player.position, 3)
             if position_counts.get(player.position, 0) <= max_starters:
@@ -840,22 +998,44 @@ class AutoTrader:
                 net_change=0,
             )
 
-        # Step 3: If locked (match imminent), just set lineup and exit
+        # Step 3: If locked (match imminent), set lineup and exit — UNLESS the
+        # squad is short. An empty lineup slot is worth -100 pts at kickoff;
+        # the no-trade safety rule has to yield to the larger penalty.
         if ctx.matchday_phase.phase == "locked":
-            console.print(
-                f"[yellow]Match imminent ({ctx.matchday_phase.days_until_match}d) "
-                f"— setting lineup only, no trading[/yellow]"
-            )
+            fresh_squad = self.api.get_squad(league)
+            slots_short = 11 - len(fresh_squad)
+            if slots_short > 0:
+                console.print(
+                    f"[bold red]⚠ LINEUP EMERGENCY — squad has {len(fresh_squad)}/11 "
+                    f"({slots_short} empty slot(s)). Locked-phase trading override.[/bold red]"
+                )
+                try:
+                    emergency_results = self._run_emergency_squad_fill(
+                        league, ctx, fresh_squad, slots_short
+                    )
+                    trade_results.extend(emergency_results)
+                except Exception as e:
+                    error_msg = f"Emergency squad fill failed: {e!s}"
+                    console.print(f"[red]{error_msg}[/red]")
+                    errors.append(error_msg)
+            else:
+                console.print(
+                    f"[yellow]Match imminent ({ctx.matchday_phase.days_until_match}d) "
+                    f"— setting lineup only, no trading[/yellow]"
+                )
+
             self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+            total_spent = sum(r.price for r in trade_results if r.action == "BUY" and r.success)
+            total_earned = sum(r.price for r in trade_results if r.action == "SELL" and r.success)
             return AutoTradeSession(
                 start_time=start_time,
                 end_time=time.time(),
-                profit_trades=[],
+                profit_trades=trade_results,
                 lineup_trades=[],
                 errors=errors,
-                total_spent=0,
-                total_earned=0,
-                net_change=0,
+                total_spent=total_spent,
+                total_earned=total_earned,
+                net_change=total_earned - total_spent,
             )
 
         # Step 4: Trend-aware profit selling
