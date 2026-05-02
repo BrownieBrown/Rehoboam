@@ -22,6 +22,7 @@ into the BidLearner's history tables.
 
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 from ..bid_learner import AuctionOutcome, BidLearner, FlipOutcome
@@ -171,6 +172,153 @@ class LearningTracker:
     # ------------------------------------------------------------------
     # Flip outcome (bought + sold → profit recorded)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Matchday self-calibration (REH-20)
+    #
+    # `bid_learner.record_matchday_outcome` is the write side of the scorer
+    # self-calibration loop wired up in PR #17 — `get_position_calibration_multiplier`
+    # (read side) reads it back and corrects systematic per-position bias in
+    # the EP scorer.  Until this method existed nothing called the writer, so
+    # the read side has been returning the uncalibrated default of 1.0 since
+    # PR #17 merged.
+    # ------------------------------------------------------------------
+
+    def snapshot_predictions(
+        self,
+        league_id: str,
+        squad_scores: list,
+        best_11_ids: set[str],
+        predicted_at: float | None = None,
+    ) -> int:
+        """Persist this session's EP predictions for later reconciliation.
+
+        ``squad_scores`` is the list of :class:`~rehoboam.scoring.models.PlayerScore`
+        produced by the EP pipeline. We capture only what we need to evaluate
+        post-matchday: predicted_ep, position, and whether the player was in
+        the best-11 at prediction time.
+
+        Returns the number of rows written.
+        """
+        ts = predicted_at if predicted_at is not None else time.time()
+        rows = []
+        for ps in squad_scores:
+            try:
+                rows.append(
+                    {
+                        "player_id": ps.player_id,
+                        "league_id": league_id,
+                        "predicted_at": ts,
+                        "predicted_ep": ps.expected_points,
+                        "position": ps.position,
+                        "was_in_best_11": ps.player_id in best_11_ids,
+                        "marginal_ep_gain": None,
+                    }
+                )
+            except AttributeError:
+                # Defensive: skip any score row missing expected fields rather
+                # than blow up the session. Learning is best-effort.
+                continue
+        try:
+            count = self.bid_learner.snapshot_predictions(rows)
+            logger.info(
+                "snapshot_predictions: persisted %d EP predictions for league=%s at ts=%s",
+                count,
+                league_id,
+                int(ts),
+            )
+            return count
+        except Exception as e:
+            logger.warning("Failed to snapshot predictions: %s", e)
+            return 0
+
+    def reconcile_finished_matchdays(
+        self,
+        squad: list,
+        performance_by_player_id: dict[str, dict],
+    ) -> int:
+        """Pair past actual points with our pre-kickoff predictions.
+
+        Walks each squad player's ``performance['it'][0]['ph']`` (current-season
+        match history). For every match with ``mdst == 2`` (finished) that we
+        haven't already recorded into ``matchday_outcomes``, looks up the
+        snapshot prediction we made before that match's ``md`` timestamp and
+        writes a paired row.
+
+        Skips:
+          - matches without ``mdst == 2`` (still upcoming/in-progress)
+          - matches missing ``md`` or ``p`` (defensive)
+          - matchdays we already recorded (idempotent)
+          - players for whom we have no prior prediction snapshot
+
+        Returns the number of new ``matchday_outcomes`` rows written.
+        """
+        written = 0
+        for player in squad:
+            perf = performance_by_player_id.get(player.id)
+            if not perf:
+                continue
+            seasons = perf.get("it") or []
+            if not seasons:
+                continue
+            seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
+            current_season = seasons_sorted[0]
+            matches = current_season.get("ph") or []
+
+            for match in matches:
+                if match.get("mdst") != 2:
+                    continue  # skip upcoming / in-progress
+                md_str = match.get("md")
+                actual_pts = match.get("p")
+                if not md_str or actual_pts is None:
+                    continue
+                if self.bid_learner.has_matchday_outcome(player.id, md_str):
+                    continue
+
+                try:
+                    md_dt = datetime.fromisoformat(md_str.replace("Z", "+00:00"))
+                    md_ts = md_dt.timestamp()
+                except (ValueError, AttributeError):
+                    continue
+
+                snapshot = self.bid_learner.get_latest_prediction_before(player.id, md_ts)
+                if snapshot is None:
+                    logger.debug(
+                        "reconcile: no prior prediction for %s before %s — skip",
+                        player.id,
+                        md_str,
+                    )
+                    continue
+
+                try:
+                    self.bid_learner.record_matchday_outcome(
+                        player_id=player.id,
+                        player_position=snapshot["position"],
+                        matchday_date=md_str,
+                        predicted_ep=snapshot["predicted_ep"],
+                        actual_points=float(actual_pts),
+                        was_in_best_11=bool(snapshot.get("was_in_best_11")),
+                    )
+                    written += 1
+                    logger.info(
+                        "reconcile: %s @ %s — predicted=%.1f actual=%s",
+                        getattr(player, "last_name", player.id),
+                        md_str,
+                        snapshot["predicted_ep"],
+                        actual_pts,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to record matchday outcome for %s @ %s: %s",
+                        player.id,
+                        md_str,
+                        e,
+                    )
+        if written:
+            logger.info("reconcile_finished_matchdays: wrote %d new outcome row(s)", written)
+        else:
+            logger.debug("reconcile_finished_matchdays: no new outcomes to record")
+        return written
 
     def record_flip_outcome(self, player, sell_price: int, reason: str | None = None) -> None:
         """Compute and record a flip profit outcome for a sold player.

@@ -241,9 +241,12 @@ class Trader:
 
         squad_scores: list = []
         squad_player_map: dict = {}
+        squad_performance: dict[str, dict] = {}
         for player in squad:
             try:
                 perf, details = _fetch_player_data(player)
+                if perf is not None:
+                    squad_performance[player.id] = perf
                 data = collector.collect(
                     player=player,
                     performance=perf,
@@ -367,6 +370,11 @@ class Trader:
             "squad_players": squad_player_map,
             "market_players": market_player_map,
             "competitor_player_ids": competitor_player_ids,
+            # Surfaced for matchday reconciliation (REH-20). Reconciliation
+            # needs raw performance dicts to read past actual points (`p`,
+            # `mdst`, `md`); piggybacking on the EP pipeline's existing
+            # fetch avoids a second round-trip.
+            "squad_performance": squad_performance,
         }
 
     def get_ep_recommendations_with_trends(self, league) -> dict:
