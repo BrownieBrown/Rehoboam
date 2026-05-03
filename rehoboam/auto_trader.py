@@ -1059,6 +1059,18 @@ class AutoTrader:
             )
         except Exception:
             logger.exception("snapshot_predictions failed (non-fatal)")
+        try:
+            # REH-23: persist the team_value/budget snapshot the bot already
+            # fetched in _build_session_context. Provides the longitudinal
+            # series for goal 3 (team value growth) and feeds REH-37.
+            self.learner.record_team_value_snapshot(
+                league_id=league.id,
+                team_value=ctx.team_value,
+                budget=ctx.current_budget,
+                squad_size=len(ctx.squad),
+            )
+        except Exception:
+            logger.exception("record_team_value_snapshot failed (non-fatal)")
 
         # Step 3: If locked (match imminent), set lineup and exit — UNLESS the
         # squad is short. An empty lineup slot is worth -100 pts at kickoff;
