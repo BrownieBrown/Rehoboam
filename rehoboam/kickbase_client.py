@@ -715,3 +715,30 @@ class KickbaseV4Client:
             raise Exception(
                 f"Failed to fetch league ranking: {response.status_code} - {response.text}"
             )
+
+    def get_user_teamcenter(
+        self, league_id: str, user_id: str, day_number: int | None = None
+    ) -> dict[str, Any]:
+        """
+        Get a user's per-matchday team center: the lineup they fielded that
+        day plus per-player actual points (``p`` in each ``lp[]`` item) and
+        per-match status (``mst``: 2 = finished). With ``day_number`` returns
+        historical data for that matchday.
+
+        Sum of ``lp[].p`` equals the manager's matchday total — matches
+        ``mdp`` in ``/ranking.us[]`` for the same manager and day.
+
+        GET /v4/leagues/{league_id}/users/{user_id}/teamcenter[?dayNumber=N]
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/users/{user_id}/teamcenter"
+        if day_number is not None:
+            url = f"{url}?dayNumber={int(day_number)}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch user teamcenter: {response.status_code} - {response.text}"
+            )

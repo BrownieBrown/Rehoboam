@@ -189,6 +189,22 @@ class KickbaseAPI:
         except Exception as e:
             raise Exception(f"Failed to fetch league ranking: {e}") from e
 
+    def get_user_teamcenter(
+        self,
+        league: League,
+        user_id: str | None = None,
+        day_number: int | None = None,
+    ) -> dict:
+        """Get the matchday lineup + per-player actual points for ``user_id``
+        (defaulting to the logged-in user) on ``day_number`` (defaulting to
+        current). REH-25: source of truth for the bot's actual matchday total.
+        """
+        try:
+            uid = user_id or self.user.id
+            return self.client.get_user_teamcenter(league.id, uid, day_number=day_number)
+        except Exception as e:
+            raise Exception(f"Failed to fetch user teamcenter: {e}") from e
+
     @property
     def user(self) -> User:
         """Get the logged-in user"""
