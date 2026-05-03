@@ -288,6 +288,23 @@ class BidLearner:
             """
             )
 
+            # Per-session team-value snapshot — REH-23.
+            # The bot fetches budget + team_value every run via get_team_info()
+            # but throws the result away after logging it. Persisting it gives
+            # us a longitudinal series for goal 3 (team value increases over
+            # time) and feeds REH-37 (rank-trajectory regression).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS team_value_history (
+                    snapshot_at REAL PRIMARY KEY,
+                    league_id TEXT NOT NULL,
+                    team_value INTEGER NOT NULL,
+                    budget INTEGER NOT NULL,
+                    squad_size INTEGER NOT NULL
+                )
+            """
+            )
+
             conn.commit()
 
     def record_outcome(self, outcome: AuctionOutcome):
@@ -628,6 +645,39 @@ class BidLearner:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+    def record_team_value_snapshot(
+        self,
+        league_id: str,
+        team_value: int,
+        budget: int,
+        squad_size: int,
+        snapshot_at: float | None = None,
+    ) -> bool:
+        """Persist one row of team_value_history for the current session.
+
+        Returns True if a row was inserted, False if a row already existed at
+        the same ``snapshot_at`` (theoretical collision when two sessions land
+        in the same float second — the second is silently dropped via
+        ``INSERT OR IGNORE``). Caller does not need to check the return value;
+        it's exposed for tests.
+
+        REH-23: feeds goal 3 (team value increases over time) and unblocks
+        REH-37 (rank-trajectory regression).
+        """
+        ts = snapshot_at if snapshot_at is not None else datetime.now().timestamp()
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO team_value_history (
+                    snapshot_at, league_id, team_value, budget, squad_size
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (ts, league_id, int(team_value), int(budget), int(squad_size)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def has_matchday_outcome(self, player_id: str, matchday_date: str) -> bool:
         """True if ``matchday_outcomes`` already has a row for this player+date."""
