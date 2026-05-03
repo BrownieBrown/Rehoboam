@@ -227,6 +227,34 @@ class Trader:
                 except Exception:
                     # Learning side effects must never block the EP pipeline.
                     pass
+
+            # REH-25: capture the actual fielded lineup + total points for
+            # the most recently completed matchday, once. Skipped if the row
+            # already exists or if the matchday isn't fully finished yet.
+            if (
+                self.bid_learner is not None
+                and day_number > 0
+                and not self.bid_learner.has_matchday_lineup_result(league.id, day_number)
+            ):
+                try:
+                    tc = self.api.get_user_teamcenter(league, day_number=day_number)
+                    lp = tc.get("lp") or []
+                    if lp and all(item.get("mst") == 2 for item in lp):
+                        total_points = sum(int(item.get("p", 0)) for item in lp)
+                        first_md = lp[0].get("md", "")
+                        player_ids = [str(item.get("i", "")) for item in lp]
+                        lineup_count = int(tc.get("clpc", len(lp)))
+                        self.bid_learner.record_matchday_lineup_result(
+                            league_id=league.id,
+                            day_number=day_number,
+                            matchday_date=first_md,
+                            total_points=total_points,
+                            lineup_player_ids=player_ids,
+                            lineup_count=lineup_count,
+                        )
+                except Exception:
+                    # Best-effort — never block the EP pipeline.
+                    pass
         except Exception:
             pass
 

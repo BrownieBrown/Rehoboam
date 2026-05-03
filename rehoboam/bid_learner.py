@@ -1,5 +1,6 @@
 """Learn from auction outcomes to improve bidding strategy"""
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -309,6 +310,28 @@ class BidLearner:
                     team_value INTEGER NOT NULL,
                     budget INTEGER NOT NULL,
                     squad_size INTEGER NOT NULL
+                )
+            """
+            )
+
+            # Matchday lineup actual results — REH-25.
+            # One row per (league, matchday) capturing the lineup the bot
+            # actually fielded that week and what it scored. Source: the
+            # /users/{uid}/teamcenter?dayNumber=N endpoint, lp[] array.
+            # Goal 4 (more points each week) is unmeasurable without this;
+            # `matchday_outcomes` (REH-20) tracks per-player EP accuracy but
+            # not total lineup output.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS matchday_lineup_results (
+                    league_id TEXT NOT NULL,
+                    day_number INTEGER NOT NULL,
+                    matchday_date TEXT NOT NULL,
+                    total_points INTEGER NOT NULL,
+                    lineup_player_ids TEXT NOT NULL,
+                    lineup_count INTEGER NOT NULL,
+                    snapshot_at REAL NOT NULL,
+                    PRIMARY KEY (league_id, day_number)
                 )
             """
             )
@@ -714,6 +737,67 @@ class BidLearner:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (ts, league_id, int(team_value), int(budget), int(squad_size)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def has_matchday_lineup_result(self, league_id: str, day_number: int) -> bool:
+        """True if ``matchday_lineup_results`` already has a row for this
+        (league_id, day_number). Used by the trader to skip the extra
+        /teamcenter call once a matchday is captured."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                SELECT 1 FROM matchday_lineup_results
+                WHERE league_id = ? AND day_number = ?
+                LIMIT 1
+                """,
+                (league_id, int(day_number)),
+            )
+            return cur.fetchone() is not None
+
+    def record_matchday_lineup_result(
+        self,
+        league_id: str,
+        day_number: int,
+        matchday_date: str,
+        total_points: int,
+        lineup_player_ids: list[str],
+        lineup_count: int,
+        snapshot_at: float | None = None,
+    ) -> bool:
+        """Persist the bot's actual fielded lineup for one matchday.
+
+        ``lineup_player_ids`` is stored as a JSON array in a TEXT column —
+        analyses that need to join against player tables can json-decode.
+        ``lineup_count`` (the API's ``clpc``) is normally 11; values < 11
+        indicate empty slots and a -100 penalty applied by Kickbase.
+
+        Uses ``INSERT OR IGNORE`` keyed on ``(league_id, day_number)`` so
+        a session that runs twice on the same matchday is a no-op.
+
+        Returns True on insert, False on collision (already recorded).
+        """
+        ts = snapshot_at if snapshot_at is not None else datetime.now().timestamp()
+        ids_json = json.dumps([str(pid) for pid in lineup_player_ids])
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO matchday_lineup_results (
+                    league_id, day_number, matchday_date, total_points,
+                    lineup_player_ids, lineup_count, snapshot_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    league_id,
+                    int(day_number),
+                    matchday_date,
+                    int(total_points),
+                    ids_json,
+                    int(lineup_count),
+                    ts,
+                ),
             )
             conn.commit()
             return cur.rowcount > 0
