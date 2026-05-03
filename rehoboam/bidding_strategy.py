@@ -497,19 +497,40 @@ class SmartBidding:
         max_overbid = self.elite_max_overbid_pct if ep_tier == "must_have" else self.max_overbid_pct
         overbid_pct = min(overbid_pct, max_overbid)
 
-        # Try EP-specific learned overbid if available
+        # Try EP-specific learned overbid if available.
+        #
+        # The previous call here passed kwargs that didn't match the method
+        # signature and treated the dict return as a number, so every bid
+        # since the method was added went through with the EP-bid learner
+        # silently disabled by the surrounding `except Exception`. Result:
+        # `auction_outcomes` data accumulated but never influenced bids
+        # (REH-30).
         if self.bid_learner:
             try:
-                learned_pct = self.bid_learner.get_ep_recommended_overbid(
+                learned = self.bid_learner.get_ep_recommended_overbid(
+                    asking_price=asking_price,
                     marginal_ep_gain=marginal_ep_gain,
-                    confidence=confidence,
+                    market_value=market_value,
+                    budget_ceiling=budget_ceiling,
                 )
-                if learned_pct and learned_pct > 0:
+                learned_pct = learned.get("recommended_overbid_pct", 0.0)
+                if learned_pct > 0:
+                    stack_pct = overbid_pct
                     overbid_pct = min(learned_pct, max_overbid)
-            except AttributeError:
-                pass  # Method not yet implemented on BidLearner — expected
+                    logger.info(
+                        "ep-bid learned-override player=%s stack=%.1f%% "
+                        "learned=%.1f%% applied=%.1f%% | %s",
+                        player_id,
+                        stack_pct,
+                        learned_pct,
+                        overbid_pct,
+                        learned.get("reason", ""),
+                    )
             except Exception:
-                pass
+                logger.exception(
+                    "ep-bid learned-override failed for player=%s — using stack default",
+                    player_id,
+                )
 
         # Calculate raw bid from overbid percentage
         overbid_amount = int(asking_price * (overbid_pct / 100))
