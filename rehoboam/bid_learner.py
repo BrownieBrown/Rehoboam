@@ -314,6 +314,37 @@ class BidLearner:
             """
             )
 
+            # Daily market-value snapshots for held players — REH-26.
+            # The bot fetches /player/{id}/marketValue history every session
+            # via TrendService (cached 24h) and consumes it transiently for
+            # trend computation. The current MV plus 30-day peak/trough are
+            # discarded after that, so we have no daily series to detect
+            # slow drift on held positions (goal 2: loss avoidance).
+            # Constrained to squad players to avoid blowing up DB size —
+            # market players (~50/session) would multiply rows ~3x.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS player_mv_history (
+                    player_id TEXT NOT NULL,
+                    snapshot_at REAL NOT NULL,
+                    market_value INTEGER NOT NULL,
+                    peak_mv_30d INTEGER,
+                    trough_mv_30d INTEGER,
+                    PRIMARY KEY (player_id, snapshot_at)
+                )
+            """
+            )
+            # Explicit index matches the convention of every other time-series
+            # table in this file. The composite PK already covers
+            # (player_id, snapshot_at) lookups, but the named index makes
+            # REH-33's "sold X% off peak" join obvious to readers.
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mv_history_player
+                ON player_mv_history(player_id, snapshot_at)
+            """
+            )
+
             # Matchday lineup actual results — REH-25.
             # One row per (league, matchday) capturing the lineup the bot
             # actually fielded that week and what it scored. Source: the
@@ -740,6 +771,45 @@ class BidLearner:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def record_player_mv_snapshot(self, rows: list[dict]) -> int:
+        """Bulk-persist one row per held player into ``player_mv_history``.
+
+        Each row should provide: player_id, snapshot_at, market_value,
+        peak_mv_30d, trough_mv_30d. Peak/trough are optional (the API may
+        legitimately return an empty history for newly-listed players),
+        coerced via ``_opt_int``.
+
+        Uses ``INSERT OR IGNORE`` keyed on ``(player_id, snapshot_at)``;
+        same-second retry on the same player is a no-op.
+
+        REH-26: feeds goal 2 (loss avoidance) via daily drift detection
+        and unblocks REH-33 (sell-timing peak-MV regret).
+        """
+        if not rows:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO player_mv_history (
+                    player_id, snapshot_at, market_value,
+                    peak_mv_30d, trough_mv_30d
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["player_id"],
+                        r["snapshot_at"],
+                        int(r["market_value"]),
+                        _opt_int(r.get("peak_mv_30d")),
+                        _opt_int(r.get("trough_mv_30d")),
+                    )
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        return len(rows)
 
     def has_matchday_lineup_result(self, league_id: str, day_number: int) -> bool:
         """True if ``matchday_lineup_results`` already has a row for this
