@@ -306,6 +306,12 @@ class Trader:
         squad_scores: list = []
         squad_player_map: dict = {}
         squad_performance: dict[str, dict] = {}
+        # REH-26: collect daily MV rows for each held player. Persist after
+        # the squad loop (single bulk INSERT). The trend_service.get_history
+        # call uses the same 24h-cached data already fetched for trend
+        # analysis — no extra HTTP traffic.
+        mv_rows: list[dict] = []
+        snapshot_at = datetime.now(tz=timezone.utc).timestamp()
         for player in squad:
             try:
                 perf, details = _fetch_player_data(player)
@@ -321,9 +327,35 @@ class Trader:
                     score_player(data, calibration_multiplier=_calibration_for(player))
                 )
                 squad_player_map[player.id] = player
+
+                try:
+                    mvh = self.trend_service.get_history(player.id, league.id)
+                    recent = mvh.points[-30:] if mvh.points else []
+                    peak_30d = max((p.value for p in recent), default=None)
+                    trough_30d = min((p.value for p in recent), default=None)
+                    mv_rows.append(
+                        {
+                            "player_id": player.id,
+                            "snapshot_at": snapshot_at,
+                            "market_value": player.market_value,
+                            "peak_mv_30d": peak_30d,
+                            "trough_mv_30d": trough_30d,
+                        }
+                    )
+                except Exception:
+                    # MV-history fetch is best-effort; keep scoring this
+                    # player even if persistence fails.
+                    pass
             except Exception as e:
                 if self.verbose:
                     console.print(f"[dim]EP: scoring failed for {player.last_name}: {e}[/dim]")
+
+        if self.bid_learner is not None and mv_rows:
+            try:
+                self.bid_learner.record_player_mv_snapshot(mv_rows)
+            except Exception:
+                # Learning side effects must never block the EP pipeline.
+                pass
 
         # --- 4. Make decisions ---
         # roster_context is legacy — DecisionEngine accepts it but doesn't
