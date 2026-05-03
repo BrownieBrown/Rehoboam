@@ -692,12 +692,20 @@ class KickbaseV4Client:
                 f"Failed to fetch manager squad: {response.status_code} - {response.text}"
             )
 
-    def get_league_ranking(self, league_id: str) -> dict[str, Any]:
+    def get_league_ranking(self, league_id: str, day_number: int | None = None) -> dict[str, Any]:
         """
-        Get league ranking/standings
-        GET /v4/leagues/{league_id}/ranking
+        Get league ranking/standings.
+
+        ``day_number`` (optional) returns the historical state at the end of
+        that matchday — same response shape as the current call. Without it,
+        the response reflects the most recent completed matchday (and ``day``
+        in the response tells you which one).
+
+        GET /v4/leagues/{league_id}/ranking[?dayNumber=N]
         """
         url = f"{self.BASE_URL}/v4/leagues/{league_id}/ranking"
+        if day_number is not None:
+            url = f"{url}?dayNumber={int(day_number)}"
 
         response = self.session.get(url)
 

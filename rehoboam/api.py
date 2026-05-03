@@ -177,10 +177,15 @@ class KickbaseAPI:
         except Exception as e:
             raise Exception(f"Failed to fetch manager squad: {e}") from e
 
-    def get_league_ranking(self, league: League) -> dict:
-        """Get league ranking/standings"""
+    def get_league_ranking(self, league: League, day_number: int | None = None) -> dict:
+        """Get league ranking/standings.
+
+        ``day_number`` returns historical rankings for that matchday (REH-24
+        capture writes the current snapshot only; backfill is a separate
+        concern handled outside the bot's session loop).
+        """
         try:
-            return self.client.get_league_ranking(league.id)
+            return self.client.get_league_ranking(league.id, day_number=day_number)
         except Exception as e:
             raise Exception(f"Failed to fetch league ranking: {e}") from e
 

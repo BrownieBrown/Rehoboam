@@ -25,6 +25,14 @@ class AuctionOutcome:
     market_value: int | None = None
 
 
+def _opt_int(value: Any) -> int | None:
+    """None-preserving int coercion. Used by writers that accept partial
+    rows where any numeric column may legitimately be missing."""
+    if value is None:
+        return None
+    return int(value)
+
+
 @dataclass
 class FlipOutcome:
     """Record of a completed flip (buy + sell)"""
@@ -302,6 +310,37 @@ class BidLearner:
                     budget INTEGER NOT NULL,
                     squad_size INTEGER NOT NULL
                 )
+            """
+            )
+
+            # League rank snapshot per session — REH-24.
+            # The /ranking response already includes per-manager team_value
+            # (`tv`), season points (`sp`), season placement (`spl`),
+            # matchday points (`mdp`), matchday placement (`mdpl`) — all the
+            # data goals 3, 4, 5 need. trader.py:179 was already calling this
+            # for competitor_player_ids; we now persist what was discarded.
+            # Composite PK lets a single session insert one row per manager.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS league_rank_history (
+                    snapshot_at REAL NOT NULL,
+                    league_id TEXT NOT NULL,
+                    manager_id TEXT NOT NULL,
+                    day_number INTEGER NOT NULL,
+                    rank_overall INTEGER,
+                    rank_matchday INTEGER,
+                    total_points INTEGER,
+                    matchday_points INTEGER,
+                    team_value INTEGER,
+                    is_self INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (snapshot_at, manager_id)
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_league_rank_self_at
+                ON league_rank_history(is_self, snapshot_at)
             """
             )
 
@@ -678,6 +717,59 @@ class BidLearner:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def record_league_rank_snapshot(self, rows: list[dict]) -> int:
+        """Bulk-persist one row per manager into ``league_rank_history``.
+
+        Each row should provide:
+            snapshot_at, league_id, manager_id, day_number, is_self
+            rank_overall, rank_matchday, total_points, matchday_points,
+            team_value
+        Missing optional fields default to None — the schema accepts NULL on
+        all the numeric columns so a partial response (e.g. mid-season the
+        previous-week's matchday placement is None) doesn't blow up the row.
+
+        Uses ``INSERT OR IGNORE`` so a same-second retry collapses
+        deterministically rather than overwriting; PK is
+        ``(snapshot_at, manager_id)``.
+
+        REH-24: feeds goals 3 (team value growth across the league),
+        4 (matchday points trajectory), and 5 (rank trajectory). Returns the
+        number of rows attempted (NOT the number actually inserted, since
+        sqlite3 doesn't expose per-row outcomes from executemany; tests
+        verify behavior by reading back).
+        """
+        if not rows:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO league_rank_history (
+                    snapshot_at, league_id, manager_id, day_number,
+                    rank_overall, rank_matchday,
+                    total_points, matchday_points,
+                    team_value, is_self
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["snapshot_at"],
+                        r["league_id"],
+                        r["manager_id"],
+                        int(r["day_number"]),
+                        _opt_int(r.get("rank_overall")),
+                        _opt_int(r.get("rank_matchday")),
+                        _opt_int(r.get("total_points")),
+                        _opt_int(r.get("matchday_points")),
+                        _opt_int(r.get("team_value")),
+                        1 if r.get("is_self") else 0,
+                    )
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        return len(rows)
 
     def has_matchday_outcome(self, player_id: str, matchday_date: str) -> bool:
         """True if ``matchday_outcomes`` already has a row for this player+date."""

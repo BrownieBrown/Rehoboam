@@ -173,14 +173,43 @@ class Trader:
 
             return perf_data, player_details
 
-        # --- 2b. Competitor scouting (best-effort) ---
+        # --- 2b. Competitor scouting + rank snapshot (best-effort) ---
+        # /ranking returns the full league standings — rank, points, team
+        # value per manager. Historically this loop only extracted manager
+        # IDs to drive squad scouting; REH-24 also persists the rank/points/
+        # team_value fields so we can measure goals 3, 4, 5 over time.
         competitor_player_ids: set[str] = set()
         try:
             ranking = self.api.get_league_ranking(league)
             managers = ranking.get("it", ranking.get("us", []))
+            # `day` may legitimately be None (pre-season) or absent. int(None)
+            # would raise inside the outer try/except and lose the
+            # competitor_player_ids set that was already built — None-guard
+            # explicitly so the surrounding scouting always succeeds.
+            _day_raw = ranking.get("day")
+            day_number = int(_day_raw) if _day_raw is not None else 0
             my_id = self.api.user.id
+
+            rank_rows: list[dict] = []
+            snapshot_at = datetime.now(tz=timezone.utc).timestamp()
             for mgr in managers:
                 mgr_id = mgr.get("i", mgr.get("id", ""))
+                if not mgr_id:
+                    continue
+                rank_rows.append(
+                    {
+                        "snapshot_at": snapshot_at,
+                        "league_id": league.id,
+                        "manager_id": str(mgr_id),
+                        "day_number": day_number,
+                        "rank_overall": mgr.get("spl"),
+                        "rank_matchday": mgr.get("mdpl"),
+                        "total_points": mgr.get("sp"),
+                        "matchday_points": mgr.get("mdp"),
+                        "team_value": mgr.get("tv"),
+                        "is_self": mgr_id == my_id,
+                    }
+                )
                 if mgr_id == my_id:
                     continue
                 try:
@@ -190,6 +219,13 @@ class Trader:
                         if pid:
                             competitor_player_ids.add(pid)
                 except Exception:
+                    pass
+
+            if self.bid_learner is not None and rank_rows:
+                try:
+                    self.bid_learner.record_league_rank_snapshot(rank_rows)
+                except Exception:
+                    # Learning side effects must never block the EP pipeline.
                     pass
         except Exception:
             pass
