@@ -30,24 +30,25 @@ Since every matchday point accumulates toward the season total, the winning stra
 1. **Never lose points to penalties** — no empty slots (-100), no negative budget (0 pts for entire matchday)
 1. **Exploit double gameweeks** — DGW players play twice, effectively doubling their point contribution
 
-The bot started as a market value trader (buy low, sell high). The `analyze` command now uses an EP-first scoring pipeline with marginal EP gain for buy decisions and budget-aware bidding with sell plans. The `trade` command still uses `value_score` for profit-trading.
+The bot started as a market value trader (buy low, sell high). It now runs a unified EP-first pipeline: scores players by expected matchday points, ranks buys by marginal EP gain (how much they improve the best-11), and uses budget-aware bidding with sell plans.
 
-Current state:
+Current state (post-foundation tier, May 2026):
 
-- `analyze` command: EP-first pipeline — scores players by expected matchday points, recommends buys by marginal EP gain (how much they improve best-11), supports sell plans for going negative
 - `auto` command: Unified aggressive trading — single EP pipeline call, trade pairs compete with plain buys ranked by EP, matchday-aware aggressiveness (aggressive 5+d, moderate 2-4d, locked 0-1d), trend-aware profit selling, up to 10 trades/session (15 aggressive)
-- `trade` command: Still uses `value_score` for profit-trading (legacy path)
-- `SmartBidding`: Has both `calculate_bid()` (value-score-based, legacy) and `calculate_ep_bid()` (EP-based, used by analyze/auto). Trend data now wired through to EP bids.
-- `BidLearner`: Tracks matchday outcomes (actual vs predicted EP), feeds EP accuracy factor back into bidding
-- Double gameweek awareness: EP calculator supports DGW multiplier (1.8x), but DGW detection not yet wired
-- Budget-at-kickoff safety: Basic 24-48h buffer exists, matchday-locked phase prevents trading 0-1 days before match
+- `status` command: Read-only diagnostic — runs the full EP pipeline in dry-run mode so you can preview what `auto` would do
+- `SmartBidding.calculate_ep_bid`: the only bidding path. Tier+demand+trend stack with optional learned overbid override from `auction_outcomes` (REH-30 fix).
+- `BidLearner`: writes `auction_outcomes`, `flip_outcomes`, `matchday_outcomes` (REH-20), `predicted_eps` (REH-20), `team_value_history` (REH-23), `league_rank_history` (REH-24), `matchday_lineup_results` (REH-25), `player_mv_history` (REH-26). Scorer self-calibration loop fully wired via REH-20.
+- Double gameweek awareness: EP calculator supports DGW multiplier (1.8x), DGW detection wired through `MatchupAnalyzer.detect_double_gameweek` + `is_dgw_team`.
+- Budget-at-kickoff safety: 24-48h buffer + matchday-locked phase prevents trading 0-1 days before match.
+- Structured logging (PR #27): all bidding decisions + override applications written to `logs/rehoboam.log` with rotating file handler.
 
 ### Strategic Priorities (in order of impact)
 
-1. **Migrate `trade` command to EP** — The `trade`/`auto` commands still use `value_score`. Gradually sunset `MarketAnalyzer` in favor of the EP pipeline.
-1. **Double gameweek exploitation** — Detect DGW schedules, prioritize those players. Buy 7-10 days before DGW.
-1. **Budget safety** — Hard block on going negative before kickoff. Warn early (48h+), auto-suggest sells to stay solvent.
-1. **Squad size enforcement** — At 15/15, trade table (sell→buy swaps) is now shown instead of plain buy recommendations. Never suggest adding a 16th player without a paired sell.
+1. **Learning loops** (REH-32 through REH-37) — foundation tables now populated. Loss-cut threshold calibration, sell-timing peak-MV regret, buy-trait correlation, lineup quality scoring, rank-trajectory regression. Wait for ≥5 matchdays of post-deploy data, then ship one loop per PR.
+1. **Per-manager transfer P&L (REH-38)** — `/managers/{mid}/dashboard.prft` for competitor flip-revenue intelligence. The one signal `/ranking` doesn't include.
+1. **Double gameweek exploitation** — buy 7-10 days before a DGW. DGW detection is wired; a planning recommender that surfaces upcoming DGWs is not.
+1. **Budget safety** — Hard block on going negative before kickoff is in place; could tighten the 48h+ early warning.
+1. **Squad size enforcement** — At 15/15, the trade table (sell→buy swap pairs) is shown instead of plain buy recommendations.
 
 ## Common Commands
 
@@ -55,13 +56,14 @@ Current state:
 # Install dependencies (including dev tools)
 pip install -e ".[dev]"
 
-# Run the CLI
+# Run the CLI (only login, auto, status are exposed)
 rehoboam --help
-rehoboam login              # Test credentials
-rehoboam analyze            # EP-first action plan (buy/sell by matchday points)
-rehoboam analyze -v         # Same with debug output
-rehoboam trade --max 5      # Dry-run trading
-rehoboam trade --live       # Live trading (prompts for confirmation)
+rehoboam login              # Test credentials + list leagues
+rehoboam status             # Read-only: show squad + dry-run what auto would do
+rehoboam status -v          # Verbose: DEBUG-level decision logs to stderr
+rehoboam auto --dry-run     # Simulate one trading session
+rehoboam auto               # Live trading session
+rehoboam auto --aggressive  # Up to 15 trades, lower EP threshold, +50% spend
 
 # Code quality
 black rehoboam/                        # Format code
@@ -70,11 +72,12 @@ bandit -r rehoboam/ -c pyproject.toml  # Security scan
 mypy rehoboam/ --ignore-missing-imports # Type check
 
 # Testing
-pytest                                        # Run all tests
-pytest tests/test_analyzer.py                 # Single file
-pytest tests/test_analyzer.py::test_value_calculation  # Single test
-pytest -m "not slow"                          # Skip slow tests
-pytest --cov=rehoboam --cov-report=html       # Coverage report
+pytest                                              # Run all tests
+pytest tests/test_ep_bidding.py                     # Single file
+pytest tests/test_scoring/                          # Whole subpackage
+pytest tests/test_ep_bidding.py::TestEPBidTiers     # Single class
+pytest -m "not slow"                                # Skip slow tests
+pytest --cov=rehoboam --cov-report=html             # Coverage report
 
 # Pre-commit hooks
 pre-commit install
@@ -93,9 +96,8 @@ pre-commit run --all-files
 
 **Trading System** (`trader.py`, `auto_trader.py`):
 
-- `Trader`: Main orchestrator that combines analysis, bidding, and execution
-- Integrates multiple analyzers and learners via dependency injection
-- `auto_trade()` method executes the full trading workflow
+- `Trader`: Per-call EP pipeline (`get_ep_recommendations`, `get_ep_recommendations_with_trends`, `find_profit_opportunities`) — stateless, takes a league per call.
+- `AutoTrader`: Session orchestrator. `run_full_session(league)` is the single entry point used by both the CLI `auto` command and the Azure Function timer trigger.
 
 **EP Scoring Pipeline** (`scoring/models.py`, `scoring/scorer.py`, `scoring/collector.py`, `scoring/decision.py`):
 
@@ -104,25 +106,22 @@ pre-commit run --all-files
 - `DecisionEngine`: Buy/sell/lineup decisions via marginal EP gain calculation and sell plans
 - `PlayerScore`: The ONE number driving all decisions — components: base points, consistency, lineup probability, fixture difficulty, form, minutes trend, DGW multiplier
 - Data quality grading (A-F) penalizes unreliable predictions
+- Position calibration multiplier (REH-20) corrects systematic per-position EP bias from accumulated `matchday_outcomes`
 
-**Legacy Analysis Layer** (`analyzer.py`, `enhanced_analyzer.py`, `value_calculator.py`, `roster_analyzer.py`):
+**Legacy roster helpers** (`roster_analyzer.py`, `value_calculator.py`):
 
-- `MarketAnalyzer`: Market-value-driven evaluation (still used by `trade` command)
-- `PlayerAnalysis`: Data class containing recommendation, confidence, value_score, factors
-- `RosterAnalyzer`: Roster-aware buy recommendations based on squad composition
-- Being gradually replaced by the EP scoring pipeline
+- `RosterAnalyzer`: Roster-aware buy context (gap-fill vs upgrade detection) via `value_calculator.PlayerValue`. Currently used by some display paths; not part of the EP decision pipeline.
 
-**Learning System** (`bid_learner.py`, `factor_weight_learner.py`, `historical_tracker.py`, `activity_feed_learner.py`):
+**Learning System** (`bid_learner.py`, `learning/tracker.py`, `activity_feed_learner.py`):
 
-- Adaptive bidding based on auction outcomes
-- **Matchday outcome tracking**: Records actual vs predicted EP, feeds back into bid aggressiveness via EP accuracy factor
-- Factor weight optimization from historical recommendation results
-- Competitor analysis from activity feed data
+- `BidLearner`: SQLite writer + reader for all learning tables — auction outcomes, flip outcomes, matchday outcomes (REH-20), predicted EPs (REH-20), team value history (REH-23), league rank history (REH-24), matchday lineup results (REH-25), player MV history (REH-26).
+- `LearningTracker`: Lifecycle wrapper around BidLearner — pending bids → resolve_auctions → record_outcome; tracked_purchases → record_flip_outcome.
+- `ActivityFeedLearner`: League transfers + market value snapshot events from the activity feed for competitor and demand signals.
 
 **CLI** (`cli.py`):
 
-- Typer-based CLI with commands: `login`, `analyze`, `trade`, `monitor`, `auto`, `daemon`, `stats`
-- Rich console output for formatted tables and status
+- Typer-based CLI with three commands: `login`, `auto`, `status`. Global `--verbose`/`-v` flag toggles DEBUG-level console logging (the rotating file handler at `logs/rehoboam.log` is always DEBUG).
+- Rich console output for formatted tables and status.
 
 ### Roster-Aware Recommendations
 
@@ -131,7 +130,7 @@ The system uses position **minimums** (not quotas) to provide context-aware buy 
 - GK: 1, DEF: 3, MID: 2, FW: 1 (total: 7 minimum for an 11-player lineup)
 - Remaining 4 spots can be filled with any position
 
-**Roster impact logic** (`roster_analyzer.py`, `analyzer.py`):
+**Roster impact logic** (`scoring/decision.py`):
 
 - Below minimum: Shows "fills gap" with +10 score bonus (high priority)
 - At/above minimum: Shows upgrade comparison vs weakest player at position
@@ -142,40 +141,37 @@ Key data classes:
 - `RosterContext`: Position state (`current_count`, `minimum_count`, `is_below_minimum`, `weakest_player`)
 - `RosterImpact`: Buy impact (`impact_type`: "fills_gap", "upgrade", "not_upgrade", "additional")
 
-### Display Layer (`compact_display.py`)
-
-- `CompactDisplay`: Main display for the `analyze` command
-- **Trade mode**: When squad is full (15/15), buy recommendations are shown as sell→buy swap pairs with net cost instead of plain buys. Uses `_build_trade_pairs()` to match each buy with a sell target (natural upgrade swap first, then most expendable).
-- `display_lineup()`: Shows optimal starting 11 + bench based on expected points
-
 ### Key Design Patterns
 
-- **Dependency Injection**: Trader accepts optional learners (`bid_learner`, `activity_feed_learner`, `factor_weight_learner`)
-- **Factor-based Scoring**: `ScoringFactor` and `FactorWeights` classes allow transparent and tunable recommendations
-- **Configuration via Pydantic**: `Settings` class loads from `.env` with validation
+- **Dependency Injection**: `Trader` and `AutoTrader` accept optional learners (`bid_learner`, `activity_feed_learner`).
+- **Best-effort learning**: Every persistence call is wrapped in `try/except` so a learning-side failure never blocks the EP pipeline. Stack traces flow into `logs/rehoboam.log` via the structured logger.
+- **Configuration via Pydantic**: `Settings` class loads from `.env` with validation.
+- **Probe-first**: Before relying on a Kickbase endpoint shape, validate against the live API via the read-only scripts in `scripts/probe_*.py`. Field aliases are documented in the user-level memory file `reference_kickbase_field_aliases.md`.
 
 ### Data Flow
 
-1. CLI command invokes `Trader` with settings and optional learners
-1. `Trader.analyze_market()` fetches market data via `KickbaseAPI`
-1. `MarketAnalyzer` evaluates players using factor weights → `PlayerAnalysis`
-1. Bidding strategy calculates optimal bid amounts
-1. Live mode executes bids via `api.buy_player()`
-1. Learning systems record outcomes for future optimization
+1. Azure Function timer (or `rehoboam auto` CLI) invokes `AutoTrader.run_full_session(league)`.
+1. Step 1 — auction resolution: `LearningTracker.resolve_auctions` reconciles pending bids into won/lost rows in `auction_outcomes`; deferred sell plans execute.
+1. Step 2 — session context build: `Trader.get_ep_recommendations_with_trends(league)` fetches squad + market + ranking + per-player performance/MV-history, scores everyone, ranks buys + trade pairs by marginal EP gain.
+1. Step 2a — learning snapshots: `LearningTracker.reconcile_finished_matchdays` (REH-20), `snapshot_predictions` (REH-20), `record_team_value_snapshot` (REH-23), `record_player_mv_snapshot` (REH-26). `Trader` itself writes `record_league_rank_snapshot` (REH-24) + `record_matchday_lineup_result` (REH-25) inside its existing /ranking try block.
+1. Steps 3-7 — lineup / matchday-locked / sell phase / squad optimization / unified trade phase. Bids placed via `api.buy_player`, sells via `api.sell_player_instant` or `api.sell_player`.
+1. Step 8 — `_set_optimal_lineup` finalizes the starting 11.
 
 ## Configuration
 
-Settings loaded from `.env` (see `.env.example`):
+Settings loaded from `.env` (see `.env.example`) via Pydantic BaseSettings — see `rehoboam/config.py:Settings` for the full field list and defaults. Notable knobs:
 
 - `KICKBASE_EMAIL`, `KICKBASE_PASSWORD`: Credentials
-- `MIN_SELL_PROFIT_PCT`, `MAX_LOSS_PCT`: Trading thresholds
-- `MIN_VALUE_SCORE_TO_BUY`: Minimum score (0-100) for buy recommendations
+- `MIN_SELL_PROFIT_PCT`, `MAX_LOSS_PCT`: Trade-side thresholds (defaults 15.0 / -15.0)
+- `MIN_EP_UPGRADE_THRESHOLD`: Minimum marginal EP gain to recommend a buy (default 5.0)
 - `DRY_RUN`: Safety flag (default: true)
 
-Constants in `config.py`:
+A few legacy `Settings` fields (`min_value_score_to_buy`, `min_buy_value_increase_pct`) are defined but no live code reads them after the value-score bidding path was deleted in PR #34 — candidates for a future cleanup PR.
+
+Module-level constants in `config.py`:
 
 - `POSITION_MINIMUMS`: Minimum players per position (GK:1, DEF:3, MID:2, FW:1)
-- `MIN_UPGRADE_THRESHOLD`: Minimum value score gain to consider a player an upgrade (default: 10.0)
+- `MAX_LINEUP_PROB_FOR_BUY`: Skip players with Kickbase lineup probability above this (default 3 — only starter/rotation, never bench-risk)
 
 ## Testing Notes
 
