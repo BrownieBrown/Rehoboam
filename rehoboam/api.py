@@ -177,6 +177,20 @@ class KickbaseAPI:
         except Exception as e:
             raise Exception(f"Failed to fetch manager squad: {e}") from e
 
+    def get_manager_dashboard(self, league: League, manager_id: str) -> dict:
+        """Per-manager dashboard with `prft` (transfer P&L) and `mdw`. REH-38."""
+        try:
+            return self.client.get_manager_dashboard(league.id, manager_id)
+        except Exception as e:
+            raise Exception(f"Failed to fetch manager dashboard: {e}") from e
+
+    def get_manager_transfer_history(self, league: League, manager_id: str, start: int = 0) -> dict:
+        """Per-manager transfer history, paginated 25 per page. REH-38."""
+        try:
+            return self.client.get_manager_transfer_history(league.id, manager_id, start=start)
+        except Exception as e:
+            raise Exception(f"Failed to fetch manager transfer history: {e}") from e
+
     def get_league_ranking(self, league: League, day_number: int | None = None) -> dict:
         """Get league ranking/standings.
 

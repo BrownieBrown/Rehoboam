@@ -191,6 +191,11 @@ class Trader:
             my_id = self.api.user.id
 
             rank_rows: list[dict] = []
+            # REH-38: per-manager dashboard (`prft`, `mdw`) + transfer
+            # history. Only collected when a learner is attached — skipping
+            # the extra HTTP calls when nothing would be persisted.
+            profile_rows: list[dict] = []
+            transfer_rows: list[dict] = []
             snapshot_at = datetime.now(tz=timezone.utc).timestamp()
             for mgr in managers:
                 mgr_id = mgr.get("i", mgr.get("id", ""))
@@ -210,22 +215,80 @@ class Trader:
                         "is_self": mgr_id == my_id,
                     }
                 )
-                if mgr_id == my_id:
-                    continue
-                try:
-                    mgr_squad = self.api.get_manager_squad(league, mgr_id)
-                    for p in mgr_squad.get("it", []):
-                        pid = p.get("i", p.get("id", ""))
-                        if pid:
-                            competitor_player_ids.add(pid)
-                except Exception:
-                    pass
+                if mgr_id != my_id:
+                    try:
+                        mgr_squad = self.api.get_manager_squad(league, mgr_id)
+                        for p in mgr_squad.get("it", []):
+                            pid = p.get("i", p.get("id", ""))
+                            if pid:
+                                competitor_player_ids.add(pid)
+                    except Exception:
+                        pass
+
+                # REH-38: dashboard pull for prft + mdw. Done for every
+                # manager (including self — `prft` is not exposed in
+                # /ranking, so we cannot get our own P&L from the loop's
+                # ranking response). Best-effort per-manager.
+                if self.bid_learner is not None:
+                    try:
+                        dash = self.api.get_manager_dashboard(league, str(mgr_id))
+                        prft = dash.get("prft")
+                        if prft is not None:
+                            profile_rows.append(
+                                {
+                                    "snapshot_at": snapshot_at,
+                                    "league_id": league.id,
+                                    "manager_id": str(mgr_id),
+                                    "transfer_pnl": int(prft),
+                                    "matchday_wins": dash.get("mdw"),
+                                    "is_self": mgr_id == my_id,
+                                }
+                            )
+                    except Exception:
+                        pass
+
+                    # REH-38: transfer history page 0 (latest 25 trades).
+                    # We run 2x/day; 25 trades in a 12h window is highly
+                    # improbable for a single manager, so page 0 catches
+                    # every new transfer in steady state. Older history
+                    # (start=25, 50, ...) is a backfill concern handled
+                    # outside the session loop.
+                    try:
+                        th = self.api.get_manager_transfer_history(league, str(mgr_id))
+                        for t in th.get("it", []):
+                            pid = t.get("pi", "")
+                            tdt = t.get("dt", "")
+                            if not pid or not tdt:
+                                continue
+                            transfer_rows.append(
+                                {
+                                    "league_id": league.id,
+                                    "manager_id": str(mgr_id),
+                                    "transfer_dt": tdt,
+                                    "player_id": str(pid),
+                                    "player_name": t.get("pn", ""),
+                                    "transfer_type": t.get("tty"),
+                                    "transfer_price": t.get("trp"),
+                                }
+                            )
+                    except Exception:
+                        pass
 
             if self.bid_learner is not None and rank_rows:
                 try:
                     self.bid_learner.record_league_rank_snapshot(rank_rows)
                 except Exception:
                     # Learning side effects must never block the EP pipeline.
+                    pass
+            if self.bid_learner is not None and profile_rows:
+                try:
+                    self.bid_learner.record_manager_profile_snapshot(profile_rows)
+                except Exception:
+                    pass
+            if self.bid_learner is not None and transfer_rows:
+                try:
+                    self.bid_learner.record_manager_transfers(transfer_rows)
+                except Exception:
                     pass
 
             # REH-25: capture the actual fielded lineup + total points for

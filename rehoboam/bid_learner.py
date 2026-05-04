@@ -381,6 +381,58 @@ class BidLearner:
             """
             )
 
+            # Per-manager transfer P&L snapshot — REH-38.
+            # /managers/{mid}/dashboard returns `prft` (cumulative transfer
+            # P&L) and `mdw` (matchday wins) — neither is in /ranking. We
+            # snapshot both per session so we can plot trajectory and
+            # benchmark the bot's flip P&L against leaguemates.
+            # Composite PK matches league_rank_history for symmetry.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manager_profile_history (
+                    snapshot_at REAL NOT NULL,
+                    league_id TEXT NOT NULL,
+                    manager_id TEXT NOT NULL,
+                    transfer_pnl INTEGER NOT NULL,
+                    matchday_wins INTEGER,
+                    is_self INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (snapshot_at, manager_id)
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_manager_profile_self_at
+                ON manager_profile_history(is_self, snapshot_at)
+            """
+            )
+
+            # Per-manager transfer history — REH-38.
+            # /managers/{mid}/transfer returns each completed buy/sell with
+            # price + datetime. PK on (league, manager, dt, player) makes
+            # re-imports idempotent: the same trade always collapses to one
+            # row regardless of how many sessions see it.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manager_transfers (
+                    league_id TEXT NOT NULL,
+                    manager_id TEXT NOT NULL,
+                    transfer_dt TEXT NOT NULL,
+                    player_id TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    transfer_type INTEGER,
+                    transfer_price INTEGER,
+                    PRIMARY KEY (league_id, manager_id, transfer_dt, player_id)
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_manager_transfers_mgr_dt
+                ON manager_transfers(manager_id, transfer_dt)
+            """
+            )
+
             # REH-22: drop legacy tables that no live code references.
             # `position_bidding_stats` was orphaned by REH-27 (writer + reader
             # methods deleted). The other three are stale residue from
@@ -918,6 +970,93 @@ class BidLearner:
                         _opt_int(r.get("matchday_points")),
                         _opt_int(r.get("team_value")),
                         1 if r.get("is_self") else 0,
+                    )
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        return len(rows)
+
+    def record_manager_profile_snapshot(self, rows: list[dict]) -> int:
+        """Bulk-persist one row per manager into ``manager_profile_history``.
+
+        Each row should provide:
+            snapshot_at, league_id, manager_id, transfer_pnl, is_self
+            matchday_wins (optional)
+
+        ``transfer_pnl`` (the dashboard `prft` field) is required — it is
+        the entire reason this snapshot exists. Missing values would defeat
+        the purpose of the table, so callers must coerce or skip explicitly
+        rather than passing None through.
+
+        Uses ``INSERT OR IGNORE`` matching ``record_league_rank_snapshot``
+        so a same-second retry collapses deterministically.
+
+        REH-38: feeds goals 1 (flip revenue) and 2 (loss avoidance), and
+        gives competitive intel on which leaguemates are bleeding transfer
+        P&L. Returns the number of rows attempted.
+        """
+        if not rows:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO manager_profile_history (
+                    snapshot_at, league_id, manager_id,
+                    transfer_pnl, matchday_wins, is_self
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["snapshot_at"],
+                        r["league_id"],
+                        r["manager_id"],
+                        int(r["transfer_pnl"]),
+                        _opt_int(r.get("matchday_wins")),
+                        1 if r.get("is_self") else 0,
+                    )
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        return len(rows)
+
+    def record_manager_transfers(self, rows: list[dict]) -> int:
+        """Bulk-upsert per-trade rows into ``manager_transfers``.
+
+        Each row should provide:
+            league_id, manager_id, transfer_dt, player_id, player_name
+            transfer_type (optional), transfer_price (optional)
+
+        Uses ``INSERT OR IGNORE`` so re-importing the same transfer history
+        page doesn't error or duplicate rows. The PK
+        ``(league_id, manager_id, transfer_dt, player_id)`` collapses
+        duplicates from overlapping pages during backfill.
+
+        REH-38. Returns the number of rows attempted.
+        """
+        if not rows:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO manager_transfers (
+                    league_id, manager_id, transfer_dt,
+                    player_id, player_name,
+                    transfer_type, transfer_price
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["league_id"],
+                        r["manager_id"],
+                        r["transfer_dt"],
+                        r["player_id"],
+                        r["player_name"],
+                        _opt_int(r.get("transfer_type")),
+                        _opt_int(r.get("transfer_price")),
                     )
                     for r in rows
                 ],
