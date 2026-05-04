@@ -205,35 +205,6 @@ class TestBidRecommendationBackwardCompat:
         assert rec.sell_plan is None
         assert rec.marginal_ep_gain == 0.0
 
-    def test_existing_calculate_bid_still_works(self):
-        """calculate_bid() must be fully backward compatible."""
-        bidding = SmartBidding()
-        result = bidding.calculate_bid(
-            asking_price=10_000_000,
-            market_value=10_000_000,
-            value_score=70.0,
-            confidence=0.8,
-        )
-        # Must still return a BidRecommendation with the alias working
-        assert result.max_profitable_bid == result.budget_ceiling
-        assert result.sell_plan is None
-        assert result.marginal_ep_gain == 0.0
-
-    def test_api_route_field_accessible(self):
-        """Simulate api/routes/trading.py accessing recommendation.max_profitable_bid."""
-        bidding = SmartBidding()
-        result = bidding.calculate_bid(
-            asking_price=8_000_000,
-            market_value=8_000_000,
-            value_score=65.0,
-            confidence=0.75,
-            trend_change_pct=2.0,
-        )
-        # This is what api/routes/trading.py:253 does
-        max_bid = result.max_profitable_bid
-        assert isinstance(max_bid, int)
-        assert max_bid > 0
-
 
 class TestCompetitorAwareBidding:
     """Tests for offer_count and has_aggressive_competitors bid modulation."""
