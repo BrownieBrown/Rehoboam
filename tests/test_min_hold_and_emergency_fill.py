@@ -147,7 +147,17 @@ class _StubExecution:
     def __init__(self):
         self.calls: list = []
 
-    def buy(self, league, player, price, reason, sell_plan_player_ids=None):
+    def buy(
+        self,
+        league,
+        player,
+        price,
+        reason,
+        sell_plan_player_ids=None,
+        *,
+        current_budget=None,
+        days_until_match=None,
+    ):
         self.calls.append(("buy", player.id, price, reason))
         return SimpleNamespace(
             success=True,
@@ -172,12 +182,19 @@ class _StubExecution:
         )
 
 
-def _ctx(buy_recs, current_budget, my_bid_amounts=None):
-    """Build the slimmest EPSessionContext-shaped object _run_emergency_squad_fill needs."""
+def _ctx(buy_recs, current_budget, my_bid_amounts=None, days_until_match=None):
+    """Build the slimmest EPSessionContext-shaped object _run_emergency_squad_fill needs.
+
+    ``days_until_match`` defaults to None so the REH-11 safety guard inside
+    ExecutionService.buy() treats the schedule as unknown and skips the
+    block (these tests aren't exercising the guard, just the emergency
+    fill logic).
+    """
     return SimpleNamespace(
         ep_result={"buy_recs": buy_recs, "trade_pairs": [], "squad_scores": []},
         my_bid_amounts=my_bid_amounts or {},
         current_budget=current_budget,
+        matchday_phase=SimpleNamespace(days_until_match=days_until_match),
     )
 
 
