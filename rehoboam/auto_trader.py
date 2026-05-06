@@ -434,6 +434,7 @@ class AutoTrader:
                     ctx.executed_trade_count += 1
                     self.daily_spend += obj.recommended_bid
                     ctx.flip_budget -= obj.recommended_bid
+                    ctx.current_budget -= obj.recommended_bid
                     available_slots -= 1
 
             elif kind == "pair":
@@ -487,6 +488,7 @@ class AutoTrader:
                     # than the estimated market value, to avoid budget drift.
                     actual_net_cost = obj.recommended_bid - sell_result.price
                     ctx.flip_budget -= actual_net_cost
+                    ctx.current_budget -= actual_net_cost
                     # Trade pair: slot freed by sell, consumed by buy = net zero
                 else:
                     console.print(
@@ -534,6 +536,7 @@ class AutoTrader:
                     ctx.executed_trade_count += 1
                     self.daily_spend += opp.buy_price
                     ctx.flip_budget -= opp.buy_price
+                    ctx.current_budget -= opp.buy_price
                     available_slots -= 1
 
         console.print(
