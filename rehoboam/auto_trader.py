@@ -426,6 +426,8 @@ class AutoTrader:
                     obj.recommended_bid,
                     obj.reason,
                     sell_plan_player_ids=sp_ids,
+                    current_budget=ctx.current_budget,
+                    days_until_match=ctx.matchday_phase.days_until_match,
                 )
                 results.append(result)
                 if result.success:
@@ -474,6 +476,8 @@ class AutoTrader:
                     obj.buy_player,
                     obj.recommended_bid,
                     f"Trade pair: EP +{obj.ep_gain:.1f}",
+                    current_budget=ctx.current_budget,
+                    days_until_match=ctx.matchday_phase.days_until_match,
                 )
                 results.append(buy_result)
                 if buy_result.success:
@@ -522,6 +526,8 @@ class AutoTrader:
                     opp.player,
                     opp.buy_price,
                     f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
+                    current_budget=ctx.current_budget,
+                    days_until_match=ctx.matchday_phase.days_until_match,
                 )
                 results.append(result)
                 if result.success:
@@ -612,6 +618,8 @@ class AutoTrader:
                 rec.player,
                 rec.recommended_bid,
                 f"Emergency lineup fill (squad short by {slots_short})",
+                current_budget=budget_remaining,
+                days_until_match=ctx.matchday_phase.days_until_match,
             )
             results.append(result)
             if result.success:
