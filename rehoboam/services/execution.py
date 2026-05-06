@@ -21,6 +21,7 @@ Two public methods:
   dead in our league, so listings just sit there.
 """
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,18 @@ from rich.console import Console
 from ..learning import LearningTracker
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+
+class BudgetSafetyError(Exception):
+    """Raised when a buy would push budget < 0 within the kickoff lockout window.
+
+    Defense-in-depth assertion. If this fires in prod, an upstream bug in
+    MatchdayPhase / flip_budget logic let an unsafe candidate reach execution.
+    """
+
+
+LOCKOUT_DAYS = 1  # Within ~24h of kickoff: any trade that would go into debt is refused.
 
 
 @dataclass
@@ -64,6 +77,9 @@ class ExecutionService:
         price: int,
         reason: str,
         sell_plan_player_ids: list[str] | None = None,
+        *,
+        current_budget: int,
+        days_until_match: int | None,
     ) -> AutoTradeResult:
         """Place a buy offer at the given price.
 
@@ -72,7 +88,37 @@ class ExecutionService:
         persisted alongside the pending bid and executed when resolve_auctions
         detects we won. This ensures buy-first-sell-after semantics: we never
         sell the old player before securing the new one.
+
+        ``current_budget`` and ``days_until_match`` are required keyword args
+        — they drive the kickoff-lockout safety guard (REH-11). Negative
+        budget at kickoff = 0 points for the entire matchday, so within
+        ``LOCKOUT_DAYS`` of kickoff any trade that would push budget < 0 is
+        refused. Live mode raises ``BudgetSafetyError``; dry-run returns a
+        failure ``AutoTradeResult``. Both modes log at ERROR.
         """
+        if (
+            days_until_match is not None
+            and days_until_match <= LOCKOUT_DAYS
+            and (current_budget - price) < 0
+        ):
+            msg = (
+                f"BLOCK: buy {player.first_name} {player.last_name} "
+                f"€{price:,} would leave budget €{current_budget - price:,} "
+                f"with {days_until_match}d to kickoff"
+            )
+            logger.error(msg)
+            if self.dry_run:
+                return AutoTradeResult(
+                    success=False,
+                    player_name=f"{player.first_name} {player.last_name}",
+                    action="BUY",
+                    price=price,
+                    reason=reason,
+                    timestamp=time.time(),
+                    error=msg,
+                )
+            raise BudgetSafetyError(msg)
+
         return self._do(
             action="BUY",
             player=player,
