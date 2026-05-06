@@ -692,6 +692,47 @@ class KickbaseV4Client:
                 f"Failed to fetch manager squad: {response.status_code} - {response.text}"
             )
 
+    def get_manager_dashboard(self, league_id: str, manager_id: str) -> dict[str, Any]:
+        """
+        Per-manager dashboard, includes cumulative transfer P&L (`prft`) and
+        matchday wins (`mdw`) — neither is in /ranking. REH-38.
+
+        GET /v4/leagues/{league_id}/managers/{manager_id}/dashboard
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/managers/{manager_id}/dashboard"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch manager dashboard: {response.status_code} - {response.text}"
+            )
+
+    def get_manager_transfer_history(
+        self, league_id: str, manager_id: str, start: int = 0
+    ) -> dict[str, Any]:
+        """
+        Per-manager transfer history, paginated 25 per page in reverse
+        chronological order. ``start`` is the zero-indexed offset; pass 25,
+        50, ... to walk backward through history. REH-38.
+
+        GET /v4/leagues/{league_id}/managers/{manager_id}/transfer[?start=N]
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/managers/{manager_id}/transfer"
+        if start:
+            url = f"{url}?start={int(start)}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch manager transfer history: {response.status_code} - {response.text}"
+            )
+
     def get_league_ranking(self, league_id: str, day_number: int | None = None) -> dict[str, Any]:
         """
         Get league ranking/standings.
