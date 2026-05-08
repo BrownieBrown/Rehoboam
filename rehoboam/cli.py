@@ -1,12 +1,16 @@
 """CLI interface for Rehoboam — minimal surface for auto + diagnostics."""
 
 import logging
+from datetime import datetime
+from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
+from . import azure_blob
 from .api import KickbaseAPI
-from .config import get_settings
+from .config import AzureBlobSettings, get_settings
 from .logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -158,6 +162,153 @@ def status(
         dry_run=True,
     )
     auto_trader.run_full_session(league)
+
+
+def _fmt_size(n: int | None) -> str:
+    if n is None:
+        return "—"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KiB"
+    return f"{n / (1024 * 1024):.1f} MiB"
+
+
+def _fmt_dt(dt: datetime | None) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC") if dt else "—"
+
+
+_FETCH_STATUS_STYLE = {
+    "downloaded": "green",
+    "missing_in_blob": "yellow",
+    "skipped_dry_run": "cyan",
+    "error": "red",
+}
+
+_PUSH_STATUS_STYLE = {
+    "uploaded": "green",
+    "missing_local": "yellow",
+    "skipped_dry_run": "cyan",
+    "error": "red",
+}
+
+
+def _render_fetch_table(results: list[azure_blob.FetchResult], *, dry_run: bool) -> Table:
+    title = "Would fetch" if dry_run else "Fetched"
+    table = Table(title=title)
+    table.add_column("DB", style="bold")
+    table.add_column("Blob last modified")
+    table.add_column("Blob size", justify="right")
+    table.add_column("Local target")
+    table.add_column("Backup")
+    table.add_column("Status")
+
+    for r in results:
+        backup = str(r.backed_up_to) if r.backed_up_to else "—"
+        status_label = r.status.replace("_", " ")
+        if r.status == "error" and r.error:
+            status_label = f"error: {r.error[:40]}"
+        table.add_row(
+            r.db_file,
+            _fmt_dt(r.blob.last_modified),
+            _fmt_size(r.blob.size),
+            str(r.local_path),
+            backup,
+            f"[{_FETCH_STATUS_STYLE[r.status]}]{status_label}[/{_FETCH_STATUS_STYLE[r.status]}]",
+        )
+    return table
+
+
+def _render_push_table(results: list[azure_blob.PushResult], *, dry_run: bool) -> Table:
+    title = "Would push" if dry_run else "Pushed"
+    table = Table(title=title)
+    table.add_column("DB", style="bold")
+    table.add_column("Local path")
+    table.add_column("Local size", justify="right")
+    table.add_column("Status")
+
+    for r in results:
+        status_label = r.status.replace("_", " ")
+        if r.status == "error" and r.error:
+            status_label = f"error: {r.error[:40]}"
+        table.add_row(
+            r.db_file,
+            str(r.local_path),
+            _fmt_size(r.local_size),
+            f"[{_PUSH_STATUS_STYLE[r.status]}]{status_label}[/{_PUSH_STATUS_STYLE[r.status]}]",
+        )
+    return table
+
+
+@app.command("fetch-azure-state")
+def fetch_azure_state(
+    dry_run: bool = typer.Option(False, "--dry-run", help="List blobs without downloading"),
+    backup: bool = typer.Option(
+        True,
+        "--backup/--no-backup",
+        help="Rename existing local files to .local-bak before overwriting",
+    ),
+):
+    """Pull SQLite state from Azure Blob Storage into ./logs/ for prod debugging."""
+    blob_settings = AzureBlobSettings()
+    try:
+        results = azure_blob.fetch_state(
+            connection_string=blob_settings.azure_storage_connection_string,
+            container_name=blob_settings.blob_container,
+            dest_dir=Path("logs"),
+            backup=backup,
+            dry_run=dry_run,
+        )
+    except azure_blob.MissingAzureCredentials as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(_render_fetch_table(results, dry_run=dry_run))
+
+    if not dry_run and any(r.status == "error" for r in results):
+        raise typer.Exit(code=1)
+
+
+@app.command("push-azure-state")
+def push_azure_state(
+    confirm: bool = typer.Option(
+        False,
+        "--i-know-what-im-doing",
+        help="Required to actually upload — without it the command refuses.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List local files without uploading"),
+):
+    """Push local ./logs/ SQLite state to Azure Blob Storage (DANGEROUS).
+
+    Overwrites the live bot's persistent state. Refuses to run without
+    --i-know-what-im-doing. Use --dry-run to preview.
+    """
+    if not confirm:
+        console.print(
+            "[red]⛔ Refusing to overwrite prod state from local.[/red]\n"
+            "This will replace the live bot's databases (bid_learning.db, "
+            "value_tracking.db, market_prices.db, player_history.db) with "
+            "whatever is in ./logs/.\n"
+            "Re-run with [bold]--i-know-what-im-doing[/bold] if you actually want this."
+        )
+        raise typer.Exit(code=1)
+
+    blob_settings = AzureBlobSettings()
+    try:
+        results = azure_blob.push_state(
+            connection_string=blob_settings.azure_storage_connection_string,
+            container_name=blob_settings.blob_container,
+            source_dir=Path("logs"),
+            dry_run=dry_run,
+        )
+    except azure_blob.MissingAzureCredentials as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(_render_push_table(results, dry_run=dry_run))
+
+    if not dry_run and any(r.status == "error" for r in results):
+        raise typer.Exit(code=1)
 
 
 @app.callback()

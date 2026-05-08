@@ -136,3 +136,28 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get application settings"""
     return Settings()
+
+
+class AzureBlobSettings(BaseSettings):
+    """Azure Blob Storage settings — used by both the Azure Function and the
+    `rehoboam fetch-azure-state` / `push-azure-state` CLI commands.
+
+    Kept separate from `Settings` so debugging commands don't require
+    KICKBASE credentials to be present in `.env`.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=find_env_file(),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    azure_storage_connection_string: str | None = Field(
+        default=None,
+        description="Azure Blob Storage connection string (set in .env or app settings)",
+    )
+    blob_container: str = Field(
+        default="rehoboam-data",
+        description="Container holding the persisted SQLite databases",
+    )
