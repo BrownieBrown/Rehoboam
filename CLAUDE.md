@@ -52,36 +52,44 @@ Current state (post-foundation tier, May 2026):
 
 ## Common Commands
 
-```bash
-# Install dependencies (including dev tools)
-pip install -e ".[dev]"
+The project uses `uv` for dependency management. Install uv (`brew install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`), then everything below runs through it.
 
-# Run the CLI (only login, auto, status are exposed)
-rehoboam --help
-rehoboam login              # Test credentials + list leagues
-rehoboam status             # Read-only: show squad + dry-run what auto would do
-rehoboam status -v          # Verbose: DEBUG-level decision logs to stderr
-rehoboam auto --dry-run     # Simulate one trading session
-rehoboam auto               # Live trading session
-rehoboam auto --aggressive  # Up to 15 trades, lower EP threshold, +50% spend
+```bash
+# Install dependencies (creates .venv automatically; .python-version pins 3.12)
+uv sync --extra dev
+
+# Run the CLI (only login, auto, status, fetch-azure-state, push-azure-state are exposed)
+uv run rehoboam --help
+uv run rehoboam login              # Test credentials + list leagues
+uv run rehoboam status             # Read-only: show squad + dry-run what auto would do
+uv run rehoboam status -v          # Verbose: DEBUG-level decision logs to stderr
+uv run rehoboam auto --dry-run     # Simulate one trading session
+uv run rehoboam auto               # Live trading session
+uv run rehoboam auto --aggressive  # Up to 15 trades, lower EP threshold, +50% spend
+uv run rehoboam fetch-azure-state --dry-run  # Preview prod blob state (REH-15)
+uv run rehoboam fetch-azure-state            # Pull prod SQLite DBs into ./logs/
 
 # Code quality
-black rehoboam/                        # Format code
-ruff check rehoboam/ --fix             # Lint and auto-fix
-bandit -r rehoboam/ -c pyproject.toml  # Security scan
-mypy rehoboam/ --ignore-missing-imports # Type check
+uv run black rehoboam/                        # Format code
+uv run ruff check rehoboam/ --fix             # Lint and auto-fix
+uv run bandit -r rehoboam/ -c pyproject.toml  # Security scan
+uv run mypy rehoboam/ --ignore-missing-imports # Type check
 
 # Testing
-pytest                                              # Run all tests
-pytest tests/test_ep_bidding.py                     # Single file
-pytest tests/test_scoring/                          # Whole subpackage
-pytest tests/test_ep_bidding.py::TestEPBidTiers     # Single class
-pytest -m "not slow"                                # Skip slow tests
-pytest --cov=rehoboam --cov-report=html             # Coverage report
+uv run pytest                                              # Run all tests
+uv run pytest tests/test_ep_bidding.py                     # Single file
+uv run pytest tests/test_scoring/                          # Whole subpackage
+uv run pytest tests/test_ep_bidding.py::TestEPBidTiers     # Single class
+uv run pytest -m "not slow"                                # Skip slow tests
+uv run pytest --cov=rehoboam --cov-report=html             # Coverage report
+
+# Dependency maintenance
+uv lock                              # Refresh uv.lock (after editing pyproject.toml)
+bash scripts/sync-azure-deps.sh      # Regenerate deploy/azure_function/requirements.txt
 
 # Pre-commit hooks
-pre-commit install
-pre-commit run --all-files
+uv run pre-commit install
+uv run pre-commit run --all-files
 ```
 
 ## Architecture

@@ -19,6 +19,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Runtime extras the Azure Function needs that the CLI/library doesn't.
+# `uv export --extra azure` regenerates deploy/azure_function/requirements.txt.
+azure = [
+    "azure-functions>=1.18.0",
+]
 web = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
