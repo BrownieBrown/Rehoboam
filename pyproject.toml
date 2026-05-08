@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.0.0",  # Configuration validation
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
+    "azure-storage-blob>=12.19.0",  # Prod state debugging via fetch-azure-state
 ]
 
 [project.optional-dependencies]

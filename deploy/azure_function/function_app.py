@@ -14,71 +14,50 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # Azure Functions writable directory
 TEMP_DIR = "/tmp"
+LOGS_DIR = Path(TEMP_DIR) / "logs"
 
-# SQLite databases to persist in Azure Blob Storage
-DB_FILES = [
-    "bid_learning.db",
-    "value_tracking.db",
-    "market_prices.db",
-    "player_history.db",
-]
+
+def _blob_settings() -> tuple[str | None, str]:
+    return (
+        os.getenv("AZURE_STORAGE_CONNECTION_STRING"),
+        os.getenv("BLOB_CONTAINER", "rehoboam-data"),
+    )
 
 
 def download_databases():
-    """Download learning databases from Azure Blob Storage"""
-    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-    container_name = os.getenv("BLOB_CONTAINER", "rehoboam-data")
+    """Download learning databases from Azure Blob Storage."""
+    from rehoboam.azure_blob import fetch_state
 
-    if not connection_string:
+    conn_str, container = _blob_settings()
+    if not conn_str:
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB download")
         return
 
-    from azure.storage.blob import BlobServiceClient
-
-    blob_service = BlobServiceClient.from_connection_string(connection_string)
-    container = blob_service.get_container_client(container_name)
-
-    os.makedirs(f"{TEMP_DIR}/logs", exist_ok=True)
-
-    for db_file in DB_FILES:
-        db_path = f"{TEMP_DIR}/logs/{db_file}"
-        try:
-            blob_client = container.get_blob_client(db_file)
-            with open(db_path, "wb") as f:
-                f.write(blob_client.download_blob().readall())
-            logging.info(f"Downloaded {db_file}")
-        except Exception as e:
-            if "BlobNotFound" in str(e):
-                logging.info(f"No existing {db_file} in blob storage - will create new")
-            else:
-                logging.warning(f"Could not download {db_file}: {e}")
+    results = fetch_state(conn_str, container, LOGS_DIR, backup=False, dry_run=False)
+    for r in results:
+        if r.status == "downloaded":
+            logging.info(f"Downloaded {r.db_file} ({r.blob.size} bytes)")
+        elif r.status == "missing_in_blob":
+            logging.info(f"No existing {r.db_file} in blob storage - will create new")
+        elif r.status == "error":
+            logging.warning(f"Could not download {r.db_file}: {r.error}")
 
 
 def upload_databases():
-    """Upload learning databases to Azure Blob Storage"""
-    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-    container_name = os.getenv("BLOB_CONTAINER", "rehoboam-data")
+    """Upload learning databases to Azure Blob Storage."""
+    from rehoboam.azure_blob import push_state
 
-    if not connection_string:
+    conn_str, container = _blob_settings()
+    if not conn_str:
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB upload")
         return
 
-    from azure.storage.blob import BlobServiceClient
-
-    blob_service = BlobServiceClient.from_connection_string(connection_string)
-    container = blob_service.get_container_client(container_name)
-
-    for db_file in DB_FILES:
-        db_path = f"{TEMP_DIR}/logs/{db_file}"
-        if not os.path.exists(db_path):
-            continue
-        try:
-            blob_client = container.get_blob_client(db_file)
-            with open(db_path, "rb") as f:
-                blob_client.upload_blob(f, overwrite=True)
-            logging.info(f"Uploaded {db_file}")
-        except Exception as e:
-            logging.warning(f"Could not upload {db_file}: {e}")
+    results = push_state(conn_str, container, LOGS_DIR, dry_run=False)
+    for r in results:
+        if r.status == "uploaded":
+            logging.info(f"Uploaded {r.db_file} ({r.local_size} bytes)")
+        elif r.status == "error":
+            logging.warning(f"Could not upload {r.db_file}: {r.error}")
 
 
 # Timer trigger: runs 2x daily at 08:00 and 20:00 UTC
