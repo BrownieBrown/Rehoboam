@@ -15,25 +15,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install "black>=25.1,<26" ruff bandit[toml]
+      - name: Set up Python
+        run: uv python install 3.10
 
       - name: Check code formatting with Black
-        run: black --check --line-length=100 rehoboam/
+        run: uvx --from "black>=25.1,<26" black --check --line-length=100 rehoboam/
 
       - name: Lint with Ruff
-        run: ruff check rehoboam/
+        run: uvx ruff check rehoboam/
 
       - name: Security check with Bandit
-        run: bandit -r rehoboam/ -c pyproject.toml
+        run: uvx --from "bandit[toml]" bandit -r rehoboam/ -c pyproject.toml
         continue-on-error: true  # Don't fail build on security warnings
 
   # Run tests
@@ -46,20 +43,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --extra dev --python ${{ matrix.python-version }}
 
       - name: Run tests with pytest
-        run: |
-          pytest tests/ -v --tb=short
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -v --tb=short
         env:
           # Prevent tests from accidentally using real credentials
           KICKBASE_EMAIL: test@example.com
@@ -72,21 +68,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.10
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install mypy types-requests
+        run: uv sync --extra dev
 
       - name: Type check with mypy
-        run: mypy rehoboam/ --ignore-missing-imports
+        run: uv run mypy rehoboam/ --ignore-missing-imports
         continue-on-error: true  # Don't fail build on type errors initially
+
+  # Verify deploy/azure_function/requirements.txt matches uv.lock
+  deploy-deps-sync:
+    name: Verify Azure deploy deps in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Regenerate deploy requirements.txt
+        run: bash scripts/sync-azure-deps.sh
+
+      - name: Fail if requirements.txt drifted from uv.lock
+        run: |
+          if ! git diff --exit-code deploy/azure_function/requirements.txt; then
+            echo "::error::deploy/azure_function/requirements.txt is stale. Run scripts/sync-azure-deps.sh and commit the result."
+            exit 1
+          fi
 
   # Dependency security scanning
   security:
@@ -95,19 +112,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install safety
+          enable-cache: true
 
       - name: Check dependencies for vulnerabilities
-        run: |
-          pip freeze | safety check --stdin
+        run: uv export --no-hashes --no-dev | uvx safety check --stdin
         continue-on-error: true  # Don't fail build on vulnerabilities
 
   # Build package
@@ -118,19 +129,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          enable-cache: true
 
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install build
+      - name: Set up Python
+        run: uv python install 3.10
 
       - name: Build package
-        run: python -m build
+        run: uv build
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -142,15 +150,10 @@ jobs:
   deploy:
     name: Deploy to Azure Functions
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, deploy-deps-sync]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
       - name: Prepare deployment package
         run: |
