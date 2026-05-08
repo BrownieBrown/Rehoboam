@@ -23,17 +23,14 @@ jobs:
       - name: Set up Python
         run: uv python install 3.10
 
-      - name: Install lint tools
-        run: uv pip install --system "black>=25.1,<26" ruff bandit[toml]
-
       - name: Check code formatting with Black
-        run: black --check --line-length=100 rehoboam/
+        run: uvx --from "black>=25.1,<26" black --check --line-length=100 rehoboam/
 
       - name: Lint with Ruff
-        run: ruff check rehoboam/
+        run: uvx ruff check rehoboam/
 
       - name: Security check with Bandit
-        run: bandit -r rehoboam/ -c pyproject.toml
+        run: uvx --from "bandit[toml]" bandit -r rehoboam/ -c pyproject.toml
         continue-on-error: true  # Don't fail build on security warnings
 
   # Run tests
@@ -120,14 +117,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python
-        run: uv python install 3.10
-
-      - name: Install safety
-        run: uv pip install --system safety
-
       - name: Check dependencies for vulnerabilities
-        run: uv export --no-hashes --no-dev | safety check --stdin
+        run: uv export --no-hashes --no-dev | uvx safety check --stdin
         continue-on-error: true  # Don't fail build on vulnerabilities
 
   # Build package
