@@ -211,13 +211,13 @@ def _backfill_matchday_phase(
     league: League,
     user_id: str,
     learner: BidLearner,
-    last_finished_matchday: int,
+    current_day: int,
     *,
     dry_run: bool,
     stats: BackfillStats,
 ) -> None:
-    """For each matchday in [1..lfmd]: fetch teamcenter + ranking, write rows."""
-    for day in range(1, last_finished_matchday + 1):
+    """For each matchday in [1..current_day]: fetch teamcenter + ranking, write rows."""
+    for day in range(1, current_day + 1):
         tc = client.get_user_teamcenter(league.id, user_id, day_number=day)
         lp = tc.get("lp") or []
         if not lp:
@@ -277,8 +277,12 @@ def run_backfill(
     stats = BackfillStats()
 
     current_ranking = client.get_league_ranking(league.id)
-    last_finished = int(current_ranking.get("lfmd") or 0)
-    logger.info("Backfilling matchdays 1..%d (dry_run=%s)", last_finished, dry_run)
+    # `day` is the current matchday number (matches what the live writer in
+    # trader.py persists). `lfmd` is something else and was a misread during
+    # scoping — confirmed against probe dumps where `day=33` matched the
+    # bot's day_number=33 in league_rank_history.
+    current_day = int(current_ranking.get("day") or 0)
+    logger.info("Backfilling matchdays 1..%d (dry_run=%s)", current_day, dry_run)
 
     _backfill_flip_outcomes(client, league.id, manager_id, learner, dry_run=dry_run, stats=stats)
     logger.info(
@@ -290,9 +294,9 @@ def run_backfill(
         stats.transfers_paginated,
     )
 
-    if last_finished > 0:
+    if current_day > 0:
         _backfill_matchday_phase(
-            client, league, user_id, learner, last_finished, dry_run=dry_run, stats=stats
+            client, league, user_id, learner, current_day, dry_run=dry_run, stats=stats
         )
     logger.info(
         "Phase 2/3: %d matchdays processed (%d skipped), %d lineup rows, %d rank rows",

@@ -142,10 +142,10 @@ def test_paginate_transfers_passes_cursor_via_start_param():
 # --- run_backfill (integration with real BidLearner) ----------------------
 
 
-def _baseline_client(transfers: list[dict[str, Any]], lfmd: int = 0) -> MagicMock:
+def _baseline_client(transfers: list[dict[str, Any]], current_day: int = 0) -> MagicMock:
     c = MagicMock()
-    # First call: current ranking (provides lfmd). Subsequent calls: per-day rankings.
-    c.get_league_ranking.return_value = {"lfmd": lfmd, "us": []}
+    # First call: current ranking (provides `day`). Subsequent: per-day rankings.
+    c.get_league_ranking.return_value = {"day": current_day, "us": []}
     c.get_manager_transfer_history.side_effect = [{"it": transfers}, {"it": []}]
     c.get_user_teamcenter.return_value = {"lp": []}
     return c
@@ -159,7 +159,7 @@ def test_run_backfill_writes_flip_outcomes(tmp_path):
         _t("p2", TRANSFER_SELL, "2026-04-08T10:00:00Z", trp=1_800_000, pn="P2"),
     ]
     learner = _learner(tmp_path)
-    client = _baseline_client(transfers, lfmd=0)
+    client = _baseline_client(transfers, current_day=0)
 
     stats = run_backfill(client, _league(), "uid", "mid", learner, dry_run=False)
 
@@ -174,11 +174,11 @@ def test_run_backfill_is_idempotent_on_rerun(tmp_path):
     ]
     learner = _learner(tmp_path)
 
-    client1 = _baseline_client(transfers, lfmd=0)
+    client1 = _baseline_client(transfers, current_day=0)
     s1 = run_backfill(client1, _league(), "uid", "mid", learner, dry_run=False)
     assert s1.flip_outcomes_inserted == 1
 
-    client2 = _baseline_client(transfers, lfmd=0)
+    client2 = _baseline_client(transfers, current_day=0)
     s2 = run_backfill(client2, _league(), "uid", "mid", learner, dry_run=False)
     assert s2.flip_outcomes_inserted == 0
     assert s2.flip_outcomes_skipped_duplicate == 1
@@ -190,7 +190,7 @@ def test_run_backfill_dry_run_writes_nothing(tmp_path):
         _t("p1", TRANSFER_SELL, "2026-04-05T10:00:00Z", trp=1_200_000),
     ]
     learner = _learner(tmp_path)
-    client = _baseline_client(transfers, lfmd=0)
+    client = _baseline_client(transfers, current_day=0)
 
     stats = run_backfill(client, _league(), "uid", "mid", learner, dry_run=True)
 
@@ -205,8 +205,8 @@ def test_run_backfill_dry_run_writes_nothing(tmp_path):
 
 
 def test_run_backfill_writes_lineup_and_rank_per_matchday(tmp_path):
-    """Phase 2/3: when lfmd>0 and teamcenter returns a real lineup, we get
-    one matchday_lineup_results row and N league_rank_history rows."""
+    """Phase 2/3: when current_day>0 and teamcenter returns a real lineup,
+    we get one matchday_lineup_results row and N league_rank_history rows."""
     learner = _learner(tmp_path)
 
     teamcenter_for_md1 = {
@@ -225,7 +225,7 @@ def test_run_backfill_writes_lineup_and_rank_per_matchday(tmp_path):
 
     c = MagicMock()
     c.get_league_ranking.side_effect = [
-        {"lfmd": 1, "us": []},  # initial probe
+        {"day": 1, "us": []},  # initial probe
         ranking_for_md1,  # per-matchday call
     ]
     c.get_manager_transfer_history.side_effect = [{"it": []}]
@@ -259,7 +259,7 @@ def test_run_backfill_skips_matchday_with_no_lineup(tmp_path):
     written, and the ranking call for that matchday should NOT fire."""
     learner = _learner(tmp_path)
     c = MagicMock()
-    c.get_league_ranking.side_effect = [{"lfmd": 1, "us": []}]
+    c.get_league_ranking.side_effect = [{"day": 1, "us": []}]
     c.get_manager_transfer_history.side_effect = [{"it": []}]
     c.get_user_teamcenter.return_value = {"lp": []}
 
