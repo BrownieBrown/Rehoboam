@@ -44,8 +44,7 @@ Current state (post-foundation tier, May 2026):
 
 ### Strategic Priorities (in order of impact)
 
-1. **Learning loops** (REH-32 through REH-37) — foundation tables now populated. Loss-cut threshold calibration, sell-timing peak-MV regret, buy-trait correlation, lineup quality scoring, rank-trajectory regression. Wait for ≥5 matchdays of post-deploy data, then ship one loop per PR.
-1. **Per-manager transfer P&L (REH-38)** — `/managers/{mid}/dashboard.prft` for competitor flip-revenue intelligence. The one signal `/ranking` doesn't include.
+1. **Learning loops** (REH-32 through REH-37) — foundation tables backfilled and populated as of 2026-05-09 via REH-39 (flips + lineups + rank history) and REH-40 (full per-flip MV trajectories). Calibration tickets are now unblocked: REH-32 (loss-cut + profit-take ladder, locked design in ticket body), REH-33 (sell-timing peak-MV regret), REH-35 (lineup quality), REH-37 (rank-trajectory regression). REH-34 stays blocked (forward-only buy annotations).
 1. **Double gameweek exploitation** — buy 7-10 days before a DGW. DGW detection is wired; a planning recommender that surfaces upcoming DGWs is not.
 1. **Budget safety** — Hard block on going negative before kickoff is in place; could tighten the 48h+ early warning.
 1. **Squad size enforcement** — At 15/15, the trade table (sell→buy swap pairs) is shown instead of plain buy recommendations.
@@ -68,6 +67,9 @@ uv run rehoboam auto               # Live trading session
 uv run rehoboam auto --aggressive  # Up to 15 trades, lower EP threshold, +50% spend
 uv run rehoboam fetch-azure-state --dry-run  # Preview prod blob state (REH-15)
 uv run rehoboam fetch-azure-state            # Pull prod SQLite DBs into ./logs/
+uv run rehoboam backfill-history --dry-run   # Preview historical foundation-table backfill (REH-39)
+uv run rehoboam backfill-history             # Replay KICKBASE history → flip_outcomes + matchday_lineup_results + league_rank_history
+uv run rehoboam backfill-mv-history          # Backfill player_mv_history trajectories for all flipped players (REH-40)
 
 # Code quality
 uv run black rehoboam/                        # Format code
