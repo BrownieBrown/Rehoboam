@@ -335,6 +335,67 @@ def push_azure_state(
         raise typer.Exit(code=1)
 
 
+@app.command("backfill-mv-history")
+def backfill_mv_history(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Run all HTTP calls but skip DB writes; reports row-count estimates.",
+    ),
+    timeframe_days: int = typer.Option(
+        365,
+        "--timeframe",
+        help="Days of MV history to fetch per player (default: 365 = full season).",
+    ),
+):
+    """One-shot backfill of player_mv_history for all flipped players (REH-40).
+
+    Walks every distinct player_id in flip_outcomes and fetches the v2 MV
+    history endpoint, writing daily snapshots into player_mv_history. This
+    populates the trajectory data REH-32 / REH-33 calibrations need.
+
+    Idempotent: rerunning silently skips duplicates via the existing
+    UNIQUE(player_id, snapshot_at) constraint.
+
+    Workflow when targeting prod state:
+      1. rehoboam fetch-azure-state
+      2. rehoboam backfill-mv-history
+      3. rehoboam push-azure-state --i-know-what-im-doing
+    """
+    from .bid_learner import BidLearner
+    from .mv_backfill import run_mv_backfill
+
+    api, _settings, _league = _login_and_get_league(league_index)
+    learner = BidLearner()
+
+    console.print("\n[bold cyan]🔁 Backfilling player_mv_history…[/bold cyan]")
+    if dry_run:
+        console.print("[yellow]DRY RUN — no DB writes; counts are upper-bound estimates[/yellow]")
+
+    stats = run_mv_backfill(
+        client=api.client, learner=learner, dry_run=dry_run, timeframe_days=timeframe_days
+    )
+
+    table = Table(title="MV backfill summary")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Players processed", f"[green]{stats.players_processed}[/green]")
+    table.add_row("Players with no MV data", f"{stats.players_skipped_no_data}")
+    table.add_row(
+        "Players failed (HTTP errors)",
+        f"[red]{stats.players_failed}[/red]" if stats.players_failed else "0",
+    )
+    table.add_row("Rows attempted", f"{stats.rows_attempted}")
+    console.print(table)
+
+    if not dry_run:
+        console.print(
+            "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
+            "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
+        )
+
+
 @app.command("backfill-history")
 def backfill_history(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),

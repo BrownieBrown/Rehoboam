@@ -347,6 +347,15 @@ class Trader:
         def _calibration_for(player) -> float:
             return position_calibrations.get(player.position, 1.0)
 
+        # REH-26 + REH-40: collect daily MV rows for both squad AND market
+        # players in a single mv_rows list, persisted after both loops via
+        # one bulk INSERT. trend_service.get_history uses the 24h-cached
+        # data already fetched for trend analysis — no extra HTTP traffic.
+        # Market coverage (REH-40) gives REH-32 / REH-33 calibrations a
+        # populated trajectory for any future flip without further backfill.
+        mv_rows: list[dict] = []
+        snapshot_at = datetime.now(tz=timezone.utc).timestamp()
+
         market_scores: list = []
         market_player_map: dict = {}
         for player in kickbase_market:
@@ -362,6 +371,23 @@ class Trader:
                     score_player(data, calibration_multiplier=_calibration_for(player))
                 )
                 market_player_map[player.id] = player
+
+                try:
+                    mvh = self.trend_service.get_history(player.id, league.id)
+                    recent = mvh.points[-30:] if mvh.points else []
+                    peak_30d = max((p.value for p in recent), default=None)
+                    trough_30d = min((p.value for p in recent), default=None)
+                    mv_rows.append(
+                        {
+                            "player_id": player.id,
+                            "snapshot_at": snapshot_at,
+                            "market_value": player.market_value,
+                            "peak_mv_30d": peak_30d,
+                            "trough_mv_30d": trough_30d,
+                        }
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 if self.verbose:
                     console.print(f"[dim]EP: scoring failed for {player.last_name}: {e}[/dim]")
@@ -369,12 +395,6 @@ class Trader:
         squad_scores: list = []
         squad_player_map: dict = {}
         squad_performance: dict[str, dict] = {}
-        # REH-26: collect daily MV rows for each held player. Persist after
-        # the squad loop (single bulk INSERT). The trend_service.get_history
-        # call uses the same 24h-cached data already fetched for trend
-        # analysis — no extra HTTP traffic.
-        mv_rows: list[dict] = []
-        snapshot_at = datetime.now(tz=timezone.utc).timestamp()
         for player in squad:
             try:
                 perf, details = _fetch_player_data(player)
