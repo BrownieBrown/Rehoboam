@@ -92,6 +92,31 @@ uv run pre-commit install
 uv run pre-commit run --all-files
 ```
 
+## Prod-state debugging workflow (REH-15 / REH-39)
+
+The bot's state lives in Azure Blob Storage. To inspect, mutate, and re-publish:
+
+```bash
+# 1. Pull the live blob into local ./logs/ (writes a .fetch_state.json sidecar)
+uv run rehoboam fetch-azure-state
+
+# 2. Mutate locally — examples:
+#    - Open SQLite directly: sqlite3 logs/bid_learning.db
+#    - One-shot historical backfill: uv run rehoboam backfill-history
+#    - Anything else (manual queries, REPL exploration, etc.)
+
+# 3. Push back during a quiet window between Function runs
+uv run rehoboam push-azure-state --i-know-what-im-doing
+```
+
+The Azure Function runs at 08:00 / 20:00 UTC. **Push during the quiet window**
+(roughly 08:02–19:58 UTC, or after 20:02). `push-azure-state` enforces this
+automatically: it compares each blob's current `last_modified` against the
+sidecar from `fetch-azure-state` and refuses if the Function ran in between.
+On refusal, re-run `fetch-azure-state` (preserves your local work as
+`.local-bak`), redo your mutations, and push again. Pass `--force` only as a
+last resort — it clobbers the Function's writes.
+
 ## Architecture
 
 ### Core Components

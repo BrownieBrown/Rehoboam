@@ -5,7 +5,8 @@ chain. ``MissingAzureCredentials`` is exercised separately by leaving
 ``connection_string`` empty.
 """
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +14,10 @@ import pytest
 from rehoboam import azure_blob
 from rehoboam.azure_blob import (
     DB_FILES,
+    FETCH_SIDECAR,
+    BlobChangedSinceFetch,
     MissingAzureCredentials,
+    check_freshness,
     fetch_state,
     list_blobs,
     push_state,
@@ -270,3 +274,118 @@ def test_push_state_isolates_upload_failures(monkeypatch, tmp_path):
 
     assert statuses[failing] == "error"
     assert all(s == "uploaded" for n, s in statuses.items() if n != failing)
+
+
+# --- sidecar + freshness check (REH-39) -----------------------------------
+
+
+def test_fetch_state_writes_sidecar(monkeypatch, tmp_path):
+    ts = datetime(2026, 5, 9, 8, 0, 8, tzinfo=timezone.utc)
+    container = _make_container({n: {"props": _props(ts, 1024), "data": b"x"} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    fetch_state("conn", "rehoboam-data", tmp_path)
+
+    sidecar = tmp_path / FETCH_SIDECAR
+    assert sidecar.exists(), "fetch_state should write the .fetch_state.json sidecar"
+    recorded = json.loads(sidecar.read_text())
+    assert set(recorded) == set(DB_FILES)
+    for v in recorded.values():
+        assert v.startswith("2026-05-09T08:00:08")
+
+
+def test_fetch_state_dry_run_does_not_write_sidecar(monkeypatch, tmp_path):
+    ts = datetime(2026, 5, 9, tzinfo=timezone.utc)
+    container = _make_container({n: {"props": _props(ts, 100), "data": b"x"} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    fetch_state("conn", "rehoboam-data", tmp_path, dry_run=True)
+    assert not (tmp_path / FETCH_SIDECAR).exists()
+
+
+def test_check_freshness_empty_when_no_sidecar(monkeypatch, tmp_path):
+    container = _make_container(
+        {n: {"props": _props(datetime.now(timezone.utc), 100)} for n in DB_FILES}
+    )
+    _patch_container(monkeypatch, container)
+
+    stale = check_freshness("conn", "rehoboam-data", tmp_path)
+    assert stale == []
+
+
+def test_check_freshness_passes_when_blob_unchanged(monkeypatch, tmp_path):
+    ts = datetime(2026, 5, 9, 8, 0, 8, tzinfo=timezone.utc)
+    container = _make_container({n: {"props": _props(ts, 100)} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    sidecar = {n: ts.isoformat() for n in DB_FILES}
+    (tmp_path / FETCH_SIDECAR).write_text(json.dumps(sidecar))
+
+    assert check_freshness("conn", "rehoboam-data", tmp_path) == []
+
+
+def test_check_freshness_detects_drift(monkeypatch, tmp_path):
+    fetched_at = datetime(2026, 5, 9, 8, 0, 8, tzinfo=timezone.utc)
+    later = fetched_at + timedelta(hours=12)
+    drifting = DB_FILES[0]
+    spec = {n: {"props": _props(fetched_at, 100)} for n in DB_FILES}
+    spec[drifting] = {"props": _props(later, 100)}
+    container = _make_container(spec)
+    _patch_container(monkeypatch, container)
+
+    sidecar = {n: fetched_at.isoformat() for n in DB_FILES}
+    (tmp_path / FETCH_SIDECAR).write_text(json.dumps(sidecar))
+
+    stale = check_freshness("conn", "rehoboam-data", tmp_path)
+    assert len(stale) == 1
+    assert stale[0].db_file == drifting
+    assert stale[0].fetched_last_modified == fetched_at
+    assert stale[0].current_last_modified == later
+
+
+def test_push_state_refuses_on_drift(monkeypatch, tmp_path):
+    for n in DB_FILES:
+        (tmp_path / n).write_bytes(b"x")
+    fetched_at = datetime(2026, 5, 9, 8, 0, 8, tzinfo=timezone.utc)
+    later = fetched_at + timedelta(hours=12)
+    spec = {n: {"props": _props(later, 100)} for n in DB_FILES}
+    container = _make_container(spec)
+    _patch_container(monkeypatch, container)
+
+    sidecar = {n: fetched_at.isoformat() for n in DB_FILES}
+    (tmp_path / FETCH_SIDECAR).write_text(json.dumps(sidecar))
+
+    with pytest.raises(BlobChangedSinceFetch) as exc_info:
+        push_state("conn", "rehoboam-data", tmp_path)
+    assert len(exc_info.value.stale) == len(DB_FILES)
+
+
+def test_push_state_force_bypasses_freshness(monkeypatch, tmp_path):
+    for n in DB_FILES:
+        (tmp_path / n).write_bytes(b"x")
+    fetched_at = datetime(2026, 5, 9, 8, 0, 8, tzinfo=timezone.utc)
+    later = fetched_at + timedelta(hours=12)
+    container = _make_container({n: {"props": _props(later, 100)} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    sidecar = {n: fetched_at.isoformat() for n in DB_FILES}
+    (tmp_path / FETCH_SIDECAR).write_text(json.dumps(sidecar))
+
+    # force=True: no exception, regular upload path runs
+    results = push_state("conn", "rehoboam-data", tmp_path, force=True)
+    assert all(r.status == "uploaded" for r in results)
+
+
+def test_push_state_dry_run_still_checks_freshness(monkeypatch, tmp_path):
+    """Dry-run should surface drift the same way a real push would so the
+    user can preview the failure mode without committing."""
+    for n in DB_FILES:
+        (tmp_path / n).write_bytes(b"x")
+    fetched_at = datetime(2026, 5, 9, tzinfo=timezone.utc)
+    later = fetched_at + timedelta(hours=12)
+    container = _make_container({n: {"props": _props(later, 100)} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+    (tmp_path / FETCH_SIDECAR).write_text(json.dumps({n: fetched_at.isoformat() for n in DB_FILES}))
+
+    with pytest.raises(BlobChangedSinceFetch):
+        push_state("conn", "rehoboam-data", tmp_path, dry_run=True)
