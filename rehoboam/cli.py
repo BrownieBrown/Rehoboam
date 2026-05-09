@@ -277,11 +277,19 @@ def push_azure_state(
         help="Required to actually upload — without it the command refuses.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="List local files without uploading"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the freshness check and clobber even if blob has been "
+        "modified since fetch (DANGEROUS — likely overwrites the bot's writes).",
+    ),
 ):
     """Push local ./logs/ SQLite state to Azure Blob Storage (DANGEROUS).
 
     Overwrites the live bot's persistent state. Refuses to run without
-    --i-know-what-im-doing. Use --dry-run to preview.
+    --i-know-what-im-doing. By default, also refuses if the blob has been
+    modified since the last fetch (Function ran in the meantime); re-fetch
+    or pass --force to override. Use --dry-run to preview.
     """
     if not confirm:
         console.print(
@@ -300,15 +308,119 @@ def push_azure_state(
             container_name=blob_settings.blob_container,
             source_dir=Path("logs"),
             dry_run=dry_run,
+            force=force,
         )
     except azure_blob.MissingAzureCredentials as e:
         console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(code=1) from e
+    except azure_blob.BlobChangedSinceFetch as e:
+        console.print("[red]⛔ Refusing to push — blob has been modified since fetch.[/red]")
+        for s in e.stale:
+            console.print(
+                f"  • {s.db_file}: fetched at "
+                f"[cyan]{s.fetched_last_modified.isoformat()}[/cyan]"
+                f", current blob at [yellow]{s.current_last_modified.isoformat()}[/yellow]"
+            )
+        console.print(
+            "\nThe Azure Function probably ran since you fetched. Either:\n"
+            "  1. Re-run [bold]rehoboam fetch-azure-state[/bold] (preserves your local "
+            "work as .local-bak), redo your local mutations, then push again, OR\n"
+            "  2. Pass [bold]--force[/bold] to clobber the bot's writes (NOT recommended)."
+        )
         raise typer.Exit(code=1) from e
 
     console.print(_render_push_table(results, dry_run=dry_run))
 
     if not dry_run and any(r.status == "error" for r in results):
         raise typer.Exit(code=1)
+
+
+@app.command("backfill-history")
+def backfill_history(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Run all HTTP calls but skip DB writes; reports row-count estimates.",
+    ),
+):
+    """Backfill foundation tables from KICKBASE history (REH-39).
+
+    One-shot command that derives historical rows from the KICKBASE API:
+      • flip_outcomes           ← per-manager transfer history (FIFO pairing)
+      • matchday_lineup_results ← per-matchday teamcenter (lineup + actual points)
+      • league_rank_history     ← per-matchday ranking (one row per manager)
+
+    Idempotent: rerunning silently skips duplicates.
+
+    Workflow when targeting prod state:
+      1. rehoboam fetch-azure-state
+      2. rehoboam backfill-history
+      3. rehoboam push-azure-state --i-know-what-im-doing
+    """
+    from .backfill import run_backfill
+    from .bid_learner import BidLearner
+
+    api, _settings, league = _login_and_get_league(league_index)
+    user_id = api.user.id
+    learner = BidLearner()
+
+    console.print("\n[bold cyan]🔁 Backfilling foundation tables…[/bold cyan]")
+    if dry_run:
+        console.print("[yellow]DRY RUN — no DB writes; counts are upper-bound estimates[/yellow]")
+
+    stats = run_backfill(
+        client=api.client,
+        league=league,
+        user_id=user_id,
+        manager_id=user_id,
+        learner=learner,
+        dry_run=dry_run,
+    )
+
+    table = Table(title="Backfill summary")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Transfer pages walked", f"{stats.transfers_paginated}")
+    table.add_row(
+        "flip_outcomes inserted",
+        f"[green]{stats.flip_outcomes_inserted}[/green]",
+    )
+    table.add_row(
+        "flip_outcomes skipped (duplicate)",
+        f"[cyan]{stats.flip_outcomes_skipped_duplicate}[/cyan]",
+    )
+    table.add_row(
+        "Unpaired buys (still in squad)",
+        f"{stats.flip_outcomes_unpaired_buys}",
+    )
+    table.add_row(
+        "Orphaned sells (data gap)",
+        (
+            f"[yellow]{stats.flip_outcomes_orphaned_sells}[/yellow]"
+            if stats.flip_outcomes_orphaned_sells
+            else "0"
+        ),
+    )
+    table.add_row(
+        "Matchdays processed",
+        f"{stats.matchdays_processed} (skipped {stats.matchdays_skipped_no_lineup})",
+    )
+    table.add_row(
+        "matchday_lineup_results inserted",
+        f"[green]{stats.matchday_lineup_results_inserted}[/green]",
+    )
+    table.add_row(
+        "league_rank_history inserted",
+        f"[green]{stats.league_rank_history_inserted}[/green]",
+    )
+    console.print(table)
+
+    if not dry_run:
+        console.print(
+            "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
+            "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
+        )
 
 
 @app.callback()

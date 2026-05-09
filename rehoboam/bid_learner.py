@@ -137,6 +137,16 @@ class BidLearner:
             """
             )
 
+            # REH-39: idempotency for the backfill-history CLI. Each real-world
+            # flip is uniquely identified by (player_id, buy_date), so this
+            # also catches accidental duplicate live writes as a side benefit.
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_flip_unique
+                ON flip_outcomes(player_id, buy_date)
+            """
+            )
+
             # Matchday outcomes table for tracking EP accuracy
             conn.execute(
                 """
@@ -484,12 +494,17 @@ class BidLearner:
             )
             conn.commit()
 
-    def record_flip(self, outcome: FlipOutcome):
-        """Record a completed flip for learning"""
+    def record_flip(self, outcome: FlipOutcome) -> bool:
+        """Record a completed flip for learning.
+
+        Uses INSERT OR IGNORE so backfill reruns and accidental double-writes
+        from the live trader collapse deterministically (idx_flip_unique on
+        (player_id, buy_date)). Returns True if a row was actually inserted.
+        """
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
-                INSERT INTO flip_outcomes (
+                INSERT OR IGNORE INTO flip_outcomes (
                     player_id, player_name, buy_price, sell_price, profit, profit_pct,
                     hold_days, buy_date, sell_date, trend_at_buy, average_points, position,
                     was_injured
@@ -513,6 +528,7 @@ class BidLearner:
                 ),
             )
             conn.commit()
+            return cur.rowcount > 0
 
     # ------------------------------------------------------------------
     # Operational state: pending bids + tracked purchases
