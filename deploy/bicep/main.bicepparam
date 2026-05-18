@@ -20,4 +20,4 @@ param aggressiveMode = 'true'
 param kickbaseEmail = ''
 param kickbasePassword = ''
 
-// keyVaultName uses Bicep default (kv-rehoboam-<uniqueString>).
+// keyVaultName uses Bicep default (kv-reh-<uniqueString>, 20 chars, fits the 24-char KV limit).

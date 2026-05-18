@@ -23,8 +23,8 @@ param tradingFunctionAppName string = 'func-rehoboam'
 @description('External-data refresh function app name (REH-41 Phase 2).')
 param externalFunctionAppName string = 'func-rehoboam-external'
 
-@description('Key Vault name. Must be globally unique (3-24 chars, alphanumeric + hyphens).')
-param keyVaultName string = 'kv-rehoboam-${uniqueString(resourceGroup().id)}'
+@description('Key Vault name. Must be globally unique (3-24 chars, alphanumeric + hyphens). uniqueString returns 13 chars, leaving 11 for the prefix.')
+param keyVaultName string = 'kv-reh-${uniqueString(resourceGroup().id)}'
 
 @description('Kickbase login email.')
 @secure()
