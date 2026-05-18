@@ -32,6 +32,15 @@ param kickbaseEmail string
 @secure()
 param kickbasePassword string
 
+@description('League index in the Kickbase leagues list.')
+param leagueIndex string = '0'
+
+@description('When true, trading function simulates trades without placing them.')
+param dryRun string = 'true'
+
+@description('When true, trading function uses aggressive thresholds.')
+param aggressiveMode string = 'true'
+
 // ---------------------------------------------------------------------------
 // Shared infrastructure
 // ---------------------------------------------------------------------------
@@ -173,5 +182,48 @@ resource externalKvAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' =
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
     principalId: externalFunction.outputs.principalId
     principalType: 'ServicePrincipal'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// App settings — separate Microsoft.Web/sites/config sub-resources so they
+// can dependsOn the role assignment. KV references resolve at runtime only
+// after the function's managed identity has Get permission on the secrets.
+// ---------------------------------------------------------------------------
+
+resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
+  name: '${tradingFunctionAppName}/appsettings'
+  dependsOn: [
+    tradingFunction
+    tradingKvAccess
+  ]
+  properties: {
+    AzureWebJobsStorage: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
+    AZURE_STORAGE_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
+    APPLICATIONINSIGHTS_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretAppInsightsConn.properties.secretUri})'
+    KICKBASE_EMAIL: '@Microsoft.KeyVault(SecretUri=${secretKickbaseEmail.properties.secretUri})'
+    KICKBASE_PASSWORD: '@Microsoft.KeyVault(SecretUri=${secretKickbasePassword.properties.secretUri})'
+    FUNCTIONS_EXTENSION_VERSION: '~4'
+    FUNCTIONS_WORKER_RUNTIME: 'python'
+    LEAGUE_INDEX: leagueIndex
+    DRY_RUN: dryRun
+    AGGRESSIVE: aggressiveMode
+    BLOB_CONTAINER: blobContainerName
+  }
+}
+
+resource externalAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
+  name: '${externalFunctionAppName}/appsettings'
+  dependsOn: [
+    externalFunction
+    externalKvAccess
+  ]
+  properties: {
+    AzureWebJobsStorage: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
+    AZURE_STORAGE_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
+    APPLICATIONINSIGHTS_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretAppInsightsConn.properties.secretUri})'
+    FUNCTIONS_EXTENSION_VERSION: '~4'
+    FUNCTIONS_WORKER_RUNTIME: 'python'
+    BLOB_CONTAINER: blobContainerName
   }
 }
