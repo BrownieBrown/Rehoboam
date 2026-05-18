@@ -21,6 +21,17 @@ param tradingFunctionAppName string = 'func-rehoboam'
 @description('External-data refresh function app name (REH-41 Phase 2).')
 param externalFunctionAppName string = 'func-rehoboam-external'
 
+@description('Key Vault name. Must be globally unique (3-24 chars, alphanumeric + hyphens).')
+param keyVaultName string = 'kv-rehoboam-${uniqueString(resourceGroup().id)}'
+
+@description('Kickbase login email.')
+@secure()
+param kickbaseEmail string
+
+@description('Kickbase login password.')
+@secure()
+param kickbasePassword string
+
 // ---------------------------------------------------------------------------
 // Shared infrastructure
 // ---------------------------------------------------------------------------
@@ -91,3 +102,48 @@ module externalFunction 'modules/function-app.bicep' = {
 
 output tradingFunctionName string = tradingFunction.outputs.name
 output externalFunctionName string = externalFunction.outputs.name
+
+// ---------------------------------------------------------------------------
+// Key Vault + secrets
+// ---------------------------------------------------------------------------
+
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: keyVaultName
+  location: location
+  properties: {
+    sku: { family: 'A', name: 'standard' }
+    tenantId: subscription().tenantId
+    enableRbacAuthorization: true
+    enabledForDeployment: false
+    publicNetworkAccess: 'Enabled'
+    networkAcls: { defaultAction: 'Allow', bypass: 'AzureServices' }
+  }
+}
+
+resource secretKickbaseEmail 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'kickbase-email'
+  properties: { value: kickbaseEmail }
+}
+
+resource secretKickbasePassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'kickbase-password'
+  properties: { value: kickbasePassword }
+}
+
+var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${storageAccount.listKeys().keys[0].value}'
+
+resource secretStorageConn 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'storage-connection-string'
+  properties: { value: storageConnectionString }
+}
+
+resource secretAppInsightsConn 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'app-insights-connection-string'
+  properties: { value: appInsights.properties.ConnectionString }
+}
+
+output keyVaultName string = keyVault.name
