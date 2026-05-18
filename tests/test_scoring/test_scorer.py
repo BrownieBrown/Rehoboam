@@ -5,6 +5,7 @@ from rehoboam.scoring.models import PlayerData
 from rehoboam.scoring.scorer import (
     _extract_consistency,
     _extract_minutes_trend,
+    _extract_recent_form,
     _grade_data_quality,
     _parse_minutes,
     score_player,
@@ -212,20 +213,21 @@ class TestExtractConsistency:
         return {"it": [{"ti": "2024", "ph": matches}]}
 
     def test_no_performance_returns_zero(self):
-        games, consistency = _extract_consistency({})
+        games, consistency, season = _extract_consistency({})
         assert games == 0
         assert consistency is None
+        assert season is None
 
     def test_single_game(self):
         perf = self._make_perf([{"p": 30, "mp": "90'"}])
-        games, consistency = _extract_consistency(perf)
+        games, consistency, season = _extract_consistency(perf)
         assert games == 1
         assert consistency == 0.5  # medium confidence
 
     def test_consistent_player(self):
         # All same points → CV=0 → consistency=1.0
         perf = self._make_perf([{"p": 20, "mp": "90'"}] * 10)
-        games, consistency = _extract_consistency(perf)
+        games, consistency, season = _extract_consistency(perf)
         assert games == 10
         assert consistency == 1.0
 
@@ -238,7 +240,7 @@ class TestExtractConsistency:
                 {"p": 20, "mp": "90'"},
             ]
         )
-        games, consistency = _extract_consistency(perf)
+        games, consistency, season = _extract_consistency(perf)
         assert games == 2
 
     def test_brief_cameo_with_zero_points_still_counts(self):
@@ -252,7 +254,7 @@ class TestExtractConsistency:
                 {"p": 20, "mp": "90'"},
             ]
         )
-        games, _ = _extract_consistency(perf)
+        games, _, _season = _extract_consistency(perf)
         assert games == 3
 
 
@@ -261,27 +263,28 @@ class TestExtractMinutesTrend:
         return {"it": [{"ti": "2024", "ph": matches}]}
 
     def test_no_performance_returns_none(self):
-        trend, avg = _extract_minutes_trend({})
+        trend, avg, season = _extract_minutes_trend({})
         assert trend is None
         assert avg is None
+        assert season is None
 
     def test_increasing_minutes(self):
         # First half low, second half high
         matches = [{"mp": "30'"}] * 4 + [{"mp": "90'"}] * 4
         perf = self._make_perf(matches)
-        trend, avg = _extract_minutes_trend(perf)
+        trend, avg, season = _extract_minutes_trend(perf)
         assert trend == "increasing"
 
     def test_decreasing_minutes(self):
         matches = [{"mp": "90'"}] * 4 + [{"mp": "20'"}] * 4
         perf = self._make_perf(matches)
-        trend, avg = _extract_minutes_trend(perf)
+        trend, avg, season = _extract_minutes_trend(perf)
         assert trend == "decreasing"
 
     def test_stable_minutes(self):
         matches = [{"mp": "75'"}] * 8
         perf = self._make_perf(matches)
-        trend, avg = _extract_minutes_trend(perf)
+        trend, avg, season = _extract_minutes_trend(perf)
         assert trend == "stable"
         assert avg == 75.0
 
@@ -291,7 +294,7 @@ class TestExtractMinutesTrend:
         # falsely register as 0-minute appearances.
         matches = [{"mp": "85'"}] * 4 + [{}, {"mp": "85'"}] + [{"mp": "85'"}] * 3
         perf = self._make_perf(matches)
-        trend, avg = _extract_minutes_trend(perf)
+        trend, avg, season = _extract_minutes_trend(perf)
         # 8 valid minutes entries → still derives a trend
         assert trend == "stable"
         assert avg == 85.0
@@ -334,3 +337,98 @@ class TestParseMinutes:
     def test_plain_int_string(self):
         # Defensive: if Kickbase ever drops the apostrophe.
         assert _parse_minutes("75") == 75
+
+
+def test_extract_consistency_falls_back_to_prior_season():
+    """When current season has no played matches, use the most recent
+    season with played > 0."""
+    performance = {
+        "it": [
+            {"ti": "2025/2026", "ph": []},  # current season empty
+            {
+                "ti": "2024/2025",  # prior season — populated
+                "ph": [
+                    {"p": 100, "mp": "90'"},
+                    {"p": 80, "mp": "90'"},
+                    {"p": 120, "mp": "90'"},
+                    {"p": 90, "mp": "85'"},
+                ],
+            },
+            {"ti": "2023/2024", "ph": [{"p": 50, "mp": "60'"}]},
+        ]
+    }
+    games_played, consistency, season_used = _extract_consistency(performance)
+    assert games_played == 4
+    assert consistency is not None
+    assert 0.0 < consistency <= 1.0
+    assert season_used == "2024/2025"
+
+
+def test_extract_minutes_trend_falls_back_to_prior_season():
+    """When current season has no played matches, derive trend from
+    the most recent season with played > 0."""
+    performance = {
+        "it": [
+            {"ti": "2025/2026", "ph": []},
+            {
+                "ti": "2024/2025",
+                "ph": [
+                    {"p": 40, "mp": "30'"},
+                    {"p": 50, "mp": "45'"},
+                    {"p": 70, "mp": "75'"},
+                    {"p": 80, "mp": "90'"},
+                ],
+            },
+        ]
+    }
+    trend, avg_minutes, season_used = _extract_minutes_trend(performance)
+    assert trend == "increasing"
+    assert avg_minutes is not None
+    assert season_used == "2024/2025"
+
+
+def test_extract_recent_form_falls_back_to_prior_season():
+    """When current season has no played matches, average form from
+    the most recent season with played > 0."""
+    performance = {
+        "it": [
+            {"ti": "2025/2026", "ph": []},
+            {
+                "ti": "2024/2025",
+                "ph": [
+                    {"p": 60, "mp": "90'"},
+                    {"p": 80, "mp": "90'"},
+                    {"p": 100, "mp": "90'"},
+                ],
+            },
+        ]
+    }
+    avg, season_used = _extract_recent_form(performance, window=5)
+    assert avg == 80.0
+    assert season_used == "2024/2025"
+
+
+def test_score_player_notes_when_fallback_season_used():
+    """When the scorer falls back to a prior season, a note tells you
+    which season the data came from."""
+    player = _make_player(average_points=15.0)
+    performance = {
+        "it": [
+            {"ti": "2025/2026", "ph": []},
+            {
+                "ti": "2024/2025",
+                "ph": [
+                    {"p": 80, "mp": "90'"},
+                    {"p": 90, "mp": "90'"},
+                    {"p": 100, "mp": "90'"},
+                    {"p": 110, "mp": "90'"},
+                ],
+            },
+        ]
+    }
+    result = score_player(_make_player_data(player=player, performance=performance))
+    assert result.expected_points > 0
+    assert any(
+        "2024/2025" in note for note in result.notes
+    ), f"Expected fallback note mentioning 2024/2025, got: {result.notes}"
+    assert result.data_quality.grade in ("A", "B", "C")
