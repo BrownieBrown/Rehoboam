@@ -92,6 +92,13 @@ bash scripts/sync-azure-deps.sh      # Regenerate deploy/azure_function/requirem
 # Pre-commit hooks
 uv run pre-commit install
 uv run pre-commit run --all-files
+
+# Azure deployment (Bicep-based, REH-48)
+bash deploy/deploy.sh                  # provision + publish both function apps
+bash deploy/deploy.sh infra --what-if  # preview Bicep changes (run before first migration)
+bash deploy/deploy.sh infra            # just Bicep deploy
+bash deploy/deploy.sh code trading     # publish trading function only
+bash deploy/deploy.sh code external    # publish external-refresh function only (after REH-41 P2 lands)
 ```
 
 ## Prod-state debugging workflow (REH-15 / REH-39)
