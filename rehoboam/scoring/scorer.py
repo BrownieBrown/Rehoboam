@@ -61,138 +61,141 @@ def _parse_minutes(mp) -> int:
     return 0
 
 
-def _extract_consistency(performance: dict) -> tuple[int, float | None]:
+def _extract_consistency(performance: dict) -> tuple[int, float | None, str | None]:
     """Extract games played and consistency score from performance data.
 
-    Parses ``performance["it"]`` — a list of season dicts each containing
-    ``"ph"`` (list of match dicts with ``"p"`` = points and ``"mp"`` =
-    minutes-played string).
+    Iterates seasons in recency order and returns the first season with
+    played matches. This lets the scorer carry returning-player history
+    forward into a new season where the current-season ``ph`` is still empty.
 
     Returns:
-        (games_played, consistency_score)
+        (games_played, consistency_score, season_title)
             games_played: number of matches the player actually appeared in
-            consistency_score: 1 - CV  (0-1, where 1 = very consistent),
-                               None when no data, 0.5 for a single game
+            consistency_score: 1 - CV  (0-1, 1 = very consistent);
+                None when no data, 0.5 for a single-game sample
+            season_title: ``ti`` of the season the data came from, for audit
     """
     try:
         seasons = performance.get("it", [])
         if not seasons:
-            return 0, None
+            return 0, None, None
 
         seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
-        current_season = seasons_sorted[0] if seasons_sorted else None
-        if not current_season:
-            return 0, None
 
-        matches = current_season.get("ph", [])
+        for season in seasons_sorted:
+            matches_played = [
+                m
+                for m in season.get("ph", [])
+                if m.get("p", 0) != 0 or _parse_minutes(m.get("mp")) > 0
+            ]
+            if not matches_played:
+                continue
 
-        # Only count matches where the player actually appeared.  A 0-point
-        # appearance with non-zero minutes is still a played game (think
-        # late sub who didn't touch the ball) — keep those in the sample.
-        matches_played = [
-            m for m in matches if m.get("p", 0) != 0 or _parse_minutes(m.get("mp")) > 0
-        ]
-        games_played = len(matches_played)
+            games_played = len(matches_played)
+            season_title = season.get("ti")
 
-        if games_played == 0:
-            return 0, None
+            if games_played == 1:
+                return 1, 0.5, season_title
 
-        if games_played == 1:
-            return 1, 0.5  # medium confidence for a single-game sample
+            match_points = [m.get("p", 0) for m in matches_played]
+            mean_pts = sum(match_points) / games_played
 
-        match_points = [m.get("p", 0) for m in matches_played]
-        mean_pts = sum(match_points) / games_played
+            if mean_pts == 0:
+                return games_played, 0.0, season_title
 
-        if mean_pts == 0:
-            return games_played, 0.0  # all zeros → no consistency signal
+            variance = sum((p - mean_pts) ** 2 for p in match_points) / games_played
+            std_dev = variance**0.5
+            cv = std_dev / mean_pts
+            consistency_score = max(0.0, 1.0 - cv / 2.0)
+            return games_played, consistency_score, season_title
 
-        variance = sum((p - mean_pts) ** 2 for p in match_points) / games_played
-        std_dev = variance**0.5
-        cv = std_dev / mean_pts
-
-        # Convert CV to a 0-1 score (CV=0 → 1.0, CV≥2 → 0.0)
-        consistency_score = max(0.0, 1.0 - cv / 2.0)
-        return games_played, consistency_score
+        return 0, None, None
 
     except Exception:
-        return 0, None
+        return 0, None, None
 
 
-def _extract_minutes_trend(performance: dict) -> tuple[str | None, float | None]:
-    """Compare first-half vs second-half of recent matches to derive a trend.
+def _extract_minutes_trend(performance: dict) -> tuple[str | None, float | None, str | None]:
+    """Derive minutes trend from the most recent populated season.
 
     Returns:
-        (trend, avg_minutes)
+        (trend, avg_minutes, season_title)
             trend: "increasing" | "decreasing" | "stable" | None
-            avg_minutes: average minutes per game, or None when unavailable
+            avg_minutes: average minutes per game, None if unavailable
+            season_title: ``ti`` of the season used, None if no data
     """
     try:
         seasons = performance.get("it", [])
         if not seasons:
-            return None, None
+            return None, None, None
 
         seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
-        current_season = seasons_sorted[0] if seasons_sorted else None
-        if not current_season:
-            return None, None
 
-        matches = current_season.get("ph", [])
-        minutes_data = [_parse_minutes(m["mp"]) for m in matches if "mp" in m]
+        for season in seasons_sorted:
+            matches = season.get("ph", [])
+            minutes_data = [_parse_minutes(m["mp"]) for m in matches if "mp" in m]
+            played_minutes = [m for m in minutes_data if m > 0]
 
-        if len(minutes_data) < 2:
-            return None, None
+            if len(played_minutes) < 2:
+                continue
 
-        avg_minutes = sum(minutes_data) / len(minutes_data)
+            season_title = season.get("ti")
+            avg_minutes = sum(minutes_data) / len(minutes_data)
 
-        if len(minutes_data) >= 4:
-            half = len(minutes_data) // 2
-            first_avg = sum(minutes_data[:half]) / half
-            second_avg = sum(minutes_data[half:]) / (len(minutes_data) - half)
-            diff_pct = ((second_avg - first_avg) / max(first_avg, 1)) * 100
+            if len(minutes_data) >= 4:
+                half = len(minutes_data) // 2
+                first_avg = sum(minutes_data[:half]) / half
+                second_avg = sum(minutes_data[half:]) / (len(minutes_data) - half)
+                diff_pct = ((second_avg - first_avg) / max(first_avg, 1)) * 100
 
-            if diff_pct > 15:
-                trend = "increasing"
-            elif diff_pct < -15:
-                trend = "decreasing"
+                if diff_pct > 15:
+                    trend = "increasing"
+                elif diff_pct < -15:
+                    trend = "decreasing"
+                else:
+                    trend = "stable"
             else:
                 trend = "stable"
-        else:
-            trend = "stable"
 
-        return trend, avg_minutes
+            return trend, avg_minutes, season_title
+
+        return None, None, None
 
     except Exception:
-        return None, None
+        return None, None, None
 
 
-def _extract_recent_form(performance: dict, window: int = 5) -> float | None:
+def _extract_recent_form(performance: dict, window: int = 5) -> tuple[float | None, str | None]:
     """Average points over the last *window* matches played.
 
     Returns:
-        Average points over recent matches, or None if fewer than 2 matches.
+        (avg_points_over_window, season_title)
+            avg_points_over_window: None if fewer than 2 matches in any season
+            season_title: ``ti`` of the season used, None if no data
     """
     try:
         seasons = performance.get("it", [])
         if not seasons:
-            return None
+            return None, None
 
         seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
-        current_season = seasons_sorted[0] if seasons_sorted else None
-        if not current_season:
-            return None
 
-        matches = current_season.get("ph", [])
-        matches_played = [
-            m for m in matches if m.get("p", 0) != 0 or _parse_minutes(m.get("mp")) > 0
-        ]
+        for season in seasons_sorted:
+            matches = season.get("ph", [])
+            matches_played = [
+                m for m in matches if m.get("p", 0) != 0 or _parse_minutes(m.get("mp")) > 0
+            ]
+            if len(matches_played) < 2:
+                continue
 
-        if len(matches_played) < 2:
-            return None
+            recent = matches_played[-window:]
+            avg = sum(m.get("p", 0) for m in recent) / len(recent)
+            return avg, season.get("ti")
 
-        recent = matches_played[-window:]
-        return sum(m.get("p", 0) for m in recent) / len(recent)
+        return None, None
+
     except Exception:
-        return None
+        return None, None
 
 
 def _grade_data_quality(
@@ -242,6 +245,16 @@ def _grade_data_quality(
 # ---------------------------------------------------------------------------
 
 
+def _most_recent_season_title(performance: dict | None) -> str | None:
+    if not performance:
+        return None
+    seasons = performance.get("it", [])
+    if not seasons:
+        return None
+    seasons_sorted = sorted(seasons, key=lambda s: s.get("ti", ""), reverse=True)
+    return seasons_sorted[0].get("ti") if seasons_sorted else None
+
+
 def score_player(data: PlayerData, calibration_multiplier: float = 1.0) -> PlayerScore:
     """Score a player from assembled PlayerData.  Pure function — no I/O.
 
@@ -283,7 +296,7 @@ def score_player(data: PlayerData, calibration_multiplier: float = 1.0) -> Playe
     #    the ceiling bonus and the floor penalty are softened for them.
     #    Defenders, GKs, and midfielders use the full ±15/-5 range.
     # ------------------------------------------------------------------
-    games_played, consistency = _extract_consistency(data.performance or {})
+    games_played, consistency, consistency_season = _extract_consistency(data.performance or {})
 
     position = player.position or ""
     max_consistency, min_consistency = _CONSISTENCY_SCALE.get(position, _DEFAULT_CONSISTENCY)
@@ -376,7 +389,7 @@ def score_player(data: PlayerData, calibration_multiplier: float = 1.0) -> Playe
     # ------------------------------------------------------------------
     # 5. Minutes trend bonus  (-15 to +10)
     # ------------------------------------------------------------------
-    minutes_trend, avg_minutes = _extract_minutes_trend(data.performance or {})
+    minutes_trend, avg_minutes, minutes_season = _extract_minutes_trend(data.performance or {})
 
     minutes_bonus: float = 0.0
     if minutes_trend == "increasing":
@@ -404,7 +417,7 @@ def score_player(data: PlayerData, calibration_multiplier: float = 1.0) -> Playe
     hot_bonus, warm_bonus = _FORM_SCALE.get(position, _DEFAULT_FORM)
 
     form_bonus: float = 0.0
-    recent_avg = _extract_recent_form(data.performance or {}, window=5)
+    recent_avg, form_season = _extract_recent_form(data.performance or {}, window=5)
 
     if recent_avg is not None and avg_pts > 0:
         form_ratio = recent_avg / avg_pts
@@ -460,6 +473,16 @@ def score_player(data: PlayerData, calibration_multiplier: float = 1.0) -> Playe
     )
     # Back-fill the consistency field now that we have it
     data_quality.consistency = consistency if consistency is not None else 0.0
+
+    current_season_title = _most_recent_season_title(data.performance)
+    fallback_seasons = {
+        s
+        for s in (consistency_season, minutes_season, form_season)
+        if s and s != current_season_title
+    }
+    if fallback_seasons:
+        seasons_str = ", ".join(sorted(fallback_seasons))
+        notes.append(f"Using prior season data ({seasons_str}) — current season empty")
 
     # ------------------------------------------------------------------
     # 9. Assemble raw total and apply grade-F halving
