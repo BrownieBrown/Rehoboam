@@ -62,3 +62,6 @@ web/dist/
 web/.env
 web/.env.local
 .serena/
+
+# Bicep compiled ARM templates
+deploy/bicep/**/*.json

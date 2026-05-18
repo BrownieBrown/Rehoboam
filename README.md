@@ -46,8 +46,8 @@ rehoboam auto --live        # Live trading (DRY_RUN=false)
 The bot runs automatically on Azure Functions (Consumption plan, free tier). It executes 2x daily at 10:00 and 22:00 Europe/Berlin.
 
 ```bash
-# Deploy to Azure (requires Azure CLI + Functions Core Tools)
-./deploy/deploy_azure.sh
+# Deploy to Azure (Bicep-based; requires Azure CLI + Functions Core Tools)
+bash deploy/deploy.sh
 
 # Go live
 az functionapp config appsettings set -n func-rehoboam -g rg-rehoboam --settings DRY_RUN=false
