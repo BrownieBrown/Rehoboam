@@ -4,6 +4,8 @@ targetScope = 'resourceGroup'
 param location string = resourceGroup().location
 
 @description('Globally-unique storage account name. EXISTING prod: strehoboam6490.')
+@minLength(3)
+@maxLength(24)
 param storageAccountName string
 
 @description('App Service Plan name. EXISTING prod (auto-generated): GermanyWestCentralLinuxDynamicPlan.')
@@ -165,6 +167,10 @@ output keyVaultName string = keyVault.name
 // https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#key-vault-secrets-user
 var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 
+// guid() seed uses the function app NAME instead of principalId because
+// principalId is a runtime value (BCP120). Using a deploy-time stable
+// seed keeps the role assignment name deterministic + idempotent.
+
 resource tradingKvAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: keyVault
   name: guid(keyVault.id, tradingFunctionAppName, kvSecretsUserRoleId)
@@ -194,7 +200,6 @@ resource externalKvAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' =
 resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
   name: '${tradingFunctionAppName}/appsettings'
   dependsOn: [
-    tradingFunction
     tradingKvAccess
   ]
   properties: {
@@ -215,7 +220,6 @@ resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
 resource externalAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
   name: '${externalFunctionAppName}/appsettings'
   dependsOn: [
-    externalFunction
     externalKvAccess
   ]
   properties: {
