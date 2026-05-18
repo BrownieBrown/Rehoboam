@@ -147,3 +147,31 @@ resource secretAppInsightsConn 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = 
 }
 
 output keyVaultName string = keyVault.name
+
+// ---------------------------------------------------------------------------
+// Role assignments — Key Vault Secrets User for each function's managed identity
+// ---------------------------------------------------------------------------
+
+// Built-in role: "Key Vault Secrets User"
+// https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#key-vault-secrets-user
+var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
+
+resource tradingKvAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: keyVault
+  name: guid(keyVault.id, tradingFunctionAppName, kvSecretsUserRoleId)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
+    principalId: tradingFunction.outputs.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource externalKvAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: keyVault
+  name: guid(keyVault.id, externalFunctionAppName, kvSecretsUserRoleId)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
+    principalId: externalFunction.outputs.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
