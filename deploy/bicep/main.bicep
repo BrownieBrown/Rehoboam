@@ -15,6 +15,12 @@ param appInsightsName string = 'func-rehoboam'
 @description('Blob container name for the bot state SQLite DBs + external/ JSON cache.')
 param blobContainerName string = 'rehoboam-data'
 
+@description('Trading-session function app name.')
+param tradingFunctionAppName string = 'func-rehoboam'
+
+@description('External-data refresh function app name (REH-41 Phase 2).')
+param externalFunctionAppName string = 'func-rehoboam-external'
+
 // ---------------------------------------------------------------------------
 // Shared infrastructure
 // ---------------------------------------------------------------------------
@@ -60,3 +66,28 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 output storageAccountName string = storageAccount.name
+
+// ---------------------------------------------------------------------------
+// Function apps (via reusable module)
+// ---------------------------------------------------------------------------
+
+module tradingFunction 'modules/function-app.bicep' = {
+  name: 'tradingFunctionDeployment'
+  params: {
+    name: tradingFunctionAppName
+    location: location
+    appServicePlanId: appServicePlan.id
+  }
+}
+
+module externalFunction 'modules/function-app.bicep' = {
+  name: 'externalFunctionDeployment'
+  params: {
+    name: externalFunctionAppName
+    location: location
+    appServicePlanId: appServicePlan.id
+  }
+}
+
+output tradingFunctionName string = tradingFunction.outputs.name
+output externalFunctionName string = externalFunction.outputs.name
