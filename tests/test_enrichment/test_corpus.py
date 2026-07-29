@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from rehoboam.enrichment.corpus import TrainingCorpus
 
 
@@ -89,6 +91,18 @@ def test_record_mv_series_drops_sentinel_rows(tmp_path):
         ]
     }
     assert corpus.record_mv_series("1", history) == 2
+
+
+def test_record_mv_series_is_idempotent(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    history = {"it": [{"dt": 20000, "mv": 5_000_000}]}
+
+    corpus.record_mv_series("1", history)
+    corpus.record_mv_series("1", history)
+
+    with sqlite3.connect(corpus.db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM mv_series").fetchone()[0]
+    assert count == 1
 
 
 def test_mark_fetched_removes_player_from_pending(tmp_path):
