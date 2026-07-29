@@ -90,9 +90,14 @@ class Settings(BaseSettings):
     min_squad_size: int = Field(
         default=13,
         description=(
-            "Minimum squad size. Must exceed the 11 a lineup needs, with cover for "
-            "injuries — a 10-player squad cannot fill 11 slots and eats the -100 "
-            "empty-slot penalty (cost 3 matchdays in 2025/26)."
+            "Sell floor only — never sell down below this many players. Set to "
+            "11 (a full lineup) + 2 injury cover, which also leaves exactly 2 "
+            "open bid slots under Kickbase's 15-player cap. Does NOT drive "
+            "emergency-buy triggering: comparing raw headcount to a floor above "
+            "11 flags perfectly fieldable 11-12 player squads as emergencies "
+            "(fired on 93% of last season's sessions once tried). The emergency "
+            "trigger is a separate, position-aware fieldability check — see "
+            "formation.can_fill_starting_eleven — decoupled from this value."
         ),
     )
     min_upgrade_value_score_diff: float = Field(
