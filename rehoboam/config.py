@@ -88,8 +88,12 @@ class Settings(BaseSettings):
 
     # Squad Management Safeguards
     min_squad_size: int = Field(
-        default=10,
-        description="Minimum squad size to maintain on match day (enforced only within 2 days of next match)",
+        default=13,
+        description=(
+            "Minimum squad size. Must exceed the 11 a lineup needs, with cover for "
+            "injuries — a 10-player squad cannot fill 11 slots and eats the -100 "
+            "empty-slot penalty (cost 3 matchdays in 2025/26)."
+        ),
     )
     min_upgrade_value_score_diff: float = Field(
         default=15.0,

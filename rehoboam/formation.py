@@ -166,6 +166,59 @@ def order_for_lineup(players: list) -> list:
     return sorted(players, key=lambda p: position_order.get(p.position, 9))
 
 
+def can_fill_starting_eleven(available: list) -> dict[str, any]:
+    """Can a legal starting 11 be built from these available players?
+
+    Squad size alone does not answer this: a 13-man squad whose defenders are
+    all injured still cannot field a legal formation. Called before a matchday
+    so an emergency buy can be triggered while there is still time.
+
+    Deliberately not ``validate_formation``: that function also gates on
+    ``max_squad_size``, so passing it a 16-player *available* list returns
+    ``can_field_eleven=False`` purely for being oversized, even though eleven
+    are plainly fieldable. ``validate_formation`` answers "is this squad
+    legal?" (including its total size); this function answers "can these
+    available players field a legal eleven?" — a subset the caller has
+    already filtered (e.g. excluding injured/suspended players), which has
+    no upper bound to check.
+
+    Args:
+        available: players who can actually play (exclude injured/suspended)
+
+    Returns:
+        ``{"ok": bool, "reason": str, "counts": dict[str, int]}``
+    """
+    requirements = FormationRequirements()
+    counts = get_position_counts(available)
+
+    if len(available) < requirements.starting_eleven_size:
+        return {
+            "ok": False,
+            "reason": (
+                f"Only {len(available)} available players, need "
+                f"{requirements.starting_eleven_size}"
+            ),
+            "counts": counts,
+        }
+
+    minimums = {
+        "Goalkeeper": requirements.min_goalkeepers,
+        "Defender": requirements.min_defenders,
+        "Midfielder": requirements.min_midfielders,
+        "Forward": requirements.min_forwards,
+    }
+    for position, minimum in minimums.items():
+        have = counts.get(position, 0)
+        if have < minimum:
+            return {
+                "ok": False,
+                "reason": f"{position}: have {have}, need {minimum}",
+                "counts": counts,
+            }
+
+    return {"ok": True, "reason": "Legal starting 11 available", "counts": counts}
+
+
 def validate_trade(current_squad: list, players_out: list, players_in: list) -> dict[str, any]:
     """
     Validate an N-for-M trade
