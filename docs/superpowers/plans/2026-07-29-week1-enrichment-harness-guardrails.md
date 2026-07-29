@@ -728,8 +728,22 @@ ______________________________________________________________________
 - Produces:
   - `KickbaseV4Client.get_competition_player_performance(player_id: str, competition_id: str = "1") -> dict`
   - `KickbaseV4Client.get_competition_table(competition_id: str = "1") -> dict`
+  - `KickbaseV4Client.get_lineup_selection(league_id: str, position: int, start: int = 0, max_items: int = 50) -> dict`
 
-**Note:** confirm the paths against the Task 1 probe output before implementing.
+**Paths confirmed by the Task 1 probe (2026-07-29), all returning HTTP 200.**
+
+`get_lineup_selection` was added after the probe disproved the original
+universe source. `/v4/competitions/1/players` turned out to be a top-25
+leaderboard with no pagination; `/v4/leagues/{lid}/lineup/selection` reaches
+**453 distinct players** and carries `pi`, `mv` and `ap`. Two behaviours the
+probe found the hard way, both of which the docstring must record because
+neither is discoverable from a successful response:
+
+1. **`position` is required.** Without it the endpoint returns zero items —
+   which reads as "empty endpoint", not "missing parameter".
+1. **The server caps the page at 50 regardless of `max`.** Callers must
+   advance `start` by the number of items *actually returned*, never by the
+   requested `max`, or half of every page is silently skipped.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -779,6 +793,27 @@ def test_get_competition_table_returns_payload():
 
     assert result == {"it": [{"tid": "2", "pl": 1}]}
     assert client.session.get.call_args[0][0].endswith("/v4/competitions/1/table")
+
+
+def test_get_lineup_selection_sends_position_and_paging_params():
+    """`position` is mandatory — without it the live endpoint returns zero
+    items, which looks like an empty league rather than a bad request."""
+    client = _client_with_response(200, {"it": [{"pi": "3019", "n": "Atubolu"}]})
+    result = client.get_lineup_selection(league_id="1933872", position=1, start=50)
+
+    assert result == {"it": [{"pi": "3019", "n": "Atubolu"}]}
+    called_url = client.session.get.call_args[0][0]
+    assert called_url.endswith("/v4/leagues/1933872/lineup/selection")
+
+    params = client.session.get.call_args[1]["params"]
+    assert params["position"] == 1
+    assert params["start"] == 50
+
+
+def test_get_lineup_selection_raises_on_error():
+    client = _client_with_response(500, {})
+    with pytest.raises(Exception, match="Failed to fetch lineup selection"):
+        client.get_lineup_selection(league_id="1933872", position=1)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -835,7 +870,52 @@ def get_competition_table(self, competition_id: str = "1") -> dict[str, Any]:
         raise Exception(
             f"Failed to fetch competition table: {response.status_code} - {response.text}"
         )
+
+
+def get_lineup_selection(
+    self, league_id: str, position: int, start: int = 0, max_items: int = 50
+) -> dict[str, Any]:
+    """
+    Browse selectable players by position, paginated
+    GET /v4/leagues/{league_id}/lineup/selection
+
+    The full-universe source for the v2 training corpus: sweeping positions
+    1-4 to exhaustion reaches ~453 distinct players, and items carry ``pi``
+    (id), ``n`` (last name), ``tid``, ``pos``, ``mv`` and ``ap``.
+
+    Two behaviours found by probe (2026-07-29), neither visible in a
+    successful response:
+
+    - ``position`` is REQUIRED. Omit it and the endpoint returns zero items —
+      which reads as an empty endpoint, not a missing parameter.
+    - The server caps the page at 50 items regardless of ``max_items``.
+      Callers MUST advance ``start`` by the number of items actually
+      returned, never by the requested size, or half of every page is
+      silently skipped.
+
+    Args:
+        league_id: League ID
+        position: 1=Goalkeeper, 2=Defender, 3=Midfielder, 4=Forward
+        start: Pagination offset
+        max_items: Requested page size (server caps at 50)
+    """
+    url = f"{self.BASE_URL}/v4/leagues/{league_id}/lineup/selection"
+    params = {"position": position, "start": start, "max": max_items}
+
+    response = self.session.get(url, params=params)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(
+            f"Failed to fetch lineup selection: {response.status_code} - {response.text}"
+        )
 ```
+
+> **Indentation:** the markdown formatter strips leading indentation from
+> fenced blocks. All three functions above are **methods on
+> `KickbaseV4Client`** and must be indented one level (4 spaces) when pasted
+> into the class body.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -860,12 +940,30 @@ ______________________________________________________________________
 
 **Interfaces:**
 
-- Consumes: `TrainingCorpus` (Task 3), `get_competition_players` / `get_competition_player_performance` / `get_player_market_value_history_v2` (Task 4)
+- Consumes: `TrainingCorpus` (Task 3), `get_lineup_selection` / `get_competition_player_performance` / `get_player_market_value_history_v2` (Task 4)
 - Produces:
   - `SweepStats` dataclass with fields `universe_size, performance_fetched, mv_fetched, failed, skipped`
-  - `run_sweep(client, corpus, *, dry_run=False, throttle_seconds=0.25, limit=None, timeframe_days=365) -> SweepStats`
+  - `fetch_universe(client, league_id, *, throttle_seconds=0.25, page_size=50, max_pages_per_position=40) -> list[dict]`
+  - `run_sweep(client, corpus, *, league_id, dry_run=False, throttle_seconds=0.25, limit=None, timeframe_days=365) -> SweepStats`
 
-**Field-name note:** the universe item keys come from the Task 1 probe. The implementation below reads `i`/`id` for player ID and `tid` for team, matching the existing `Player.from_dict` convention (`kickbase_client.py:145`). Adjust if the probe shows otherwise.
+**This task was rewritten after the Task 1 probe.** The original design read
+the universe from `/v4/competitions/1/players`; that endpoint turned out to be
+a **top-25 leaderboard with no working pagination** (`start`/`max`/`page`/
+`offset` are all silently ignored), and its items lack `mv` and `ap` entirely.
+
+The real source is `/v4/leagues/{lid}/lineup/selection`, swept across the four
+positions. Verified reach: **453 distinct players** (GK 50, DEF 156, MID 164,
+FW 83), with `pi`, `mv` and `ap` all present.
+
+**Field names — measured, not assumed:** `pi` (id), `n` (last name), `pos`
+(position code), `tid` (team), `mv` (market value), `ap` (average points).
+There is **no `fn`** on this endpoint, so `first_name` is always `None`.
+
+**The pagination trap this task must not fall into:** the server returns at
+most 50 items regardless of the requested `max`. Advancing `start` by the
+requested size would skip half of every page while still returning HTTP 200
+and a plausible-looking corpus. `fetch_universe` therefore advances `start` by
+`len(items)`, and the test below pins that behaviour explicitly.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -877,12 +975,30 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from rehoboam.enrichment.corpus import TrainingCorpus
-from rehoboam.enrichment.sweep import SweepStats, run_sweep
+from rehoboam.enrichment.sweep import SweepStats, fetch_universe, run_sweep
+
+LEAGUE_ID = "1933872"
 
 
-def _client(universe_items: list[dict]) -> MagicMock:
+def _paged_client(pages_by_position: dict[int, list[list[dict]]]) -> MagicMock:
+    """Mock whose lineup/selection returns successive pages per position.
+
+    ``pages_by_position`` maps a position code to the list of pages it should
+    serve, in order. Any position not listed serves a single empty page, which
+    is how the real endpoint signals exhaustion.
+    """
     client = MagicMock()
-    client.get_competition_players.return_value = {"it": universe_items}
+
+    def _selection(*, league_id, position, start, max_items):
+        pages = pages_by_position.get(position, [])
+        offset = 0
+        for page in pages:
+            if offset == start:
+                return {"it": page}
+            offset += len(page)
+        return {"it": []}
+
+    client.get_lineup_selection.side_effect = _selection
     client.get_competition_player_performance.return_value = {
         "it": [
             {
@@ -897,32 +1013,115 @@ def _client(universe_items: list[dict]) -> MagicMock:
     return client
 
 
-def test_sweep_populates_universe_and_history(tmp_path):
-    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
-    client = _client(
-        [
-            {
-                "i": "1",
-                "fn": "Jamal",
-                "n": "Musiala",
-                "pos": 3,
-                "tid": "2",
-                "mv": 30_000_000,
-                "ap": 120.0,
-            },
-            {
-                "i": "2",
-                "fn": "Harry",
-                "n": "Kane",
-                "pos": 4,
-                "tid": "2",
-                "mv": 40_000_000,
-                "ap": 150.0,
-            },
-        ]
+def _client(universe_items: list[dict]) -> MagicMock:
+    """Single-page-per-position mock: every item served from position 3."""
+    return _paged_client({3: [universe_items]})
+
+
+def test_fetch_universe_unions_all_four_positions(tmp_path):
+    client = _paged_client(
+        {
+            1: [[{"pi": "10", "n": "Neuer", "pos": 1, "tid": "2"}]],
+            2: [[{"pi": "20", "n": "Tah", "pos": 2, "tid": "2"}]],
+            3: [[{"pi": "30", "n": "Musiala", "pos": 3, "tid": "2"}]],
+            4: [[{"pi": "40", "n": "Kane", "pos": 4, "tid": "2"}]],
+        }
     )
 
-    stats = run_sweep(client, corpus, throttle_seconds=0)
+    rows = fetch_universe(client, LEAGUE_ID, throttle_seconds=0)
+
+    assert {r["player_id"] for r in rows} == {"10", "20", "30", "40"}
+
+
+def test_fetch_universe_advances_start_by_actual_count_not_requested_max(tmp_path):
+    """The pagination trap. The live server caps pages at 50 no matter what
+    `max` asks for. If the loop advanced `start` by the requested size, it
+    would ask for start=100 after a 50-item page and skip 50 players — while
+    still returning HTTP 200 the whole way."""
+    page_one = [{"pi": str(i), "n": f"P{i}", "pos": 2, "tid": "2"} for i in range(50)]
+    page_two = [
+        {"pi": str(i), "n": f"P{i}", "pos": 2, "tid": "2"} for i in range(50, 60)
+    ]
+    client = _paged_client({2: [page_one, page_two]})
+
+    rows = fetch_universe(client, LEAGUE_ID, throttle_seconds=0, page_size=100)
+
+    assert len(rows) == 60, "second page was skipped — start advanced by requested max"
+    starts = [c.kwargs["start"] for c in client.get_lineup_selection.call_args_list]
+    assert 50 in starts, "expected a request at start=50 (actual first-page length)"
+
+
+def test_fetch_universe_dedupes_players_seen_twice(tmp_path):
+    dupe = {"pi": "1", "n": "Musiala", "pos": 3, "tid": "2"}
+    client = _paged_client({2: [[dupe]], 3: [[dupe]]})
+
+    rows = fetch_universe(client, LEAGUE_ID, throttle_seconds=0)
+
+    assert len(rows) == 1
+
+
+def test_fetch_universe_maps_real_field_names(tmp_path):
+    client = _paged_client(
+        {
+            3: [
+                [
+                    {
+                        "pi": "1",
+                        "n": "Musiala",
+                        "pos": 3,
+                        "tid": "2",
+                        "mv": 30_000_000,
+                        "ap": 120.0,
+                    }
+                ]
+            ]
+        }
+    )
+
+    row = fetch_universe(client, LEAGUE_ID, throttle_seconds=0)[0]
+
+    assert row["player_id"] == "1"
+    assert row["last_name"] == "Musiala"
+    assert row["position"] == "Midfielder"
+    assert row["team_id"] == "2"
+    assert row["market_value"] == 30_000_000
+    assert row["average_points"] == 120.0
+    # this endpoint carries no first name at all
+    assert row["first_name"] is None
+
+
+def test_sweep_populates_universe_and_history(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _paged_client(
+        {
+            3: [
+                [
+                    {
+                        "pi": "1",
+                        "n": "Musiala",
+                        "pos": 3,
+                        "tid": "2",
+                        "mv": 30_000_000,
+                        "ap": 120.0,
+                    }
+                ]
+            ],
+            4: [
+                [
+                    {
+                        "pi": "2",
+                        "n": "Kane",
+                        "pos": 4,
+                        "tid": "2",
+                        "mv": 40_000_000,
+                        "ap": 150.0,
+                    }
+                ]
+            ],
+        }
+    )
+
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0)
 
     assert stats.universe_size == 2
     assert stats.performance_fetched == 2
@@ -934,12 +1133,12 @@ def test_sweep_populates_universe_and_history(tmp_path):
 def test_sweep_is_resumable(tmp_path):
     """A second run must not refetch players already marked complete."""
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
-    client = _client([{"i": "1", "tid": "2"}])
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
 
-    run_sweep(client, corpus, throttle_seconds=0)
+    run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0)
     client.get_competition_player_performance.reset_mock()
 
-    stats = run_sweep(client, corpus, throttle_seconds=0)
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0)
 
     assert client.get_competition_player_performance.call_count == 0
     assert stats.performance_fetched == 0
@@ -947,15 +1146,20 @@ def test_sweep_is_resumable(tmp_path):
 
 
 def test_sweep_survives_per_player_failure(tmp_path):
-    """One bad player must not abort a multi-thousand-request sweep."""
+    """One bad player must not abort a 450-player sweep."""
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
-    client = _client([{"i": "1", "tid": "2"}, {"i": "2", "tid": "2"}])
+    client = _client(
+        [
+            {"pi": "1", "n": "P1", "pos": 3, "tid": "2"},
+            {"pi": "2", "n": "P2", "pos": 3, "tid": "2"},
+        ]
+    )
     client.get_competition_player_performance.side_effect = [
         Exception("500 server error"),
         {"it": [{"ti": "2025/2026", "ph": [{"day": 1, "p": 80, "mp": "90'"}]}]},
     ]
 
-    stats = run_sweep(client, corpus, throttle_seconds=0)
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0)
 
     assert stats.failed == 1
     assert stats.performance_fetched == 1
@@ -965,9 +1169,11 @@ def test_sweep_survives_per_player_failure(tmp_path):
 
 def test_dry_run_fetches_universe_but_writes_no_history(tmp_path):
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
-    client = _client([{"i": "1", "tid": "2"}])
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
 
-    stats = run_sweep(client, corpus, dry_run=True, throttle_seconds=0)
+    stats = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, dry_run=True, throttle_seconds=0
+    )
 
     assert stats.universe_size == 1
     assert corpus.matches_for_player("1") == []
@@ -975,9 +1181,11 @@ def test_dry_run_fetches_universe_but_writes_no_history(tmp_path):
 
 def test_limit_caps_players_processed(tmp_path):
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
-    client = _client([{"i": str(i), "tid": "2"} for i in range(10)])
+    client = _client(
+        [{"pi": str(i), "n": f"P{i}", "pos": 3, "tid": "2"} for i in range(10)]
+    )
 
-    stats = run_sweep(client, corpus, limit=3, throttle_seconds=0)
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, limit=3, throttle_seconds=0)
 
     assert stats.performance_fetched == 3
 ```
@@ -992,9 +1200,10 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'rehoboam.enrichment.s
 ```python
 """League-wide corpus sweep — the long pole of week 1.
 
-Walks every player in the competition and pulls per-match performance plus
-the full market-value series into ``TrainingCorpus``. Thousands of requests,
-so it is throttled, resumable, and tolerant of individual failures.
+Enumerates every selectable player in the league and pulls per-match
+performance plus the full market-value series into ``TrainingCorpus``. Around
+a thousand requests, so it is throttled, resumable, and tolerant of individual
+failures.
 
 Resumability is the important property: ``sweep_progress`` is only marked
 after a successful write, so an interrupted or partially-failed run picks up
@@ -1013,6 +1222,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEFRAME_DAYS = 365
 DEFAULT_THROTTLE_SECONDS = 0.25
+DEFAULT_PAGE_SIZE = 50
+# Generous ceiling: the largest real position (MID) needed 4 pages. This only
+# exists so a misbehaving endpoint cannot spin the loop forever.
+DEFAULT_MAX_PAGES_PER_POSITION = 40
 
 _POSITIONS = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 
@@ -1027,23 +1240,22 @@ class SweepStats:
 
 
 def _universe_to_rows(items: list[dict]) -> list[dict]:
-    """Map competition player items to ``upsert_players`` rows.
+    """Map lineup-selection items to ``upsert_players`` rows.
 
-    Field names follow the existing ``Player.from_dict`` convention
-    (``kickbase_client.py:145``): ``i`` id, ``fn`` first name, ``n`` last
-    name, ``pos`` position code, ``tid`` team, ``mv`` market value,
-    ``ap`` average points.
+    Field names are measured from the live endpoint, not inherited from
+    ``Player.from_dict`` — the two disagree. Here the id is ``pi``, and there
+    is no first-name field at all, so ``first_name`` is always None.
     """
     rows = []
     for item in items:
-        pid = item.get("i") or item.get("id")
+        pid = item.get("pi")
         if pid is None:
             continue
         rows.append(
             {
                 "player_id": str(pid),
-                "first_name": item.get("fn"),
-                "last_name": item.get("n") or item.get("ln"),
+                "first_name": None,
+                "last_name": item.get("n"),
                 "position": _POSITIONS.get(item.get("pos"), None),
                 "team_id": item.get("tid"),
                 "market_value": item.get("mv"),
@@ -1053,28 +1265,77 @@ def _universe_to_rows(items: list[dict]) -> list[dict]:
     return rows
 
 
+def fetch_universe(
+    client,
+    league_id: str,
+    *,
+    throttle_seconds: float = DEFAULT_THROTTLE_SECONDS,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages_per_position: int = DEFAULT_MAX_PAGES_PER_POSITION,
+) -> list[dict]:
+    """Enumerate every selectable player by sweeping positions 1-4.
+
+    ``position`` is mandatory on the endpoint — omitting it returns zero items
+    rather than an error — so the universe is the union of four per-position
+    sweeps, deduplicated by player id.
+
+    Pagination note, load-bearing: the server caps each page at 50 items no
+    matter what ``page_size`` requests. ``start`` therefore advances by the
+    number of items actually returned. Advancing by ``page_size`` would skip
+    every other page while still looking like a successful sweep.
+    """
+    by_id: dict[str, dict] = {}
+
+    for position in (1, 2, 3, 4):
+        start = 0
+        for _ in range(max_pages_per_position):
+            payload = client.get_lineup_selection(
+                league_id=league_id,
+                position=position,
+                start=start,
+                max_items=page_size,
+            )
+            items = payload.get("it") or []
+            if not items:
+                break
+
+            for row in _universe_to_rows(items):
+                by_id[row["player_id"]] = row
+
+            start += len(items)  # actual count, never page_size
+            if throttle_seconds:
+                time.sleep(throttle_seconds)
+        else:
+            logger.warning(
+                "Position %d hit the %d-page ceiling — universe may be truncated",
+                position,
+                max_pages_per_position,
+            )
+
+    logger.info("Universe: %d distinct players across 4 positions", len(by_id))
+    return list(by_id.values())
+
+
 def run_sweep(
     client,
     corpus: TrainingCorpus,
     *,
+    league_id: str,
     dry_run: bool = False,
     throttle_seconds: float = DEFAULT_THROTTLE_SECONDS,
     limit: int | None = None,
     timeframe_days: int = DEFAULT_TIMEFRAME_DAYS,
 ) -> SweepStats:
-    """Populate the training corpus from the competition endpoints.
+    """Populate the training corpus for every player in the league.
 
     ``dry_run`` fetches the universe (so the size estimate is real) but
     performs no per-player fetches and no history writes.
     """
     stats = SweepStats()
 
-    universe = client.get_competition_players(competition_id="1")
-    items = universe.get("it") or universe.get("players") or []
-    rows = _universe_to_rows(items)
+    rows = fetch_universe(client, league_id, throttle_seconds=throttle_seconds)
     stats.universe_size = len(rows)
     corpus.upsert_players(rows)
-    logger.info("Universe: %d players", stats.universe_size)
 
     if dry_run:
         return stats
@@ -1128,7 +1389,7 @@ def run_sweep(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_enrichment/test_sweep.py -v`
-Expected: PASS (5 tests)
+Expected: PASS (10 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1182,15 +1443,17 @@ def enrich_corpus(
     from .enrichment.corpus import TrainingCorpus
     from .enrichment.sweep import run_sweep
 
-    api = _get_api()
-    if not api.login():
-        console.print("[red]Login failed[/red]")
-        raise typer.Exit(1)
+    # The universe endpoint is league-scoped, so we need a league. Reuse the
+    # existing helper rather than re-deriving it — it already handles login,
+    # league listing and the not-found error path. It returns a 3-tuple
+    # (api, settings, league); `settings` is unused here.
+    api, _settings, league = _login_and_get_league(0)
 
     corpus = TrainingCorpus()
     stats = run_sweep(
         api.client,
         corpus,
+        league_id=league.id,
         dry_run=dry_run,
         throttle_seconds=throttle,
         limit=limit or None,
