@@ -472,6 +472,9 @@ def enrich_corpus(
     table.add_row("MV series fetched", str(stats.mv_fetched))
     table.add_row("Skipped (already done)", str(stats.skipped))
     table.add_row("Failed", str(stats.failed))
+    if include_historical:
+        table.add_row("Historical positions resolved", str(stats.positions_resolved))
+        table.add_row("Historical positions unresolved", str(stats.positions_unresolved))
     console.print(table)
     console.print(f"[dim]Corpus: {corpus.db_path}[/dim]")
 

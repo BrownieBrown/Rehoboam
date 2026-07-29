@@ -41,6 +41,18 @@ def _paged_client(pages_by_position: dict[int, list[list[dict]]]) -> MagicMock:
     client.get_player_market_value_history_v2.return_value = {
         "it": [{"dt": 20000, "mv": 5_000_000}]
     }
+    # Default: a successful competition-player-details lookup, matching the
+    # live response shape. Individual tests override this to exercise the
+    # failure/partial paths.
+    client.get_competition_player_details.return_value = {
+        "i": "?",
+        "fn": "Default",
+        "ln": "Player",
+        "pos": 3,
+        "tid": "9",
+        "mv": 1_000_000,
+        "ap": 30.0,
+    }
     return client
 
 
@@ -206,6 +218,27 @@ def test_dry_run_fetches_universe_but_writes_no_history(tmp_path):
     assert corpus.matches_for_player("1") == []
 
 
+def test_dry_run_does_not_resolve_positions_for_extra_ids(tmp_path):
+    """dry_run must not make the per-player position-lookup call either —
+    universe size (including extras) is reported, nothing else runs."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    stats = run_sweep(
+        client,
+        corpus,
+        league_id=LEAGUE_ID,
+        dry_run=True,
+        throttle_seconds=0,
+        extra_player_ids=["99"],
+    )
+
+    assert stats.universe_size == 2
+    assert stats.positions_resolved == 0
+    assert stats.positions_unresolved == 0
+    client.get_competition_player_details.assert_not_called()
+
+
 def test_limit_caps_players_processed(tmp_path):
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
     client = _client([{"pi": str(i), "n": f"P{i}", "pos": 3, "tid": "2"} for i in range(10)])
@@ -215,13 +248,23 @@ def test_limit_caps_players_processed(tmp_path):
     assert stats.performance_fetched == 3
 
 
-def test_extra_player_ids_are_fetched_and_get_a_positionless_stub(tmp_path):
+def test_extra_player_ids_get_position_and_name_resolved(tmp_path):
     """Departed players recovered from the learning DB aren't in
-    /lineup/selection at all, so they need a manual id list. They still get
-    performance + MV history, but only a bare player_universe stub — no
-    endpoint or local table gives us their position or name."""
+    /lineup/selection at all, so they need a manual id list. Unlike the
+    performance/MV endpoints, get_competition_player_details carries a real
+    position and first name — use it to fully resolve the stub row, not
+    leave it bare."""
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
     client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+    client.get_competition_player_details.return_value = {
+        "i": "99",
+        "fn": "Joel",
+        "ln": "Agyekum",
+        "pos": 2,
+        "tid": "6",
+        "mv": 500_000,
+        "ap": 12.0,
+    }
 
     stats = run_sweep(
         client,
@@ -234,13 +277,82 @@ def test_extra_player_ids_are_fetched_and_get_a_positionless_stub(tmp_path):
     assert stats.universe_size == 2  # 1 live + 1 historical
     assert stats.performance_fetched == 2
     assert stats.mv_fetched == 2
+    assert stats.positions_resolved == 1
+    assert stats.positions_unresolved == 0
     assert len(corpus.matches_for_player("99")) == 1
 
     with sqlite3.connect(corpus.db_path) as conn:
         row = conn.execute(
-            "SELECT position, last_name FROM player_universe WHERE player_id = '99'"
+            "SELECT first_name, last_name, position, team_id "
+            "FROM player_universe WHERE player_id = '99'"
         ).fetchone()
-    assert row == (None, None)
+    assert row == ("Joel", "Agyekum", "Defender", "6")
+
+
+def test_extra_player_ids_unresolvable_position_stays_null_and_is_counted(tmp_path):
+    """A 500/404 or a response missing `pos` must not be guessed at — the
+    row stays NULL and the failure is counted rather than silently eaten.
+    Performance/MV history are independent and still get fetched."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+    client.get_competition_player_details.side_effect = Exception(
+        "500 - {'err': 2, 'errMsg': 'NotFound'}"
+    )
+
+    stats = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+
+    assert stats.positions_resolved == 0
+    assert stats.positions_unresolved == 1
+    assert stats.performance_fetched == 2  # unaffected by the position failure
+    assert stats.mv_fetched == 2
+
+    with sqlite3.connect(corpus.db_path) as conn:
+        row = conn.execute("SELECT position FROM player_universe WHERE player_id = '99'").fetchone()
+    assert row == (None,)
+
+
+def test_extra_player_ids_failed_position_lookup_is_retried_on_rerun(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+    client.get_competition_player_details.side_effect = Exception("500 error")
+
+    first = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+    assert first.positions_unresolved == 1
+
+    client.get_competition_player_details.side_effect = None
+    client.get_competition_player_details.return_value = {
+        "fn": "Joel",
+        "ln": "Agyekum",
+        "pos": 2,
+        "tid": "6",
+    }
+    second = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+
+    assert client.get_competition_player_details.call_count == 2  # retried
+    assert second.positions_resolved == 1
+    assert second.positions_unresolved == 0
+
+
+def test_extra_player_ids_resolved_position_is_not_refetched_on_rerun(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"])
+    client.get_competition_player_details.reset_mock()
+
+    second = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+
+    client.get_competition_player_details.assert_not_called()
+    assert second.positions_resolved == 0
+    assert second.positions_unresolved == 0
 
 
 def test_extra_player_ids_overlapping_the_live_universe_are_not_double_counted(tmp_path):
@@ -257,21 +369,25 @@ def test_extra_player_ids_overlapping_the_live_universe_are_not_double_counted(t
 
     assert stats.universe_size == 1
     assert stats.performance_fetched == 1
+    # already has a real position from the live sweep — never worth a lookup
+    client.get_competition_player_details.assert_not_called()
 
 
 def test_extra_player_ids_do_not_regress_resumability(tmp_path):
     """A rerun with the same extra ids must not refetch either the live or
-    the historical players."""
+    the historical players — performance/MV history, or position."""
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
     client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
 
     run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"])
     client.get_competition_player_performance.reset_mock()
+    client.get_competition_player_details.reset_mock()
 
     stats = run_sweep(
         client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
     )
 
     assert client.get_competition_player_performance.call_count == 0
+    assert client.get_competition_player_details.call_count == 0
     assert stats.performance_fetched == 0
     assert stats.skipped == 2

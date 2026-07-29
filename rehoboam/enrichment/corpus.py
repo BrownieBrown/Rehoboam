@@ -142,6 +142,32 @@ class TrainingCorpus:
                 conn.commit()
         return len(new_ids)
 
+    def players_missing_position(self, player_ids: list[str]) -> list[str]:
+        """Subset of ``player_ids`` that still need a position resolved.
+
+        An id is "missing" if it has no ``player_universe`` row at all, or
+        the row exists but ``position IS NULL`` — the state every stub from
+        ``ensure_players`` starts in. Once a position is set (by any path —
+        ``upsert_players`` or otherwise), the id drops out of this list for
+        good, which is what makes the historical-player position-resolution
+        pass in ``sweep.run_sweep`` resumable: a rerun only retries ids that
+        are still unresolved, never ones that already succeeded.
+        """
+        ids = {str(pid) for pid in player_ids}
+        if not ids:
+            return []
+        with sqlite3.connect(self.db_path) as conn:
+            placeholders = ",".join("?" for _ in ids)
+            resolved = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT player_id FROM player_universe "
+                    f"WHERE player_id IN ({placeholders}) AND position IS NOT NULL",
+                    list(ids),
+                )
+            }
+        return sorted(ids - resolved)
+
     def record_match_history(
         self, player_id: str, team_id: str | None, performance: dict[str, Any]
     ) -> int:

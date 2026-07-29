@@ -62,3 +62,34 @@ def test_get_lineup_selection_raises_on_error():
     client = _client_with_response(500, {})
     with pytest.raises(Exception, match="Failed to fetch lineup selection"):
         client.get_lineup_selection(league_id="1933872", position=1)
+
+
+def test_get_competition_player_details_returns_payload():
+    """Competition-scoped, so it resolves players no longer in our league's
+    /lineup/selection view — the only endpoint of the three the v2 corpus
+    sweep uses that carries a player's position and real first name."""
+    client = _client_with_response(
+        200,
+        {"i": "10006", "fn": "James", "ln": "Sands", "pos": 3, "tid": "39", "mv": 500_000},
+    )
+    result = client.get_competition_player_details(player_id="10006")
+
+    assert result == {
+        "i": "10006",
+        "fn": "James",
+        "ln": "Sands",
+        "pos": 3,
+        "tid": "39",
+        "mv": 500_000,
+    }
+    called_url = client.session.get.call_args[0][0]
+    assert called_url.endswith("/v4/competitions/1/players/10006")
+
+
+def test_get_competition_player_details_raises_on_error():
+    """A nonexistent player id returns HTTP 500 with an err/errMsg body, not
+    404 — verified by live probe (2026-07-29). Any non-200 must still raise
+    so the sweep's per-player try/except can count it as unresolved."""
+    client = _client_with_response(500, {"err": 2, "errMsg": "NotFound", "svcs": []})
+    with pytest.raises(Exception, match="Failed to fetch competition player details"):
+        client.get_competition_player_details(player_id="99999999")

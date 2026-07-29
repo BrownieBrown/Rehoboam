@@ -676,6 +676,46 @@ class KickbaseV4Client:
                 f"Failed to fetch competition players: {response.status_code} - {response.text}"
             )
 
+    def get_competition_player_details(
+        self, player_id: str, competition_id: str = "1"
+    ) -> dict[str, Any]:
+        """
+        Get full player details for any player in the competition, including
+        one no longer registered in our league
+        GET /v4/competitions/{competition_id}/players/{player_id}
+
+        Competition-scoped, so unlike the league-scoped ``get_player_details``
+        this resolves players who have since transferred out of the league —
+        the v2 training corpus uses it to backfill position/name/team for
+        departed players recovered from the learning DB, since neither
+        ``get_competition_player_performance`` nor
+        ``get_player_market_value_history_v2`` carries a position field at
+        all (checked directly against both live responses, 2026-07-29).
+
+        Returns:
+            dict with (among others) ``i`` (id), ``fn``/``ln`` (first/last
+            name), ``tid`` (team id), ``pos`` (position code: 1=Goalkeeper,
+            2=Defender, 3=Midfielder, 4=Forward), ``mv`` (market value).
+            ``ap`` (average points) is present only for players with senior
+            appearances — omitted, not zero, otherwise.
+
+        Raises:
+            Exception on any non-200. A nonexistent player id returns HTTP
+            500 with ``{"err": 2, "errMsg": "NotFound", ...}``, not 404 —
+            verified by live probe (2026-07-29).
+        """
+        url = f"{self.BASE_URL}/v4/competitions/{competition_id}/players/{player_id}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch competition player details: "
+                f"{response.status_code} - {response.text}"
+            )
+
     def get_competition_player_performance(
         self, player_id: str, competition_id: str = "1"
     ) -> dict[str, Any]:

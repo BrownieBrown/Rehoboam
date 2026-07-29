@@ -37,6 +37,8 @@ class SweepStats:
     mv_fetched: int = 0
     failed: int = 0
     skipped: int = 0
+    positions_resolved: int = 0
+    positions_unresolved: int = 0
 
 
 def _universe_to_rows(items: list[dict]) -> list[dict]:
@@ -137,16 +139,18 @@ def run_sweep(
     registered via ``/lineup/selection``, so anyone who transferred out of
     the Bundesliga since is invisible to it, even though a backtest
     replaying a past season needs their history too. Each id not already
-    covered by the live sweep gets a bare ``player_universe`` stub (id only)
-    via ``TrainingCorpus.ensure_players`` — never an overwrite, so a rerun
-    can't clobber a row that has since gained real data some other way.
-    Neither the competition performance nor MV endpoint returns a position
-    for an arbitrary id (checked directly against the live API), and none of
-    the learning-DB tables these ids come from carry it reliably either, so
-    these stub rows are expected to keep ``position IS NULL`` — enough for
-    rank-correlation backtesting, not enough to place the player in a
-    formation. See ``rehoboam.enrichment.historical_ids`` for where the ids
-    come from.
+    covered by the live sweep first gets a bare ``player_universe`` stub (id
+    only) via ``TrainingCorpus.ensure_players`` — an insert, never an
+    overwrite, so a rerun can't clobber a row that has since gained real
+    data some other way — and is then resolved via
+    ``get_competition_player_details``, the only one of the three endpoints
+    this sweep uses that carries a position (``get_competition_player_performance``
+    and ``get_player_market_value_history_v2`` do not — checked directly
+    against the live API). A player whose lookup fails or omits ``pos``
+    keeps ``position IS NULL`` rather than a guessed value, and is retried
+    on the next run (``TrainingCorpus.players_missing_position`` drives
+    that: an id only drops off once it has a real position). See
+    ``rehoboam.enrichment.historical_ids`` for where the ids come from.
     """
     stats = SweepStats()
 
@@ -154,6 +158,7 @@ def run_sweep(
     stats.universe_size = len(rows)
     corpus.upsert_players(rows)
 
+    extra_ids: list[str] = []
     if extra_player_ids:
         live_ids = {r["player_id"] for r in rows}
         extra_ids = sorted({str(pid) for pid in extra_player_ids if str(pid) not in live_ids})
@@ -169,6 +174,45 @@ def run_sweep(
 
     if dry_run:
         return stats
+
+    if extra_ids:
+        for pid in corpus.players_missing_position(extra_ids):
+            try:
+                details = client.get_competition_player_details(player_id=pid)
+            except Exception as e:
+                stats.positions_unresolved += 1
+                logger.warning("Position lookup failed for historical player %s: %s", pid, e)
+                if throttle_seconds:
+                    time.sleep(throttle_seconds)
+                continue
+
+            position = _POSITIONS.get(details.get("pos"))
+            if position is None:
+                stats.positions_unresolved += 1
+                logger.warning("Competition player details for %s carried no usable position", pid)
+            else:
+                corpus.upsert_players(
+                    [
+                        {
+                            "player_id": pid,
+                            "first_name": details.get("fn"),
+                            "last_name": details.get("ln"),
+                            "position": position,
+                            "team_id": details.get("tid"),
+                            "market_value": details.get("mv"),
+                            "average_points": details.get("ap"),
+                        }
+                    ]
+                )
+                stats.positions_resolved += 1
+            if throttle_seconds:
+                time.sleep(throttle_seconds)
+
+        logger.info(
+            "Historical positions: %d resolved, %d unresolved",
+            stats.positions_resolved,
+            stats.positions_unresolved,
+        )
 
     team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
 

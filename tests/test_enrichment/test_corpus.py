@@ -150,3 +150,22 @@ def test_ensure_players_is_idempotent(tmp_path):
     added_again = corpus.ensure_players(["1"])
 
     assert added_again == 0
+
+
+def test_players_missing_position_includes_stubs_and_unknown_ids(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.ensure_players(["1"])  # stub, position NULL
+
+    missing = corpus.players_missing_position(["1", "2"])  # "2" isn't even a row yet
+
+    assert missing == ["1", "2"]
+
+
+def test_players_missing_position_excludes_players_with_a_real_position(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.upsert_players([{"player_id": "1", "position": "Defender"}])
+    corpus.ensure_players(["2"])
+
+    missing = corpus.players_missing_position(["1", "2"])
+
+    assert missing == ["2"]
