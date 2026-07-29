@@ -1389,7 +1389,7 @@ def run_sweep(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_enrichment/test_sweep.py -v`
-Expected: PASS (10 tests)
+Expected: PASS (9 tests)
 
 - [ ] **Step 5: Commit**
 

@@ -89,12 +89,47 @@ Cross-referencing `matchday_lineup_results` against official `league_rank_histor
   negative-budget-at-kickoff penalty. **~1,100 points in one day.**
 - **Matchdays 6, 17, 21: only 10 players fielded** → −100 each.
 
-Direct configuration cause, `config.py:90`: `min_squad_size = 10`. **A 10-player
-squad cannot fill 11 slots.** The floor guarantees the penalty it exists to prevent.
+**Corrected 2026-07-29, during week-1 implementation.** This section originally
+claimed a direct configuration cause: `config.py:90`, `min_squad_size = 10`, on
+the reasoning that a 10-player squad cannot fill 11 slots. **That diagnosis was
+wrong**, and the correction matters because it changes what the fix has to be.
+
+`min_squad_size` never enforced a sell floor. `SquadOptimizer` assigns it
+(`squad_optimizer.py:39`) and **never reads it again** — `optimize_squad` does
+not consult it. Its only live consumer was the emergency-mode trigger in
+`trader.py`. So the setting could not have caused the three 10-man lineups, and
+raising it would not by itself have prevented them.
+
+The real mechanism: nothing stopped the squad reaching an **unfieldable position
+shape**. Twelve players with only two defenders cannot form a legal eleven, and
+nothing checked fieldability before kickoff. Squad sizes on those matchdays were
+11–12 — the bot *had* enough bodies and still fielded ten. These were
+**availability and shape failures, not headcount failures**; raw squad size was
+only ever a proxy for the question that mattered.
+
+Two consequences, both now implemented:
+
+1. The fix is `formation.can_fill_starting_eleven(available)` driving the
+   emergency trigger — asking directly whether a legal eleven can be fielded.
+1. Raising `min_squad_size` to 13 **must not** also drive emergency mode.
+   Measured against real season data (`team_value_history`, 29 sessions: squad
+   size 11 in 41%, 12 in 52%), coupling them would have fired emergency in
+   **27 of 29 sessions (93%)**, versus 0 before. Emergency drops the EP quality
+   bar from 30 to 10 and skips the marginal-EP-upgrade gate entirely, so the
+   guardrail would have put the bot into permanent panic-buy mode — amplifying
+   the very churn that cost the season.
+
+`min_squad_size = 13` is retained as a **sell floor** (11 + 2 injury cover, also
+leaving 2 slots for open bids under the 15 cap). Note it is still not enforced
+anywhere on the sell side; wiring that is week-4 decision-layer work.
 
 Recovering those ~1,400 points moves us from 10th to **8th** (9th was 215 points
 ahead). REH-11's budget block landed *after* matchday 14 and has never faced the
-failure it was written for.
+failure it was written for — week 1 pinned it with tests and confirmed the
+matchday-14 scenario is genuinely blocked today. Two gaps in it remain
+documented rather than fixed: it fails open when the match date is unknown, and
+it blocks *creating* negative budget within 24h rather than *arriving* at
+kickoff negative.
 
 ______________________________________________________________________
 
@@ -239,14 +274,37 @@ fitted multipliers, **including DGW**: the current ×1.8 is an unverified assump
 
 ### 4.3 Guardrails
 
-- `min_squad_size` **10 → 13**.
-- **Position-aware pre-matchday check** — the actual fix for the 10-man lineups.
-  Squad size alone does not guarantee a *legal formation* can be filled from
-  available, non-injured players. Must verify a fillable formation and trigger an
-  emergency buy otherwise. *(Cause inferred, not proven — squad composition history
-  is unavailable. Step one is a test reproducing it.)*
-- **Budget block regression test** reproducing matchday 14.
-- Reduced trade budget for matchdays 1–3, when cold-start uncertainty is highest.
+**Shipped in week 1** (see §1.4 for the corrected diagnosis that reshaped these):
+
+- **Position-aware fieldability check** — `formation.can_fill_starting_eleven`,
+  the actual fix for the 10-man lineups. It asks whether a legal eleven can be
+  formed from available players, rather than inferring it from headcount.
+  *Known limitation:* squad `Player` objects carry no injury/status field, so
+  every squad member counts as available. This catches headcount and
+  position-shape emergencies — the pattern behind the historical bug — but not
+  "twelve well-shaped players, one injured." Real availability arrives with the
+  week-2 scorer; the caveat is documented in the code, not just here.
+- **Emergency trigger decoupled from `min_squad_size`** and driven by that
+  fieldability check. Coupling them would have fired emergency in 93% of
+  sessions (§1.4).
+- `min_squad_size` **10 → 13**, re-scoped as a **sell floor** only. Still not
+  enforced anywhere on the sell side — `SquadOptimizer` ignores it. Wiring a
+  real floor is week-4 work.
+- **15-player cap now counts open bids.** Kickbase caps the squad at 15
+  *including open trades*; the code previously counted only `len(squad)`, so 13
+  players plus 3 open bids could commit to 16. Bidding is now gated on
+  `len(squad) + len(open_bids) < 15`.
+- **Budget-at-kickoff guard pinned** with tests against the matchday-14
+  scenario. Confirmed genuinely blocked today in both live and dry-run paths.
+  Two gaps documented as characterisation tests rather than fixed: it fails
+  open when `days_until_match` is unknown, and it blocks *creating* negative
+  budget within 24h rather than *arriving* at kickoff negative — recovery
+  depends on `optimize_squad_for_gameday`, which is unverified.
+
+**Still to do:**
+
+- Reduced trade budget for matchdays 1–3, when cold-start uncertainty is
+  highest (week 4, with the decision layer).
 
 ______________________________________________________________________
 
