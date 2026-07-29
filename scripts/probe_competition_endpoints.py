@@ -72,7 +72,11 @@ def main() -> int:
         print("   !! empty universe — record this; Task 5 needs a fallback source")
         return 1
 
-    pid = str(items[0].get("i") or items[0].get("id"))
+    pid_value = items[0].get("pi") or items[0].get("i") or items[0].get("id")
+    if pid_value is None:
+        print("   !! Could not find player ID field (tried 'pi', 'i', 'id')")
+        return 1
+    pid = str(pid_value)
     print(f"\n2. Performance for player {pid}")
     url = f"{client.BASE_URL}/v4/competitions/1/players/{pid}/performance"
     resp = client.session.get(url)
