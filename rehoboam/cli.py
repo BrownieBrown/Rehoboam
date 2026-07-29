@@ -407,6 +407,15 @@ def enrich_corpus(
         help="Cap players processed this run (0 = no cap). Useful for a smoke run.",
     ),
     throttle: float = typer.Option(0.25, "--throttle", help="Seconds to sleep between API calls"),
+    include_historical: bool = typer.Option(
+        False,
+        "--include-historical",
+        help=(
+            "Also recover players who left the league since last season "
+            "(read from logs/bid_learning.db) — needed for backtesting past "
+            "matchdays, since /lineup/selection only sees current players."
+        ),
+    ),
 ):
     """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
 
@@ -418,8 +427,15 @@ def enrich_corpus(
       1. rehoboam enrich-corpus --dry-run          # how many players?
       2. rehoboam enrich-corpus --limit 20         # smoke-test the shapes
       3. rehoboam enrich-corpus                    # the full sweep
+
+    ``--include-historical`` additionally recovers departed players so a
+    backtest replaying a past season has a full squad to reconstruct — see
+    ``rehoboam.enrichment.historical_ids`` for where those ids come from and
+    why their position stays unset.
     """
+    from .bid_learner import BidLearner
     from .enrichment.corpus import TrainingCorpus
+    from .enrichment.historical_ids import gather_historical_player_ids
     from .enrichment.sweep import run_sweep
 
     # The universe endpoint is league-scoped, so we need a league. Reuse the
@@ -427,6 +443,15 @@ def enrich_corpus(
     # league listing and the not-found error path. It returns a 3-tuple
     # (api, settings, league); `settings` is unused here.
     api, _settings, league = _login_and_get_league(0)
+
+    extra_player_ids = None
+    if include_historical:
+        learner_db_path = BidLearner().db_path
+        extra_player_ids = gather_historical_player_ids(learner_db_path)
+        console.print(
+            f"[dim]Recovered {len(extra_player_ids)} historical player ids from "
+            f"{learner_db_path}[/dim]"
+        )
 
     corpus = TrainingCorpus()
     stats = run_sweep(
@@ -436,6 +461,7 @@ def enrich_corpus(
         dry_run=dry_run,
         throttle_seconds=throttle,
         limit=limit or None,
+        extra_player_ids=extra_player_ids,
     )
 
     table = Table(title="Corpus enrichment summary")

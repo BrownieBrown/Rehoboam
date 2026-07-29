@@ -113,3 +113,40 @@ def test_mark_fetched_removes_player_from_pending(tmp_path):
     assert corpus.players_needing_fetch("performance") == ["2"]
     # marking performance must not satisfy the mv sweep
     assert set(corpus.players_needing_fetch("mv")) == {"1", "2"}
+
+
+def test_ensure_players_inserts_stub_rows_for_new_ids(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+
+    added = corpus.ensure_players(["10", "20"])
+
+    assert added == 2
+    assert set(corpus.players_needing_fetch("performance")) == {"10", "20"}
+    with sqlite3.connect(corpus.db_path) as conn:
+        row = conn.execute(
+            "SELECT position, last_name FROM player_universe WHERE player_id = '10'"
+        ).fetchone()
+    assert row == (None, None)
+
+
+def test_ensure_players_never_overwrites_an_existing_row(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.upsert_players([{"player_id": "1", "last_name": "Musiala", "position": "Midfielder"}])
+
+    added = corpus.ensure_players(["1", "2"])
+
+    assert added == 1  # only "2" is new
+    with sqlite3.connect(corpus.db_path) as conn:
+        row = conn.execute(
+            "SELECT position, last_name FROM player_universe WHERE player_id = '1'"
+        ).fetchone()
+    assert row == ("Midfielder", "Musiala")
+
+
+def test_ensure_players_is_idempotent(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+
+    corpus.ensure_players(["1"])
+    added_again = corpus.ensure_players(["1"])
+
+    assert added_again == 0

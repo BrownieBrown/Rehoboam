@@ -125,17 +125,47 @@ def run_sweep(
     throttle_seconds: float = DEFAULT_THROTTLE_SECONDS,
     limit: int | None = None,
     timeframe_days: int = DEFAULT_TIMEFRAME_DAYS,
+    extra_player_ids: list[str] | None = None,
 ) -> SweepStats:
     """Populate the training corpus for every player in the league.
 
     ``dry_run`` fetches the universe (so the size estimate is real) but
     performs no per-player fetches and no history writes.
+
+    ``extra_player_ids`` recovers players who are no longer in the live
+    universe at all — ``fetch_universe`` only sees players currently
+    registered via ``/lineup/selection``, so anyone who transferred out of
+    the Bundesliga since is invisible to it, even though a backtest
+    replaying a past season needs their history too. Each id not already
+    covered by the live sweep gets a bare ``player_universe`` stub (id only)
+    via ``TrainingCorpus.ensure_players`` — never an overwrite, so a rerun
+    can't clobber a row that has since gained real data some other way.
+    Neither the competition performance nor MV endpoint returns a position
+    for an arbitrary id (checked directly against the live API), and none of
+    the learning-DB tables these ids come from carry it reliably either, so
+    these stub rows are expected to keep ``position IS NULL`` — enough for
+    rank-correlation backtesting, not enough to place the player in a
+    formation. See ``rehoboam.enrichment.historical_ids`` for where the ids
+    come from.
     """
     stats = SweepStats()
 
     rows = fetch_universe(client, league_id, throttle_seconds=throttle_seconds)
     stats.universe_size = len(rows)
     corpus.upsert_players(rows)
+
+    if extra_player_ids:
+        live_ids = {r["player_id"] for r in rows}
+        extra_ids = sorted({str(pid) for pid in extra_player_ids if str(pid) not in live_ids})
+        if extra_ids:
+            added = corpus.ensure_players(extra_ids)
+            stats.universe_size += len(extra_ids)
+            logger.info(
+                "Historical ids: %d supplied outside the live universe, %d new stub rows (%d already tracked)",
+                len(extra_ids),
+                added,
+                len(extra_ids) - added,
+            )
 
     if dry_run:
         return stats

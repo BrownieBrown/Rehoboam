@@ -150,9 +150,9 @@ last resort — it clobbers the Function's writes.
 - Data quality grading (A-F) penalizes unreliable predictions
 - Position calibration multiplier (REH-20) corrects systematic per-position EP bias from accumulated `matchday_outcomes`
 
-**Legacy roster helpers** (`roster_analyzer.py`, `value_calculator.py`):
+**Legacy roster helper** (`value_calculator.py`):
 
-- `RosterAnalyzer`: Roster-aware buy context (gap-fill vs upgrade detection) via `value_calculator.PlayerValue`. Currently used by some display paths; not part of the EP decision pipeline.
+- `PlayerValue`: A handful of static extraction helpers (games/consistency, minutes trend) still called directly by `expected_points.py`. `roster_analyzer.py`, the module that used to wrap this into gap-fill/upgrade buy context, was deleted as dead code (no reachable imports from the CLI or Azure Function entrypoints); not part of the EP decision pipeline.
 
 **Learning System** (`bid_learner.py`, `learning/tracker.py`, `activity_feed_learner.py`):
 

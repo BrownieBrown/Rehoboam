@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import MagicMock
 
 from rehoboam.enrichment.corpus import TrainingCorpus
@@ -212,3 +213,65 @@ def test_limit_caps_players_processed(tmp_path):
     stats = run_sweep(client, corpus, league_id=LEAGUE_ID, limit=3, throttle_seconds=0)
 
     assert stats.performance_fetched == 3
+
+
+def test_extra_player_ids_are_fetched_and_get_a_positionless_stub(tmp_path):
+    """Departed players recovered from the learning DB aren't in
+    /lineup/selection at all, so they need a manual id list. They still get
+    performance + MV history, but only a bare player_universe stub — no
+    endpoint or local table gives us their position or name."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    stats = run_sweep(
+        client,
+        corpus,
+        league_id=LEAGUE_ID,
+        throttle_seconds=0,
+        extra_player_ids=["99"],
+    )
+
+    assert stats.universe_size == 2  # 1 live + 1 historical
+    assert stats.performance_fetched == 2
+    assert stats.mv_fetched == 2
+    assert len(corpus.matches_for_player("99")) == 1
+
+    with sqlite3.connect(corpus.db_path) as conn:
+        row = conn.execute(
+            "SELECT position, last_name FROM player_universe WHERE player_id = '99'"
+        ).fetchone()
+    assert row == (None, None)
+
+
+def test_extra_player_ids_overlapping_the_live_universe_are_not_double_counted(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    stats = run_sweep(
+        client,
+        corpus,
+        league_id=LEAGUE_ID,
+        throttle_seconds=0,
+        extra_player_ids=["1"],  # already in the live universe
+    )
+
+    assert stats.universe_size == 1
+    assert stats.performance_fetched == 1
+
+
+def test_extra_player_ids_do_not_regress_resumability(tmp_path):
+    """A rerun with the same extra ids must not refetch either the live or
+    the historical players."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"])
+    client.get_competition_player_performance.reset_mock()
+
+    stats = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+
+    assert client.get_competition_player_performance.call_count == 0
+    assert stats.performance_fetched == 0
+    assert stats.skipped == 2

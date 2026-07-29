@@ -107,6 +107,41 @@ class TrainingCorpus:
             conn.commit()
         return len(players)
 
+    def ensure_players(self, player_ids: list[str]) -> int:
+        """Create a bare ``player_universe`` stub for ids not already present.
+
+        Unlike ``upsert_players``, this never overwrites an existing row —
+        it only inserts a row (``player_id`` set, every other column left
+        NULL) for an id that is entirely new to the corpus. Used by the
+        historical-ids sweep extension (``sweep.run_sweep``'s
+        ``extra_player_ids``): departed players recovered from the learning
+        DB carry no position/name from any source we have, so a stub is the
+        most we can safely claim, and a rerun must not clobber a row that
+        later gained real data through some other path.
+
+        Returns the number of rows actually inserted.
+        """
+        ids = {str(pid) for pid in player_ids}
+        if not ids:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            placeholders = ",".join("?" for _ in ids)
+            existing = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT player_id FROM player_universe WHERE player_id IN ({placeholders})",
+                    list(ids),
+                )
+            }
+            new_ids = sorted(ids - existing)
+            if new_ids:
+                conn.executemany(
+                    "INSERT INTO player_universe (player_id) VALUES (?)",
+                    [(pid,) for pid in new_ids],
+                )
+                conn.commit()
+        return len(new_ids)
+
     def record_match_history(
         self, player_id: str, team_id: str | None, performance: dict[str, Any]
     ) -> int:
