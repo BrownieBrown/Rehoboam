@@ -396,6 +396,60 @@ def backfill_mv_history(
         )
 
 
+@app.command("enrich-corpus")
+def enrich_corpus(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Fetch the universe only; write no per-player history"
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        help="Cap players processed this run (0 = no cap). Useful for a smoke run.",
+    ),
+    throttle: float = typer.Option(0.25, "--throttle", help="Seconds to sleep between API calls"),
+):
+    """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
+
+    Long-running and API-bound — thousands of requests. Safe to interrupt and
+    rerun: progress is tracked per player, so a rerun resumes rather than
+    restarting.
+
+    Typical first run:
+      1. rehoboam enrich-corpus --dry-run          # how many players?
+      2. rehoboam enrich-corpus --limit 20         # smoke-test the shapes
+      3. rehoboam enrich-corpus                    # the full sweep
+    """
+    from .enrichment.corpus import TrainingCorpus
+    from .enrichment.sweep import run_sweep
+
+    # The universe endpoint is league-scoped, so we need a league. Reuse the
+    # existing helper rather than re-deriving it — it already handles login,
+    # league listing and the not-found error path. It returns a 3-tuple
+    # (api, settings, league); `settings` is unused here.
+    api, _settings, league = _login_and_get_league(0)
+
+    corpus = TrainingCorpus()
+    stats = run_sweep(
+        api.client,
+        corpus,
+        league_id=league.id,
+        dry_run=dry_run,
+        throttle_seconds=throttle,
+        limit=limit or None,
+    )
+
+    table = Table(title="Corpus enrichment summary")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    table.add_row("Universe size", str(stats.universe_size))
+    table.add_row("Performance fetched", str(stats.performance_fetched))
+    table.add_row("MV series fetched", str(stats.mv_fetched))
+    table.add_row("Skipped (already done)", str(stats.skipped))
+    table.add_row("Failed", str(stats.failed))
+    console.print(table)
+    console.print(f"[dim]Corpus: {corpus.db_path}[/dim]")
+
+
 @app.command("backfill-history")
 def backfill_history(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
