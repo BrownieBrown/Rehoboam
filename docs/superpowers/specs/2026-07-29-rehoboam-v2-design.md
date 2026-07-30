@@ -383,6 +383,36 @@ scorer cannot beat it on replay, we ship the baseline.
 would drive us to overfit noise. The bot does not need to know Musiala scores 143 on
 Saturday; it needs to rank him correctly.
 
+**Week 1 measured the baseline** (`rehoboam backtest-baseline`, season-average model,
+22 usable matchdays of 2025/26). Regret is sensitive to the assumed squad size, and
+the sensitivity runs one way — more assumed bench depth can only inflate the
+hindsight-optimal eleven, never what the ranker actually picks:
+
+| assumed squad cap          | 12    | 13    | 14    | 15 (CLI default) | 16    | uncapped |
+| -------------------------- | ----- | ----- | ----- | ---------------- | ----- | -------- |
+| mean regret (pts/matchday) | 43.5  | 61.7  | 78.0  | 87.0             | 91.7  | 97.1     |
+| points captured            | 95.0% | 93.0% | 91.3% | 90.4%            | 89.9% | 89.4%    |
+
+`total_chosen_points` is identical (17,939) at caps 15, 16 and uncapped, while
+`total_best_points` keeps climbing — confirming the inflation is one-sided. A second,
+compounding selection effect sharpens this further: squad reconstruction unions two
+membership sources (flip hold-windows and the fielded eleven), so a player held but
+never fielded nor flipped stays invisible to both — the 12 of 34 matchdays excluded
+from the 22 "usable" ones for having fewer than 12 reconstructed players are precisely
+this *under*-counted case, so the surviving 22 are systematically selected for the
+*over*-counted side instead.
+
+**The uncapped headline figure (97.1 pts/matchday) is therefore an upper bound, not a
+point estimate.** The defensible restatement is **~60–85 pts/matchday, ~2,000–2,900
+points/season, 17–25% of the 11,687-point gap** to last season's winner — not a single
+~97 → ~3,300 → 28% number. It remains sound as a **relative** bar, though: weeks 2-3
+score their scorer on this exact same fixture set — identical squads, identical days,
+identical actuals — so the pool bias is common-mode and cancels in a paired
+comparison against this baseline. That is exactly what the §8 safety valve needs: not
+an absolute verdict on how many points selection is worth, but a same-conditions bar
+the week-2/3 scorer either clears or doesn't. Selection quality remains the
+highest-ROI work available, surviving intact at 17-25% of the gap either way.
+
 ### 6.2 Full-bot season replay — a *verdict* instrument
 
 Replays the entire agent — buys, sells, budget, squad evolution, lineup — across
