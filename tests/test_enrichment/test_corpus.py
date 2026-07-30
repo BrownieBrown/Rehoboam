@@ -260,3 +260,18 @@ def test_players_missing_position_excludes_players_with_a_real_position(tmp_path
     missing = corpus.players_missing_position(["1", "2"])
 
     assert missing == ["2"]
+
+
+def test_positions_for_returns_only_resolved_positions(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.upsert_players([{"player_id": "1", "position": "Defender"}])
+    corpus.ensure_players(["2"])  # stub, position NULL
+
+    positions = corpus.positions_for(["1", "2", "3"])  # "3" isn't a row at all
+
+    assert positions == {"1": "Defender"}
+
+
+def test_positions_for_empty_input_returns_empty_dict(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    assert corpus.positions_for([]) == {}

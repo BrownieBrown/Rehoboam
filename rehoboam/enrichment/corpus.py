@@ -168,6 +168,28 @@ class TrainingCorpus:
             }
         return sorted(ids - resolved)
 
+    def positions_for(self, player_ids: list[str]) -> dict[str, str]:
+        """Resolved ``position`` for each id, keyed by player_id.
+
+        Ids with no ``player_universe`` row, or whose position was never
+        resolved (``position IS NULL`` — the state every ``ensure_players``
+        stub starts in), are simply absent from the returned dict. Callers
+        that need a squad's position shape (e.g. the backtest baseline
+        driver joining reconstructed squad ids against the corpus) can then
+        treat "missing" and "unresolved" identically by using ``.get``.
+        """
+        ids = {str(pid) for pid in player_ids}
+        if not ids:
+            return {}
+        with sqlite3.connect(self.db_path) as conn:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT player_id, position FROM player_universe "
+                f"WHERE player_id IN ({placeholders}) AND position IS NOT NULL",
+                list(ids),
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
     def record_match_history(
         self, player_id: str, team_id: str | None, performance: dict[str, Any]
     ) -> int:

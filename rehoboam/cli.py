@@ -587,6 +587,71 @@ def backfill_history(
         )
 
 
+@app.command("backtest-baseline")
+def backtest_baseline(
+    season: str = typer.Option("2025/2026", "--season", help="Season to replay, e.g. 2025/2026."),
+    max_squad_size: int = typer.Option(
+        15,
+        "--max-squad-size",
+        help=(
+            "Cap each reconstructed squad at this size — fielded eleven kept "
+            "first, then the most-recently-bought remainder. Pass 0 for "
+            "uncapped (the original, upward-biased headline figure)."
+        ),
+    ),
+    learner_db: Path = typer.Option(
+        Path("logs") / "bid_learning.db",
+        "--learner-db",
+        help="Path to bid_learning.db (matchday_lineup_results + flip_outcomes).",
+    ),
+    corpus_db: Path = typer.Option(
+        Path("logs") / "training_corpus.db",
+        "--corpus-db",
+        help="Path to training_corpus.db (player_match_history + player_universe).",
+    ),
+):
+    """Reproduce the season-average baseline regret measurement (week 1 headline number).
+
+    Read-only, no API calls and no login: replays ``matchday_lineup_results``
+    and ``flip_outcomes`` from the learning DB against ``player_match_history``
+    and ``player_universe`` in the training corpus, and reports how a naive
+    season-average lineup picker performs against the hindsight-optimal
+    eleven. This is the bar weeks 2-3 must beat with the real scorer, on an
+    identical fixture set — see
+    docs/superpowers/specs/2026-07-29-rehoboam-v2-design.md §6 for why the
+    uncapped figure is reported as an upper bound rather than a point
+    estimate.
+    """
+    from .backtest.baseline_driver import run_baseline
+
+    cap = None if max_squad_size <= 0 else max_squad_size
+    report, stats = run_baseline(
+        learner_db_path=learner_db,
+        corpus_db_path=corpus_db,
+        season=season,
+        max_squad_size=cap,
+    )
+
+    console.print(f"[bold cyan]Backtest baseline — {season}[/bold cyan]")
+    console.print(
+        f"Matchdays: {stats.matchdays_total} total, {stats.matchdays_usable} usable "
+        f"({stats.matchdays_skipped_small_squad} skipped — reconstructed squad "
+        f"below {12} players)\n"
+    )
+
+    table = Table(title=f"season_average_baseline (max_squad_size={max_squad_size or 'uncapped'})")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Mean regret", f"{report.mean_regret:.1f} pts/matchday")
+    table.add_row("Mean rank correlation", f"{report.mean_rank_correlation:+.3f}")
+    if report.total_best_points:
+        captured = 100 * report.total_chosen_points / report.total_best_points
+        table.add_row("Points captured", f"{captured:.1f}%")
+    table.add_row("Total chosen points", f"{report.total_chosen_points:,.0f}")
+    table.add_row("Total best-possible points", f"{report.total_best_points:,.0f}")
+    console.print(table)
+
+
 @app.callback()
 def callback(
     verbose: bool = typer.Option(
