@@ -176,9 +176,21 @@ class TrainingCorpus:
         Shape: ``{"it": [{"ti": "2025/2026", "ph": [{...match...}]}]}``.
         Matches without a ``day`` are skipped — they cannot be placed on a
         timeline and so are useless for both training and backtesting.
+
+        Each match's ``pt`` field is the player's team *for that match* —
+        verified to stay constant for a player within a season while
+        ``t1``/``t2`` alternate. It is the primary source for is_home,
+        opponent_team_id and the stored team_id, because the caller-supplied
+        ``team_id`` reflects only the player's *current* team (e.g.
+        ``sweep.py``'s ``team_by_id``, built from the live universe
+        snapshot) and is wrong for every match before a player's most recent
+        transfer — every 15-season history for a transferred player would
+        otherwise mislabel home/away and record the player's own former team
+        as the opponent. ``team_id`` is only a fallback for the rare match
+        entry that omits ``pt``.
         """
         rows: list[tuple] = []
-        team = str(team_id) if team_id is not None else None
+        fallback_team = str(team_id) if team_id is not None else None
 
         for season in performance.get("it") or []:
             title = season.get("ti")
@@ -190,6 +202,8 @@ class TrainingCorpus:
                     continue
                 t1 = str(m.get("t1", "")) or None
                 t2 = str(m.get("t2", "")) or None
+                pt = m.get("pt")
+                team = str(pt) if pt is not None else fallback_team
                 is_home = 1 if team is not None and team == t1 else 0
                 opponent = t2 if is_home else t1
                 rows.append(
@@ -266,6 +280,42 @@ class TrainingCorpus:
                     (now, str(player_id)),
                 )
             conn.commit()
+
+    def clear_performance_fetched(self, player_ids: list[str] | None = None) -> int:
+        """Reset ``performance_fetched_at`` so the next sweep re-fetches it.
+
+        Deliberately narrow: only the ``performance`` column is touched —
+        ``mv_fetched_at`` (and thus MV-series resumability) is untouched, so
+        this cannot turn into an accidental full re-fetch of MV history too.
+        Used one-off after a bug in ``record_match_history`` (the
+        ``is_home``/``opponent_team_id`` derivation) to force re-fetch of
+        already-"complete" players, since ``players_needing_fetch`` would
+        otherwise skip every one of them.
+
+        ``player_ids=None`` clears every tracked player; passing an explicit
+        list scopes the reset (e.g. to a single player during testing).
+
+        Returns the number of rows actually cleared (rows that had a
+        non-NULL ``performance_fetched_at`` before this call).
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            if player_ids is None:
+                cur = conn.execute(
+                    "UPDATE sweep_progress SET performance_fetched_at = NULL "
+                    "WHERE performance_fetched_at IS NOT NULL"
+                )
+            else:
+                ids = [str(pid) for pid in player_ids]
+                if not ids:
+                    return 0
+                placeholders = ",".join("?" for _ in ids)
+                cur = conn.execute(
+                    f"UPDATE sweep_progress SET performance_fetched_at = NULL "
+                    f"WHERE performance_fetched_at IS NOT NULL AND player_id IN ({placeholders})",
+                    ids,
+                )
+            conn.commit()
+            return cur.rowcount
 
     def players_needing_fetch(self, kind: str) -> list[str]:
         """Universe players with no successful fetch of ``kind`` yet.

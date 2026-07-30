@@ -186,6 +186,32 @@ def test_sweep_is_resumable(tmp_path):
     assert stats.skipped == 1
 
 
+def test_force_refetch_performance_refetches_completed_players(tmp_path):
+    """The one-off escape hatch for the is_home/opponent_team_id fix: a
+    player already marked complete must be re-fetched when the flag is set,
+    and MV resumability must be untouched by it."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0)
+    client.get_competition_player_performance.reset_mock()
+    client.get_player_market_value_history_v2.reset_mock()
+
+    stats = run_sweep(
+        client,
+        corpus,
+        league_id=LEAGUE_ID,
+        throttle_seconds=0,
+        force_refetch_performance=True,
+    )
+
+    assert client.get_competition_player_performance.call_count == 1
+    assert stats.performance_fetched == 1
+    # MV resumability must be untouched -- the second run must not refetch it.
+    assert client.get_player_market_value_history_v2.call_count == 0
+    assert stats.mv_fetched == 0
+
+
 def test_sweep_survives_per_player_failure(tmp_path):
     """One bad player must not abort a 450-player sweep."""
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")

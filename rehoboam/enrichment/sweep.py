@@ -128,6 +128,7 @@ def run_sweep(
     limit: int | None = None,
     timeframe_days: int = DEFAULT_TIMEFRAME_DAYS,
     extra_player_ids: list[str] | None = None,
+    force_refetch_performance: bool = False,
 ) -> SweepStats:
     """Populate the training corpus for every player in the league.
 
@@ -151,6 +152,15 @@ def run_sweep(
     on the next run (``TrainingCorpus.players_missing_position`` drives
     that: an id only drops off once it has a real position). See
     ``rehoboam.enrichment.historical_ids`` for where the ids come from.
+
+    ``force_refetch_performance`` clears every player's
+    ``performance_fetched_at`` (via ``TrainingCorpus.clear_performance_fetched``)
+    before computing the pending-performance list, so a rerun re-fetches
+    performance for players ``sweep_progress`` already marks complete —
+    needed after a bug fix in how performance rows are parsed, since a plain
+    rerun would otherwise skip everyone. Scoped to performance only: MV-series
+    resumability (``mv_fetched_at``) is untouched, and this never fires
+    silently — it is opt-in per call, never the default.
     """
     stats = SweepStats()
 
@@ -215,6 +225,10 @@ def run_sweep(
         )
 
     team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
+
+    if force_refetch_performance:
+        cleared = corpus.clear_performance_fetched()
+        logger.info("Forced re-fetch: cleared performance_fetched_at for %d players", cleared)
 
     pending_perf = corpus.players_needing_fetch("performance")
     pending_mv = corpus.players_needing_fetch("mv")

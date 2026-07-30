@@ -416,6 +416,17 @@ def enrich_corpus(
             "matchdays, since /lineup/selection only sees current players."
         ),
     ),
+    refetch_performance: bool = typer.Option(
+        False,
+        "--refetch-performance",
+        help=(
+            "Force re-fetch of performance history for every player already "
+            "marked complete (clears performance_fetched_at only — MV-series "
+            "resumability is untouched). Needed once after a bug fix in how "
+            "performance rows are parsed; a plain rerun would otherwise skip "
+            "everyone via sweep_progress. Not the default — opt in per run."
+        ),
+    ),
 ):
     """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
 
@@ -435,6 +446,11 @@ def enrich_corpus(
     where those ids come from and ``sweep.run_sweep`` for how position gets
     resolved (an id only keeps ``position IS NULL`` if that lookup itself
     genuinely fails).
+
+    ``--refetch-performance`` is a one-off escape hatch: normally
+    ``sweep_progress`` makes reruns skip players already fetched, which is
+    exactly what you don't want after a parsing bug is fixed and the stored
+    rows need to be regenerated from scratch.
     """
     from .bid_learner import BidLearner
     from .enrichment.corpus import TrainingCorpus
@@ -465,6 +481,7 @@ def enrich_corpus(
         throttle_seconds=throttle,
         limit=limit or None,
         extra_player_ids=extra_player_ids,
+        force_refetch_performance=refetch_performance,
     )
 
     table = Table(title="Corpus enrichment summary")
