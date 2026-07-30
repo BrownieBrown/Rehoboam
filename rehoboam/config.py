@@ -90,8 +90,10 @@ class Settings(BaseSettings):
     min_squad_size: int = Field(
         default=13,
         description=(
-            "Sell floor only — never sell down below this many players. Set to "
-            "11 (a full lineup) + 2 injury cover, which also leaves exactly 2 "
+            "NOT YET ENFORCED — sell floor only, and nothing currently reads "
+            "this to stop a sell (SquadOptimizer assigns it and never checks "
+            "it; wiring an actual sell-side guard is week-4 work). Set to 11 "
+            "(a full lineup) + 2 injury cover, which also leaves exactly 2 "
             "open bid slots under Kickbase's 15-player cap. Does NOT drive "
             "emergency-buy triggering: comparing raw headcount to a floor above "
             "11 flags perfectly fieldable 11-12 player squads as emergencies "

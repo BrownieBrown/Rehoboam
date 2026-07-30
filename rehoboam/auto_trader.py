@@ -1391,6 +1391,12 @@ class AutoTrader:
         squad = self.api.get_squad(league)
         player_values = {p.id: float(p.average_points or 0) for p in squad}
 
+        # NOTE: hardcoded 11 here vs. self.settings.min_squad_size (13) in
+        # trader.py:753 — two different values for the same setting, on the
+        # same SquadOptimizer.min_squad_size that nothing currently reads
+        # (see config.py's min_squad_size docstring). Harmless today because
+        # it's inert either way; week 4 (wiring an actual sell-floor guard)
+        # is where this needs to be reconciled, not rewired here.
         optimizer = SquadOptimizer(min_squad_size=11, max_squad_size=15)
         optimizer.display_optimization(optimization, player_values=player_values)
 

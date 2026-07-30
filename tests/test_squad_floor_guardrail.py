@@ -1,7 +1,10 @@
 """Guardrail regression tests for the 2025/26 10-man lineup failures.
 
 Matchdays 6, 17 and 21 fielded only 10 players, costing -100 points each.
-Root cause: min_squad_size defaulted to 10, which cannot fill 11 slots.
+Root cause: an unfieldable position shape (enough bodies, wrong positions) —
+not squad headcount. `min_squad_size` never enforced a sell floor and could
+not have caused these matchdays; see spec §1.4 for the corrected diagnosis.
+The actual fix is `formation.can_fill_starting_eleven`, exercised below.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ def _player(pid: str, position: str) -> Player:
 
 
 def test_squad_floor_can_fill_eleven_slots():
-    """The 2025/26 bug in one assertion: the floor must exceed the 11 a
-    lineup needs, with room for injury cover."""
+    """Pins the chosen floor value, not a causal claim about the 10-man
+    lineups (see the module docstring / spec §1.4 — this setting is not
+    enforced anywhere and could not have caused them). 13 = 11 a lineup
+    needs + 2 injury cover, chosen to also leave headroom for open bids."""
     assert Settings().min_squad_size >= 13
 
 
