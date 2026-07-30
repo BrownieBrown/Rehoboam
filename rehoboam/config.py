@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     )
 
     # KICKBASE Credentials
-    kickbase_email: str = Field(..., description="KICKBASE account email")
-    kickbase_password: str = Field(..., description="KICKBASE account password")
+    kickbase_email: str = Field(..., repr=False, description="KICKBASE account email")
+    kickbase_password: str = Field(..., repr=False, description="KICKBASE account password")
 
     # Trading Configuration
     min_sell_profit_pct: float = Field(
