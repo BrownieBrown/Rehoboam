@@ -313,6 +313,54 @@ def test_extra_player_ids_unresolvable_position_stays_null_and_is_counted(tmp_pa
     assert row == (None,)
 
 
+def test_extra_player_ids_response_missing_pos_stays_null_and_is_counted(tmp_path):
+    """A 200 response that simply omits `pos` is a different failure mode
+    than an exception — more likely in practice than an outright error — and
+    must be handled the same way: NULL, counted, not guessed."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+    client.get_competition_player_details.return_value = {
+        "fn": "Joel",
+        "ln": "Agyekum",
+        "tid": "6",
+        # no "pos" key at all
+    }
+
+    stats = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+
+    assert stats.positions_resolved == 0
+    assert stats.positions_unresolved == 1
+    with sqlite3.connect(corpus.db_path) as conn:
+        row = conn.execute("SELECT position FROM player_universe WHERE player_id = '99'").fetchone()
+    assert row == (None,)
+
+
+def test_extra_player_ids_response_with_unmapped_pos_code_stays_null_and_is_counted(tmp_path):
+    """A `pos` value outside the known 1-4 range (e.g. a new/unknown code)
+    must not be silently accepted — `_POSITIONS.get` returns None for it,
+    same treatment as a missing `pos`."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+    client.get_competition_player_details.return_value = {
+        "fn": "Joel",
+        "ln": "Agyekum",
+        "pos": 9,  # not in {1, 2, 3, 4}
+        "tid": "6",
+    }
+
+    stats = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, extra_player_ids=["99"]
+    )
+
+    assert stats.positions_resolved == 0
+    assert stats.positions_unresolved == 1
+    with sqlite3.connect(corpus.db_path) as conn:
+        row = conn.execute("SELECT position FROM player_universe WHERE player_id = '99'").fetchone()
+    assert row == (None,)
+
+
 def test_extra_player_ids_failed_position_lookup_is_retried_on_rerun(tmp_path):
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
     client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])

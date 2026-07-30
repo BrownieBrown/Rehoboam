@@ -429,9 +429,12 @@ def enrich_corpus(
       3. rehoboam enrich-corpus                    # the full sweep
 
     ``--include-historical`` additionally recovers departed players so a
-    backtest replaying a past season has a full squad to reconstruct — see
-    ``rehoboam.enrichment.historical_ids`` for where those ids come from and
-    why their position stays unset.
+    backtest replaying a past season has a full squad to reconstruct, and
+    resolves their position/name/team via a competition-scoped endpoint that
+    works for any player id — see ``rehoboam.enrichment.historical_ids`` for
+    where those ids come from and ``sweep.run_sweep`` for how position gets
+    resolved (an id only keeps ``position IS NULL`` if that lookup itself
+    genuinely fails).
     """
     from .bid_learner import BidLearner
     from .enrichment.corpus import TrainingCorpus
