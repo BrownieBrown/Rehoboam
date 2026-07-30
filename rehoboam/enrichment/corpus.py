@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS player_match_history (
     team_id          TEXT,
     opponent_team_id TEXT,
     is_home          INTEGER NOT NULL DEFAULT 0,
+    -- Availability label from the performance payload's per-match `st` field
+    -- (1=not in squad, 3=came on as sub, 4=unused sub, 5=started; 0 for
+    -- unplayed future fixtures; NULL when the payload omits it entirely).
+    -- Named `status`, NOT `st` -- `st` already means something completely
+    -- different elsewhere in this codebase: the *live* injury-status field
+    -- returned by get_player_details (kickbase_client.py, matchup_analyzer.py,
+    -- scorer.py). Do not conflate the two.
+    status           INTEGER,
     PRIMARY KEY (player_id, season, day_number)
 );
 
@@ -70,7 +78,24 @@ class TrainingCorpus:
         self.db_path = db_path
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
             conn.commit()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Additive migrations for databases created before a column existed.
+
+        ``CREATE TABLE IF NOT EXISTS`` in ``_SCHEMA`` only helps a brand-new
+        database -- an existing ``player_match_history`` table (75,890 rows in
+        prod as of REH-52) keeps whatever columns it had when it was first
+        created, so a column added to ``_SCHEMA`` later needs an explicit
+        ``ALTER TABLE`` here too. Guarded by a ``PRAGMA table_info`` check so
+        it is a no-op both for a fresh DB (which already has the column via
+        ``CREATE TABLE``) and for a DB that has already been migrated.
+        """
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(player_match_history)")}
+        if "status" not in columns:
+            conn.execute("ALTER TABLE player_match_history ADD COLUMN status INTEGER")
 
     def upsert_players(self, players: list[dict[str, Any]]) -> int:
         """Insert or update universe rows. Returns rows written."""
@@ -210,6 +235,16 @@ class TrainingCorpus:
         otherwise mislabel home/away and record the player's own former team
         as the opponent. ``team_id`` is only a fallback for the rare match
         entry that omits ``pt``.
+
+        Each match also carries an ``st`` field, stored as ``status`` (see
+        the column comment in ``_SCHEMA`` for why it isn't named ``st``
+        here). Deliberately NOT stored: ``ap``, ``tp``, ``asp``. They look
+        like point-in-time per-match aggregates but are not — ``tp`` was
+        verified live to be constant across an entire season (362 on every
+        matchday for a sampled player), i.e. a season-end total stamped onto
+        every row. Storing it would leak the season outcome into training
+        rows for matchdays that hadn't happened yet. Do not re-add these
+        three without re-verifying that finding.
         """
         rows: list[tuple] = []
         fallback_team = str(team_id) if team_id is not None else None
@@ -228,6 +263,8 @@ class TrainingCorpus:
                 team = str(pt) if pt is not None else fallback_team
                 is_home = 1 if team is not None and team == t1 else 0
                 opponent = t2 if is_home else t1
+                st = m.get("st")
+                status = int(st) if st is not None else None
                 rows.append(
                     (
                         str(player_id),
@@ -239,6 +276,7 @@ class TrainingCorpus:
                         team,
                         opponent,
                         is_home,
+                        status,
                     )
                 )
 
@@ -250,8 +288,8 @@ class TrainingCorpus:
                 """
                 INSERT OR REPLACE INTO player_match_history (
                     player_id, season, day_number, match_date, points,
-                    minutes, team_id, opponent_team_id, is_home
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    minutes, team_id, opponent_team_id, is_home, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -364,7 +402,7 @@ class TrainingCorpus:
             rows = conn.execute(
                 """
                 SELECT season, day_number, match_date, points, minutes,
-                       team_id, opponent_team_id, is_home
+                       team_id, opponent_team_id, is_home, status
                 FROM player_match_history
                 WHERE player_id = ?
                 ORDER BY season, day_number
