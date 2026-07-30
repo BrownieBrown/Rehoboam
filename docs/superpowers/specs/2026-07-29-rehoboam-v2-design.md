@@ -390,8 +390,17 @@ hindsight-optimal eleven, never what the ranker actually picks:
 
 | assumed squad cap          | 12    | 13    | 14    | 15 (CLI default) | 16    | uncapped |
 | -------------------------- | ----- | ----- | ----- | ---------------- | ----- | -------- |
-| mean regret (pts/matchday) | 43.5  | 61.7  | 78.0  | 87.0             | 91.7  | 97.1     |
-| points captured            | 95.0% | 93.0% | 91.3% | 90.4%            | 89.9% | 89.4%    |
+| mean regret (pts/matchday) | 46.1  | 70.3  | 78.0  | 87.0             | 91.7  | 97.1     |
+| points captured            | 94.7% | 92.1% | 91.3% | 90.4%            | 89.9% | 89.4%    |
+
+Every cell above reproduces via `rehoboam backtest-baseline --max-squad-size N`
+against the committed corpus. The cap-12 and cap-13 cells were initially
+published as 43.5/95.0% and 61.7/93.0%, computed with an ad-hoc capping
+implementation that ordered bench players differently from the shipped driver;
+at caps 14 and above the two orderings agree, which is why only the two
+tightest caps diverged. Corrected to the reproducible values — a sensitivity
+table exists to establish precision, so cells that do not reproduce with the
+committed tool defeat its purpose.
 
 `total_chosen_points` is identical (17,939) at caps 15, 16 and uncapped, while
 `total_best_points` keeps climbing — confirming the inflation is one-sided. A second,
