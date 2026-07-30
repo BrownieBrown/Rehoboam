@@ -5,6 +5,7 @@ All scoring logic is encapsulated here; callers only need to pass data in
 and read the result back out.
 """
 
+from rehoboam.match_parsing import parse_minutes as _parse_minutes
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
 
 # ---------------------------------------------------------------------------
@@ -33,32 +34,6 @@ _DEFAULT_FORM: tuple[float, float] = (10.0, 5.0)
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _parse_minutes(mp) -> int:
-    """Parse Kickbase ``mp`` minutes-played values (e.g. ``"13'"``) to int.
-
-    Kickbase ships minutes as a string with a trailing apostrophe.
-    Extra-time matches arrive as ``"90+5'"`` per common football
-    convention (regulation + stoppage); both components are summed so
-    a 95-minute appearance counts as 95, not 0. Anything else (None,
-    empty string, future matches without minutes, truly malformed
-    entries) degrades silently to 0 — a single odd entry must not
-    poison the whole player score.
-    """
-    if not mp:
-        return 0
-    s = str(mp).rstrip("'")
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    if "+" in s:
-        try:
-            return sum(int(part) for part in s.split("+"))
-        except ValueError:
-            return 0
-    return 0
 
 
 def _extract_consistency(performance: dict) -> tuple[int, float | None, str | None]:

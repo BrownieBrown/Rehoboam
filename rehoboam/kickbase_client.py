@@ -676,6 +676,129 @@ class KickbaseV4Client:
                 f"Failed to fetch competition players: {response.status_code} - {response.text}"
             )
 
+    def get_competition_player_details(
+        self, player_id: str, competition_id: str = "1"
+    ) -> dict[str, Any]:
+        """
+        Get full player details for any player in the competition, including
+        one no longer registered in our league
+        GET /v4/competitions/{competition_id}/players/{player_id}
+
+        Competition-scoped, so unlike the league-scoped ``get_player_details``
+        this resolves players who have since transferred out of the league —
+        the v2 training corpus uses it to backfill position/name/team for
+        departed players recovered from the learning DB, since neither
+        ``get_competition_player_performance`` nor
+        ``get_player_market_value_history_v2`` carries a position field at
+        all (checked directly against both live responses, 2026-07-29).
+
+        Returns:
+            dict with (among others) ``i`` (id), ``fn``/``ln`` (first/last
+            name), ``tid`` (team id), ``pos`` (position code: 1=Goalkeeper,
+            2=Defender, 3=Midfielder, 4=Forward), ``mv`` (market value).
+            ``ap`` (average points) is present only for players with senior
+            appearances — omitted, not zero, otherwise.
+
+        Raises:
+            Exception on any non-200. A nonexistent player id returns HTTP
+            500 with ``{"err": 2, "errMsg": "NotFound", ...}``, not 404 —
+            verified by live probe (2026-07-29).
+        """
+        url = f"{self.BASE_URL}/v4/competitions/{competition_id}/players/{player_id}"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch competition player details: "
+                f"{response.status_code} - {response.text}"
+            )
+
+    def get_competition_player_performance(
+        self, player_id: str, competition_id: str = "1"
+    ) -> dict[str, Any]:
+        """
+        Get per-match performance history for any player in the competition
+        GET /v4/competitions/{competition_id}/players/{player_id}/performance
+
+        Competition-scoped twin of ``get_player_performance``. Needed by the
+        v2 training corpus, which sweeps the whole league rather than only
+        players in our own league view.
+
+        Returns:
+            dict with ``it``: list of seasons, each ``{"ti": title, "ph": [matches]}``
+        """
+        url = f"{self.BASE_URL}/v4/competitions/{competition_id}/players/{player_id}/performance"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch competition player performance: "
+                f"{response.status_code} - {response.text}"
+            )
+
+    def get_competition_table(self, competition_id: str = "1") -> dict[str, Any]:
+        """
+        Get the league table / standings for a competition
+        GET /v4/competitions/{competition_id}/table
+
+        Replaces the homegrown strength-of-schedule rating with real standings.
+        """
+        url = f"{self.BASE_URL}/v4/competitions/{competition_id}/table"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch competition table: {response.status_code} - {response.text}"
+            )
+
+    def get_lineup_selection(
+        self, league_id: str, position: int, start: int = 0, max_items: int = 50
+    ) -> dict[str, Any]:
+        """
+        Browse selectable players by position, paginated
+        GET /v4/leagues/{league_id}/lineup/selection
+
+        The full-universe source for the v2 training corpus: sweeping positions
+        1-4 to exhaustion reaches ~453 distinct players, and items carry ``pi``
+        (id), ``n`` (last name), ``tid``, ``pos``, ``mv`` and ``ap``.
+
+        Two behaviours found by probe (2026-07-29), neither visible in a
+        successful response:
+
+        - ``position`` is REQUIRED. Omit it and the endpoint returns zero items —
+          which reads as an empty endpoint, not a missing parameter.
+        - The server caps the page at 50 items regardless of ``max_items``.
+          Callers MUST advance ``start`` by the number of items actually
+          returned, never by the requested size, or half of every page is
+          silently skipped.
+
+        Args:
+            league_id: League ID
+            position: 1=Goalkeeper, 2=Defender, 3=Midfielder, 4=Forward
+            start: Pagination offset
+            max_items: Requested page size (server caps at 50)
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/lineup/selection"
+        params = {"position": position, "start": start, "max": max_items}
+
+        response = self.session.get(url, params=params)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch lineup selection: {response.status_code} - {response.text}"
+            )
+
     def get_manager_squad(self, league_id: str, manager_id: str) -> dict[str, Any]:
         """
         View a competitor's squad

@@ -65,3 +65,6 @@ web/.env.local
 
 # Bicep compiled ARM templates
 deploy/bicep/**/*.json
+
+# SDD workspace (scratch — git history is the record)
+.superpowers/

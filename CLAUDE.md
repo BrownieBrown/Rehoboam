@@ -57,7 +57,8 @@ The project uses `uv` for dependency management. Install uv (`brew install uv` o
 # Install dependencies (creates .venv automatically; .python-version pins 3.12)
 uv sync --extra dev
 
-# Run the CLI (only login, auto, status, fetch-azure-state, push-azure-state are exposed)
+# Run the CLI (login, auto, status, fetch-azure-state, push-azure-state,
+# backfill-history, backfill-mv-history, enrich-corpus, backtest-baseline are exposed)
 uv run rehoboam --help
 uv run rehoboam login              # Test credentials + list leagues
 uv run rehoboam status             # Read-only: show squad + dry-run what auto would do
@@ -70,6 +71,9 @@ uv run rehoboam fetch-azure-state            # Pull prod SQLite DBs into ./logs/
 uv run rehoboam backfill-history --dry-run   # Preview historical foundation-table backfill (REH-39)
 uv run rehoboam backfill-history             # Replay KICKBASE history → flip_outcomes + matchday_lineup_results + league_rank_history
 uv run rehoboam backfill-mv-history          # Backfill player_mv_history trajectories for all flipped players (REH-40)
+uv run rehoboam enrich-corpus --dry-run      # Preview v2 training-corpus sweep size
+uv run rehoboam enrich-corpus                # League-wide sweep into logs/training_corpus.db (v2 scorer training data)
+uv run rehoboam backtest-baseline            # Reproduce the season-average regret baseline weeks 2-3 must beat
 
 # Code quality
 uv run black rehoboam/                        # Format code
@@ -150,9 +154,9 @@ last resort — it clobbers the Function's writes.
 - Data quality grading (A-F) penalizes unreliable predictions
 - Position calibration multiplier (REH-20) corrects systematic per-position EP bias from accumulated `matchday_outcomes`
 
-**Legacy roster helpers** (`roster_analyzer.py`, `value_calculator.py`):
+**Legacy roster helper** (`value_calculator.py`):
 
-- `RosterAnalyzer`: Roster-aware buy context (gap-fill vs upgrade detection) via `value_calculator.PlayerValue`. Currently used by some display paths; not part of the EP decision pipeline.
+- `PlayerValue`: A handful of static extraction helpers (games/consistency, minutes trend) still called directly by `expected_points.py`. `roster_analyzer.py`, the module that used to wrap this into gap-fill/upgrade buy context, was deleted as dead code (no reachable imports from the CLI or Azure Function entrypoints); not part of the EP decision pipeline.
 
 **Learning System** (`bid_learner.py`, `learning/tracker.py`, `activity_feed_learner.py`):
 
@@ -162,8 +166,14 @@ last resort — it clobbers the Function's writes.
 
 **CLI** (`cli.py`):
 
-- Typer-based CLI with three commands: `login`, `auto`, `status`. Global `--verbose`/`-v` flag toggles DEBUG-level console logging (the rotating file handler at `logs/rehoboam.log` is always DEBUG).
+- Typer-based CLI: `login`, `auto`, `status`, `fetch-azure-state`, `push-azure-state`, `backfill-history`, `backfill-mv-history`, `enrich-corpus`, `backtest-baseline`. Global `--verbose`/`-v` flag toggles DEBUG-level console logging (the rotating file handler at `logs/rehoboam.log` is always DEBUG).
 - Rich console output for formatted tables and status.
+
+**Training corpus + backtest harness** (`enrichment/`, `backtest/`) — week 1 of the v2 rebuild (`docs/superpowers/specs/2026-07-29-rehoboam-v2-design.md`):
+
+- `enrichment/corpus.py`'s `TrainingCorpus`: durable, non-expiring SQLite store — `player_universe`, `player_match_history`, `mv_series`, `sweep_progress` — deliberately separate from `value_history.py`'s 6h-TTL `performance_cache`. Lives at `logs/training_corpus.db`, deliberately **not** synced to Azure Blob (absent from `azure_blob.DB_FILES`) — it's training data, not bot operating state.
+- `enrichment/sweep.py`'s `run_sweep`: resumable, throttled, league-wide sweep (`rehoboam enrich-corpus`) — tolerant of per-player failure, `sweep_progress` tracks per-player completion so a rerun only retries what's missing. `--refetch-performance` forces a one-off re-fetch of already-complete players (e.g. after a parsing bug fix) without touching MV-series resumability.
+- `backtest/`: a *tuning* instrument, not a verdict — `harness.run_backtest` replays matchday-by-matchday using only pre-matchday data (`snapshot.matches_before`, leakage-tested), scoring via `metrics.spearman` + `metrics.lineup_regret` against `baselines.season_average_baseline` (the model weeks 2-3 must beat). `squad_reconstruction.squad_on_matchday` rebuilds squad membership from flip hold-windows ∪ fielded lineups — medium fidelity, see spec §6.1 for the sensitivity caveats. `baseline_driver.run_baseline` is the committed composition behind `rehoboam backtest-baseline`.
 
 ### Roster-Aware Recommendations
 

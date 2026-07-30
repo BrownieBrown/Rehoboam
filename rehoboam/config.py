@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     )
 
     # KICKBASE Credentials
-    kickbase_email: str = Field(..., description="KICKBASE account email")
-    kickbase_password: str = Field(..., description="KICKBASE account password")
+    kickbase_email: str = Field(..., repr=False, description="KICKBASE account email")
+    kickbase_password: str = Field(..., repr=False, description="KICKBASE account password")
 
     # Trading Configuration
     min_sell_profit_pct: float = Field(
@@ -88,8 +88,19 @@ class Settings(BaseSettings):
 
     # Squad Management Safeguards
     min_squad_size: int = Field(
-        default=10,
-        description="Minimum squad size to maintain on match day (enforced only within 2 days of next match)",
+        default=13,
+        description=(
+            "NOT YET ENFORCED — sell floor only, and nothing currently reads "
+            "this to stop a sell (SquadOptimizer assigns it and never checks "
+            "it; wiring an actual sell-side guard is week-4 work). Set to 11 "
+            "(a full lineup) + 2 injury cover, which also leaves exactly 2 "
+            "open bid slots under Kickbase's 15-player cap. Does NOT drive "
+            "emergency-buy triggering: comparing raw headcount to a floor above "
+            "11 flags perfectly fieldable 11-12 player squads as emergencies "
+            "(fired on 93% of last season's sessions once tried). The emergency "
+            "trigger is a separate, position-aware fieldability check — see "
+            "formation.can_fill_starting_eleven — decoupled from this value."
+        ),
     )
     min_upgrade_value_score_diff: float = Field(
         default=15.0,

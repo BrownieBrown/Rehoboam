@@ -70,6 +70,24 @@ def _compute_flip_budget(
     return current_budget + max_debt - pending_bid_total
 
 
+SQUAD_CAP = 15  # Kickbase's hard squad-size limit, including open (unresolved) bids
+
+
+def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUAD_CAP) -> int:
+    """Slots left under Kickbase's squad cap, counting open bids as committed.
+
+    Kickbase counts pending offers toward the 15-player cap before they even
+    resolve — a squad at 13 with 2 open bids has zero room for a further
+    bid, not two (``len(squad)`` alone would wrongly say two). Positive
+    means room for another bid; zero or negative means none.
+
+    Shared by session-context logging and the trade-phase buy gate so both
+    agree on the same number — a duplicated ad-hoc ``15 - size - bids``
+    calculation in two places is exactly how this kind of drift happens.
+    """
+    return cap - squad_size - open_bid_count
+
+
 @dataclass
 class EPSessionContext:
     """Single-fetch context for the entire auto session."""
@@ -203,12 +221,15 @@ class AutoTrader:
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
         flip_budget = _compute_flip_budget(phase.phase, current_budget, pending_bid_total, max_debt)
 
+        # Kickbase counts open bids toward the 15-player cap, so the
+        # committed headcount is squad + pending bids, not squad alone.
+        committed = len(squad) + len(my_bids)
         logger.info(
             "session-context phase=%s days_to_match=%s squad=%d/15 "
             "budget=%d team_value=%d flip_budget=%d pending_bids=%d",
             phase.phase,
             phase.days_until_match,
-            len(squad),
+            committed,
             int(current_budget),
             int(team_value),
             flip_budget,
@@ -302,7 +323,7 @@ class AutoTrader:
         fresh_team_info = self.api.get_team_info(league)
         current_squad_size = len(fresh_squad)
         active_bid_count = len(fresh_bids)
-        available_slots = 15 - current_squad_size - active_bid_count
+        available_slots = _available_squad_slots(current_squad_size, active_bid_count)
         ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
         ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
@@ -502,7 +523,9 @@ class AutoTrader:
                         fresh_bids = self.api.get_my_bids(league)
                         current_squad_size = len(fresh)
                         active_bid_count = len(fresh_bids)
-                        available_slots = 15 - current_squad_size - active_bid_count
+                        available_slots = _available_squad_slots(
+                            current_squad_size, active_bid_count
+                        )
                     except Exception:
                         available_slots += 1  # Fallback: optimistic increment
 
@@ -1368,6 +1391,12 @@ class AutoTrader:
         squad = self.api.get_squad(league)
         player_values = {p.id: float(p.average_points or 0) for p in squad}
 
+        # NOTE: hardcoded 11 here vs. self.settings.min_squad_size (13) in
+        # trader.py:753 — two different values for the same setting, on the
+        # same SquadOptimizer.min_squad_size that nothing currently reads
+        # (see config.py's min_squad_size docstring). Harmless today because
+        # it's inert either way; week 4 (wiring an actual sell-floor guard)
+        # is where this needs to be reconciled, not rewired here.
         optimizer = SquadOptimizer(min_squad_size=11, max_squad_size=15)
         optimizer.display_optimization(optimization, player_values=player_values)
 

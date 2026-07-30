@@ -22,12 +22,45 @@ from rich.console import Console
 from .api import KickbaseAPI
 from .bidding_strategy import SmartBidding
 from .config import Settings
+from .formation import can_fill_starting_eleven
 from .kickbase_client import League
 from .matchup_analyzer import MatchupAnalyzer
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
 
 console = Console()
+
+
+def _determine_emergency(squad: list) -> tuple[bool, str]:
+    """Is the squad in a lineup emergency? Position-aware, not headcount-based.
+
+    Emergency means "cannot field a legal starting 11 from the available
+    squad" — too few players overall, or too few at some position (e.g. 0
+    forwards = an empty slot = -100 pts). This is deliberately NOT a
+    comparison against ``Settings.min_squad_size``: that value is a sell
+    floor (never sell below 13), and a raw-headcount emergency trigger
+    ("squad_size < floor") fires on any squad below the floor regardless of
+    whether it can actually field eleven — which, against last season's real
+    session data, meant 93% of sessions (squad at 11 or 12, the normal
+    range) would have tripped the "buy almost anything" emergency path.
+    ``can_fill_starting_eleven`` asks the real question directly.
+
+    Availability caveat: ``squad`` here is whatever the caller passes in —
+    typically straight from ``api.get_squad()``, whose ``Player`` objects
+    carry no injury/availability status field (only ``MarketPlayer`` has
+    ``status``, populated from a different endpoint). So this only catches
+    headcount and position-shape emergencies (too few total, or too few at a
+    position) — not "12 well-shaped players, one of them injured". Real
+    availability filtering needs per-player status/lineup data that isn't
+    fetched this early in the pipeline; that arrives with the week-2 scorer.
+
+    Returns:
+        ``(is_emergency, reason)`` — reason is empty when not an emergency.
+    """
+    fieldability = can_fill_starting_eleven(squad)
+    if fieldability["ok"]:
+        return False, ""
+    return True, fieldability["reason"]
 
 
 class Trader:
@@ -94,7 +127,6 @@ class Trader:
             budget, squad_size, squad_players, market_players,
             competitor_player_ids
         """
-        from .config import POSITION_MINIMUMS
         from .scoring.collector import DataCollector
         from .scoring.decision import DecisionEngine
         from .scoring.scorer import score_player
@@ -103,24 +135,11 @@ class Trader:
         squad = self.api.get_squad(league)
         squad_size = len(squad)
 
-        # Emergency mode — triggered when squad size is too low OR formation
-        # is broken (e.g., 0 forwards = -100 pts every matchday from empty slot).
-        position_counts: dict[str, int] = {}
-        for p in squad:
-            position_counts[p.position] = position_counts.get(p.position, 0) + 1
-        formation_broken = any(
-            position_counts.get(pos, 0) < minimum for pos, minimum in POSITION_MINIMUMS.items()
-        )
-        is_emergency = squad_size < self.settings.min_squad_size or formation_broken
-        if formation_broken:
-            missing = [
-                f"{pos} ({position_counts.get(pos, 0)}/{minimum})"
-                for pos, minimum in POSITION_MINIMUMS.items()
-                if position_counts.get(pos, 0) < minimum
-            ]
-            console.print(
-                f"[bold red]⚠ FORMATION EMERGENCY — missing: {', '.join(missing)}[/bold red]"
-            )
+        # Emergency mode — see _determine_emergency for why this is a
+        # position-aware fieldability check, not a headcount comparison.
+        is_emergency, emergency_reason = _determine_emergency(squad)
+        if is_emergency:
+            console.print(f"[bold red]⚠ FORMATION EMERGENCY — {emergency_reason}[/bold red]")
 
         market_players_list = self.api.get_market(league)
         kickbase_market = [p for p in market_players_list if p.is_kickbase_seller()]

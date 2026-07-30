@@ -396,6 +396,109 @@ def backfill_mv_history(
         )
 
 
+@app.command("enrich-corpus")
+def enrich_corpus(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Fetch the universe only; write no per-player history"
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        help="Cap players processed this run (0 = no cap). Useful for a smoke run.",
+    ),
+    throttle: float = typer.Option(0.25, "--throttle", help="Seconds to sleep between API calls"),
+    include_historical: bool = typer.Option(
+        False,
+        "--include-historical",
+        help=(
+            "Also recover players who left the league since last season "
+            "(read from logs/bid_learning.db) — needed for backtesting past "
+            "matchdays, since /lineup/selection only sees current players."
+        ),
+    ),
+    refetch_performance: bool = typer.Option(
+        False,
+        "--refetch-performance",
+        help=(
+            "Force re-fetch of performance history for every player already "
+            "marked complete (clears performance_fetched_at only — MV-series "
+            "resumability is untouched). Needed once after a bug fix in how "
+            "performance rows are parsed; a plain rerun would otherwise skip "
+            "everyone via sweep_progress. Not the default — opt in per run."
+        ),
+    ),
+):
+    """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
+
+    Long-running and API-bound — thousands of requests. Safe to interrupt and
+    rerun: progress is tracked per player, so a rerun resumes rather than
+    restarting.
+
+    Typical first run:
+      1. rehoboam enrich-corpus --dry-run          # how many players?
+      2. rehoboam enrich-corpus --limit 20         # smoke-test the shapes
+      3. rehoboam enrich-corpus                    # the full sweep
+
+    ``--include-historical`` additionally recovers departed players so a
+    backtest replaying a past season has a full squad to reconstruct, and
+    resolves their position/name/team via a competition-scoped endpoint that
+    works for any player id — see ``rehoboam.enrichment.historical_ids`` for
+    where those ids come from and ``sweep.run_sweep`` for how position gets
+    resolved (an id only keeps ``position IS NULL`` if that lookup itself
+    genuinely fails).
+
+    ``--refetch-performance`` is a one-off escape hatch: normally
+    ``sweep_progress`` makes reruns skip players already fetched, which is
+    exactly what you don't want after a parsing bug is fixed and the stored
+    rows need to be regenerated from scratch.
+    """
+    from .bid_learner import BidLearner
+    from .enrichment.corpus import TrainingCorpus
+    from .enrichment.historical_ids import gather_historical_player_ids
+    from .enrichment.sweep import run_sweep
+
+    # The universe endpoint is league-scoped, so we need a league. Reuse the
+    # existing helper rather than re-deriving it — it already handles login,
+    # league listing and the not-found error path. It returns a 3-tuple
+    # (api, settings, league); `settings` is unused here.
+    api, _settings, league = _login_and_get_league(0)
+
+    extra_player_ids = None
+    if include_historical:
+        learner_db_path = BidLearner().db_path
+        extra_player_ids = gather_historical_player_ids(learner_db_path)
+        console.print(
+            f"[dim]Recovered {len(extra_player_ids)} historical player ids from "
+            f"{learner_db_path}[/dim]"
+        )
+
+    corpus = TrainingCorpus()
+    stats = run_sweep(
+        api.client,
+        corpus,
+        league_id=league.id,
+        dry_run=dry_run,
+        throttle_seconds=throttle,
+        limit=limit or None,
+        extra_player_ids=extra_player_ids,
+        force_refetch_performance=refetch_performance,
+    )
+
+    table = Table(title="Corpus enrichment summary")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    table.add_row("Universe size", str(stats.universe_size))
+    table.add_row("Performance fetched", str(stats.performance_fetched))
+    table.add_row("MV series fetched", str(stats.mv_fetched))
+    table.add_row("Skipped (already done)", str(stats.skipped))
+    table.add_row("Failed", str(stats.failed))
+    if include_historical:
+        table.add_row("Historical positions resolved", str(stats.positions_resolved))
+        table.add_row("Historical positions unresolved", str(stats.positions_unresolved))
+    console.print(table)
+    console.print(f"[dim]Corpus: {corpus.db_path}[/dim]")
+
+
 @app.command("backfill-history")
 def backfill_history(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
@@ -482,6 +585,71 @@ def backfill_history(
             "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
             "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
         )
+
+
+@app.command("backtest-baseline")
+def backtest_baseline(
+    season: str = typer.Option("2025/2026", "--season", help="Season to replay, e.g. 2025/2026."),
+    max_squad_size: int = typer.Option(
+        15,
+        "--max-squad-size",
+        help=(
+            "Cap each reconstructed squad at this size — fielded eleven kept "
+            "first, then the most-recently-bought remainder. Pass 0 for "
+            "uncapped (the original, upward-biased headline figure)."
+        ),
+    ),
+    learner_db: Path = typer.Option(
+        Path("logs") / "bid_learning.db",
+        "--learner-db",
+        help="Path to bid_learning.db (matchday_lineup_results + flip_outcomes).",
+    ),
+    corpus_db: Path = typer.Option(
+        Path("logs") / "training_corpus.db",
+        "--corpus-db",
+        help="Path to training_corpus.db (player_match_history + player_universe).",
+    ),
+):
+    """Reproduce the season-average baseline regret measurement (week 1 headline number).
+
+    Read-only, no API calls and no login: replays ``matchday_lineup_results``
+    and ``flip_outcomes`` from the learning DB against ``player_match_history``
+    and ``player_universe`` in the training corpus, and reports how a naive
+    season-average lineup picker performs against the hindsight-optimal
+    eleven. This is the bar weeks 2-3 must beat with the real scorer, on an
+    identical fixture set — see
+    docs/superpowers/specs/2026-07-29-rehoboam-v2-design.md §6 for why the
+    uncapped figure is reported as an upper bound rather than a point
+    estimate.
+    """
+    from .backtest.baseline_driver import run_baseline
+
+    cap = None if max_squad_size <= 0 else max_squad_size
+    report, stats = run_baseline(
+        learner_db_path=learner_db,
+        corpus_db_path=corpus_db,
+        season=season,
+        max_squad_size=cap,
+    )
+
+    console.print(f"[bold cyan]Backtest baseline — {season}[/bold cyan]")
+    console.print(
+        f"Matchdays: {stats.matchdays_total} total, {stats.matchdays_usable} usable "
+        f"({stats.matchdays_skipped_small_squad} skipped — reconstructed squad "
+        f"below {12} players)\n"
+    )
+
+    table = Table(title=f"season_average_baseline (max_squad_size={max_squad_size or 'uncapped'})")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Mean regret", f"{report.mean_regret:.1f} pts/matchday")
+    table.add_row("Mean rank correlation", f"{report.mean_rank_correlation:+.3f}")
+    if report.total_best_points:
+        captured = 100 * report.total_chosen_points / report.total_best_points
+        table.add_row("Points captured", f"{captured:.1f}%")
+    table.add_row("Total chosen points", f"{report.total_chosen_points:,.0f}")
+    table.add_row("Total best-possible points", f"{report.total_best_points:,.0f}")
+    console.print(table)
 
 
 @app.callback()
