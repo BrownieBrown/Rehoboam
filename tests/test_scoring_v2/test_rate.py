@@ -91,6 +91,20 @@ def test_round_trips_through_dict():
     )
 
 
+def test_round_trips_through_json():
+    import json
+
+    rows = [_row("average", 5, 80)] * 10 + [_row("star", 5, 160)] * 10
+    model = fit_rate(rows, POSITIONS)
+    restored = RateModel.from_dict(json.loads(json.dumps(model.to_dict())))
+    assert restored.predict("star", 5, "Forward") == pytest.approx(
+        model.predict("star", 5, "Forward")
+    )
+    assert restored.predict("unknown", 5, "Forward") == pytest.approx(
+        model.predict("unknown", 5, "Forward")
+    )
+
+
 def test_empty_training_data_predicts_zero():
     model = fit_rate([], {})
     assert model.predict("anyone", 5, "Forward") == 0.0
