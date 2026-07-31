@@ -652,6 +652,86 @@ def backtest_baseline(
     console.print(table)
 
 
+@app.command("fit-scorer")
+def fit_scorer(
+    availability_k: float = typer.Option(
+        20.0, "--availability-k", help="Shrinkage pseudo-count for the transition model"
+    ),
+    rate_k: float = typer.Option(
+        5.0, "--rate-k", help="Shrinkage pseudo-count for per-player quality"
+    ),
+):
+    """Fit the v2 scorer components and write coefficients.json.
+
+    Trains on seasons up to 2024/25 and reports the train/holdout row split
+    against the held-out 2025/26 season. Never fits on the holdout — that
+    season is what the whole rebuild is judged against. Does not score
+    predictions against the holdout; that's REH-56's job.
+    """
+    from .enrichment.corpus import TrainingCorpus
+    from .scoring.v2.availability import fit_availability
+    from .scoring.v2.coefficients import COEFFICIENTS_PATH, save_coefficients
+    from .scoring.v2.dataset import (
+        HOLDOUT_SEASON,
+        TRAIN_MAX_SEASON,
+        load_match_rows,
+        load_positions,
+        split_rows,
+    )
+    from .scoring.v2.features import build_feature_rows
+    from .scoring.v2.rate import fit_rate
+
+    corpus = TrainingCorpus()
+    by_player = load_match_rows(corpus.db_path)
+    positions = load_positions(corpus.db_path)
+
+    all_rows = []
+    for matches in by_player.values():
+        all_rows.extend(build_feature_rows(matches))
+
+    train, holdout = split_rows(all_rows)
+    console.print(
+        f"[cyan]train {len(train):,} rows (≤{TRAIN_MAX_SEASON}) · "
+        f"holdout {len(holdout):,} rows ({HOLDOUT_SEASON})[/cyan]"
+    )
+    if not train:
+        console.print("[red]No training rows — is the corpus populated?[/red]")
+        raise typer.Exit(1)
+
+    availability = fit_availability(train, shrinkage_k=availability_k)
+    rate = fit_rate(train, positions, shrinkage_k=rate_k)
+
+    save_coefficients(
+        availability,
+        rate,
+        {
+            "train_max_season": TRAIN_MAX_SEASON,
+            "holdout_season": HOLDOUT_SEASON,
+            "train_rows": len(train),
+            "availability_k": availability_k,
+            "rate_k": rate_k,
+        },
+    )
+
+    table = Table(title="Availability transitions (fitted)")
+    table.add_column("prev")
+    for s in (1, 3, 4, 5):
+        table.add_column(f"→{s}", justify="right")
+    for prev in (1, 3, 4, 5):
+        probs = availability.predict(prev)
+        table.add_row(str(prev), *(f"{probs[s]:.1%}" for s in (1, 3, 4, 5)))
+    console.print(table)
+
+    rates = Table(title="Base rate by status (real points)")
+    rates.add_column("status")
+    rates.add_column("points", justify="right")
+    for s in (1, 3, 4, 5):
+        rates.add_row(str(s), f"{rate.base_rate.get(s, 0.0):.1f}")
+    console.print(rates)
+
+    console.print(f"[dim]Coefficients: {COEFFICIENTS_PATH}[/dim]")
+
+
 @app.callback()
 def callback(
     verbose: bool = typer.Option(

@@ -66,6 +66,45 @@ def test_record_match_history_parses_minutes_and_home_away(tmp_path):
     assert rows[1]["opponent_team_id"] == "18"
 
 
+def test_record_match_history_populates_status_from_st(tmp_path):
+    """The availability label (REH-52): ``st`` on the payload becomes the
+    ``status`` column, not a column literally named ``st`` -- that name is
+    already taken by the unrelated live injury-status field elsewhere in the
+    codebase (kickbase_client.py, matchup_analyzer.py, scorer.py)."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.upsert_players([{"player_id": "1", "team_id": "3"}])
+
+    perf = _perf(
+        "2025/2026",
+        [
+            {"day": 1, "p": 85, "mp": "90'", "t1": "3", "t2": "4", "st": 5},  # started
+            {"day": 2, "p": 18, "mp": "23'", "t1": "3", "t2": "5", "st": 3},  # came on
+            {"day": 3, "p": 1, "mp": "0'", "t1": "3", "t2": "6", "st": 4},  # unused sub
+            {"day": 4, "p": 0, "mp": "0'", "t1": "3", "t2": "7", "st": 1},  # not in squad
+            {"day": 5, "p": 0, "mp": "0'", "t1": "3", "t2": "8", "st": 0},  # unplayed fixture
+        ],
+    )
+    assert corpus.record_match_history("1", "3", perf) == 5
+
+    rows = {r["day_number"]: r for r in corpus.matches_for_player("1")}
+    assert rows[1]["status"] == 5
+    assert rows[2]["status"] == 3
+    assert rows[3]["status"] == 4
+    assert rows[4]["status"] == 1
+    assert rows[5]["status"] == 0  # 0 is a real value, not a stand-in for NULL
+
+
+def test_record_match_history_leaves_status_null_when_st_absent(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.upsert_players([{"player_id": "1", "team_id": "3"}])
+
+    perf = _perf("2025/2026", [{"day": 1, "p": 50, "mp": "90'", "t1": "3", "t2": "4"}])
+    corpus.record_match_history("1", "3", perf)
+
+    rows = corpus.matches_for_player("1")
+    assert rows[0]["status"] is None
+
+
 def test_record_match_history_uses_pt_for_transferred_player(tmp_path):
     """A player's team changes over a career, but the caller only ever
     passes the team_id it currently holds. Old matches must still resolve
@@ -275,3 +314,107 @@ def test_positions_for_returns_only_resolved_positions(tmp_path):
 def test_positions_for_empty_input_returns_empty_dict(tmp_path):
     corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
     assert corpus.positions_for([]) == {}
+
+
+def test_fresh_db_gets_status_column_from_create_table(tmp_path):
+    """A brand-new DB must have ``status`` from the CREATE TABLE statement
+    itself, with no migration step needed."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+
+    with sqlite3.connect(corpus.db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(player_match_history)")}
+    assert "status" in columns
+
+
+def test_existing_db_without_status_column_is_migrated_preserving_rows(tmp_path):
+    """The one most likely to be got wrong (REH-52): opening a pre-existing
+    corpus DB -- created before ``status`` existed -- must add the column via
+    ALTER TABLE and must not touch, reorder, or drop a single one of its
+    existing rows."""
+    db_path = tmp_path / "corpus.db"
+
+    # Build a DB using the *pre-status* player_match_history shape directly,
+    # bypassing TrainingCorpus entirely so this genuinely models an old file
+    # on disk rather than something the current code already knows how to
+    # produce.
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE player_universe (
+                player_id      TEXT PRIMARY KEY,
+                first_name     TEXT,
+                last_name      TEXT,
+                position       TEXT,
+                team_id        TEXT,
+                market_value   INTEGER,
+                average_points REAL
+            );
+            CREATE TABLE player_match_history (
+                player_id        TEXT NOT NULL,
+                season           TEXT NOT NULL,
+                day_number       INTEGER NOT NULL,
+                match_date       TEXT,
+                points           INTEGER NOT NULL,
+                minutes          INTEGER NOT NULL,
+                team_id          TEXT,
+                opponent_team_id TEXT,
+                is_home          INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, season, day_number)
+            );
+            CREATE TABLE mv_series (
+                player_id    TEXT NOT NULL,
+                snapshot_at  REAL NOT NULL,
+                market_value INTEGER NOT NULL,
+                PRIMARY KEY (player_id, snapshot_at)
+            );
+            CREATE TABLE sweep_progress (
+                player_id             TEXT PRIMARY KEY,
+                performance_fetched_at REAL,
+                mv_fetched_at          REAL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO player_match_history "
+            "(player_id, season, day_number, match_date, points, minutes, "
+            "team_id, opponent_team_id, is_home) VALUES "
+            "('1', '2025/2026', 3, '2026-02-01T00:00:00Z', 42, 90, '3', '4', 1)"
+        )
+        conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        pre_columns = {row[1] for row in conn.execute("PRAGMA table_info(player_match_history)")}
+        pre_count = conn.execute("SELECT COUNT(*) FROM player_match_history").fetchone()[0]
+    assert "status" not in pre_columns
+    assert pre_count == 1
+
+    # Opening this pre-existing file through TrainingCorpus must migrate it
+    # in place.
+    corpus = TrainingCorpus(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        post_columns = {row[1] for row in conn.execute("PRAGMA table_info(player_match_history)")}
+    assert "status" in post_columns
+
+    rows = corpus.matches_for_player("1")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["season"] == "2025/2026"
+    assert row["day_number"] == 3
+    assert row["match_date"] == "2026-02-01T00:00:00Z"
+    assert row["points"] == 42
+    assert row["minutes"] == 90
+    assert row["team_id"] == "3"
+    assert row["opponent_team_id"] == "4"
+    assert row["is_home"] == 1
+    assert row["status"] is None  # pre-existing row has nothing to backfill from
+
+    # And the migration itself must be idempotent -- reopening again (the
+    # normal case on every subsequent run) must not error or duplicate work.
+    corpus_again = TrainingCorpus(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        columns_again = {row[1] for row in conn.execute("PRAGMA table_info(player_match_history)")}
+        count_again = conn.execute("SELECT COUNT(*) FROM player_match_history").fetchone()[0]
+    assert columns_again == post_columns
+    assert count_again == 1
+    assert corpus_again.matches_for_player("1")[0]["points"] == 42
