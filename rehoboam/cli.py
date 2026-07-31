@@ -732,6 +732,84 @@ def fit_scorer(
     console.print(f"[dim]Coefficients: {COEFFICIENTS_PATH}[/dim]")
 
 
+@app.command("derive-thresholds")
+def derive_thresholds(
+    league_index: int = typer.Option(0, "--league", help="League index"),
+):
+    """Measure the v2 marginal-gain distribution and propose decision thresholds.
+
+    The constants in config.py and bidding_strategy.py were calibrated against
+    the old 0-100 EP index. On real points they mean something different, and
+    the old firing rates cannot be recovered (predicted_eps.marginal_ep_gain is
+    NULL on every production row). This measures the real distribution against
+    the current squad and market, and proposes thresholds by rarity.
+
+    Read-only: reports numbers, changes nothing.
+    """
+    from .scoring.decision import DecisionEngine
+    from .scoring.v2.thresholds import build_report
+    from .trader import Trader
+
+    api, settings, league = _login_and_get_league(league_index)
+    trader = Trader(api, settings)
+    result = trader.get_ep_recommendations_with_trends(league)
+
+    # NOTE: `get_ep_recommendations_with_trends` returns a **dict**, not a
+    # dataclass. Verified keys: buy_recs, trade_pairs, sell_recs, squad_scores,
+    # lineup_map, budget, squad_size, squad_players, market_players,
+    # market_scores, competitor_player_ids.
+    #
+    # Do NOT read marginal gains off `buy_recs`: `recommend_buys` returns only
+    # the top-N already filtered and ranked, so its gains sample the good tail
+    # and would push every derived threshold upward. Thresholds must be measured
+    # over ALL market candidates.
+    squad_scores = result["squad_scores"]
+    squad_players = result["squad_players"]  # {player_id: MarketPlayer}
+    market_players = result["market_players"]  # {player_id: MarketPlayer}
+    market_scores = result["market_scores"]  # {player_id: PlayerScore}
+    squad = list(squad_players.values())
+
+    # calculate_marginal_ep doesn't read min_ep_to_buy/min_ep_upgrade (those
+    # only gate recommend_buys/recommend_sells), so defaults are fine here —
+    # DecisionEngine has no `settings` kwarg to pass through.
+    engine = DecisionEngine()
+
+    gains: list[float] = []
+    for pid, player in market_players.items():
+        candidate_score = market_scores.get(pid)
+        if candidate_score is None:
+            continue
+        mep = engine.calculate_marginal_ep(
+            candidate_score=candidate_score,
+            candidate_player=player,
+            squad=squad,
+            squad_scores=squad_scores,
+        )
+        gains.append(mep.marginal_ep_gain)
+
+    report = build_report(gains)
+
+    table = Table(title=f"v2 marginal-gain distribution (n={report.n_candidates} positive)")
+    table.add_column("percentile")
+    table.add_column("marginal EP gain", justify="right")
+    for name, value in report.percentiles.items():
+        table.add_row(name, f"{value:.1f}")
+    console.print(table)
+
+    proposed = Table(title="Proposed tier thresholds (by rarity)")
+    proposed.add_column("tier")
+    proposed.add_column("rarity")
+    proposed.add_column("threshold", justify="right")
+    for name, rarity in (
+        ("must_have", "top 15%"),
+        ("strong_upgrade", "top 30%"),
+        ("solid_upgrade", "top 50%"),
+    ):
+        proposed.add_row(name, rarity, f"{report.proposed[name]:.1f}")
+    console.print(proposed)
+    console.print("[dim]Read-only. Apply these by editing config.py / bidding_strategy.py.[/dim]")
+
+
 @app.callback()
 def callback(
     verbose: bool = typer.Option(

@@ -567,6 +567,7 @@ class Trader:
             "squad_size": squad_size,
             "squad_players": squad_player_map,
             "market_players": market_player_map,
+            "market_scores": {s.player_id: s for s in market_scores},
             "competitor_player_ids": competitor_player_ids,
             # Surfaced for matchday reconciliation (REH-20). Reconciliation
             # needs raw performance dicts to read past actual points (`p`,
