@@ -88,3 +88,15 @@ def test_unplayed_fixtures_are_excluded():
 
 def test_empty_input_returns_empty():
     assert build_feature_rows([]) == []
+
+
+def test_mixed_players_raise_instead_of_silently_interleaving():
+    """Sorting is by (season, day_number) only — mixed input would otherwise
+    silently hand one player's rolling history to another player's row.
+    """
+    a1 = MatchRow("A", "2024/2025", 1, 5, 80, 90)
+    b1 = MatchRow("B", "2024/2025", 1, 1, 0, 0)
+    a2 = MatchRow("A", "2024/2025", 2, 5, 70, 90)
+
+    with pytest.raises(ValueError, match="one player"):
+        build_feature_rows([a1, b1, a2])

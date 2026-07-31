@@ -59,7 +59,22 @@ def build_feature_rows(matches: list[MatchRow]) -> list[FeatureRow]:
     Returns:
         One row per played match, ordered by (season, day_number). Features are
         derived only from earlier matches within the same season.
+
+    Raises:
+        ValueError: if ``matches`` contains more than one distinct
+            ``player_id``. Sorting is by ``(season, day_number)`` only, so
+            mixed-player input silently interleaves one player's rolling
+            history with another's instead of raising — pass one player's
+            matches at a time; iterate ``by_player.values()``.
     """
+    player_ids = {m.player_id for m in matches}
+    if len(player_ids) > 1:
+        raise ValueError(
+            "build_feature_rows expects one player's match history, got "
+            f"{len(player_ids)} distinct player_ids: {sorted(player_ids)}. "
+            "Pass one player's matches; iterate by_player.values()."
+        )
+
     played = [m for m in matches if m.status in PLAYED_STATUSES]
     played.sort(key=lambda m: (m.season, m.day_number))
 
