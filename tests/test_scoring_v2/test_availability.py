@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from rehoboam.scoring.v2.availability import AvailabilityModel, fit_availability
@@ -56,6 +58,7 @@ def test_unknown_previous_status_falls_back_to_the_prior():
     rows = [_row(5, 5)] * 80 + [_row(5, 4)] * 20
     model = fit_availability(rows)
     probs = model.predict(None)
+    assert set(probs) == {1, 3, 4, 5}
     assert sum(probs.values()) == pytest.approx(1.0)
     assert probs[5] > probs[4]
 
@@ -63,12 +66,15 @@ def test_unknown_previous_status_falls_back_to_the_prior():
 def test_previous_status_never_seen_in_training_falls_back_to_the_prior():
     rows = [_row(5, 5)] * 100
     model = fit_availability(rows)
-    assert model.predict(1) == model.predict(None)
+    probs = model.predict(1)
+    assert set(probs) == {1, 3, 4, 5}
+    assert probs == model.predict(None)
 
 
 def test_empty_training_data_yields_a_uniform_prior():
     model = fit_availability([])
     probs = model.predict(5)
+    assert set(probs) == {1, 3, 4, 5}
     assert sum(probs.values()) == pytest.approx(1.0)
     assert len(set(probs.values())) == 1
 
@@ -76,6 +82,14 @@ def test_empty_training_data_yields_a_uniform_prior():
 def test_round_trips_through_dict():
     model = fit_availability([_row(5, 5)] * 10 + [_row(5, 3)] * 5)
     restored = AvailabilityModel.from_dict(model.to_dict())
+    assert restored.predict(5) == model.predict(5)
+    assert restored.predict(None) == model.predict(None)
+
+
+def test_round_trips_through_json():
+    """JSON is the production serialisation path to the Azure Function."""
+    model = fit_availability([_row(5, 5)] * 10 + [_row(5, 3)] * 5)
+    restored = AvailabilityModel.from_dict(json.loads(json.dumps(model.to_dict())))
     assert restored.predict(5) == model.predict(5)
     assert restored.predict(None) == model.predict(None)
 
