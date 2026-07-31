@@ -663,9 +663,10 @@ def fit_scorer(
 ):
     """Fit the v2 scorer components and write coefficients.json.
 
-    Trains on seasons up to 2024/25 and reports calibration on the held-out
-    2025/26 season. Never fits on the holdout — that season is what the whole
-    rebuild is judged against.
+    Trains on seasons up to 2024/25 and reports the train/holdout row split
+    against the held-out 2025/26 season. Never fits on the holdout — that
+    season is what the whole rebuild is judged against. Does not score
+    predictions against the holdout; that's REH-56's job.
     """
     from .enrichment.corpus import TrainingCorpus
     from .scoring.v2.availability import fit_availability
