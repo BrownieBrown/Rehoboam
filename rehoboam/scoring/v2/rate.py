@@ -17,6 +17,27 @@ the one component meant to express player quality was a constant for everyone
 worth owning.
 
 Output is in real Kickbase points, never a 0-100 index.
+
+CAVEAT — quality is pooled, base_rate is per-status, and predict() is NOT a
+calibrated within-status estimate. ``quality`` normalises a player's scoring
+against a single reference averaged over statuses 3 and 5 pooled together, but
+``base_rate`` is a separate mean for each status. Multiplying a pooled quality by
+a per-status rate means quality absorbs each player's start share along with his
+skill: a pure starter's ``predict(..., 5, ...)`` overshoots his own historical
+mean by ~23-24%, and a pure substitute's ``predict(..., 3, ...)`` undershoots by
+~52% (measured on train). The *composed* prediction
+``Σ_status P(status) × rate(status)`` is well calibrated (+1.3% vs actual on
+train) because the availability model was fitted as a paired component and the
+two errors cancel — but the individual factors, taken alone, are not. Refitting
+quality within-status looks "more correct" and is actually worse for the
+composed output (train MAE rises from 43.79 to 44.95), because the availability
+model conditions only on ``prev_status`` with no player effect, so pooled quality
+is doing double duty as a crude player-level correction for start share.
+
+Anyone overriding ``P(status)`` at serving time (e.g. forcing a confirmed
+starter's ``P(5) = 1.0`` from live lineup data) MUST renormalise quality
+within-status first, or this ~24% starter bias — currently cancelled by the
+paired availability model — will leak straight into the output.
 """
 
 from __future__ import annotations
@@ -38,7 +59,20 @@ class RateModel:
     shrinkage_k: float
 
     def predict(self, player_id: str, status: int, position: str | None) -> float:
-        """Expected points for this player in this availability state."""
+        """Expected points for this player in this availability state.
+
+        NOT a calibrated within-status expectation. ``quality`` is normalised
+        against a reference pooled across statuses 3 and 5, while ``base_rate``
+        is per-status — so this multiplies a pooled quality by a per-status
+        rate, and quality absorbs each player's start share as well as his
+        skill (see module docstring for measured error sizes). Only the
+        *composed* prediction ``Σ_status P(status) × predict(status)`` is
+        calibrated; do not treat a single call's return value as a calibrated
+        per-status estimate. If you override ``P(status)`` at serving time
+        (e.g. a confirmed-starter lineup override), you must renormalise
+        ``quality`` within-status first or you will reintroduce the ~24%
+        starter overshoot this composition currently cancels out.
+        """
         base = self.base_rate.get(status, 0.0)
         if base == 0.0:
             return 0.0
