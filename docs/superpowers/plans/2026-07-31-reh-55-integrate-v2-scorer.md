@@ -607,16 +607,34 @@ def derive_thresholds(
 
     api, settings, league = _login_and_get_league(league_index)
     trader = Trader(api, settings)
-    ep_result = trader.get_ep_recommendations_with_trends(league)
+    result = trader.get_ep_recommendations_with_trends(league)
+
+    # NOTE: `get_ep_recommendations_with_trends` returns a **dict**, not a
+    # dataclass. Verified keys: buy_recs, trade_pairs, sell_recs, squad_scores,
+    # lineup_map, budget, squad_size, squad_players, market_players,
+    # competitor_player_ids.
+    #
+    # Do NOT read marginal gains off `buy_recs`: `recommend_buys` returns only
+    # the top-N already filtered and ranked, so its gains sample the good tail
+    # and would push every derived threshold upward. Thresholds must be measured
+    # over ALL market candidates.
+    squad_scores = result["squad_scores"]
+    squad_players = result["squad_players"]  # {player_id: MarketPlayer}
+    market_players = result["market_players"]  # {player_id: MarketPlayer}
+    squad = list(squad_players.values())
 
     engine = DecisionEngine(settings=settings)
-    squad_scores = ep_result.squad_scores
-    squad = ep_result.squad
 
     gains: list[float] = []
-    for candidate in ep_result.market_scores:
+    for pid, player in market_players.items():
+        candidate_score = market_scores.get(pid)
+        if candidate_score is None:
+            continue
         mep = engine.calculate_marginal_ep(
-            candidate_score=candidate, squad_scores=squad_scores, squad=squad
+            candidate_score=candidate_score,
+            candidate_player=player,
+            squad=squad,
+            squad_scores=squad_scores,
         )
         gains.append(mep.marginal_ep_gain)
 
@@ -647,7 +665,22 @@ def derive_thresholds(
     )
 ```
 
-**Note on `ep_result` fields:** confirm the attribute names (`squad_scores`, `market_scores`, `squad`) against `Trader.get_ep_recommendations_with_trends`'s return type before implementing, and adjust to match. Do not guess.
+### Required prerequisite: `market_scores` is not currently returned
+
+`Trader.get_ep_recommendations` returns a dict whose verified keys are
+`buy_recs, trade_pairs, sell_recs, squad_scores, lineup_map, budget, squad_size, squad_players, market_players, competitor_player_ids` (plus a performance map).
+**It scores every market player internally but does not return those scores.**
+
+So before the command above can work, add `"market_scores": {s.player_id: s for s in market_scores}` to that return dict (`trader.py`, around line 439). It is a
+purely additive change — a new key no existing caller reads.
+
+**Why not use `buy_recs` instead**, which already carries `marginal_ep_gain`:
+`recommend_buys` returns only the **top-N, already filtered and ranked**, so its
+gains sample the good tail of the distribution. Deriving thresholds from it would
+push every tier upward — the exact opposite of the correction this task exists to
+make. Thresholds must be measured over *all* market candidates.
+
+Verify the additive change breaks nothing: `uv run pytest -q` before proceeding.
 
 - [ ] **Step 6: Run it against the live league and record the output**
 
