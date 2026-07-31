@@ -108,3 +108,20 @@ def test_round_trips_through_json():
 def test_empty_training_data_predicts_zero():
     model = fit_rate([], {})
     assert model.predict("anyone", 5, "Forward") == 0.0
+
+
+def test_quality_ignores_bench_and_not_in_squad_appearances():
+    """Only statuses 3 (came on) and 5 (started) may feed quality.
+
+    A player with a strong scoring record on the pitch must not have that
+    record diluted by rows where he did not play — status 4 (unused sub,
+    0 points) and status 1 (not in squad, 0 points) are not evidence about
+    his scoring ability and must be excluded from the fit.
+    """
+    scoring_rows = [_row("player", 5, 100)] * 10
+    padding_rows = [_row("player", 4, 0)] * 50 + [_row("player", 1, 0)] * 50
+
+    with_padding = fit_rate(scoring_rows + padding_rows, POSITIONS, shrinkage_k=0.0)
+    without_padding = fit_rate(scoring_rows, POSITIONS, shrinkage_k=0.0)
+
+    assert with_padding.quality["player"] == pytest.approx(without_padding.quality["player"])
