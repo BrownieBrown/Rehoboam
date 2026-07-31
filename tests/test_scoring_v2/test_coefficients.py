@@ -52,3 +52,20 @@ def test_saved_file_is_human_readable_json(tmp_path):
 def test_missing_file_raises_a_clear_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_coefficients(tmp_path / "nope.json")
+
+
+def test_committed_coefficients_load_and_look_right():
+    """Smoke test on the shipped artifact.
+
+    The round-trip tests above only ever touch a tmp_path file — the actual
+    committed rehoboam/scoring/v2/coefficients.json that ships to the Azure
+    Function is never loaded by any test. Load it via the default path (no
+    explicit path argument) and sanity-check known fitted values, loosely,
+    so this also catches accidental exclusion from packaging.
+    """
+    availability, rate, meta = load_coefficients()
+
+    assert availability.predict(5)[5] == pytest.approx(0.848, abs=0.01)
+    assert rate.base_rate[5] == pytest.approx(91.5, abs=1.0)
+    assert len(rate.quality) == 389
+    assert meta["train_max_season"] == "2024/2025"
