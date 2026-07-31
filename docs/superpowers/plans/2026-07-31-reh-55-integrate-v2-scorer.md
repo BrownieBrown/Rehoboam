@@ -711,13 +711,44 @@ ______________________________________________________________________
 
 - Consumes: `score_player_v2` (Task 1), the measured thresholds from Task 2
 
+### The thresholds are pre-season estimates and cannot be validated yet
+
+`derive-thresholds` measured **n = 0**: the market holds 21 listings but none are
+`is_kickbase_seller()`, and **there will be no purchasable listings until the
+season starts** (2026-08-28). The command is correct and useful — it simply has
+nothing to measure until then.
+
+So the numbers below come from a controller measurement over the **full
+473-player universe** against a synthetic mid-table 15-man squad (legal shape,
+players drawn from the middle third of the EP distribution per position; best-11
+total 277). That is arguably a better basis than one arbitrary day's listings,
+since thresholds should hold all season rather than reflect a single snapshot.
+
+|               | p25  | p50  | p70  | p85  | p95  | max   |
+| ------------- | ---- | ---- | ---- | ---- | ---- | ----- |
+| marginal gain | 13.7 | 43.1 | 52.6 | 69.3 | 82.0 | 176.2 |
+
+309 of 473 candidates (65%) show a positive gain. For comparison, the current
+`must_have >= 20` sits **below the median** — it would fire on most candidates.
+
+**Two consequences for how this task implements them:**
+
+- **They must be tunable without a deploy.** No live-market validation is
+  possible until after kickoff, so the first real evidence arrives mid-season.
+  Every threshold becomes a `Settings` field readable from `.env`.
+- **Marginal gain is relative to your own squad.** A weak squad finds many
+  improvements; a strong one finds few, so a fixed threshold is not a fixed
+  standard — it drifts as the squad changes. `must_have` may rarely fire late in
+  a successful season, which will look like the bot going passive when it is
+  behaving as designed. Say so in the field descriptions.
+
 ### What changes
 
 1. **`trader.py:390` and `trader.py:429`** — swap `score_player(data, calibration_multiplier=_calibration_for(player))` for `score_player_v2(data)`. The calibration multiplier is dropped deliberately (see Task 1's rationale). If `_calibration_for` becomes unused, remove it and its `get_position_calibration_multiplier` call.
 
-1. **`config.py:111` `min_expected_points_to_buy`** (30.0) and **`config.py:115` `min_ep_upgrade_threshold`** (5.0) — set from Task 2's measured distribution. Update each `description` to state the scale is real points and name the date/method of derivation, so the next person knows these are measured rather than inherited.
+1. **`config.py:111` `min_expected_points_to_buy`** (30.0) and **`config.py:115` `min_ep_upgrade_threshold`** (5.0). `min_ep_upgrade_threshold` is the floor for recommending a buy at all, so the `solid_upgrade` value is the natural choice — set it to **40.0** (rounded from p50 = 43.1). `min_expected_points_to_buy` is an *absolute* EP floor rather than a marginal one; the new EP median is 34.8, so **35.0** preserves its original intent of "do not buy a player who is not at least mid-table". Update each `description` to state the scale is real points, the derivation date and method, and that it is a **pre-season estimate awaiting live-market validation**.
 
-1. **`bidding_strategy.py` tier constants** (`>= 20`, `>= 10`, `>= 5`) — replace with Task 2's `must_have` / `strong_upgrade` / `solid_upgrade` values. Extract them to named module-level constants rather than leaving magic numbers inline.
+1. **Bid tiers become `Settings` fields**, not module constants: `bid_tier_must_have` (**70.0**), `bid_tier_strong_upgrade` (**53.0**), `bid_tier_solid_upgrade` (**43.0**) — rounded from p85 / p70 / p50 of the measured distribution. Replace `bidding_strategy.py`'s inline `>= 20` / `>= 10` / `>= 5` with reads from settings. **This is what lets the thresholds be re-tuned from `.env` once the market opens, rather than shipping a new build.**
 
 1. **`decision.py:345`** — there is a fallback `marginal = ps.expected_points` where the formation-aware path is not used. That substitutes an *absolute* EP for a *marginal* gain, which was already a scale mismatch on the old index and is a larger one now. Investigate when it fires; if it is reachable, either fix it to compute a real marginal gain or document why absolute EP is acceptable there. **Report what you find** — do not silently leave it.
 
