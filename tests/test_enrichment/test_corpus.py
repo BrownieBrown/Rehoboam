@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from rehoboam.enrichment.corpus import TrainingCorpus
 
 
@@ -316,6 +318,93 @@ def test_positions_for_empty_input_returns_empty_dict(tmp_path):
     assert corpus.positions_for([]) == {}
 
 
+def test_record_player_transfers_parses_transaction_rows(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    history = {
+        "it": [
+            {
+                "u": "1911002",
+                "unm": "Eduard",
+                "dt": "2025-08-22T20:55:39Z",
+                "trp": 6519598,
+                "t": 2,
+            }
+        ]
+    }
+
+    assert corpus.record_player_transfers("10006", history) == 1
+
+    rows = corpus.transfers_for_player("10006")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["price"] == 6519598
+    assert row["transfer_type"] == 2
+    assert row["counterparty_id"] == "1911002"
+    assert row["counterparty_name"] == "Eduard"
+    # 2025-08-22T20:55:39Z as a unix epoch float
+    assert row["transfer_at"] == pytest.approx(1755896139.0)
+
+
+def test_record_player_transfers_stores_transfer_type_raw(tmp_path):
+    """``t`` semantics are not confirmed live -- store both observed values
+    (0 and 2) verbatim, never interpreted or coerced."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    history = {
+        "it": [
+            {"u": "SVEN", "unm": "Sven", "dt": "2025-08-08T14:05:48Z", "trp": 0, "t": 0},
+            {
+                "u": "1907267",
+                "unm": "stefan_m",
+                "dt": "2025-08-28T03:32:43Z",
+                "trp": 8422620,
+                "t": 2,
+            },
+        ]
+    }
+
+    assert corpus.record_player_transfers("1", history) == 2
+
+    rows = {r["transfer_type"]: r for r in corpus.transfers_for_player("1")}
+    assert rows[0]["price"] == 0
+    assert rows[2]["price"] == 8422620
+
+
+def test_record_player_transfers_is_idempotent(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    history = {"it": [{"u": "9", "unm": "X", "dt": "2025-08-22T20:55:39Z", "trp": 100, "t": 2}]}
+
+    corpus.record_player_transfers("1", history)
+    corpus.record_player_transfers("1", history)
+
+    assert len(corpus.transfers_for_player("1")) == 1
+
+
+def test_record_player_transfers_skips_items_without_dt(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    history = {"it": [{"u": "9", "unm": "X", "trp": 100, "t": 2}]}
+
+    assert corpus.record_player_transfers("1", history) == 0
+    assert corpus.transfers_for_player("1") == []
+
+
+def test_record_player_transfers_handles_empty_history(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    assert corpus.record_player_transfers("1", {"it": []}) == 0
+    assert corpus.record_player_transfers("1", {}) == 0
+
+
+def test_mark_fetched_transfers_removes_player_from_pending(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    corpus.upsert_players([{"player_id": "1"}, {"player_id": "2"}])
+
+    corpus.mark_fetched("1", transfers=True)
+
+    assert corpus.players_needing_fetch("transfers") == ["2"]
+    # marking transfers must not satisfy the performance/mv sweeps
+    assert set(corpus.players_needing_fetch("performance")) == {"1", "2"}
+    assert set(corpus.players_needing_fetch("mv")) == {"1", "2"}
+
+
 def test_fresh_db_gets_status_column_from_create_table(tmp_path):
     """A brand-new DB must have ``status`` from the CREATE TABLE statement
     itself, with no migration step needed."""
@@ -418,3 +507,124 @@ def test_existing_db_without_status_column_is_migrated_preserving_rows(tmp_path)
     assert columns_again == post_columns
     assert count_again == 1
     assert corpus_again.matches_for_player("1")[0]["points"] == 42
+
+
+def test_fresh_db_gets_player_transfers_table_and_transfers_fetched_at_column(tmp_path):
+    """A brand-new DB must have ``player_transfers`` and
+    ``sweep_progress.transfers_fetched_at`` straight from the CREATE TABLE
+    statements, with no migration step needed."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+
+    with sqlite3.connect(corpus.db_path) as conn:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+    assert "player_transfers" in tables
+    assert "transfers_fetched_at" in sweep_columns
+
+
+def test_existing_db_without_player_transfers_is_migrated_preserving_rows(tmp_path):
+    """The part most likely to be got wrong: opening a pre-existing corpus DB
+    -- created before ``player_transfers``/``transfers_fetched_at`` existed --
+    must add both without touching, reordering, or dropping a single existing
+    row in any other table."""
+    db_path = tmp_path / "corpus.db"
+
+    # Build a DB using the pre-REH-55 schema directly, bypassing
+    # TrainingCorpus entirely so this genuinely models an old file on disk.
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE player_universe (
+                player_id      TEXT PRIMARY KEY,
+                first_name     TEXT,
+                last_name      TEXT,
+                position       TEXT,
+                team_id        TEXT,
+                market_value   INTEGER,
+                average_points REAL
+            );
+            CREATE TABLE player_match_history (
+                player_id        TEXT NOT NULL,
+                season           TEXT NOT NULL,
+                day_number       INTEGER NOT NULL,
+                match_date       TEXT,
+                points           INTEGER NOT NULL,
+                minutes          INTEGER NOT NULL,
+                team_id          TEXT,
+                opponent_team_id TEXT,
+                is_home          INTEGER NOT NULL DEFAULT 0,
+                status           INTEGER,
+                PRIMARY KEY (player_id, season, day_number)
+            );
+            CREATE TABLE mv_series (
+                player_id    TEXT NOT NULL,
+                snapshot_at  REAL NOT NULL,
+                market_value INTEGER NOT NULL,
+                PRIMARY KEY (player_id, snapshot_at)
+            );
+            CREATE TABLE sweep_progress (
+                player_id             TEXT PRIMARY KEY,
+                performance_fetched_at REAL,
+                mv_fetched_at          REAL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO player_universe (player_id, last_name, position) "
+            "VALUES ('1', 'Musiala', 'Midfielder')"
+        )
+        conn.execute(
+            "INSERT INTO sweep_progress (player_id, performance_fetched_at, mv_fetched_at) "
+            "VALUES ('1', 123.0, 456.0)"
+        )
+        conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        pre_tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        pre_sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+        pre_sweep_row = conn.execute(
+            "SELECT performance_fetched_at, mv_fetched_at FROM sweep_progress WHERE player_id = '1'"
+        ).fetchone()
+    assert "player_transfers" not in pre_tables
+    assert "transfers_fetched_at" not in pre_sweep_columns
+    assert pre_sweep_row == (123.0, 456.0)
+
+    # Opening this pre-existing file through TrainingCorpus must migrate it in place.
+    corpus = TrainingCorpus(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        post_tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        post_sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+        post_sweep_row = conn.execute(
+            "SELECT performance_fetched_at, mv_fetched_at, transfers_fetched_at "
+            "FROM sweep_progress WHERE player_id = '1'"
+        ).fetchone()
+        universe_row = conn.execute(
+            "SELECT last_name, position FROM player_universe WHERE player_id = '1'"
+        ).fetchone()
+    assert "player_transfers" in post_tables
+    assert "transfers_fetched_at" in post_sweep_columns
+    # Pre-existing sweep_progress row is preserved, with the new column NULL.
+    assert post_sweep_row == (123.0, 456.0, None)
+    assert universe_row == ("Musiala", "Midfielder")
+
+    # The new table is usable immediately after migration.
+    corpus.record_player_transfers(
+        "1", {"it": [{"u": "9", "unm": "X", "dt": "2025-08-22T20:55:39Z", "trp": 100, "t": 2}]}
+    )
+    assert len(corpus.transfers_for_player("1")) == 1
+
+    # And the migration itself must be idempotent on a second open.
+    corpus_again = TrainingCorpus(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        columns_again = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+        transfer_count_again = conn.execute("SELECT COUNT(*) FROM player_transfers").fetchone()[0]
+    assert columns_again == post_sweep_columns
+    assert transfer_count_again == 1
+    assert corpus_again.transfers_for_player("1")[0]["price"] == 100

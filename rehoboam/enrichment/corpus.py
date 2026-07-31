@@ -11,6 +11,7 @@ Schema is append-mostly and idempotent — the league-wide sweep in
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +64,41 @@ CREATE TABLE IF NOT EXISTS mv_series (
 CREATE TABLE IF NOT EXISTS sweep_progress (
     player_id             TEXT PRIMARY KEY,
     performance_fetched_at REAL,
-    mv_fetched_at          REAL
+    mv_fetched_at          REAL,
+    transfers_fetched_at   REAL
 );
+
+-- Real per-transaction transfer prices (REH-55), the only local source of a
+-- season-wide reconstructed market -- market_prices.db is empty and
+-- bid_learning.db.league_transfers covers five weeks, not nine months.
+-- ``transfer_type`` (the raw ``t`` field) is stored as-is: its meaning was
+-- not confirmed by the live probe (both 0 and 2 observed, 0 co-occurring
+-- with price 0), so it is deliberately not interpreted here.
+CREATE TABLE IF NOT EXISTS player_transfers (
+    player_id         TEXT NOT NULL,
+    transfer_at        REAL NOT NULL,
+    price              INTEGER,
+    transfer_type      INTEGER,
+    counterparty_id    TEXT,
+    counterparty_name  TEXT,
+    PRIMARY KEY (player_id, transfer_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_player_transfers_player
+    ON player_transfers(player_id);
 """
+
+
+def _to_epoch(iso_str: str) -> float:
+    """Convert an ISO-8601 timestamp (optional trailing 'Z') to a unix epoch float.
+
+    Same convention as ``backfill.py:_to_epoch`` / ``baseline_driver.py:_to_epoch``
+    -- not imported from either to avoid a cross-module dependency for one line,
+    but must stay behaviorally identical to them.
+    """
+    if iso_str.endswith("Z"):
+        iso_str = iso_str[:-1] + "+00:00"
+    return datetime.fromisoformat(iso_str).timestamp()
 
 
 class TrainingCorpus:
@@ -96,6 +129,10 @@ class TrainingCorpus:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(player_match_history)")}
         if "status" not in columns:
             conn.execute("ALTER TABLE player_match_history ADD COLUMN status INTEGER")
+
+        sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+        if "transfers_fetched_at" not in sweep_columns:
+            conn.execute("ALTER TABLE sweep_progress ADD COLUMN transfers_fetched_at REAL")
 
     def upsert_players(self, players: list[dict[str, Any]]) -> int:
         """Insert or update universe rows. Returns rows written."""
@@ -319,7 +356,85 @@ class TrainingCorpus:
             conn.commit()
         return len(rows)
 
-    def mark_fetched(self, player_id: str, *, performance: bool = False, mv: bool = False) -> None:
+    def record_player_transfers(self, player_id: str, history: dict[str, Any]) -> int:
+        """Persist a player's real transfer transactions (REH-55).
+
+        Shape: ``{"it": [{"u": counterparty_id, "unm": counterparty_name,
+        "dt": <ISO-8601 timestamp>, "trp": price, "t": transfer_type}]}``.
+
+        Unlike ``mv_series``'s ``dt`` (days-since-epoch), this endpoint's
+        ``dt`` is an ISO-8601 timestamp string -- verified against the live
+        probe response (2026-07-29). Items missing ``dt`` cannot be placed on
+        a timeline and are skipped, same rule as
+        ``record_match_history``'s day-less matches.
+
+        ``t`` (stored as ``transfer_type``) is persisted exactly as received
+        and never interpreted here -- see
+        ``KickbaseV4Client.get_player_transfer_history`` for the empirical
+        read from the full REH-55 sweep (0/2/3 observed; only 2 carries a
+        real price and is what the market reconstruction should use).
+        """
+        rows: list[tuple] = []
+        for item in history.get("it") or []:
+            dt = item.get("dt")
+            if not dt:
+                continue
+            try:
+                transfer_at = _to_epoch(dt)
+            except (ValueError, TypeError):
+                continue
+            counterparty_id = item.get("u")
+            rows.append(
+                (
+                    str(player_id),
+                    transfer_at,
+                    item.get("trp"),
+                    item.get("t"),
+                    str(counterparty_id) if counterparty_id is not None else None,
+                    item.get("unm"),
+                )
+            )
+
+        if not rows:
+            return 0
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO player_transfers (
+                    player_id, transfer_at, price, transfer_type,
+                    counterparty_id, counterparty_name
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+        return len(rows)
+
+    def transfers_for_player(self, player_id: str) -> list[dict[str, Any]]:
+        """All recorded transfer transactions for a player, oldest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT player_id, transfer_at, price, transfer_type,
+                       counterparty_id, counterparty_name
+                FROM player_transfers
+                WHERE player_id = ?
+                ORDER BY transfer_at
+                """,
+                (str(player_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_fetched(
+        self,
+        player_id: str,
+        *,
+        performance: bool = False,
+        mv: bool = False,
+        transfers: bool = False,
+    ) -> None:
         """Record sweep progress so an interrupted run resumes cleanly."""
         import time
 
@@ -337,6 +452,11 @@ class TrainingCorpus:
             if mv:
                 conn.execute(
                     "UPDATE sweep_progress SET mv_fetched_at = ? WHERE player_id = ?",
+                    (now, str(player_id)),
+                )
+            if transfers:
+                conn.execute(
+                    "UPDATE sweep_progress SET transfers_fetched_at = ? WHERE player_id = ?",
                     (now, str(player_id)),
                 )
             conn.commit()
@@ -380,9 +500,13 @@ class TrainingCorpus:
     def players_needing_fetch(self, kind: str) -> list[str]:
         """Universe players with no successful fetch of ``kind`` yet.
 
-        ``kind`` is ``"performance"`` or ``"mv"``.
+        ``kind`` is ``"performance"``, ``"mv"``, or ``"transfers"``.
         """
-        column = {"performance": "performance_fetched_at", "mv": "mv_fetched_at"}[kind]
+        column = {
+            "performance": "performance_fetched_at",
+            "mv": "mv_fetched_at",
+            "transfers": "transfers_fetched_at",
+        }[kind]
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
                 f"""

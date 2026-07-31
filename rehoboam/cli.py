@@ -427,6 +427,17 @@ def enrich_corpus(
             "everyone via sweep_progress. Not the default — opt in per run."
         ),
     ),
+    transfers: bool = typer.Option(
+        False,
+        "--transfers",
+        help=(
+            "Also sweep each player's real transfer history (REH-55) into "
+            "player_transfers — the only local source of real, whole-season "
+            "market prices for the full-bot replay. One extra request per "
+            "player (~527 in the live universe); off by default and "
+            "independently resumable from performance/MV."
+        ),
+    ),
 ):
     """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
 
@@ -451,6 +462,12 @@ def enrich_corpus(
     ``sweep_progress`` makes reruns skip players already fetched, which is
     exactly what you don't want after a parsing bug is fixed and the stored
     rows need to be regenerated from scratch.
+
+    ``--transfers`` additionally sweeps ``/leagues/{lid}/players/{pid}/transferHistory``
+    for every player into the new ``player_transfers`` table — real
+    transaction prices across the whole season, needed by the full-bot
+    replay (REH-51) to know what was actually buyable and at what price on
+    a given matchday.
     """
     from .bid_learner import BidLearner
     from .enrichment.corpus import TrainingCorpus
@@ -482,6 +499,7 @@ def enrich_corpus(
         limit=limit or None,
         extra_player_ids=extra_player_ids,
         force_refetch_performance=refetch_performance,
+        sweep_transfers=transfers,
     )
 
     table = Table(title="Corpus enrichment summary")
@@ -490,6 +508,8 @@ def enrich_corpus(
     table.add_row("Universe size", str(stats.universe_size))
     table.add_row("Performance fetched", str(stats.performance_fetched))
     table.add_row("MV series fetched", str(stats.mv_fetched))
+    if transfers:
+        table.add_row("Transfers fetched", str(stats.transfers_fetched))
     table.add_row("Skipped (already done)", str(stats.skipped))
     table.add_row("Failed", str(stats.failed))
     if include_historical:

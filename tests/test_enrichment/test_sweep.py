@@ -53,6 +53,7 @@ def _paged_client(pages_by_position: dict[int, list[list[dict]]]) -> MagicMock:
         "mv": 1_000_000,
         "ap": 30.0,
     }
+    client.get_player_transfer_history.return_value = {"it": []}
     return client
 
 
@@ -465,3 +466,102 @@ def test_extra_player_ids_do_not_regress_resumability(tmp_path):
     assert client.get_competition_player_details.call_count == 0
     assert stats.performance_fetched == 0
     assert stats.skipped == 2
+
+
+def test_sweep_transfers_off_by_default(tmp_path):
+    """REH-55's ~527 extra requests are opt-in -- a plain sweep must not
+    touch the transfer-history endpoint at all."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0)
+
+    assert stats.transfers_fetched == 0
+    client.get_player_transfer_history.assert_not_called()
+
+
+def test_sweep_transfers_populates_when_flag_set(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+    client.get_player_transfer_history.return_value = {
+        "it": [
+            {
+                "u": "99",
+                "unm": "Rival",
+                "dt": "2025-08-22T20:55:39Z",
+                "trp": 5_000_000,
+                "t": 2,
+            }
+        ]
+    }
+
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, sweep_transfers=True)
+
+    assert stats.transfers_fetched == 1
+    assert stats.failed == 0
+    call_kwargs = client.get_player_transfer_history.call_args.kwargs
+    assert call_kwargs == {"league_id": LEAGUE_ID, "player_id": "1"}
+    assert len(corpus.transfers_for_player("1")) == 1
+
+
+def test_sweep_transfers_is_resumable(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, sweep_transfers=True)
+    client.get_player_transfer_history.reset_mock()
+
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, sweep_transfers=True)
+
+    assert client.get_player_transfer_history.call_count == 0
+    assert stats.transfers_fetched == 0
+
+
+def test_sweep_transfers_survives_per_player_failure(tmp_path):
+    """One bad player's transfer-history fetch must not abort the sweep, and
+    must leave that player pending for a rerun."""
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client(
+        [
+            {"pi": "1", "n": "P1", "pos": 3, "tid": "2"},
+            {"pi": "2", "n": "P2", "pos": 3, "tid": "2"},
+        ]
+    )
+    client.get_player_transfer_history.side_effect = [
+        Exception("500 server error"),
+        {"it": [{"u": "9", "unm": "X", "dt": "2025-08-22T20:55:39Z", "trp": 1, "t": 2}]},
+    ]
+
+    stats = run_sweep(client, corpus, league_id=LEAGUE_ID, throttle_seconds=0, sweep_transfers=True)
+
+    assert stats.failed == 1
+    assert stats.transfers_fetched == 1
+    assert "1" in corpus.players_needing_fetch("transfers")
+
+
+def test_sweep_transfers_respects_limit(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": str(i), "n": f"P{i}", "pos": 3, "tid": "2"} for i in range(10)])
+
+    stats = run_sweep(
+        client, corpus, league_id=LEAGUE_ID, limit=3, throttle_seconds=0, sweep_transfers=True
+    )
+
+    assert stats.transfers_fetched == 3
+
+
+def test_dry_run_does_not_fetch_transfers_even_when_flag_set(tmp_path):
+    corpus = TrainingCorpus(db_path=tmp_path / "corpus.db")
+    client = _client([{"pi": "1", "n": "P1", "pos": 3, "tid": "2"}])
+
+    stats = run_sweep(
+        client,
+        corpus,
+        league_id=LEAGUE_ID,
+        dry_run=True,
+        throttle_seconds=0,
+        sweep_transfers=True,
+    )
+
+    assert stats.transfers_fetched == 0
+    client.get_player_transfer_history.assert_not_called()

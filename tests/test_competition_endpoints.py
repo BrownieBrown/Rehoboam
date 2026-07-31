@@ -93,3 +93,46 @@ def test_get_competition_player_details_raises_on_error():
     client = _client_with_response(500, {"err": 2, "errMsg": "NotFound", "svcs": []})
     with pytest.raises(Exception, match="Failed to fetch competition player details"):
         client.get_competition_player_details(player_id="99999999")
+
+
+def test_get_player_transfer_history_returns_payload():
+    """League-scoped (unlike the other endpoints in this file), but tested
+    alongside them since it feeds the same v2 corpus sweep. Verified live
+    (2026-07-29): top-level key is ``it``, items carry ``u``/``unm``
+    (counterparty), ``dt`` (ISO-8601 timestamp), ``trp`` (price), ``t``
+    (transfer type, meaning unconfirmed)."""
+    client = _client_with_response(
+        200,
+        {
+            "it": [
+                {
+                    "u": "1911002",
+                    "unm": "Eduard",
+                    "dt": "2025-08-22T20:55:39Z",
+                    "trp": 6519598,
+                    "t": 2,
+                }
+            ]
+        },
+    )
+    result = client.get_player_transfer_history(league_id="1933872", player_id="10006")
+
+    assert result == {
+        "it": [
+            {
+                "u": "1911002",
+                "unm": "Eduard",
+                "dt": "2025-08-22T20:55:39Z",
+                "trp": 6519598,
+                "t": 2,
+            }
+        ]
+    }
+    called_url = client.session.get.call_args[0][0]
+    assert called_url.endswith("/v4/leagues/1933872/players/10006/transferHistory")
+
+
+def test_get_player_transfer_history_raises_on_error():
+    client = _client_with_response(500, {})
+    with pytest.raises(Exception, match="Failed to fetch player transfer history"):
+        client.get_player_transfer_history(league_id="1933872", player_id="10006")
