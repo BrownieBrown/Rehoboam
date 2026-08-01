@@ -672,6 +672,29 @@ def backtest_baseline(
     console.print(table)
 
 
+@app.command("replay-season")
+def replay_season(
+    corpus: Path = typer.Option(  # noqa: B008
+        Path("logs/training_corpus.db"), help="Path to the training corpus DB"
+    ),
+    learning_db: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"), help="Path to the learning DB with real standings"
+    ),
+) -> None:
+    """Replay the full bot across 2025/26 and report the counterfactual finish."""
+    from rehoboam.replay.driver import run_replay
+
+    if not corpus.exists():
+        console.print(f"[red]Corpus not found: {corpus}[/red]")
+        raise typer.Exit(1)
+    if not learning_db.exists():
+        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
+        raise typer.Exit(1)
+
+    _result, report = run_replay(corpus_path=corpus, learning_db_path=learning_db)
+    console.print(report)
+
+
 @app.command("fit-scorer")
 def fit_scorer(
     availability_k: float = typer.Option(
