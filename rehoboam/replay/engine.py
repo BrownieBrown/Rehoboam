@@ -14,6 +14,7 @@ from rehoboam.formation import select_best_eleven
 from rehoboam.replay.rules import (
     MAX_SQUAD_SIZE,
     can_buy,
+    can_field_eleven,
     empty_slot_penalty,
 )
 from rehoboam.replay.state import ReplayPlayer, ReplayState
@@ -56,6 +57,68 @@ def _team_value(state: ReplayState, mv_fn: Callable[[str, float], int | None], a
     return sum(mv_fn(pid, at) or 0 for pid in state.player_ids)
 
 
+def _proceeds(pid: str, mv_fn: Callable[[str, float], int | None], at: float) -> int:
+    """Cash raised by selling ``pid`` instantly back to Kickbase."""
+    return int((mv_fn(pid, at) or 0) * INSTANT_SELL_PCT)
+
+
+def _eleven_total(players: list[ReplayPlayer], scores: dict[str, float]) -> float:
+    """Expected points of the best *legal* eleven drawn from ``players``."""
+    return sum(scores.get(p.id, 0.0) for p in select_best_eleven(players, scores))
+
+
+def _fieldable_sale_victim(state: ReplayState, scores: dict[str, float]) -> str | None:
+    """Cheapest player by EP whose sale still leaves a legal starting eleven.
+
+    Picking the sale victim by score alone strands the squad without a
+    goalkeeper: keepers reliably score least, so a naive ``min`` sells the only
+    one and silently books an empty slot. Returns ``None`` when no sale keeps
+    the eleven legal.
+    """
+    for pid in sorted(state.player_ids, key=lambda p: scores.get(p, 0.0)):
+        remaining = {k: v for k, v in state.squad.items() if k != pid}
+        if can_field_eleven(ReplayState(budget=state.budget, squad=remaining)):
+            return pid
+    return None
+
+
+def _restore_budget(
+    state: ReplayState,
+    scores: dict[str, float],
+    mv_fn: Callable[[str, float], int | None],
+    at: float,
+) -> int:
+    """Sell down until the balance is non-negative at kickoff; returns sells.
+
+    A negative balance at kickoff zeroes the *entire* matchday, which is by far
+    the most expensive outcome in Kickbase — worth several hundred points,
+    against the -100 per empty slot charged for a short squad. So this sells
+    below eleven when that is what it takes, accepting the penalty.
+
+    It prefers victims whose sale keeps the eleven legal, and it refuses to
+    sell at all when liquidating the whole squad still could not clear the
+    debt: a zero with the squad intact beats a zero with no squad, because the
+    squad carries into the following matchday.
+    """
+    if state.budget >= 0:
+        return 0
+    realisable = sum(_proceeds(pid, mv_fn, at) for pid in state.player_ids)
+    if state.budget + realisable < 0:
+        return 0
+
+    sells = 0
+    while state.budget < 0 and state.squad:
+        victim = _fieldable_sale_victim(state, scores)
+        if victim is None:
+            # Nothing can be sold without breaking the eleven, but a zero is
+            # worse than the penalty — sell the cheapest player regardless.
+            victim = min(state.player_ids, key=lambda p: scores.get(p, 0.0))
+        state.sell(victim, _proceeds(victim, mv_fn, at))
+        scores.pop(victim, None)
+        sells += 1
+    return sells
+
+
 def run_season(
     *,
     state: ReplayState,
@@ -93,27 +156,40 @@ def run_season(
                 position=position,
                 team_id=team_fn(listing.player_id),
             )
-            team_value = _team_value(state, mv_fn, decide_at)
 
-            # Marginal gain: how much this player improves the weakest slot.
-            weakest = min(scores.values()) if scores else 0.0
-            if cand_ep - weakest < min_ep_gain and state.squad_size >= 11:
+            # Marginal gain: how much this player improves the best legal
+            # eleven. Measuring against the weakest *squad* member instead
+            # waves through a twelfth midfielder who outscores the bench but
+            # cannot displace a starter — a true gain of zero.
+            gain = _eleven_total(
+                [*state.players, candidate], {**scores, candidate.id: cand_ep}
+            ) - _eleven_total(state.players, scores)
+            if gain < min_ep_gain and state.squad_size >= 11:
                 continue
 
             # Check every constraint that a sale would NOT relieve before
             # selling anyone — otherwise a blocked buy leaves us a player down.
-            allowed, _reason = can_buy(state, candidate, listing.price, team_value=team_value)
-            if not allowed and "squad full" not in _reason:
+            allowed, reason = can_buy(
+                state, candidate, listing.price, team_value=_team_value(state, mv_fn, decide_at)
+            )
+            if not allowed and "squad full" not in reason:
                 continue
 
-            sold_id: str | None = None
             if state.squad_size >= MAX_SQUAD_SIZE:
-                sold_id = min(scores, key=lambda p: scores[p])
-                proceeds = int((mv_fn(sold_id, decide_at) or 0) * INSTANT_SELL_PCT)
-                state.sell(sold_id, proceeds)
-                del scores[sold_id]
+                sold_id = _fieldable_sale_victim(state, scores)
+                if sold_id is None:
+                    continue  # no sale keeps the eleven legal — skip this buy
+                state.sell(sold_id, _proceeds(sold_id, mv_fn, decide_at))
+                scores.pop(sold_id, None)
                 sells += 1
-                allowed, _reason = can_buy(state, candidate, listing.price, team_value=team_value)
+                # The credit floor is 70% of *current* team value, so it has to
+                # be re-derived after the sale rather than reused from before.
+                allowed, reason = can_buy(
+                    state,
+                    candidate,
+                    listing.price,
+                    team_value=_team_value(state, mv_fn, decide_at),
+                )
                 if not allowed:
                     continue
 
@@ -121,13 +197,8 @@ def run_season(
             scores[candidate.id] = cand_ep
             buys += 1
 
-        # Budget must be non-negative at kickoff — sell the weakest until it is.
-        while state.budget < 0 and state.squad_size > 11:
-            worst_id = min(scores, key=lambda p: scores[p])
-            proceeds = int((mv_fn(worst_id, decide_at) or 0) * INSTANT_SELL_PCT)
-            state.sell(worst_id, proceeds)
-            del scores[worst_id]
-            sells += 1
+        # Budget must be non-negative at kickoff or the matchday scores zero.
+        sells += _restore_budget(state, scores, mv_fn, decide_at)
 
         eleven = select_best_eleven(state.players, scores)
         lineup_ids = [p.id for p in eleven]

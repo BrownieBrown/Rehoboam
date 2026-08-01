@@ -39,7 +39,11 @@ def test_scores_the_points_of_the_fielded_eleven():
 
 
 def test_negative_budget_at_kickoff_zeroes_the_matchday():
-    state = ReplayState(budget=-1, squad=_full_squad())
+    # The debt is far beyond what liquidating this squad could raise (11 players
+    # at EUR 1,000,000 yields EUR 10,450,000 at the 95% instant-sell rate), so
+    # the engine cannot trade its way out and eats the zero. A *recoverable*
+    # deficit is covered by test_sells_below_eleven_to_avoid_a_zeroed_matchday.
+    state = ReplayState(budget=-100_000_000, squad=_full_squad())
     mds = [_matchday(1, 10 * DAY, {str(i): 50.0 for i in range(11)})]
     result = run_season(
         state=state,
@@ -126,3 +130,173 @@ def test_engine_never_reads_points_of_the_matchday_being_played():
     )
     assert seen, "score_fn was never called"
     assert all(at < 10 * DAY for at in seen), "scored at or after kickoff — leak"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: fieldability-safe sells, penalty-over-zero, fresh team value,
+# and position-aware marginal gain.
+# ---------------------------------------------------------------------------
+
+
+def _named_squad(spec):
+    """``spec`` is ``[(player_id, position), ...]``; each player gets own team."""
+    return {pid: ReplayPlayer(id=pid, position=pos, team_id=pid) for pid, pos in spec}
+
+
+# 1 GK, 5 DEF, 5 MID, 4 FW — a legal full squad of fifteen.
+_FIFTEEN = (
+    [("gk", "Goalkeeper")]
+    + [(f"d{i}", "Defender") for i in range(1, 6)]
+    + [(f"m{i}", "Midfielder") for i in range(1, 6)]
+    + [(f"f{i}", "Forward") for i in range(1, 5)]
+)
+
+
+def _gk_is_cheapest(pid, at):
+    """The goalkeeper scores lowest, so a naive min() would always sell them."""
+    if pid == "gk":
+        return 0.0
+    if pid == "d1":
+        return 1.0
+    return 50.0
+
+
+def test_make_room_sale_never_strands_the_squad_without_a_goalkeeper():
+    """At 15/15 the sale victim must leave a squad that can still field eleven."""
+    state = ReplayState(budget=50_000_000, squad=_named_squad(_FIFTEEN))
+    market = FakeMarket([MarketListing(player_id="star", price=1_000_000, transfer_at=9 * DAY)])
+    mds = [_matchday(1, 10 * DAY, {"star": 100.0})]
+    result = run_season(
+        state=state,
+        market=market,
+        matchdays=mds,
+        score_fn=lambda pid, at: 200.0 if pid == "star" else _gk_is_cheapest(pid, at),
+        mv_fn=lambda pid, at: 1_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: "star-team",
+    )
+    assert "gk" in state.squad, "sold the only goalkeeper to make room"
+    assert "d1" not in state.squad, "should have sold the cheapest legal victim"
+    assert result.outcomes[0].buys == 1
+    assert result.outcomes[0].sells == 1
+    assert len(result.outcomes[0].lineup_ids) == 11
+
+
+def test_budget_recovery_prefers_a_sale_that_keeps_the_eleven_legal():
+    """Selling to clear a deficit must not gratuitously break the formation."""
+    spec = (
+        [("gk", "Goalkeeper")]
+        + [(f"d{i}", "Defender") for i in range(1, 5)]
+        + [(f"m{i}", "Midfielder") for i in range(1, 6)]
+        + [(f"f{i}", "Forward") for i in range(1, 3)]
+    )
+    state = ReplayState(budget=-1_000_000, squad=_named_squad(spec))
+    mds = [_matchday(1, 10 * DAY, {pid: 50.0 for pid, _ in spec})]
+    result = run_season(
+        state=state,
+        market=FakeMarket([]),
+        matchdays=mds,
+        score_fn=_gk_is_cheapest,
+        mv_fn=lambda pid, at: 2_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: pid,
+    )
+    assert "gk" in state.squad, "sold the only goalkeeper to raise cash"
+    assert "d1" not in state.squad, "should have sold the cheapest legal victim"
+    assert result.outcomes[0].sells == 1
+    assert result.outcomes[0].zeroed is False
+    assert len(result.outcomes[0].lineup_ids) == 11
+
+
+def test_sells_below_eleven_to_avoid_a_zeroed_matchday():
+    """A -100 empty-slot penalty beats a zero, so sell down past eleven."""
+    state = ReplayState(budget=-1_000_000, squad=_full_squad())
+    mds = [_matchday(1, 10 * DAY, {str(i): 50.0 for i in range(11)})]
+    result = run_season(
+        state=state,
+        market=FakeMarket([]),
+        matchdays=mds,
+        score_fn=lambda pid, at: 1.0 if pid == "10" else 10.0,
+        mv_fn=lambda pid, at: 2_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: "99",
+    )
+    outcome = result.outcomes[0]
+    assert outcome.zeroed is False, "took a zero rather than selling below eleven"
+    assert outcome.sells == 1
+    assert outcome.squad_size == 10
+    assert outcome.penalty == -100
+    assert outcome.points_scored == 10 * 50 - 100
+
+
+def test_keeps_the_squad_when_no_sale_could_clear_the_debt():
+    """A zero with the squad intact beats a zero with the squad liquidated."""
+    state = ReplayState(budget=-100_000_000, squad=_full_squad())
+    mds = [_matchday(1, 10 * DAY, {str(i): 50.0 for i in range(11)})]
+    result = run_season(
+        state=state,
+        market=FakeMarket([]),
+        matchdays=mds,
+        score_fn=lambda pid, at: 10.0,
+        mv_fn=lambda pid, at: 1_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: "99",
+    )
+    assert result.outcomes[0].sells == 0, "liquidated a squad it could not save"
+    assert result.outcomes[0].squad_size == 11
+    assert result.outcomes[0].zeroed is True
+
+
+def test_credit_line_is_rechecked_against_team_value_after_the_sale():
+    """The credit floor is 70% of *post-sale* team value, not the stale one.
+
+    Fifteen players at EUR 1,000,000 give a EUR -10,500,000 floor; after one
+    sale, fourteen players give EUR -9,800,000. Budget after the sale is
+    EUR 950,000, so a EUR 11,000,000 price lands at EUR -10,050,000 — legal
+    under the stale floor, illegal under the real one.
+    """
+    state = ReplayState(budget=0, squad=_named_squad(_FIFTEEN))
+    market = FakeMarket([MarketListing(player_id="star", price=11_000_000, transfer_at=9 * DAY)])
+    mds = [_matchday(1, 10 * DAY, {"star": 100.0})]
+    result = run_season(
+        state=state,
+        market=market,
+        matchdays=mds,
+        score_fn=lambda pid, at: 200.0 if pid == "star" else _gk_is_cheapest(pid, at),
+        mv_fn=lambda pid, at: 1_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: "star-team",
+    )
+    assert result.outcomes[0].buys == 0, "bought past the real credit line"
+    assert "star" not in state.squad
+
+
+def test_rejects_a_candidate_who_cannot_improve_the_best_eleven():
+    """Marginal gain is measured against the best legal eleven, not the bench.
+
+    The squad's eleven starters all score 100; three bench players score 10.
+    A candidate on 50 beats the bench by 40 but cannot displace any starter,
+    so their true marginal gain is zero and the buy must be refused.
+    """
+    spec = (
+        [("gk", "Goalkeeper")]
+        + [(f"d{i}", "Defender") for i in range(1, 6)]
+        + [(f"m{i}", "Midfielder") for i in range(1, 6)]
+        + [(f"f{i}", "Forward") for i in range(1, 4)]
+    )
+    bench = {"d5", "m5", "f3"}
+    state = ReplayState(budget=50_000_000, squad=_named_squad(spec))
+    market = FakeMarket([MarketListing(player_id="meh", price=1_000_000, transfer_at=9 * DAY)])
+    mds = [_matchday(1, 10 * DAY, {pid: 50.0 for pid, _ in spec})]
+    result = run_season(
+        state=state,
+        market=market,
+        matchdays=mds,
+        score_fn=lambda pid, at: 50.0 if pid == "meh" else (10.0 if pid in bench else 100.0),
+        mv_fn=lambda pid, at: 1_000_000,
+        position_fn=lambda pid: "Midfielder",
+        team_fn=lambda pid: "meh-team",
+        min_ep_gain=5.0,
+    )
+    assert result.outcomes[0].buys == 0, "bought a player who cannot reach the eleven"
+    assert result.outcomes[0].sells == 0
