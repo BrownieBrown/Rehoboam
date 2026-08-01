@@ -7,9 +7,12 @@ from dataclasses import dataclass, field
 
 from rehoboam.enrichment.corpus import TrainingCorpus
 
-# Assignments are recorded within seconds of league creation; a one-day window
-# separates this season's assignment from prior seasons' in the same table.
-ASSIGNMENT_WINDOW_SECONDS = 86400.0
+# One assignment batch lands on a single timestamp, within a second or two of
+# league creation. The tolerance must stay tight: our league drew a squad on
+# 2025-08-07 20:40:08 and then re-drew on 2025-08-08 14:05:48, and only the
+# later batch is real. A day-wide window silently merges both into a 25-player
+# phantom squad, so this stays in the minutes, not hours.
+ASSIGNMENT_WINDOW_SECONDS = 300.0
 
 
 @dataclass(frozen=True)

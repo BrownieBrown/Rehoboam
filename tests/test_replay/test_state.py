@@ -95,3 +95,32 @@ def test_initial_state_ignores_prior_season_assignments(tmp_path):
         c, manager_id="3616202", assigned_on=ASSIGNED_AT, starting_budget=80_000_000
     )
     assert state.player_ids == []
+
+
+def test_initial_state_ignores_a_superseded_earlier_draw(tmp_path):
+    """A re-rolled league has two assignment batches; only the later is real.
+
+    Our real league drew a 14-player squad on 2025-08-07 20:40:08 and re-drew
+    12 players on 2025-08-08 14:05:48. A window wide enough to span both
+    produces a 25-player phantom squad that never existed.
+    """
+    c = TrainingCorpus(tmp_path / "rerolled.db")
+    earlier = ASSIGNED_AT - 62_499  # ~17.4h before, matching the real re-roll gap
+    with sqlite3.connect(c.db_path) as conn:
+        conn.executemany(
+            "INSERT INTO player_transfers (player_id, transfer_at, price, transfer_type,"
+            " counterparty_id, counterparty_name) VALUES (?,?,?,?,?,?)",
+            [
+                ("stale1", earlier, 0, 0, "3616202", "Brownie"),
+                ("stale2", earlier, 0, 0, "3616202", "Brownie"),
+                ("real1", ASSIGNED_AT, 0, 0, "3616202", "Brownie"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO player_universe (player_id, position, team_id) VALUES (?,?,?)",
+            [("stale1", "Forward", "1"), ("stale2", "Defender", "2"), ("real1", "Midfielder", "3")],
+        )
+    state = initial_state(
+        c, manager_id="3616202", assigned_on=ASSIGNED_AT, starting_budget=80_000_000
+    )
+    assert state.player_ids == ["real1"]
