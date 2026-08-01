@@ -10,7 +10,6 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
-from functools import cache
 from pathlib import Path
 
 from rehoboam.backtest.snapshot import matches_before
@@ -34,8 +33,51 @@ def _parse(dt: str) -> float:
     return datetime.strptime(dt, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
 
 
-def build_matchdays(corpus: TrainingCorpus, *, season: str) -> list[Matchday]:
-    """One ``Matchday`` per day_number, with real points and the earliest kickoff."""
+def load_calendar(learning_db_path: Path, *, league_id: str) -> dict[int, float]:
+    """Authoritative kickoff per matchday, as unix epochs.
+
+    ``player_match_history`` cannot supply this: it holds 36 distinct team ids
+    for 2025/2026 against a league of 18, so two competitions with different
+    calendars share one ``day_number`` space and day 1 spans 2025-08-01 to
+    2025-08-24. ``matchday_lineup_results`` is our league's own fixture list —
+    exactly one row per matchday, with the date the matchday actually started.
+    """
+    with sqlite3.connect(learning_db_path) as conn:
+        rows = conn.execute(
+            "SELECT day_number, matchday_date FROM matchday_lineup_results "
+            "WHERE league_id = ? AND matchday_date IS NOT NULL",
+            (league_id,),
+        ).fetchall()
+    return {int(day): _parse(str(date)) for day, date in rows}
+
+
+def day_for_kickoff(kickoffs: dict[int, float], at: float) -> int:
+    """The matchday being predicted at ``at``: the next one still to kick off.
+
+    Resolving this from match dates instead (``MIN(day_number)`` over unplayed
+    fixtures) lags badly whenever a low-numbered fixture is postponed — it put
+    matchdays 21 through 24 all on a cutoff of 17, starving the scorer of four
+    matchdays of history. A per-league calendar has no such overlap.
+    """
+    upcoming = [day for day, kickoff in kickoffs.items() if kickoff > at]
+    if upcoming:
+        return min(upcoming)
+    # Past the final whistle of the season: every matchday is history.
+    return max(kickoffs, default=0) + 1
+
+
+def build_matchdays(
+    corpus: TrainingCorpus, *, season: str, kickoffs: dict[int, float] | None = None
+) -> list[Matchday]:
+    """One ``Matchday`` per day_number, with real points and its kickoff.
+
+    Points come from ``player_match_history`` keyed by ``day_number``; those
+    reconcile exactly with the official league totals, so only the dates were
+    ever wrong. Pass ``kickoffs`` (see ``load_calendar``) to date the matchdays
+    from our league's own fixture list. Without it the kickoff falls back to
+    the earliest match recorded under that day_number, which is only correct
+    for a corpus holding a single competition.
+    """
     with sqlite3.connect(corpus.db_path) as conn:
         rows = conn.execute(
             "SELECT day_number, player_id, points, match_date FROM player_match_history "
@@ -44,16 +86,20 @@ def build_matchdays(corpus: TrainingCorpus, *, season: str) -> list[Matchday]:
         ).fetchall()
 
     by_day: dict[int, dict[str, float]] = {}
-    kickoffs: dict[int, float] = {}
+    earliest: dict[int, float] = {}
     for day, pid, points, match_date in rows:
         day = int(day)
         by_day.setdefault(day, {})[str(pid)] = float(points or 0)
         at = _parse(match_date)
-        if day not in kickoffs or at < kickoffs[day]:
-            kickoffs[day] = at
+        if day not in earliest or at < earliest[day]:
+            earliest[day] = at
 
     return [
-        Matchday(day_number=day, kickoff=kickoffs[day], points=by_day[day])
+        Matchday(
+            day_number=day,
+            kickoff=(kickoffs or {}).get(day, earliest[day]),
+            points=by_day[day],
+        )
         for day in sorted(by_day)
     ]
 
@@ -74,32 +120,20 @@ def load_standings(
     ]
 
 
-def _make_score_fn(corpus: TrainingCorpus, season: str) -> Callable[[str, float], float]:
+def _make_score_fn(
+    corpus: TrainingCorpus, season: str, kickoffs: dict[int, float]
+) -> Callable[[str, float], float]:
     """Score a player using only matches before the current matchday.
 
     The leak boundary lives here: ``matches_before`` truncates history to
     strictly earlier matchdays, and the cutoff is derived from the decision
-    timestamp, never from the matchday being predicted.
+    timestamp via the league calendar, never from the matchday being predicted.
     """
     availability, rate, _meta = load_coefficients()
     positions: dict[str, str] = {}
 
-    @cache
-    def day_for(at: float) -> int:
-        """The matchday being predicted, from the decision timestamp."""
-        with sqlite3.connect(corpus.db_path) as conn:
-            row = conn.execute(
-                "SELECT MIN(day_number) FROM player_match_history "
-                "WHERE season = ? AND match_date > ?",
-                (
-                    season,
-                    datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                ),
-            ).fetchone()
-        return int(row[0]) if row and row[0] is not None else 99
-
     def score(player_id: str, at: float) -> float:
-        day = day_for(at)
+        day = day_for_kickoff(kickoffs, at)
         history = matches_before(
             corpus.matches_for_player(player_id), season=season, day_number=day
         )
@@ -120,7 +154,8 @@ def _make_score_fn(corpus: TrainingCorpus, season: str) -> Callable[[str, float]
 def run_replay(*, corpus_path: Path, learning_db_path: Path) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report."""
     corpus = TrainingCorpus(corpus_path)
-    matchdays = build_matchdays(corpus, season=SEASON)
+    kickoffs = load_calendar(learning_db_path, league_id=LEAGUE_ID)
+    matchdays = build_matchdays(corpus, season=SEASON, kickoffs=kickoffs)
     state = initial_state(
         corpus,
         manager_id=MANAGER_ID,
@@ -128,7 +163,7 @@ def run_replay(*, corpus_path: Path, learning_db_path: Path) -> tuple[SeasonResu
         starting_budget=STARTING_BUDGET,
     )
     market = ReplayMarket(corpus)
-    score_fn = _make_score_fn(corpus, SEASON)
+    score_fn = _make_score_fn(corpus, SEASON, kickoffs)
     positions_cache: dict[str, str] = {}
     teams_cache: dict[str, str] = {}
 

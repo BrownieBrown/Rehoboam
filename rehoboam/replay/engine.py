@@ -62,6 +62,26 @@ def _proceeds(pid: str, mv_fn: Callable[[str, float], int | None], at: float) ->
     return int((mv_fn(pid, at) or 0) * INSTANT_SELL_PCT)
 
 
+def _solvent_after(state: ReplayState, price: int, proceeds: int = 0) -> bool:
+    """Whether the balance stays non-negative once this purchase settles.
+
+    Every decision here is taken ``DECISION_LEAD_SECONDS`` before kickoff, and
+    a negative balance *at* kickoff zeroes the whole matchday. There is no
+    intervening window in which to recover, so the credit line — a mid-week
+    facility this engine deliberately does not model — is the wrong constraint
+    at this instant. The bot may spend only cash it actually holds, plus what
+    the sale it is about to make will raise.
+
+    Without this gate the engine leveraged to the credit floor (measured:
+    EUR -167,048,229 against a EUR 80,000,000 starting budget) and then had to
+    unwind it in the same session at 95% of market value, against a mean buy
+    price of 1.117x market value — destroying ~15% of the squad's equity every
+    matchday until nothing was left. ``can_buy``'s credit-line check stays as
+    the standing legality rule; this is an additional decision-time one.
+    """
+    return state.budget + int(proceeds) - int(price) >= 0
+
+
 def _eleven_total(players: list[ReplayPlayer], scores: dict[str, float]) -> float:
     """Expected points of the best *legal* eleven drawn from ``players``."""
     return sum(scores.get(p.id, 0.0) for p in select_best_eleven(players, scores))
@@ -179,7 +199,12 @@ def run_season(
                 sold_id = _fieldable_sale_victim(state, scores)
                 if sold_id is None:
                     continue  # no sale keeps the eleven legal — skip this buy
-                state.sell(sold_id, _proceeds(sold_id, mv_fn, decide_at))
+                sale_proceeds = _proceeds(sold_id, mv_fn, decide_at)
+                # Solvency is tested *before* the sale so that an unaffordable
+                # candidate never costs us a player we then cannot replace.
+                if not _solvent_after(state, listing.price, sale_proceeds):
+                    continue
+                state.sell(sold_id, sale_proceeds)
                 scores.pop(sold_id, None)
                 sells += 1
                 # The credit floor is 70% of *current* team value, so it has to
@@ -192,6 +217,8 @@ def run_season(
                 )
                 if not allowed:
                     continue
+            elif not _solvent_after(state, listing.price):
+                continue
 
             state.buy(candidate, listing.price)
             scores[candidate.id] = cand_ep

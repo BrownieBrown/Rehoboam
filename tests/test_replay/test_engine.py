@@ -300,3 +300,39 @@ def test_rejects_a_candidate_who_cannot_improve_the_best_eleven():
     )
     assert result.outcomes[0].buys == 0, "bought a player who cannot reach the eleven"
     assert result.outcomes[0].sells == 0
+
+
+def test_budget_never_goes_negative_at_kickoff_with_an_expensive_market():
+    """Solvency gate: the engine may only spend cash it holds at decision time.
+
+    Every decision is taken one hour before kickoff, so there is no window in
+    which to recover — the credit line is a mid-week facility this engine does
+    not model. Gated on the credit line alone, the engine leveraged to many
+    times its cash (a squad worth EUR 220,000,000 licenses a EUR -154,000,000
+    floor) and then liquidated the squad at 95% of MV to get back to zero,
+    losing ~15% on every forced round trip. Here it must simply decline: it
+    can afford the EUR 3,000,000 listing and nothing else.
+    """
+    squad = {str(i): ReplayPlayer(id=str(i), position=POS[i], team_id=str(i)) for i in range(11)}
+    state = ReplayState(budget=5_000_000, squad=squad)
+    listings = [MarketListing(player_id="cheap", price=3_000_000, transfer_at=0.0)] + [
+        MarketListing(player_id=f"star{i}", price=30_000_000, transfer_at=0.0) for i in range(11)
+    ]
+    mds = [_matchday(d, d * DAY, {}) for d in range(1, 11)]
+    result = run_season(
+        state=state,
+        market=FakeMarket(listings),
+        matchdays=mds,
+        score_fn=lambda pid, at: 1.0 if pid.isdigit() else 200.0,
+        mv_fn=lambda pid, at: 20_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: pid,
+    )
+    assert all(o.budget_at_kickoff >= 0 for o in result.outcomes), (
+        "spent money it did not hold: "
+        f"{[o.budget_at_kickoff for o in result.outcomes if o.budget_at_kickoff < 0]}"
+    )
+    assert not any(o.zeroed for o in result.outcomes)
+    assert all(len(o.lineup_ids) == 11 for o in result.outcomes), "squad collapsed below eleven"
+    assert sum(o.buys for o in result.outcomes) == 1, "bought something it could not afford"
+    assert sum(o.sells for o in result.outcomes) == 0, "forced into a liquidation"
