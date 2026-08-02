@@ -19,8 +19,20 @@ from rehoboam.replay.rules import (
 )
 from rehoboam.replay.state import ReplayPlayer, ReplayState
 
-# Selling instantly to Kickbase returns 95% of market value.
-INSTANT_SELL_PCT = 0.95
+# Selling instantly to Kickbase returns the FULL market value.
+#
+# REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured across
+# all 151 real flips in `flip_outcomes`, joined to `player_mv_history` within a
+# day of the sale: the sell/MV ratio has a hard mode of 41 rows at exactly 1.00
+# and ZERO rows at 0.95 (2 anywhere in 0.94-0.96). A 5% haircut would leave a
+# cluster at 0.95; there is none. Ratios above 1.00 are sales to other managers
+# at a premium, a channel this replay deliberately does not model.
+# `api.sell_player_instant` documents the same: "sell instantly to Kickbase at
+# market value".
+#
+# This is not cosmetic: proceeds feed `_solvent_after`, so a 5% understatement
+# suppressed buys the bot could actually afford.
+INSTANT_SELL_PCT = 1.0
 # Decisions are made this long before kickoff, mirroring the live bot's
 # pre-matchday session rather than pretending to trade at the whistle.
 DECISION_LEAD_SECONDS = 3600.0

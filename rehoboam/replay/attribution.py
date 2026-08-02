@@ -14,7 +14,7 @@ FIDELITY_NOTES = [
     ("Points scoring", "exact", "real per-match points from the corpus"),
     ("Penalty avoidance", "exact", "deterministic"),
     ("Lineup selection", "high", "real squad, real formation rules"),
-    ("Sell decisions", "high", "instant sell = 95% of market value"),
+    ("Sell decisions", "medium", "instant sell at MV; profit flips NOT modelled"),
     ("Buy prices", "high", "real transaction prices"),
     ("Buy availability", "medium", "only players who actually traded are visible"),
     ("Bid competition", "ABSENT - optimistic", "wanted players are always won"),

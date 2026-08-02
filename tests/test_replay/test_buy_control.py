@@ -111,3 +111,19 @@ def test_quota_is_taken_from_the_reference_run_matchday_by_matchday():
     result = SeasonResult(outcomes=[_outcome(1, 3), _outcome(2, 0), _outcome(3, 1)])
 
     assert buy_quota_from(result) == {1: 3, 2: 0, 3: 1}
+
+
+def test_instant_sell_returns_full_market_value():
+    """Measured, not assumed. Across 151 real flips in flip_outcomes joined to
+    player_mv_history within a day of the sale, the sell/MV ratio has a hard
+    mode of 41 rows at exactly 1.00 and ZERO at 0.95. A 5% haircut would have
+    produced a cluster at 0.95; there is none. api.py's own wrapper agrees:
+    "Sell a player instantly to Kickbase at market value."
+
+    REH-51 asserted 0.95 in the plan and it was never checked, understating
+    proceeds on every sale in every replay run and tightening the solvency gate
+    that decides how many buys are affordable.
+    """
+    from rehoboam.replay.engine import INSTANT_SELL_PCT
+
+    assert INSTANT_SELL_PCT == 1.0
