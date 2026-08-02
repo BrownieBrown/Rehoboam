@@ -81,6 +81,21 @@ def test_last_played_status_ignores_unplayed_fixtures():
     assert last_played_status(perf) == 5
 
 
+def test_last_played_status_prefers_the_later_season_over_a_higher_day_number():
+    """'Most recent played match' is across seasons, not within one.
+
+    A day-1 match this season is more recent than a day-34 match last season.
+    Pinned in both list orders so neither "first season wins" nor "last season
+    wins" can pass by accident.
+    """
+    this_season = ("2025/2026", [{"day": 1, "st": 3, "p": 12, "mp": "20'"}])
+    last_season = ("2024/2025", [{"day": 34, "st": 5, "p": 80, "mp": "90'"}])
+
+    for ordering in ((this_season, last_season), (last_season, this_season)):
+        perf = {"it": [{"ti": title, "ph": matches} for title, matches in ordering]}
+        assert last_played_status(perf) == 3
+
+
 def test_last_played_status_returns_none_without_history():
     assert last_played_status(None) is None
     assert last_played_status({"it": []}) is None
@@ -134,7 +149,6 @@ def test_dgw_multiplies_the_composed_score():
     perf = _perf([{"day": 1, "st": 5, "p": 80, "mp": "90'"}])
     single = score_player_v2(_data(performance=perf))
     dgw_data = _data(performance=perf)
-    (object.__setattr__(dgw_data, "is_dgw", True) if hasattr(dgw_data, "__setattr__") else None)
     dgw_data.is_dgw = True
     doubled = score_player_v2(dgw_data)
     assert doubled.expected_points > single.expected_points
