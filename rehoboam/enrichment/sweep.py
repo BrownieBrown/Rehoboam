@@ -35,6 +35,7 @@ class SweepStats:
     universe_size: int = 0
     performance_fetched: int = 0
     mv_fetched: int = 0
+    transfers_fetched: int = 0
     failed: int = 0
     skipped: int = 0
     positions_resolved: int = 0
@@ -129,6 +130,7 @@ def run_sweep(
     timeframe_days: int = DEFAULT_TIMEFRAME_DAYS,
     extra_player_ids: list[str] | None = None,
     force_refetch_performance: bool = False,
+    sweep_transfers: bool = False,
 ) -> SweepStats:
     """Populate the training corpus for every player in the league.
 
@@ -161,6 +163,15 @@ def run_sweep(
     rerun would otherwise skip everyone. Scoped to performance only: MV-series
     resumability (``mv_fetched_at``) is untouched, and this never fires
     silently — it is opt-in per call, never the default.
+
+    ``sweep_transfers`` (REH-55) additionally fetches each pending player's
+    real transfer history via ``get_player_transfer_history`` and persists it
+    through ``TrainingCorpus.record_player_transfers``, tracked by its own
+    ``sweep_progress.transfers_fetched_at`` column — so it is independently
+    resumable from performance/MV, and a rerun with the flag on only retries
+    players that don't have it yet. Off by default: it adds one request per
+    player (~527 in the live universe) on top of the existing sweep, and a
+    plain ``enrich-corpus`` run should not pay that cost unless asked.
     """
     stats = SweepStats()
 
@@ -264,10 +275,28 @@ def run_sweep(
         if throttle_seconds:
             time.sleep(throttle_seconds)
 
+    if sweep_transfers:
+        pending_transfers = corpus.players_needing_fetch("transfers")
+        if limit is not None:
+            pending_transfers = pending_transfers[:limit]
+
+        for pid in pending_transfers:
+            try:
+                history = client.get_player_transfer_history(league_id=league_id, player_id=pid)
+                corpus.record_player_transfers(pid, history)
+                corpus.mark_fetched(pid, transfers=True)
+                stats.transfers_fetched += 1
+            except Exception as e:
+                stats.failed += 1
+                logger.warning("Transfer history fetch failed for player %s: %s", pid, e)
+            if throttle_seconds:
+                time.sleep(throttle_seconds)
+
     logger.info(
-        "Sweep done: %d perf, %d mv, %d failed, %d skipped",
+        "Sweep done: %d perf, %d mv, %d transfers, %d failed, %d skipped",
         stats.performance_fetched,
         stats.mv_fetched,
+        stats.transfers_fetched,
         stats.failed,
         stats.skipped,
     )

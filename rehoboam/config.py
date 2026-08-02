@@ -108,13 +108,68 @@ class Settings(BaseSettings):
     )
 
     # EP-First Settings
+    #
+    # These are on the v2 scale: REAL Kickbase matchday points, not the old
+    # 0-100 index. Every value below is a PRE-SEASON ESTIMATE awaiting
+    # live-market validation. `derive-thresholds` measured n=0 on 2026-07-31
+    # because no purchasable listings exist before the season opens
+    # (2026-08-28), so the numbers come instead from a controller measurement
+    # over the full 473-player universe scored against a synthetic mid-table
+    # 15-man squad: marginal-gain p50 43.1, p70 52.6, p85 69.3, with 309 of
+    # 473 candidates showing a positive gain.
+    #
+    # Re-run `rehoboam derive-thresholds` once the market repopulates and tune
+    # these in `.env` — they are Settings fields precisely so the first real
+    # evidence, which arrives mid-season, does not require a new build.
     min_expected_points_to_buy: float = Field(
-        default=30.0,
-        description="Minimum expected points to consider buying a player",
+        default=35.0,
+        description=(
+            "Minimum ABSOLUTE expected points (real points) to consider buying a "
+            "player. Set from the v2 EP median of 34.8 measured 2026-07-31, "
+            "preserving the original intent of 'do not buy a player who is not at "
+            "least mid-table'. Pre-season estimate awaiting live-market validation."
+        ),
     )
     min_ep_upgrade_threshold: float = Field(
-        default=5.0,
-        description="Minimum EP gain to consider a market player an upgrade (lower = more trades that compound over the season)",
+        default=40.0,
+        description=(
+            "Minimum MARGINAL EP gain (real points) for a market player to count as "
+            "an upgrade at all. Rounded from the p50 of 43.1 measured 2026-07-31 "
+            "over the 473-player universe against a mid-table squad. Pre-season "
+            "estimate awaiting live-market validation. Note marginal gain is "
+            "relative to YOUR squad: a strong squad finds fewer improvements, so "
+            "this gets harder to clear as the season goes well."
+        ),
+    )
+
+    # Bid tiers — the marginal-gain bands SmartBidding uses to size an overbid.
+    # Fields rather than module constants so they can be re-tuned from `.env`
+    # mid-season without shipping a build.
+    bid_tier_must_have: float = Field(
+        default=70.0,
+        description=(
+            "Marginal EP gain (real points) at or above which a candidate is a "
+            "'must have'. Rounded from p85 = 69.3 measured 2026-07-31. Because "
+            "marginal gain is measured against your own squad, this may rarely "
+            "fire late in a successful season — the bot going quiet there is the "
+            "design working, not a fault. Pre-season estimate."
+        ),
+    )
+    bid_tier_strong_upgrade: float = Field(
+        default=53.0,
+        description=(
+            "Marginal EP gain (real points) at or above which a candidate is a "
+            "'strong upgrade'. Rounded from p70 = 52.6 measured 2026-07-31. "
+            "Pre-season estimate awaiting live-market validation."
+        ),
+    )
+    bid_tier_solid_upgrade: float = Field(
+        default=43.0,
+        description=(
+            "Marginal EP gain (real points) at or above which a candidate is a "
+            "'solid upgrade'. Rounded from p50 = 43.1 measured 2026-07-31. "
+            "Pre-season estimate awaiting live-market validation."
+        ),
     )
 
     # Auto Trading Limits

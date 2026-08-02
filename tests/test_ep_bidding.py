@@ -11,7 +11,7 @@ class TestEPBidTiers:
             asking_price=10_000_000,
             market_value=12_000_000,
             expected_points=80.0,
-            marginal_ep_gain=25.0,
+            marginal_ep_gain=75.0,
             confidence=0.8,
             current_budget=20_000_000,
             sell_plan=None,
@@ -52,7 +52,7 @@ class TestEPBidTiers:
             asking_price=8_000_000,
             market_value=8_000_000,
             expected_points=60.0,
-            marginal_ep_gain=15.0,
+            marginal_ep_gain=55.0,
             confidence=0.75,
             current_budget=20_000_000,
             sell_plan=None,
@@ -67,13 +67,13 @@ class TestEPBidTiers:
             asking_price=6_000_000,
             market_value=6_000_000,
             expected_points=45.0,
-            marginal_ep_gain=7.0,
+            marginal_ep_gain=45.0,
             confidence=0.65,
             current_budget=15_000_000,
             sell_plan=None,
         )
         assert result.recommended_bid > 0
-        assert result.marginal_ep_gain == 7.0
+        assert result.marginal_ep_gain == 45.0
 
     def test_marginal_ep_gain_stored_in_result(self):
         bidding = SmartBidding()
@@ -210,12 +210,17 @@ class TestCompetitorAwareBidding:
     """Tests for offer_count and has_aggressive_competitors bid modulation."""
 
     def _must_have_bid(self, bidding: SmartBidding, **overrides):
-        """Shared setup for a must-have tier bid with knobs for competitor args."""
+        """Shared setup for a must-have tier bid with knobs for competitor args.
+
+        REH-55: gains are real Kickbase points now, not the old 0-100 index.
+        25.0 cleared the old ``must_have >= 20``; the measured p85 is 69.3, so
+        the must-have fixture moves to 75.0 to keep testing the same tier.
+        """
         kwargs = {
             "asking_price": 10_000_000,
             "market_value": 10_000_000,
             "expected_points": 80.0,
-            "marginal_ep_gain": 25.0,
+            "marginal_ep_gain": 75.0,
             "confidence": 0.8,
             "current_budget": 30_000_000,
             "sell_plan": None,
@@ -274,7 +279,7 @@ class TestCompetitorAwareBidding:
             asking_price=8_000_000,
             market_value=8_000_000,
             expected_points=45.0,
-            marginal_ep_gain=7.0,  # solid_upgrade tier
+            marginal_ep_gain=45.0,  # solid_upgrade tier (real points: p50 = 43.1)
             confidence=0.7,
             current_budget=20_000_000,
             sell_plan=None,
@@ -292,7 +297,7 @@ class TestCompetitorAwareBidding:
             asking_price=8_000_000,
             market_value=8_000_000,
             expected_points=45.0,
-            marginal_ep_gain=7.0,
+            marginal_ep_gain=45.0,  # solid_upgrade tier (real points)
             confidence=0.7,
             current_budget=20_000_000,
             sell_plan=None,

@@ -427,6 +427,17 @@ def enrich_corpus(
             "everyone via sweep_progress. Not the default — opt in per run."
         ),
     ),
+    transfers: bool = typer.Option(
+        False,
+        "--transfers",
+        help=(
+            "Also sweep each player's real transfer history (REH-55) into "
+            "player_transfers — the only local source of real, whole-season "
+            "market prices for the full-bot replay. One extra request per "
+            "player (~527 in the live universe); off by default and "
+            "independently resumable from performance/MV."
+        ),
+    ),
 ):
     """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
 
@@ -451,6 +462,12 @@ def enrich_corpus(
     ``sweep_progress`` makes reruns skip players already fetched, which is
     exactly what you don't want after a parsing bug is fixed and the stored
     rows need to be regenerated from scratch.
+
+    ``--transfers`` additionally sweeps ``/leagues/{lid}/players/{pid}/transferHistory``
+    for every player into the new ``player_transfers`` table — real
+    transaction prices across the whole season, needed by the full-bot
+    replay (REH-51) to know what was actually buyable and at what price on
+    a given matchday.
     """
     from .bid_learner import BidLearner
     from .enrichment.corpus import TrainingCorpus
@@ -482,6 +499,7 @@ def enrich_corpus(
         limit=limit or None,
         extra_player_ids=extra_player_ids,
         force_refetch_performance=refetch_performance,
+        sweep_transfers=transfers,
     )
 
     table = Table(title="Corpus enrichment summary")
@@ -490,6 +508,8 @@ def enrich_corpus(
     table.add_row("Universe size", str(stats.universe_size))
     table.add_row("Performance fetched", str(stats.performance_fetched))
     table.add_row("MV series fetched", str(stats.mv_fetched))
+    if transfers:
+        table.add_row("Transfers fetched", str(stats.transfers_fetched))
     table.add_row("Skipped (already done)", str(stats.skipped))
     table.add_row("Failed", str(stats.failed))
     if include_historical:
@@ -652,6 +672,29 @@ def backtest_baseline(
     console.print(table)
 
 
+@app.command("replay-season")
+def replay_season(
+    corpus: Path = typer.Option(  # noqa: B008
+        Path("logs/training_corpus.db"), help="Path to the training corpus DB"
+    ),
+    learning_db: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"), help="Path to the learning DB with real standings"
+    ),
+) -> None:
+    """Replay the full bot across 2025/26 and report the counterfactual finish."""
+    from rehoboam.replay.driver import run_replay
+
+    if not corpus.exists():
+        console.print(f"[red]Corpus not found: {corpus}[/red]")
+        raise typer.Exit(1)
+    if not learning_db.exists():
+        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
+        raise typer.Exit(1)
+
+    _result, report = run_replay(corpus_path=corpus, learning_db_path=learning_db)
+    console.print(report)
+
+
 @app.command("fit-scorer")
 def fit_scorer(
     availability_k: float = typer.Option(
@@ -730,6 +773,84 @@ def fit_scorer(
     console.print(rates)
 
     console.print(f"[dim]Coefficients: {COEFFICIENTS_PATH}[/dim]")
+
+
+@app.command("derive-thresholds")
+def derive_thresholds(
+    league_index: int = typer.Option(0, "--league", help="League index"),
+):
+    """Measure the v2 marginal-gain distribution and propose decision thresholds.
+
+    The constants in config.py and bidding_strategy.py were calibrated against
+    the old 0-100 EP index. On real points they mean something different, and
+    the old firing rates cannot be recovered (predicted_eps.marginal_ep_gain is
+    NULL on every production row). This measures the real distribution against
+    the current squad and market, and proposes thresholds by rarity.
+
+    Read-only: reports numbers, changes nothing.
+    """
+    from .scoring.decision import DecisionEngine
+    from .scoring.v2.thresholds import build_report
+    from .trader import Trader
+
+    api, settings, league = _login_and_get_league(league_index)
+    trader = Trader(api, settings)
+    result = trader.get_ep_recommendations_with_trends(league)
+
+    # NOTE: `get_ep_recommendations_with_trends` returns a **dict**, not a
+    # dataclass. Verified keys: buy_recs, trade_pairs, sell_recs, squad_scores,
+    # lineup_map, budget, squad_size, squad_players, market_players,
+    # market_scores, competitor_player_ids.
+    #
+    # Do NOT read marginal gains off `buy_recs`: `recommend_buys` returns only
+    # the top-N already filtered and ranked, so its gains sample the good tail
+    # and would push every derived threshold upward. Thresholds must be measured
+    # over ALL market candidates.
+    squad_scores = result["squad_scores"]
+    squad_players = result["squad_players"]  # {player_id: MarketPlayer}
+    market_players = result["market_players"]  # {player_id: MarketPlayer}
+    market_scores = result["market_scores"]  # {player_id: PlayerScore}
+    squad = list(squad_players.values())
+
+    # calculate_marginal_ep doesn't read min_ep_to_buy/min_ep_upgrade (those
+    # only gate recommend_buys/recommend_sells), so defaults are fine here —
+    # DecisionEngine has no `settings` kwarg to pass through.
+    engine = DecisionEngine()
+
+    gains: list[float] = []
+    for pid, player in market_players.items():
+        candidate_score = market_scores.get(pid)
+        if candidate_score is None:
+            continue
+        mep = engine.calculate_marginal_ep(
+            candidate_score=candidate_score,
+            candidate_player=player,
+            squad=squad,
+            squad_scores=squad_scores,
+        )
+        gains.append(mep.marginal_ep_gain)
+
+    report = build_report(gains)
+
+    table = Table(title=f"v2 marginal-gain distribution (n={report.n_candidates} positive)")
+    table.add_column("percentile")
+    table.add_column("marginal EP gain", justify="right")
+    for name, value in report.percentiles.items():
+        table.add_row(name, f"{value:.1f}")
+    console.print(table)
+
+    proposed = Table(title="Proposed tier thresholds (by rarity)")
+    proposed.add_column("tier")
+    proposed.add_column("rarity")
+    proposed.add_column("threshold", justify="right")
+    for name, rarity in (
+        ("must_have", "top 15%"),
+        ("strong_upgrade", "top 30%"),
+        ("solid_upgrade", "top 50%"),
+    ):
+        proposed.add_row(name, rarity, f"{report.proposed[name]:.1f}")
+    console.print(proposed)
+    console.print("[dim]Read-only. Apply these by editing config.py / bidding_strategy.py.[/dim]")
 
 
 @app.callback()

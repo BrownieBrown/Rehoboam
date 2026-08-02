@@ -145,18 +145,16 @@ last resort — it clobbers the Function's writes.
 - `Trader`: Per-call EP pipeline (`get_ep_recommendations`, `get_ep_recommendations_with_trends`, `find_profit_opportunities`) — stateless, takes a league per call.
 - `AutoTrader`: Session orchestrator. `run_full_session(league)` is the single entry point used by both the CLI `auto` command and the Azure Function timer trigger.
 
-**EP Scoring Pipeline** (`scoring/models.py`, `scoring/scorer.py`, `scoring/collector.py`, `scoring/decision.py`):
+**EP Scoring Pipeline** (`scoring/models.py`, `scoring/v2/adapter.py`, `scoring/collector.py`, `scoring/decision.py`):
 
-- `score_player(PlayerData) -> PlayerScore`: Pure function computing expected matchday points (0-180 scale)
+- `score_player_v2(PlayerData) -> PlayerScore`: the live scoring path (REH-55). Returns **real Kickbase matchday points**, not the old 0-100 index — `EP = Σ_status P(status) × rate(player, status)` over the fitted models in `scoring/v2/coefficients.json`.
 - `DataCollector`: Assembles player data from pre-fetched API data, flags missing fields
 - `DecisionEngine`: Buy/sell/lineup decisions via marginal EP gain calculation and sell plans
-- `PlayerScore`: The ONE number driving all decisions — components: base points, consistency, lineup probability, fixture difficulty, form, minutes trend, DGW multiplier
+- `PlayerScore`: The ONE number driving all decisions. v2 zeroes the v1 decomposition fields (consistency, fixture difficulty, form bonuses) — they are display-only remnants, so do not reason from them.
 - Data quality grading (A-F) penalizes unreliable predictions
-- Position calibration multiplier (REH-20) corrects systematic per-position EP bias from accumulated `matchday_outcomes`
+- `scoring/scorer.py`'s v1 `score_player` still exists and is still tested, but **no production code calls it** after REH-55. REH-20's position calibration multiplier went with it: it was fitted against the 0-100 index and must not be applied to real points.
 
-**Legacy roster helper** (`value_calculator.py`):
-
-- `PlayerValue`: A handful of static extraction helpers (games/consistency, minutes trend) still called directly by `expected_points.py`. `roster_analyzer.py`, the module that used to wrap this into gap-fill/upgrade buy context, was deleted as dead code (no reachable imports from the CLI or Azure Function entrypoints); not part of the EP decision pipeline.
+**Threshold scale — read before touching any EP constant.** Every EP threshold is now in real points: `min_ep_upgrade_threshold` 40.0, `min_expected_points_to_buy` 35.0, bid tiers 70/53/43. These are **pre-season estimates** derived 2026-07-31 from a synthetic mid-table squad (`derive-thresholds` measured n=0 — no purchasable listings exist before 2026-08-28), and every one is a `Settings` field so it can be re-tuned from `.env` mid-season without a deploy. Re-run `rehoboam derive-thresholds` once the market repopulates.
 
 **Learning System** (`bid_learner.py`, `learning/tracker.py`, `activity_feed_learner.py`):
 
@@ -253,6 +251,8 @@ The bot was built as a **market value trader** — buy undervalued players, ride
 - **Overbid percentage optimization** — Helps win auctions but doesn't help pick the right players to bid on.
 
 ### Data available but underused
+
+*Historical snapshot of the pre-v2 bot. `ExpectedPointsCalc` (`expected_points.py`) and `value_calculator.py` were deleted in REH-55; scoring now runs through `scoring/v2/`. Kept because the reasoning still explains why the rebuild was needed.*
 
 | Data                 | Where it exists    | How it's used               | How it should be used                                       |
 | -------------------- | ------------------ | --------------------------- | ----------------------------------------------------------- |

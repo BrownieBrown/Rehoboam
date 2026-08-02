@@ -799,6 +799,50 @@ class KickbaseV4Client:
                 f"Failed to fetch lineup selection: {response.status_code} - {response.text}"
             )
 
+    def get_player_transfer_history(self, league_id: str, player_id: str) -> dict[str, Any]:
+        """
+        Get a single player's transfer history within this league
+        GET /v4/leagues/{league_id}/players/{player_id}/transferHistory
+
+        The v2 corpus's only source of real, whole-season market prices —
+        ``logs/market_prices.db`` is empty and ``league_transfers`` covers
+        five weeks, not nine months. ``dt`` reaches back to the start of the
+        season (verified by live probe, 2026-07-29), so this reconstructs a
+        lower-bound market: if a player changed hands on some day at some
+        price, he was buyable that day at that price.
+
+        Returns:
+            dict with ``it``: list of transaction records (not capped to the
+            current season — the full REH-55 sweep saw records back to 2021
+            for players who rarely change hands), each
+            ``{"u": counterparty_manager_id, "unm": counterparty_name,
+            "dt": ISO-8601 timestamp, "trp": price, "t": transfer type}``.
+            ``t`` is stored raw (never interpreted here) — the full sweep
+            (2026-07-31, this league) saw 0, 2, and 3, not just the 0/2 the
+            probe found: ``t=2`` is the overwhelming majority (~95%) and
+            always carries a real positive price — a genuine manager-to-
+            manager transaction; ``t=0`` always carries price 0 with a real
+            counterparty and clusters at a handful of timestamps that line
+            up with season starts/resets — read as an initial/reset squad
+            assignment, not a purchase; ``t=3`` always carries price 0 with
+            no counterparty at all and clusters similarly — read as a
+            player being unassigned back to the pool. Every in-season
+            (2025/26) record swept was ``t=2``; 0/3 only appeared at
+            season-boundary timestamps. Not confirmed against Kickbase
+            documentation — treat as a strong empirical read, not a
+            guarantee.
+        """
+        url = f"{self.BASE_URL}/v4/leagues/{league_id}/players/{player_id}/transferHistory"
+
+        response = self.session.get(url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(
+                f"Failed to fetch player transfer history: {response.status_code} - {response.text}"
+            )
+
     def get_manager_squad(self, league_id: str, manager_id: str) -> dict[str, Any]:
         """
         View a competitor's squad
