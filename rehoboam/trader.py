@@ -20,7 +20,12 @@ from datetime import datetime, timezone
 from rich.console import Console
 
 from .api import KickbaseAPI
-from .bidding_strategy import SmartBidding
+from .bidding_strategy import (
+    TIER_MUST_HAVE,
+    TIER_SOLID_UPGRADE,
+    TIER_STRONG_UPGRADE,
+    SmartBidding,
+)
 from .config import Settings
 from .formation import can_fill_starting_eleven
 from .kickbase_client import League
@@ -85,6 +90,11 @@ class Trader:
         self.bidding = SmartBidding(
             bid_learner=bid_learner,
             activity_feed_learner=activity_feed_learner,
+            # Real-points marginal-gain bands, overridable from `.env` so they
+            # can be re-tuned mid-season once the live market gives evidence.
+            tier_must_have=getattr(settings, "bid_tier_must_have", TIER_MUST_HAVE),
+            tier_strong_upgrade=getattr(settings, "bid_tier_strong_upgrade", TIER_STRONG_UPGRADE),
+            tier_solid_upgrade=getattr(settings, "bid_tier_solid_upgrade", TIER_SOLID_UPGRADE),
         )
 
     # ------------------------------------------------------------------
@@ -129,7 +139,7 @@ class Trader:
         """
         from .scoring.collector import DataCollector
         from .scoring.decision import DecisionEngine
-        from .scoring.scorer import score_player
+        from .scoring.v2.adapter import score_player_v2
 
         # --- 1. Fetch squad and market ---
         squad = self.api.get_squad(league)
@@ -350,21 +360,11 @@ class Trader:
         # --- 3. Score all players ---
         collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
 
-        # Pre-compute position calibration multipliers once per session
-        # (one SQL query per position vs once per player). Stays at 1.0
-        # without a bid_learner or with insufficient historical data.
-        position_calibrations: dict[str, float] = {}
-        if self.bid_learner is not None:
-            for pos in ("Goalkeeper", "Defender", "Midfielder", "Forward"):
-                try:
-                    position_calibrations[pos] = (
-                        self.bid_learner.get_position_calibration_multiplier(pos)
-                    )
-                except Exception:
-                    position_calibrations[pos] = 1.0
-
-        def _calibration_for(player) -> float:
-            return position_calibrations.get(player.position, 1.0)
+        # REH-55: scoring runs through the fitted v2 models, which return real
+        # Kickbase matchday points rather than the old 0-100 index. REH-20's
+        # per-position calibration multiplier is deliberately NOT applied — it
+        # was fitted against that index, so on real points it would correct a
+        # bias that no longer exists.
 
         # REH-26 + REH-40: collect daily MV rows for both squad AND market
         # players in a single mv_rows list, persisted after both loops via
@@ -386,9 +386,7 @@ class Trader:
                     player_details=details,
                     team_profiles=team_profiles,
                 )
-                market_scores.append(
-                    score_player(data, calibration_multiplier=_calibration_for(player))
-                )
+                market_scores.append(score_player_v2(data))
                 market_player_map[player.id] = player
 
                 try:
@@ -425,9 +423,7 @@ class Trader:
                     player_details=details,
                     team_profiles=team_profiles,
                 )
-                squad_scores.append(
-                    score_player(data, calibration_multiplier=_calibration_for(player))
-                )
+                squad_scores.append(score_player_v2(data))
                 squad_player_map[player.id] = player
 
                 try:
@@ -465,8 +461,11 @@ class Trader:
         roster_context: dict = {}
 
         engine = DecisionEngine(
-            min_ep_to_buy=getattr(self.settings, "min_expected_points_to_buy", 30.0),
-            min_ep_upgrade=getattr(self.settings, "min_ep_upgrade_threshold", 5.0),
+            # Fallbacks are real-points values (REH-55). The old 30.0 / 5.0 were
+            # 0-100 index thresholds — leaving them here would silently disable
+            # both gates for any caller whose Settings lacks the fields.
+            min_ep_to_buy=getattr(self.settings, "min_expected_points_to_buy", 35.0),
+            min_ep_upgrade=getattr(self.settings, "min_ep_upgrade_threshold", 40.0),
         )
 
         # Always compute both buy recs and trade pairs so the unified trade

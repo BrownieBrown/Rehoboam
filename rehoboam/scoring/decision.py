@@ -32,7 +32,7 @@ class DecisionEngine:
         min_ep_upgrade: Minimum marginal EP gain required to recommend a buy.
     """
 
-    def __init__(self, min_ep_to_buy: float = 30.0, min_ep_upgrade: float = 5.0) -> None:
+    def __init__(self, min_ep_to_buy: float = 35.0, min_ep_upgrade: float = 40.0) -> None:
         self.min_ep_to_buy = min_ep_to_buy
         self.min_ep_upgrade = min_ep_upgrade
 
@@ -341,7 +341,28 @@ class DecisionEngine:
                 replaces_id = mep.replaces_player_id
                 replaces_name = mep.replaces_player_name
             else:
-                # No squad data — treat as pure EP gain
+                # No squad data — treat as pure EP gain.
+                #
+                # REH-55 investigated whether substituting an ABSOLUTE EP for a
+                # MARGINAL gain is a scale bug now that both are real points.
+                # It is semantically right: against an empty squad every signing
+                # is a pure addition to the best eleven, so the marginal gain IS
+                # the full EP. What matters is what it is then compared against.
+                #
+                # Two ways to reach here, and the threshold is harmless in both:
+                #   1. Genuinely empty squad — `_determine_emergency` reports a
+                #      lineup emergency, and line ~387 skips the `min_ep_upgrade`
+                #      comparison entirely when `is_emergency` is set.
+                #   2. Every squad player failed to score (upstream API failure)
+                #      while the raw squad still fields eleven, so no emergency.
+                #      Absolute EP (median ~35) is then measured against
+                #      min_ep_upgrade (40.0) and most candidates are rejected.
+                #
+                # Case 2 is a degraded state, and rejecting buys there is the
+                # safe direction. Note the old index made this the *opposite*
+                # trade: absolute EP ~72 against a threshold of 5.0 passed
+                # everything, so a total scoring failure used to trigger a
+                # buying spree. Documented rather than "fixed" for that reason.
                 marginal = ps.expected_points
                 replaces_id = None
                 replaces_name = None

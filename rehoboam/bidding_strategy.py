@@ -20,6 +20,26 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Marginal-gain tiers
+# ---------------------------------------------------------------------------
+#
+# On the v2 scale: REAL Kickbase matchday points, not the old 0-100 index.
+# Measured 2026-07-31 over the full 473-player universe against a synthetic
+# mid-table 15-man squad — p85 69.3 / p70 52.6 / p50 43.1. Pre-season
+# estimates; `derive-thresholds` could not measure the live market because no
+# purchasable listings exist before 2026-08-28.
+#
+# These are the DEFAULTS. `SmartBidding` takes them as constructor arguments so
+# `Settings.bid_tier_*` (readable from `.env`) can override them mid-season
+# without a new build — see `trader.py` for the live wiring. The old inline
+# values were 20 / 10 / 5, which on the real-points scale sit *below* the
+# median gain and so classified almost every candidate as a must-have.
+TIER_MUST_HAVE = 70.0
+TIER_STRONG_UPGRADE = 53.0
+TIER_SOLID_UPGRADE = 43.0
+
+
+# ---------------------------------------------------------------------------
 # Competitor-aware bidding helpers
 # ---------------------------------------------------------------------------
 
@@ -113,6 +133,9 @@ class SmartBidding:
         min_bid_increment: int = 1000,  # Minimum bid increment (€1k)
         bid_learner: BidLearner | None = None,  # Optional learning from past auctions
         activity_feed_learner: ActivityFeedLearner | None = None,  # Learn from league transfers
+        tier_must_have: float = TIER_MUST_HAVE,  # Marginal EP gain bands, real points
+        tier_strong_upgrade: float = TIER_STRONG_UPGRADE,
+        tier_solid_upgrade: float = TIER_SOLID_UPGRADE,
     ):
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -124,6 +147,9 @@ class SmartBidding:
         self.activity_feed_learner = activity_feed_learner or (
             ActivityFeedLearner() if ActivityFeedLearner else None
         )
+        self.tier_must_have = tier_must_have
+        self.tier_strong_upgrade = tier_strong_upgrade
+        self.tier_solid_upgrade = tier_solid_upgrade
 
     def calculate_ep_bid(
         self,
@@ -189,14 +215,15 @@ class SmartBidding:
                 marginal_ep_gain=0.0,
             )
 
-        # Tier classification based on marginal EP gain
-        if marginal_ep_gain >= 20:
+        # Tier classification based on marginal EP gain (real points — see the
+        # TIER_* constants for the measured distribution these come from)
+        if marginal_ep_gain >= self.tier_must_have:
             ep_tier = "must_have"
             tier_bonus = 10.0
-        elif marginal_ep_gain >= 10:
+        elif marginal_ep_gain >= self.tier_strong_upgrade:
             ep_tier = "strong_upgrade"
             tier_bonus = 6.0
-        elif marginal_ep_gain >= 5:
+        elif marginal_ep_gain >= self.tier_solid_upgrade:
             ep_tier = "solid_upgrade"
             tier_bonus = 3.0
         else:
