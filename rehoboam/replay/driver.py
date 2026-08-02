@@ -156,11 +156,23 @@ def _make_score_fn(
     return score
 
 
+def buy_quota_from(result: SeasonResult) -> dict[int, int]:
+    """Per-matchday buy counts, for holding a control's trading tempo fixed.
+
+    Matched matchday by matchday rather than season-wide: a season-wide budget
+    would let the control front-load its buys into whichever weeks happened to
+    be cheap, which is a different policy, not a different chooser.
+    """
+    return {o.day_number: o.buys for o in result.outcomes}
+
+
 def run_replay(
     *,
     corpus_path: Path,
     learning_db_path: Path,
     min_ep_gain: float | None = None,
+    buy_rank_fn: Callable[[str, float], float] | None = None,
+    buy_quota: dict[int, int] | None = None,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -204,6 +216,8 @@ def run_replay(
         position_fn=position_fn,
         team_fn=team_fn,
         min_ep_gain=gain_floor,
+        buy_rank_fn=buy_rank_fn,
+        buy_quota=buy_quota,
     )
 
     with sqlite3.connect(learning_db_path) as conn:
@@ -224,3 +238,63 @@ def run_replay(
         min_ep_gain=gain_floor,
     )
     return result, report
+
+
+def run_buy_control(*, corpus_path: Path, learning_db_path: Path) -> str:
+    """REH-67: does the v2 scorer pick better than the market prices?
+
+    Runs the shipped bot, then re-runs it with one thing changed — candidates
+    ranked by market value instead of expected points, at the same per-matchday
+    trading tempo. Lineup and sell decisions keep using EP in both, so the
+    difference isolates the buy side.
+
+    Market value is the sharpest available control because it already embeds
+    every manager's opinion of a player. Beating chance is necessary; beating
+    the crowd's own pricing is what would justify the scorer.
+
+    Returns a comparison, not a verdict. This is a labelled control run and must
+    never be reported as the counterfactual season result.
+    """
+    reference, _ = run_replay(corpus_path=corpus_path, learning_db_path=learning_db_path)
+    quota = buy_quota_from(reference)
+
+    corpus = TrainingCorpus(corpus_path)
+
+    def mv_rank(player_id: str, at: float) -> float:
+        return float(corpus.market_value_at(player_id, at) or 0)
+
+    control, _ = run_replay(
+        corpus_path=corpus_path,
+        learning_db_path=learning_db_path,
+        buy_rank_fn=mv_rank,
+        buy_quota=quota,
+    )
+
+    delta = reference.total_points - control.total_points
+    ref_buys = sum(o.buys for o in reference.outcomes)
+    ctl_buys = sum(o.buys for o in control.outcomes)
+    lines = [
+        "=" * 68,
+        "BUY-SIDE CONTROL - EP ranking vs market-value ranking",
+        "=" * 68,
+        "",
+        f"EP-ranked (shipped):      {reference.total_points:>8,} points   " f"{ref_buys} buys",
+        f"Market-value-ranked:      {control.total_points:>8,} points   {ctl_buys} buys",
+        f"EP advantage:             {delta:>+8,} points",
+        "",
+        "Only the buy chooser differs. Trading tempo is matched per matchday;",
+        "lineup and sell decisions use EP in both runs.",
+        "",
+    ]
+    if ctl_buys != ref_buys:
+        lines.append(
+            f"NOTE: tempo not fully matched ({ref_buys} vs {ctl_buys} buys) - the "
+            "control could not always afford its preferred candidate."
+        )
+        lines.append("")
+    lines += [
+        "A labelled control, not a season result. Bid competition is still",
+        "absent from both runs, so both buy sides remain upper bounds.",
+        "=" * 68,
+    ]
+    return "\n".join(lines)

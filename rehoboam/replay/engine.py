@@ -19,8 +19,20 @@ from rehoboam.replay.rules import (
 )
 from rehoboam.replay.state import ReplayPlayer, ReplayState
 
-# Selling instantly to Kickbase returns 95% of market value.
-INSTANT_SELL_PCT = 0.95
+# Selling instantly to Kickbase returns the FULL market value.
+#
+# REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured across
+# all 151 real flips in `flip_outcomes`, joined to `player_mv_history` within a
+# day of the sale: the sell/MV ratio has a hard mode of 41 rows at exactly 1.00
+# and ZERO rows at 0.95 (2 anywhere in 0.94-0.96). A 5% haircut would leave a
+# cluster at 0.95; there is none. Ratios above 1.00 are sales to other managers
+# at a premium, a channel this replay deliberately does not model.
+# `api.sell_player_instant` documents the same: "sell instantly to Kickbase at
+# market value".
+#
+# This is not cosmetic: proceeds feed `_solvent_after`, so a 5% understatement
+# suppressed buys the bot could actually afford.
+INSTANT_SELL_PCT = 1.0
 # Decisions are made this long before kickoff, mirroring the live bot's
 # pre-matchday session rather than pretending to trade at the whistle.
 DECISION_LEAD_SECONDS = 3600.0
@@ -166,6 +178,14 @@ def run_season(
     # REH-51's result was produced by silently accepting 5.0 while production
     # gated at 40.0. `driver.run_replay` does this; see REH-66.
     min_ep_gain: float = 5.0,
+    # REH-67 buy-side control. When buy_rank_fn is given, candidates are ranked
+    # by it instead of by EP and the marginal-gain gate is bypassed, with
+    # buy_quota[day_number] holding the trading tempo fixed to a reference run.
+    # Lineup and sell decisions keep using score_fn, so a difference in the
+    # result is attributable to the buy side alone. Leave both None for the
+    # shipped behaviour.
+    buy_rank_fn: Callable[[str, float], float] | None = None,
+    buy_quota: dict[int, int] | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -175,9 +195,11 @@ def run_season(
         scores = {pid: score_fn(pid, decide_at) for pid in state.player_ids}
 
         buys = sells = 0
+        rank_fn = buy_rank_fn or score_fn
+        quota = None if buy_quota is None else buy_quota.get(md.day_number, 0)
         listings = sorted(
             market.available_before(decide_at),
-            key=lambda x: score_fn(x.player_id, decide_at),
+            key=lambda x: rank_fn(x.player_id, decide_at),
             reverse=True,
         )
         for listing in listings:
@@ -201,8 +223,13 @@ def run_season(
             gain = _eleven_total(
                 [*state.players, candidate], {**scores, candidate.id: cand_ep}
             ) - _eleven_total(state.players, scores)
-            if gain < min_ep_gain and state.squad_size >= 11:
-                continue
+            if buy_rank_fn is None:
+                if gain < min_ep_gain and state.squad_size >= 11:
+                    continue
+            elif quota is not None and buys >= quota:
+                # Tempo matched to the reference run — the control may not buy
+                # its way to a better season simply by trading more.
+                break
 
             # Check every constraint that a sale would NOT relieve before
             # selling anyone — otherwise a blocked buy leaves us a player down.
