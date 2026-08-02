@@ -64,8 +64,14 @@ def format_report(
     actual_total: int,
     actual_per_matchday: dict[int, int],
     standings: list[LeagueStanding],
+    min_ep_gain: float,
 ) -> str:
-    """Human-readable replay report with fidelity caveats attached."""
+    """Human-readable replay report with fidelity caveats attached.
+
+    ``min_ep_gain`` is required rather than defaulted: the headline number is a
+    function of it, and REH-51 published a result without recording which floor
+    produced it. A report that cannot be interpreted later is not a report.
+    """
     place = place_in_league(result.total_points, standings)
     total_managers = len(standings) + 1
     lines = [
@@ -86,6 +92,12 @@ def format_report(
         result, actual_total=actual_total, actual_per_matchday=actual_per_matchday
     ):
         lines.append(f"  {label:<34}{points:>+9,}   {fidelity}")
+
+    lines += ["", "Configuration", "-" * 68]
+    lines.append(
+        f"  {'Marginal EP gain floor':<34}{min_ep_gain:>9,.1f}   real points, "
+        "buys below this are skipped"
+    )
 
     lines += ["", "Fidelity", "-" * 68]
     for component, level, basis in FIDELITY_NOTES:

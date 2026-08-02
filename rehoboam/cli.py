@@ -680,6 +680,13 @@ def replay_season(
     learning_db: Path = typer.Option(  # noqa: B008
         Path("logs/bid_learning.db"), help="Path to the learning DB with real standings"
     ),
+    min_ep_gain: float | None = typer.Option(
+        None,
+        help=(
+            "Marginal EP gain floor in real points. Defaults to the value the live "
+            "bot ships with; override only for a labelled sensitivity check."
+        ),
+    ),
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
@@ -691,7 +698,9 @@ def replay_season(
         console.print(f"[red]Learning DB not found: {learning_db}[/red]")
         raise typer.Exit(1)
 
-    _result, report = run_replay(corpus_path=corpus, learning_db_path=learning_db)
+    _result, report = run_replay(
+        corpus_path=corpus, learning_db_path=learning_db, min_ep_gain=min_ep_gain
+    )
     console.print(report)
 
 
