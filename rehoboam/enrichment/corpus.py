@@ -534,3 +534,48 @@ class TrainingCorpus:
                 (str(player_id),),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def transfers_between(
+        self, lo: float, hi: float, *, transfer_type: int = 2
+    ) -> list[dict[str, Any]]:
+        """Transactions with ``lo <= transfer_at <= hi``, oldest first.
+
+        Defaults to ``transfer_type=2`` — the only type carrying a real price.
+        Types 0 (season assignment) and 3 (release to pool) always have price 0.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                    SELECT player_id, transfer_at, price, transfer_type,
+                           counterparty_id, counterparty_name
+                    FROM player_transfers
+                    WHERE transfer_type = ? AND transfer_at >= ? AND transfer_at <= ?
+                    ORDER BY transfer_at
+                    """,
+                (transfer_type, lo, hi),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def market_value_at(self, player_id: str, at: float) -> int | None:
+        """Most recent market value at or before ``at``. None if no such snapshot."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT market_value FROM mv_series WHERE player_id = ? "
+                "AND snapshot_at <= ? ORDER BY snapshot_at DESC LIMIT 1",
+                (str(player_id), at),
+            ).fetchone()
+        return int(row[0]) if row else None
+
+    def team_ids_for(self, player_ids: list[str]) -> dict[str, str]:
+        """Map player_id -> team_id for players that have one recorded."""
+        if not player_ids:
+            return {}
+        placeholders = ",".join("?" * len(player_ids))
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"SELECT player_id, team_id FROM player_universe "  # noqa: S608
+                f"WHERE player_id IN ({placeholders}) AND team_id IS NOT NULL",
+                [str(p) for p in player_ids],
+            ).fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
