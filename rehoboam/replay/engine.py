@@ -139,6 +139,19 @@ def _restore_budget(
     return sells
 
 
+def shipped_min_ep_gain() -> float:
+    """The marginal-gain floor the live bot actually ships with (REH-66).
+
+    Read from the field default rather than by instantiating ``Settings``,
+    which requires KICKBASE credentials — the replay has to stay runnable
+    offline and deterministic against the DBs alone. Reading it dynamically
+    means a re-tune in production cannot silently leave the harness behind.
+    """
+    from rehoboam.config import Settings
+
+    return float(Settings.model_fields["min_ep_upgrade_threshold"].default)
+
+
 def run_season(
     *,
     state: ReplayState,
@@ -148,6 +161,10 @@ def run_season(
     mv_fn: Callable[[str, float], int | None],
     position_fn: Callable[[str], str | None],
     team_fn: Callable[[str], str | None],
+    # NOTE: this default is the *engine's* neutral value, not the bot's. Any
+    # caller reporting a headline number must pass shipped_min_ep_gain() —
+    # REH-51's result was produced by silently accepting 5.0 while production
+    # gated at 40.0. `driver.run_replay` does this; see REH-66.
     min_ep_gain: float = 5.0,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""

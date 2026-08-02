@@ -15,7 +15,12 @@ from pathlib import Path
 from rehoboam.backtest.snapshot import matches_before
 from rehoboam.enrichment.corpus import TrainingCorpus
 from rehoboam.replay.attribution import LeagueStanding, format_report
-from rehoboam.replay.engine import Matchday, SeasonResult, run_season
+from rehoboam.replay.engine import (
+    Matchday,
+    SeasonResult,
+    run_season,
+    shipped_min_ep_gain,
+)
 from rehoboam.replay.market import ReplayMarket
 from rehoboam.replay.state import initial_state
 from rehoboam.scoring.v2.coefficients import load_coefficients
@@ -151,8 +156,19 @@ def _make_score_fn(
     return score
 
 
-def run_replay(*, corpus_path: Path, learning_db_path: Path) -> tuple[SeasonResult, str]:
-    """Replay the whole season and return the result plus a formatted report."""
+def run_replay(
+    *,
+    corpus_path: Path,
+    learning_db_path: Path,
+    min_ep_gain: float | None = None,
+) -> tuple[SeasonResult, str]:
+    """Replay the whole season and return the result plus a formatted report.
+
+    ``min_ep_gain`` defaults to whatever the live bot ships with, so the replay
+    describes the bot on main rather than an agent nobody deployed. Pass it
+    explicitly only to answer a "what if the floor were X" question — and label
+    any such run as a sensitivity check, not a counterfactual result.
+    """
     corpus = TrainingCorpus(corpus_path)
     kickoffs = load_calendar(learning_db_path, league_id=LEAGUE_ID)
     matchdays = build_matchdays(corpus, season=SEASON, kickoffs=kickoffs)
@@ -177,6 +193,8 @@ def run_replay(*, corpus_path: Path, learning_db_path: Path) -> tuple[SeasonResu
             teams_cache.update(corpus.team_ids_for([pid]))
         return teams_cache.get(pid)
 
+    gain_floor = shipped_min_ep_gain() if min_ep_gain is None else min_ep_gain
+
     result = run_season(
         state=state,
         market=market,
@@ -185,6 +203,7 @@ def run_replay(*, corpus_path: Path, learning_db_path: Path) -> tuple[SeasonResu
         mv_fn=corpus.market_value_at,
         position_fn=position_fn,
         team_fn=team_fn,
+        min_ep_gain=gain_floor,
     )
 
     with sqlite3.connect(learning_db_path) as conn:
@@ -202,5 +221,6 @@ def run_replay(*, corpus_path: Path, learning_db_path: Path) -> tuple[SeasonResu
         actual_total=actual_total,
         actual_per_matchday=actual_per_matchday,
         standings=standings,
+        min_ep_gain=gain_floor,
     )
     return result, report

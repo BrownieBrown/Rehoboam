@@ -63,7 +63,11 @@ def test_attribution_total_matches_simulated_minus_actual():
 def test_format_report_states_finishing_position_and_fidelity():
     result = SeasonResult(outcomes=[_outcome(1, 800)], total_points=800)
     text = format_report(
-        result, actual_total=700, actual_per_matchday={1: 700}, standings=STANDINGS
+        result,
+        actual_total=700,
+        actual_per_matchday={1: 700},
+        standings=STANDINGS,
+        min_ep_gain=40.0,
     )
     assert "FINISHING POSITION" in text
     assert "Bid competition" in text  # fidelity caveat must be printed
