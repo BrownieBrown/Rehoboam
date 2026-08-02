@@ -17,7 +17,7 @@ FIDELITY_NOTES = [
     ("Sell decisions", "medium", "instant sell at MV; profit flips NOT modelled"),
     ("Buy prices", "high", "real transaction prices"),
     ("Buy availability", "medium", "only players who actually traded are visible"),
-    ("Bid competition", "ABSENT - optimistic", "wanted players are always won"),
+    ("Bid competition", "see footer", "absent unless --with-competition"),
 ]
 
 
@@ -65,6 +65,7 @@ def format_report(
     actual_per_matchday: dict[int, int],
     standings: list[LeagueStanding],
     min_ep_gain: float,
+    with_competition: bool = False,
 ) -> str:
     """Human-readable replay report with fidelity caveats attached.
 
@@ -111,8 +112,20 @@ def format_report(
         f"Total sells: {sum(o.sells for o in result.outcomes)}",
         f"Final budget: EUR {result.final_budget:,}",
         "",
-        "This models no bid competition: any listed player the bot wanted, it got.",
-        "Treat the buy-side contribution as an upper bound.",
+    ]
+    if with_competition:
+        lines += [
+            "Bid competition IS modelled: a listing is won only by bidding above",
+            "what the real buyer paid, and the winning bid is what we pay.",
+            "INCOMPLETE - profit flipping is still unmodelled, and it is the",
+            "behaviour that funds bidding. Diagnostic only, not a season result.",
+        ]
+    else:
+        lines += [
+            "This models no bid competition: any listed player the bot wanted, it got.",
+            "Treat the buy-side contribution as an upper bound.",
+        ]
+    lines += [
         "=" * 68,
     ]
     return "\n".join(lines)

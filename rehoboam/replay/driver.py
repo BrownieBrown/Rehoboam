@@ -173,6 +173,7 @@ def run_replay(
     min_ep_gain: float | None = None,
     buy_rank_fn: Callable[[str, float], float] | None = None,
     buy_quota: dict[int, int] | None = None,
+    with_competition: bool = False,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -218,6 +219,11 @@ def run_replay(
         min_ep_gain=gain_floor,
         buy_rank_fn=buy_rank_fn,
         buy_quota=buy_quota,
+        bid_fn=(
+            make_ep_bid_fn(mv_fn=corpus.market_value_at, score_fn=score_fn)
+            if with_competition
+            else None
+        ),
     )
 
     with sqlite3.connect(learning_db_path) as conn:
@@ -236,6 +242,7 @@ def run_replay(
         actual_per_matchday=actual_per_matchday,
         standings=standings,
         min_ep_gain=gain_floor,
+        with_competition=with_competition,
     )
     return result, report
 
@@ -298,3 +305,56 @@ def run_buy_control(*, corpus_path: Path, learning_db_path: Path) -> str:
         "=" * 68,
     ]
     return "\n".join(lines)
+
+
+def make_ep_bid_fn(
+    *,
+    mv_fn: Callable[[str, float], int | None],
+    score_fn: Callable[[str, float], float],
+) -> Callable[[str, int, float, float, int], int]:
+    """Bid with the bot's own bidding strategy (REH-68).
+
+    Until now the replay bought at the listed price and never called
+    ``SmartBidding`` at all, so the tier thresholds REH-55 re-tuned (70/53/43)
+    and the entire overbid stack were unexercised by the harness. Wiring
+    ``calculate_ep_bid`` in as the bidder is what makes them matter: a
+    must-have candidate now bids high enough to outbid the manager who really
+    signed him, while a marginal one does not.
+
+    Tiers are read from the shipped ``Settings`` defaults for the same reason
+    ``shipped_min_ep_gain`` is — so a production re-tune cannot leave the
+    harness describing a bot nobody deployed — and without instantiating
+    ``Settings``, which would require KICKBASE credentials.
+
+    Two inputs the live bot has and the replay does not, both pinned to neutral
+    and both making this an UPPER bound on our willingness to pay:
+    ``offer_count=0`` (we cannot know how many rivals bid on a given listing)
+    and ``trend_change_pct=0.0`` (no market-value trend is fed in). Confidence
+    is fixed at 0.8 rather than derived from data quality grading.
+    """
+    from rehoboam.bidding_strategy import SmartBidding
+    from rehoboam.config import Settings
+
+    def _default(name: str) -> float:
+        return float(Settings.model_fields[name].default)
+
+    bidding = SmartBidding(
+        tier_must_have=_default("bid_tier_must_have"),
+        tier_strong_upgrade=_default("bid_tier_strong_upgrade"),
+        tier_solid_upgrade=_default("bid_tier_solid_upgrade"),
+    )
+
+    def bid(player_id: str, price: int, at: float, gain: float, budget: int) -> int:
+        rec = bidding.calculate_ep_bid(
+            asking_price=price,
+            market_value=mv_fn(player_id, at) or price,
+            expected_points=score_fn(player_id, at),
+            marginal_ep_gain=gain,
+            confidence=0.8,
+            current_budget=budget,
+            sell_plan=None,
+            trend_change_pct=0.0,
+        )
+        return int(rec.recommended_bid)
+
+    return bid

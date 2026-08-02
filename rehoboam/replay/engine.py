@@ -189,13 +189,18 @@ def run_season(
     # shipped behaviour.
     buy_rank_fn: Callable[[str, float], float] | None = None,
     buy_quota: dict[int, int] | None = None,
-    # REH-68 bid competition. Given (player_id, real_price, at), returns our
-    # maximum bid. We win only if it EXCEEDS what the real buyer actually paid,
+    # REH-68 bid competition. Given (player_id, real_price, at, marginal_gain,
+    # budget), returns our maximum bid. Gain and budget are passed because a
+    # real bid is a function of both — SmartBidding sizes its overbid from the
+    # marginal-gain tier and caps it against what we can afford — and a hook
+    # without them could only express a flat willingness to pay, which is not
+    # what the bot does.
+    # We win only if the bid EXCEEDS what the real buyer actually paid,
     # and we then pay our own bid rather than theirs — outbidding a rival costs
     # more than the rival paid, and charging their price would hand us the
     # upside of competition with none of its cost. None keeps the shipped
     # behaviour, in which every wanted player is won.
-    bid_fn: Callable[[str, int, float], int] | None = None,
+    bid_fn: Callable[[str, int, float, float, int], int] | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -226,15 +231,6 @@ def run_season(
                 team_id=team_fn(listing.player_id),
             )
 
-            # What this signing costs us. Without a competition model that is
-            # the price the real buyer paid; with one it is our own winning bid.
-            cost = listing.price
-            if bid_fn is not None:
-                our_bid = bid_fn(listing.player_id, listing.price, decide_at)
-                if our_bid <= listing.price:
-                    continue  # outbid by the manager who really signed him
-                cost = our_bid
-
             # Marginal gain: how much this player improves the best legal
             # eleven. Measuring against the weakest *squad* member instead
             # waves through a twelfth midfielder who outscores the bench but
@@ -249,6 +245,15 @@ def run_season(
                 # Tempo matched to the reference run — the control may not buy
                 # its way to a better season simply by trading more.
                 break
+
+            # What this signing costs us. Without a competition model that is
+            # the price the real buyer paid; with one it is our own winning bid.
+            cost = listing.price
+            if bid_fn is not None:
+                our_bid = bid_fn(listing.player_id, listing.price, decide_at, gain, state.budget)
+                if our_bid <= listing.price:
+                    continue  # outbid by the manager who really signed him
+                cost = our_bid
 
             # Check every constraint that a sale would NOT relieve before
             # selling anyone — otherwise a blocked buy leaves us a player down.

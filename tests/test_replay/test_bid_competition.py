@@ -51,13 +51,13 @@ def _run(bid_fn):
 
 def test_a_bid_below_the_real_price_loses_the_auction():
     """The rival paid 10,000,000. Bidding under that must not win."""
-    _result, state = _run(lambda pid, price, at: 9_999_999)
+    _result, state = _run(lambda pid, price, at, gain, budget: 9_999_999)
 
     assert "target" not in state.squad
 
 
 def test_a_bid_above_the_real_price_wins():
-    _result, state = _run(lambda pid, price, at: 11_000_000)
+    _result, state = _run(lambda pid, price, at, gain, budget: 11_000_000)
 
     assert "target" in state.squad
 
@@ -65,7 +65,7 @@ def test_a_bid_above_the_real_price_wins():
 def test_the_winner_pays_its_own_bid_not_the_rivals_price():
     """Outbidding costs more than the rival paid. Charging the rival's price
     would give us the upside of competition with none of its cost."""
-    _result, state = _run(lambda pid, price, at: 11_000_000)
+    _result, state = _run(lambda pid, price, at, gain, budget: 11_000_000)
 
     assert state.budget == 100_000_000 - 11_000_000
 
@@ -76,3 +76,50 @@ def test_without_a_bid_fn_every_wanted_player_is_still_won():
 
     assert "target" in state.squad
     assert state.budget == 100_000_000 - 10_000_000
+
+
+def test_bid_fn_receives_the_marginal_gain_and_the_current_budget():
+    """A bid is a function of how much the player improves the eleven and what
+    we can afford — SmartBidding.calculate_ep_bid needs both. Without them the
+    hook can only express a flat willingness to pay, which is not the bot."""
+    seen: dict = {}
+
+    def bid(pid, price, at, gain, budget):
+        seen.update(pid=pid, price=price, gain=gain, budget=budget)
+        return 0  # lose, so the run is unaffected
+
+    _run(bid)
+
+    assert seen["pid"] == "target"
+    assert seen["price"] == 10_000_000
+    assert seen["gain"] > 0.0, "target scores 200 against a squad of 10s"
+    assert seen["budget"] == 100_000_000
+
+
+def test_the_ep_bid_fn_bids_more_for_a_must_have_than_for_a_marginal_gain():
+    """Wires SmartBidding in as the bidder, which is what finally makes the
+    tier thresholds REH-55 re-tuned (70/53/43) matter to the replay at all —
+    until now the harness bought at the listed price and never called it.
+    """
+    from rehoboam.replay.driver import make_ep_bid_fn
+
+    bid_fn = make_ep_bid_fn(
+        mv_fn=lambda pid, at: 10_000_000,
+        score_fn=lambda pid, at: 100.0,
+    )
+
+    must_have = bid_fn("p", 10_000_000, 0.0, 80.0, 50_000_000)
+    marginal = bid_fn("p", 10_000_000, 0.0, 5.0, 50_000_000)
+
+    assert must_have > marginal
+
+
+def test_the_ep_bid_fn_never_bids_beyond_the_budget():
+    from rehoboam.replay.driver import make_ep_bid_fn
+
+    bid_fn = make_ep_bid_fn(
+        mv_fn=lambda pid, at: 10_000_000,
+        score_fn=lambda pid, at: 100.0,
+    )
+
+    assert bid_fn("p", 10_000_000, 0.0, 80.0, 3_000_000) <= 3_000_000
