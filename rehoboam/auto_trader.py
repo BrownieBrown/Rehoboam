@@ -1221,8 +1221,8 @@ class AutoTrader:
             logger.exception("Unified trade phase failed")
 
         # Step 8: Set optimal lineup using EP pipeline scores from the session.
-        # Players acquired mid-session (if any) fall back to the legacy
-        # calculator inside _set_optimal_lineup.
+        # Players acquired mid-session (if any) are scored by the v2 fallback
+        # inside _set_optimal_lineup.
         self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
 
         # Calculate totals
@@ -1291,8 +1291,8 @@ class AutoTrader:
         Prefers the new EP scoring pipeline (via *squad_scores* when the caller
         already computed them) so the lineup benefits from DGW multipliers,
         injury penalties, 5-fixture SOS, and position-weighted scoring. Falls
-        back to the legacy calculator per-player only when scores are missing
-        (e.g. EP pipeline failed, or a player was just bought mid-session).
+        back to a per-player v2 score only when scores are missing (e.g. EP
+        pipeline failed, or a player was just bought mid-session).
         """
         from .formation import get_formation_string, order_for_lineup, select_best_eleven
 
@@ -1304,9 +1304,10 @@ class AutoTrader:
                 console.print("[yellow]Not enough players to set lineup[/yellow]")
                 return
 
-            # Build ep_scores from the new pipeline when available; fall back
-            # to the legacy per-player calculator only for uncovered squad
-            # members or when the caller didn't provide scores.
+            # Build ep_scores from the pipeline when available; fall back to a
+            # per-player v2 score only for uncovered squad members or when the
+            # caller didn't provide scores. Both sides are real points, so they
+            # are safe to rank against each other below.
             ep_scores: dict[str, float] = {}
             if squad_scores:
                 ep_scores = {s.player_id: s.expected_points for s in squad_scores}
@@ -1314,7 +1315,7 @@ class AutoTrader:
             missing = [p for p in squad if p.id not in ep_scores]
             if missing:
                 for player in missing:
-                    ep_scores[player.id] = self._legacy_expected_points(league, player)
+                    ep_scores[player.id] = self._fallback_expected_points(league, player)
 
             # Select best 11, order by position for API (GK→DEF→MID→FWD)
             best_eleven = select_best_eleven(squad, ep_scores)
@@ -1340,16 +1341,28 @@ class AutoTrader:
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
 
-    def _legacy_expected_points(self, league, player) -> float:
-        """Fallback per-player EP using the legacy calculator.
+    def _fallback_expected_points(self, league, player) -> float:
+        """Fallback per-player EP for a squad member the pipeline didn't score.
 
-        Only used when the new EP pipeline didn't score this player — e.g. a
-        mid-session purchase, or the pipeline failed upstream. Kept narrow so
-        the legacy path doesn't drift back into the main lineup flow.
+        Only fires for a mid-session purchase or an upstream pipeline failure.
+        Returns REAL Kickbase points (REH-55), which matters more than it looks:
+        the caller merges this into the same ``ep_scores`` dict as the pipeline's
+        own scores and ranks them together, so a value on a different scale would
+        silently reorder the starting eleven.
+
+        Degrades in two stages rather than one. If the performance fetch fails we
+        still score the player cold — ``compose_ep`` with ``prev_status=None``
+        falls back to the availability model's marginal prior, which is a usable
+        number. Only a failure of the fitted models themselves returns 0.0. That
+        ordering is deliberate: a 0.0 sorts a player to the bottom of
+        ``select_best_eleven``, and benching someone we simply failed to fetch is
+        how an avoidable empty slot turns into -100.
         """
-        from .expected_points import calculate_expected_points
+        from .scoring.v2.adapter import compose_ep, last_played_status
+        from .scoring.v2.coefficients import load_coefficients
         from .value_history import ValueHistoryCache
 
+        perf_data = None
         try:
             history_cache = ValueHistoryCache()
             perf_data = history_cache.get_cached_performance(
@@ -1361,9 +1374,20 @@ class AutoTrader:
                     history_cache.cache_performance(
                         player_id=player.id, league_id=league.id, data=perf_data
                     )
-            ep = calculate_expected_points(player=player, performance_data=perf_data)
-            return ep.expected_points
         except Exception:
+            logger.debug("fallback-ep: performance fetch failed for %s", player.id)
+
+        try:
+            availability, rate, _meta = load_coefficients()
+            return compose_ep(
+                str(player.id),
+                last_played_status(perf_data),
+                player.position,
+                availability,
+                rate,
+            )
+        except Exception:
+            logger.debug("fallback-ep: v2 scoring failed for %s", player.id)
             return 0.0
 
     def optimize_and_execute_squad(self, league) -> list[AutoTradeResult]:
