@@ -66,6 +66,7 @@ def format_report(
     standings: list[LeagueStanding],
     min_ep_gain: float,
     with_competition: bool = False,
+    with_flips: bool = False,
 ) -> str:
     """Human-readable replay report with fidelity caveats attached.
 
@@ -117,14 +118,25 @@ def format_report(
         lines += [
             "Bid competition IS modelled: a listing is won only by bidding above",
             "what the real buyer paid, and the winning bid is what we pay.",
-            "INCOMPLETE - profit flipping is still unmodelled, and it is the",
-            "behaviour that funds bidding. Diagnostic only, not a season result.",
         ]
     else:
         lines += [
             "This models no bid competition: any listed player the bot wanted, it got.",
             "Treat the buy-side contribution as an upper bound.",
         ]
+    if with_flips:
+        lines += [
+            "Profit flipping IS modelled: take profit / cut loss against the",
+            "cost basis. Real flipping lost EUR 55.3M over 151 flips, so this is",
+            "expected to LOWER the result, not raise it.",
+        ]
+    else:
+        lines += [
+            "Profit flipping is NOT modelled: the bot sells only to make room or",
+            "to restore solvency, while the live bot also trades for gain.",
+        ]
+    if not (with_competition and with_flips):
+        lines += ["INCOMPLETE - diagnostic only, not a season result."]
     lines += [
         "=" * 68,
     ]

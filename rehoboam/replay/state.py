@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from rehoboam.enrichment.corpus import TrainingCorpus
 
@@ -17,11 +17,20 @@ ASSIGNMENT_WINDOW_SECONDS = 300.0
 
 @dataclass(frozen=True)
 class ReplayPlayer:
-    """A squad member. ``id`` and ``position`` satisfy ``select_best_eleven``."""
+    """A squad member. ``id`` and ``position`` satisfy ``select_best_eleven``.
+
+    ``buy_price`` / ``bought_at`` are the cost basis, needed to compute profit
+    (REH-68). Both default to ``None`` rather than ``0``: the opening squad was
+    *assigned* rather than bought, and a zero basis would make every
+    opening-squad sale read as a 100% gain — a fortune the replay never earned.
+    Unknown must stay distinguishable from free.
+    """
 
     id: str
     position: str
     team_id: str | None = None
+    buy_price: int | None = None
+    bought_at: float | None = None
 
 
 @dataclass
@@ -43,8 +52,9 @@ class ReplayState:
     def players(self) -> list[ReplayPlayer]:
         return list(self.squad.values())
 
-    def buy(self, player: ReplayPlayer, price: int) -> None:
-        self.squad[player.id] = player
+    def buy(self, player: ReplayPlayer, price: int, at: float | None = None) -> None:
+        """Add ``player`` to the squad, recording the cost basis (REH-68)."""
+        self.squad[player.id] = replace(player, buy_price=int(price), bought_at=at)
         self.budget -= int(price)
 
     def sell(self, player_id: str, proceeds: int) -> None:
@@ -83,8 +93,19 @@ def initial_state(
     pids = [str(r[0]) for r in rows]
     positions = corpus.positions_for(pids)
     teams = corpus.team_ids_for(pids)
+    # Cost basis for an ASSIGNED player is his market value at assignment
+    # (REH-68), mirroring how the live API derives buy_price as
+    # market_value - mvgl. Leaving it None would exclude the entire opening
+    # squad from profit logic; setting it to 0 would make selling any of them
+    # read as pure profit.
     squad = {
-        pid: ReplayPlayer(id=pid, position=positions[pid], team_id=teams.get(pid))
+        pid: ReplayPlayer(
+            id=pid,
+            position=positions[pid],
+            team_id=teams.get(pid),
+            buy_price=corpus.market_value_at(pid, assigned_on),
+            bought_at=assigned_on,
+        )
         for pid in pids
         if pid in positions
     }

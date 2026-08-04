@@ -687,6 +687,15 @@ def replay_season(
             "bot ships with; override only for a labelled sensitivity check."
         ),
     ),
+    with_flips: bool = typer.Option(
+        False,
+        "--with-flips",
+        help=(
+            "Model profit flipping (REH-68): take profit at min_sell_profit_pct "
+            "and cut losses at max_loss_pct. Real flipping LOST EUR 55.3M over "
+            "151 flips, so expect this to lower the result."
+        ),
+    ),
     with_competition: bool = typer.Option(
         False,
         "--with-competition",
@@ -712,6 +721,7 @@ def replay_season(
         learning_db_path=learning_db,
         min_ep_gain=min_ep_gain,
         with_competition=with_competition,
+        with_flips=with_flips,
     )
     console.print(report)
 

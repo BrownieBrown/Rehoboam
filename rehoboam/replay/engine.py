@@ -154,6 +154,54 @@ def _restore_budget(
     return sells
 
 
+def _flip_sells(
+    state: ReplayState,
+    scores: dict[str, float],
+    mv_fn: Callable[[str, float], int | None],
+    at: float,
+    *,
+    profit_take_pct: float | None,
+    loss_cut_pct: float | None,
+) -> int:
+    """Take profit and cut losses on squad players; returns sells (REH-68).
+
+    Ports the live trade-side thresholds (``min_sell_profit_pct`` 15.0,
+    ``max_loss_pct`` -15.0). Until now the replay sold only to make room or to
+    restore solvency, so an entire revenue behaviour of the real bot was
+    missing from every result.
+
+    Fieldability is checked before every sale for the same reason it is on the
+    make-room path: an empty slot costs -100, which dwarfs any plausible
+    trading gain. A squad of exactly eleven therefore holds a winner rather
+    than banking it.
+
+    Players with no cost basis are skipped rather than assumed free.
+    """
+    if profit_take_pct is None and loss_cut_pct is None:
+        return 0
+
+    sells = 0
+    for pid in list(state.player_ids):
+        player = state.squad.get(pid)
+        if player is None or not player.buy_price:
+            continue
+        current = mv_fn(pid, at)
+        if not current:
+            continue
+        change_pct = (current - player.buy_price) / player.buy_price * 100.0
+        take = profit_take_pct is not None and change_pct >= profit_take_pct
+        cut = loss_cut_pct is not None and change_pct <= loss_cut_pct
+        if not (take or cut):
+            continue
+        remaining = {k: v for k, v in state.squad.items() if k != pid}
+        if not can_field_eleven(ReplayState(budget=state.budget, squad=remaining)):
+            continue
+        state.sell(pid, _proceeds(pid, mv_fn, at))
+        scores.pop(pid, None)
+        sells += 1
+    return sells
+
+
 def shipped_min_ep_gain() -> float:
     """The marginal-gain floor the live bot actually ships with (REH-66).
 
@@ -201,6 +249,12 @@ def run_season(
     # upside of competition with none of its cost. None keeps the shipped
     # behaviour, in which every wanted player is won.
     bid_fn: Callable[[str, int, float, float, int], int] | None = None,
+    # REH-68 profit flipping. The live trade-side thresholds
+    # (min_sell_profit_pct 15.0 / max_loss_pct -15.0). Both None disables the
+    # pass entirely, preserving the shipped replay behaviour in which the bot
+    # sells only to make room or to restore solvency.
+    profit_take_pct: float | None = None,
+    loss_cut_pct: float | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -210,6 +264,15 @@ def run_season(
         scores = {pid: score_fn(pid, decide_at) for pid in state.player_ids}
 
         buys = sells = 0
+        # Trade before shopping: proceeds fund the same matchday's buys.
+        sells += _flip_sells(
+            state,
+            scores,
+            mv_fn,
+            decide_at,
+            profit_take_pct=profit_take_pct,
+            loss_cut_pct=loss_cut_pct,
+        )
         rank_fn = buy_rank_fn or score_fn
         quota = None if buy_quota is None else buy_quota.get(md.day_number, 0)
         listings = sorted(
@@ -288,7 +351,7 @@ def run_season(
             elif not _solvent_after(state, cost):
                 continue
 
-            state.buy(candidate, cost)
+            state.buy(candidate, cost, at=decide_at)
             scores[candidate.id] = cand_ep
             buys += 1
 

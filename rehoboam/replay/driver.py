@@ -156,6 +156,17 @@ def _make_score_fn(
     return score
 
 
+def _shipped_default(name: str) -> float:
+    """A Settings field default without instantiating Settings.
+
+    Instantiation requires KICKBASE credentials; the replay must stay runnable
+    offline and deterministic against the DBs alone.
+    """
+    from rehoboam.config import Settings
+
+    return float(Settings.model_fields[name].default)
+
+
 def buy_quota_from(result: SeasonResult) -> dict[int, int]:
     """Per-matchday buy counts, for holding a control's trading tempo fixed.
 
@@ -174,6 +185,7 @@ def run_replay(
     buy_rank_fn: Callable[[str, float], float] | None = None,
     buy_quota: dict[int, int] | None = None,
     with_competition: bool = False,
+    with_flips: bool = False,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -224,6 +236,11 @@ def run_replay(
             if with_competition
             else None
         ),
+        # Live trade-side thresholds, read from the shipped Settings defaults
+        # for the same reason shipped_min_ep_gain is (REH-66): a production
+        # re-tune must not leave the harness describing a bot nobody deployed.
+        profit_take_pct=_shipped_default("min_sell_profit_pct") if with_flips else None,
+        loss_cut_pct=_shipped_default("max_loss_pct") if with_flips else None,
     )
 
     with sqlite3.connect(learning_db_path) as conn:
@@ -243,6 +260,7 @@ def run_replay(
         standings=standings,
         min_ep_gain=gain_floor,
         with_competition=with_competition,
+        with_flips=with_flips,
     )
     return result, report
 
