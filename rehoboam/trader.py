@@ -21,6 +21,7 @@ from rich.console import Console
 
 from .api import KickbaseAPI
 from .bidding_strategy import (
+    BID_FULL_COMMIT_GAIN,
     TIER_MUST_HAVE,
     TIER_SOLID_UPGRADE,
     TIER_STRONG_UPGRADE,
@@ -95,6 +96,7 @@ class Trader:
             tier_must_have=getattr(settings, "bid_tier_must_have", TIER_MUST_HAVE),
             tier_strong_upgrade=getattr(settings, "bid_tier_strong_upgrade", TIER_STRONG_UPGRADE),
             tier_solid_upgrade=getattr(settings, "bid_tier_solid_upgrade", TIER_SOLID_UPGRADE),
+            full_commit_gain=getattr(settings, "bid_full_commit_gain", BID_FULL_COMMIT_GAIN),
         )
 
     # ------------------------------------------------------------------

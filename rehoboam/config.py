@@ -163,6 +163,17 @@ class Settings(BaseSettings):
             "Pre-season estimate awaiting live-market validation."
         ),
     )
+    bid_full_commit_gain: float = Field(
+        default=82.0,
+        description=(
+            "Marginal EP gain (real points) at which the bot will commit its "
+            "maximum share of budget to a single signing. Set to p95 = 82.0 of "
+            "the distribution measured 2026-07-31; anchoring here rather than at "
+            "the observed maximum (176.2) keeps bid sizing discriminating across "
+            "the bulk of real candidates instead of being stretched flat by one "
+            "outlier. Pre-season estimate awaiting live-market validation."
+        ),
+    )
     bid_tier_solid_upgrade: float = Field(
         default=43.0,
         description=(

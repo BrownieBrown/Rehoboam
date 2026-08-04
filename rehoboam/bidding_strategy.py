@@ -38,6 +38,46 @@ TIER_MUST_HAVE = 70.0
 TIER_STRONG_UPGRADE = 53.0
 TIER_SOLID_UPGRADE = 43.0
 
+# How much of the budget a signing may consume, as a function of marginal gain.
+#
+# REH-69: the previous rule was inline arithmetic,
+# ``min(0.8, 0.2 + marginal_ep_gain / 50)``, calibrated for the 0-100 index
+# where it ramped 0.30 -> 0.70 across the gains the bot actually saw. On real
+# points EVERY gain clearing the shipped floor of 40 saturates at 0.80, so a
+# +43 signing and a +195 superstar were sized identically — the bot would
+# commit 80% of budget to the first qualifying candidate and be unable to
+# afford the one that mattered next week.
+#
+# The ramp now spans the measured operating range: it starts at the
+# solid-upgrade tier (p50 = 43.1, the weakest candidate worth recommending)
+# and reaches full commitment at p95. Anchoring the top at p95 rather than the
+# observed maximum (176.2) keeps the gradient discriminating across the bulk of
+# real candidates instead of being stretched flat by one outlier.
+BID_FRACTION_MIN = 0.2
+BID_FRACTION_MAX = 0.8
+BID_FULL_COMMIT_GAIN = 82.0
+
+
+def max_bid_fraction(
+    marginal_ep_gain: float,
+    *,
+    ramp_start: float = TIER_SOLID_UPGRADE,
+    full_commit_gain: float = BID_FULL_COMMIT_GAIN,
+) -> float:
+    """Fraction of the budget ceiling this gain justifies committing.
+
+    Linear between ``ramp_start`` and ``full_commit_gain``, clamped to
+    ``[BID_FRACTION_MIN, BID_FRACTION_MAX]`` outside that range. Committing
+    0.8 is the whole war chest, so it should take a gain near the top of the
+    measured distribution, not merely clearing the median.
+    """
+    span = full_commit_gain - ramp_start
+    if span <= 0:  # misconfigured — fail toward caution, not toward spending
+        return BID_FRACTION_MIN
+    progress = (marginal_ep_gain - ramp_start) / span
+    progress = max(0.0, min(1.0, progress))
+    return BID_FRACTION_MIN + progress * (BID_FRACTION_MAX - BID_FRACTION_MIN)
+
 
 # ---------------------------------------------------------------------------
 # Competitor-aware bidding helpers
@@ -136,6 +176,7 @@ class SmartBidding:
         tier_must_have: float = TIER_MUST_HAVE,  # Marginal EP gain bands, real points
         tier_strong_upgrade: float = TIER_STRONG_UPGRADE,
         tier_solid_upgrade: float = TIER_SOLID_UPGRADE,
+        full_commit_gain: float = BID_FULL_COMMIT_GAIN,  # gain earning max budget share
     ):
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -150,6 +191,7 @@ class SmartBidding:
         self.tier_must_have = tier_must_have
         self.tier_strong_upgrade = tier_strong_upgrade
         self.tier_solid_upgrade = tier_solid_upgrade
+        self.full_commit_gain = full_commit_gain
 
     def calculate_ep_bid(
         self,
@@ -261,9 +303,14 @@ class SmartBidding:
         # Budget ceiling = current budget + any sell plan recovery
         budget_ceiling = current_budget + (sell_plan.total_recovery if sell_plan else 0)
 
-        # EP-proportional max bid: larger EP gain justifies spending more of the budget
-        max_bid_fraction = min(0.8, 0.2 + marginal_ep_gain / 50)
-        ep_max_bid = int(budget_ceiling * max_bid_fraction)
+        # EP-proportional max bid: larger EP gain justifies spending more of the
+        # budget. See max_bid_fraction for why this is no longer inline (REH-69).
+        bid_fraction = max_bid_fraction(
+            marginal_ep_gain,
+            ramp_start=self.tier_solid_upgrade,
+            full_commit_gain=self.full_commit_gain,
+        )
+        ep_max_bid = int(budget_ceiling * bid_fraction)
 
         # League competitive intelligence
         demand_adjustment = 0.0
