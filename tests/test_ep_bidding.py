@@ -341,13 +341,19 @@ class TestDGWBidding:
     def test_dgw_floors_confidence(self):
         """DGW player bid should reflect higher confidence even when the
         caller passes a low confidence (e.g. from small games_played sample).
+
+        REH-69: the gain here was 25.0, an old-index must-have. On real points
+        that is BELOW the shipped buy floor of 40, so the bot would never
+        consider the player at all -- and once bid sizing discriminated again,
+        it clamped to the minimum budget share and pinned both bids to the
+        asking price, erasing the difference this test exists to check.
         """
         bidding = SmartBidding()
         non_dgw = bidding.calculate_ep_bid(
             asking_price=10_000_000,
             market_value=10_000_000,
             expected_points=80.0,
-            marginal_ep_gain=25.0,
+            marginal_ep_gain=75.0,
             confidence=0.5,
             current_budget=30_000_000,
             trend_change_pct=0.0,
@@ -359,7 +365,7 @@ class TestDGWBidding:
             asking_price=10_000_000,
             market_value=10_000_000,
             expected_points=80.0,
-            marginal_ep_gain=25.0,
+            marginal_ep_gain=75.0,
             confidence=0.5,
             current_budget=30_000_000,
             trend_change_pct=0.0,

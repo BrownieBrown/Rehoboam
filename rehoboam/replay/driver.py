@@ -360,6 +360,7 @@ def make_ep_bid_fn(
         tier_must_have=_default("bid_tier_must_have"),
         tier_strong_upgrade=_default("bid_tier_strong_upgrade"),
         tier_solid_upgrade=_default("bid_tier_solid_upgrade"),
+        full_commit_gain=_default("bid_full_commit_gain"),
     )
 
     def bid(player_id: str, price: int, at: float, gain: float, budget: int) -> int:
