@@ -17,7 +17,7 @@ FIDELITY_NOTES = [
     ("Sell decisions", "medium", "instant sell at MV; profit flips NOT modelled"),
     ("Buy prices", "high", "real transaction prices"),
     ("Buy availability", "medium", "only players who actually traded are visible"),
-    ("Bid competition", "ABSENT - optimistic", "wanted players are always won"),
+    ("Bid competition", "see footer", "absent unless --with-competition"),
 ]
 
 
@@ -65,6 +65,8 @@ def format_report(
     actual_per_matchday: dict[int, int],
     standings: list[LeagueStanding],
     min_ep_gain: float,
+    with_competition: bool = False,
+    with_flips: bool = False,
 ) -> str:
     """Human-readable replay report with fidelity caveats attached.
 
@@ -111,8 +113,31 @@ def format_report(
         f"Total sells: {sum(o.sells for o in result.outcomes)}",
         f"Final budget: EUR {result.final_budget:,}",
         "",
-        "This models no bid competition: any listed player the bot wanted, it got.",
-        "Treat the buy-side contribution as an upper bound.",
+    ]
+    if with_competition:
+        lines += [
+            "Bid competition IS modelled: a listing is won only by bidding above",
+            "what the real buyer paid, and the winning bid is what we pay.",
+        ]
+    else:
+        lines += [
+            "This models no bid competition: any listed player the bot wanted, it got.",
+            "Treat the buy-side contribution as an upper bound.",
+        ]
+    if with_flips:
+        lines += [
+            "Profit flipping IS modelled: take profit / cut loss against the",
+            "cost basis. Real flipping lost EUR 55.3M over 151 flips, so this is",
+            "expected to LOWER the result, not raise it.",
+        ]
+    else:
+        lines += [
+            "Profit flipping is NOT modelled: the bot sells only to make room or",
+            "to restore solvency, while the live bot also trades for gain.",
+        ]
+    if not (with_competition and with_flips):
+        lines += ["INCOMPLETE - diagnostic only, not a season result."]
+    lines += [
         "=" * 68,
     ]
     return "\n".join(lines)

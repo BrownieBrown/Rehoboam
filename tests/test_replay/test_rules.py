@@ -62,13 +62,18 @@ def test_credit_line_boundary_is_inclusive():
     assert can_buy(state, _p("x"), 35_000_000, team_value=50_000_000)[0] is True
 
 
-def test_can_field_eleven_requires_position_minimums():
+def test_can_field_eleven_accepts_a_shape_that_can_actually_start():
+    """REH-68: this fixture used to be 1 GK / 3 DEF / 6 MID / 1 FW and asserted
+    True, but midfielders cap at 5 across every Kickbase formation, so only ten
+    of those eleven could ever start. The old guard checked position *minimums*
+    only and waved it through. Corrected to a shape that genuinely fields
+    eleven: 1 + 4 + 5 + 1.
+    """
     ok = _squad(
         [("g", "Goalkeeper", "1")]
-        + [(f"d{i}", "Defender", str(i)) for i in range(3)]
-        + [(f"m{i}", "Midfielder", str(i + 10)) for i in range(2)]
+        + [(f"d{i}", "Defender", str(i)) for i in range(4)]
+        + [(f"m{i}", "Midfielder", str(i + 10)) for i in range(5)]
         + [("f", "Forward", "20")]
-        + [(f"x{i}", "Midfielder", str(i + 30)) for i in range(4)]
     )
     assert can_field_eleven(ReplayState(budget=0, squad=ok)) is True
 

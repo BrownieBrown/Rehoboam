@@ -86,10 +86,13 @@ def _solvent_after(state: ReplayState, price: int, proceeds: int = 0) -> bool:
 
     Without this gate the engine leveraged to the credit floor (measured:
     EUR -167,048,229 against a EUR 80,000,000 starting budget) and then had to
-    unwind it in the same session at 95% of market value, against a mean buy
-    price of 1.117x market value — destroying ~15% of the squad's equity every
-    matchday until nothing was left. ``can_buy``'s credit-line check stays as
-    the standing legality rule; this is an additional decision-time one.
+    unwind it in the same session, destroying squad equity every matchday until
+    nothing was left. The round-trip cost is the buy-side premium alone — a
+    measured mean transaction price of 1.117x market value against an instant
+    sell that returns the full market value, so ~11.7%, not the ~15% claimed
+    while ``INSTANT_SELL_PCT`` was wrongly 0.95 (see REH-67). ``can_buy``'s
+    credit-line check stays as the standing legality rule; this is an
+    additional decision-time one.
     """
     return state.budget + int(proceeds) - int(price) >= 0
 
@@ -151,6 +154,64 @@ def _restore_budget(
     return sells
 
 
+def _flip_sells(
+    state: ReplayState,
+    scores: dict[str, float],
+    mv_fn: Callable[[str, float], int | None],
+    at: float,
+    *,
+    profit_take_pct: float | None,
+    loss_cut_pct: float | None,
+) -> int:
+    """Take profit and cut losses on squad players; returns sells (REH-68).
+
+    Ports the live trade-side thresholds (``min_sell_profit_pct`` 15.0,
+    ``max_loss_pct`` -15.0). Until now the replay sold only to make room or to
+    restore solvency, so an entire revenue behaviour of the real bot was
+    missing from every result.
+
+    Fieldability is checked before every sale for the same reason it is on the
+    make-room path: an empty slot costs -100, which dwarfs any plausible
+    trading gain. A squad of exactly eleven therefore holds a winner rather
+    than banking it.
+
+    Best-eleven starters are protected, mirroring the live sell logic
+    ("Non-displaced best-11 starters are protected and cannot be sold",
+    decision.py). Without that, the replay banks a 15% gain by selling the very
+    player it needs on Saturday — converting points into cash it then spends
+    worse, since re-entry pays a measured 1.117x market value.
+
+    Players with no cost basis are skipped rather than assumed free.
+    """
+    if profit_take_pct is None and loss_cut_pct is None:
+        return 0
+
+    protected = {p.id for p in select_best_eleven(state.players, scores)}
+
+    sells = 0
+    for pid in list(state.player_ids):
+        if pid in protected:
+            continue
+        player = state.squad.get(pid)
+        if player is None or not player.buy_price:
+            continue
+        current = mv_fn(pid, at)
+        if not current:
+            continue
+        change_pct = (current - player.buy_price) / player.buy_price * 100.0
+        take = profit_take_pct is not None and change_pct >= profit_take_pct
+        cut = loss_cut_pct is not None and change_pct <= loss_cut_pct
+        if not (take or cut):
+            continue
+        remaining = {k: v for k, v in state.squad.items() if k != pid}
+        if not can_field_eleven(ReplayState(budget=state.budget, squad=remaining)):
+            continue
+        state.sell(pid, _proceeds(pid, mv_fn, at))
+        scores.pop(pid, None)
+        sells += 1
+    return sells
+
+
 def shipped_min_ep_gain() -> float:
     """The marginal-gain floor the live bot actually ships with (REH-66).
 
@@ -186,6 +247,24 @@ def run_season(
     # shipped behaviour.
     buy_rank_fn: Callable[[str, float], float] | None = None,
     buy_quota: dict[int, int] | None = None,
+    # REH-68 bid competition. Given (player_id, real_price, at, marginal_gain,
+    # budget), returns our maximum bid. Gain and budget are passed because a
+    # real bid is a function of both — SmartBidding sizes its overbid from the
+    # marginal-gain tier and caps it against what we can afford — and a hook
+    # without them could only express a flat willingness to pay, which is not
+    # what the bot does.
+    # We win only if the bid EXCEEDS what the real buyer actually paid,
+    # and we then pay our own bid rather than theirs — outbidding a rival costs
+    # more than the rival paid, and charging their price would hand us the
+    # upside of competition with none of its cost. None keeps the shipped
+    # behaviour, in which every wanted player is won.
+    bid_fn: Callable[[str, int, float, float, int], int] | None = None,
+    # REH-68 profit flipping. The live trade-side thresholds
+    # (min_sell_profit_pct 15.0 / max_loss_pct -15.0). Both None disables the
+    # pass entirely, preserving the shipped replay behaviour in which the bot
+    # sells only to make room or to restore solvency.
+    profit_take_pct: float | None = None,
+    loss_cut_pct: float | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -195,6 +274,15 @@ def run_season(
         scores = {pid: score_fn(pid, decide_at) for pid in state.player_ids}
 
         buys = sells = 0
+        # Trade before shopping: proceeds fund the same matchday's buys.
+        sells += _flip_sells(
+            state,
+            scores,
+            mv_fn,
+            decide_at,
+            profit_take_pct=profit_take_pct,
+            loss_cut_pct=loss_cut_pct,
+        )
         rank_fn = buy_rank_fn or score_fn
         quota = None if buy_quota is None else buy_quota.get(md.day_number, 0)
         listings = sorted(
@@ -231,10 +319,19 @@ def run_season(
                 # its way to a better season simply by trading more.
                 break
 
+            # What this signing costs us. Without a competition model that is
+            # the price the real buyer paid; with one it is our own winning bid.
+            cost = listing.price
+            if bid_fn is not None:
+                our_bid = bid_fn(listing.player_id, listing.price, decide_at, gain, state.budget)
+                if our_bid <= listing.price:
+                    continue  # outbid by the manager who really signed him
+                cost = our_bid
+
             # Check every constraint that a sale would NOT relieve before
             # selling anyone — otherwise a blocked buy leaves us a player down.
             allowed, reason = can_buy(
-                state, candidate, listing.price, team_value=_team_value(state, mv_fn, decide_at)
+                state, candidate, cost, team_value=_team_value(state, mv_fn, decide_at)
             )
             if not allowed and "squad full" not in reason:
                 continue
@@ -246,7 +343,7 @@ def run_season(
                 sale_proceeds = _proceeds(sold_id, mv_fn, decide_at)
                 # Solvency is tested *before* the sale so that an unaffordable
                 # candidate never costs us a player we then cannot replace.
-                if not _solvent_after(state, listing.price, sale_proceeds):
+                if not _solvent_after(state, cost, sale_proceeds):
                     continue
                 state.sell(sold_id, sale_proceeds)
                 scores.pop(sold_id, None)
@@ -256,15 +353,15 @@ def run_season(
                 allowed, reason = can_buy(
                     state,
                     candidate,
-                    listing.price,
+                    cost,
                     team_value=_team_value(state, mv_fn, decide_at),
                 )
                 if not allowed:
                     continue
-            elif not _solvent_after(state, listing.price):
+            elif not _solvent_after(state, cost):
                 continue
 
-            state.buy(candidate, listing.price)
+            state.buy(candidate, cost, at=decide_at)
             scores[candidate.id] = cand_ep
             buys += 1
 
