@@ -175,13 +175,23 @@ def _flip_sells(
     trading gain. A squad of exactly eleven therefore holds a winner rather
     than banking it.
 
+    Best-eleven starters are protected, mirroring the live sell logic
+    ("Non-displaced best-11 starters are protected and cannot be sold",
+    decision.py). Without that, the replay banks a 15% gain by selling the very
+    player it needs on Saturday — converting points into cash it then spends
+    worse, since re-entry pays a measured 1.117x market value.
+
     Players with no cost basis are skipped rather than assumed free.
     """
     if profit_take_pct is None and loss_cut_pct is None:
         return 0
 
+    protected = {p.id for p in select_best_eleven(state.players, scores)}
+
     sells = 0
     for pid in list(state.player_ids):
+        if pid in protected:
+            continue
         player = state.squad.get(pid)
         if player is None or not player.buy_price:
             continue

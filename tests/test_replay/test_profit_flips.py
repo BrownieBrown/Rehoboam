@@ -98,3 +98,50 @@ def test_flipping_is_off_by_default():
     _result, state = _run(current_mv=99_000_000)
 
     assert "11" in state.squad
+
+
+def test_a_best_eleven_starter_is_never_flipped():
+    """The live sell logic protects non-displaced best-11 starters
+    (decision.py: "Non-displaced best-11 starters are protected and cannot be
+    sold"). Without this the replay banks a 15% gain by selling the very player
+    it needs on Saturday — trading points for cash it then spends worse.
+    """
+    squad = _squad_of_12()
+    state = ReplayState(budget=10_000_000, squad=squad)
+
+    result = run_season(
+        state=state,
+        market=NoMarket(),
+        matchdays=[Matchday(day_number=1, kickoff=10 * DAY, points={})],
+        # "11" is both the most valuable player and deep in profit: exactly the
+        # player a naive take-profit rule sells and a real manager keeps.
+        score_fn=lambda pid, at: 500.0 if pid == "11" else 10.0,
+        mv_fn=lambda pid, at: 12_000_000 if pid == "11" else 10_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: pid,
+        profit_take_pct=15.0,
+    )
+
+    assert "11" in state.squad, "sold a best-eleven starter for a 20% gain"
+    assert result.outcomes[0].sells == 0
+
+
+def test_a_benched_player_in_profit_is_still_flipped():
+    """Protection applies to the eleven, not to the whole squad — otherwise
+    profit taking could never fire at all."""
+    squad = _squad_of_12()
+    state = ReplayState(budget=10_000_000, squad=squad)
+
+    run_season(
+        state=state,
+        market=NoMarket(),
+        matchdays=[Matchday(day_number=1, kickoff=10 * DAY, points={})],
+        # "11" is the WORST player, so he is the one left out of the eleven.
+        score_fn=lambda pid, at: 0.0 if pid == "11" else 100.0,
+        mv_fn=lambda pid, at: 12_000_000 if pid == "11" else 10_000_000,
+        position_fn=lambda pid: "Forward",
+        team_fn=lambda pid: pid,
+        profit_take_pct=15.0,
+    )
+
+    assert "11" not in state.squad
