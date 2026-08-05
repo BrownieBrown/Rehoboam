@@ -53,7 +53,14 @@ def _squad(n: int, basis: int = 10_000_000):
     }
 
 
-def _run(*, squad_size: int, listing_price: int, max_bid: int, budget: int = 50_000_000):
+def _run(
+    *,
+    squad_size: int,
+    listing_price: int,
+    max_bid: int,
+    budget: int = 50_000_000,
+    with_competition: bool = False,
+):
     state = ReplayState(budget=budget, squad=_squad(squad_size))
     result = run_season(
         state=state,
@@ -75,6 +82,11 @@ def _run(*, squad_size: int, listing_price: int, max_bid: int, budget: int = 50_
                 max_bid=max_bid,
             )
         ],
+        # bid_fn's mere presence -- not its return value -- is what flips
+        # `with_competition` True inside `_flip_buys`. The EP loop never calls
+        # it for real in these tests: the marginal-gain floor above always
+        # sends "new" through the `continue` before bid_fn would be reached.
+        bid_fn=(lambda player_id, price, at, gain, budget: price + 1) if with_competition else None,
     )
     return result, state
 
@@ -86,9 +98,39 @@ def test_a_flip_candidate_within_the_ceiling_is_bought():
 
 
 def test_a_flip_is_not_bought_above_its_economic_ceiling():
-    """Paying more than the flip can ever return is a guaranteed loss, so losing
-    the listing to a rival is the correct outcome."""
+    """Paying more than the flip can ever return is a guaranteed loss. No rival
+    is modelled here (no bid_fn) -- this is a plain price-vs-ceiling skip: the
+    listing's price exceeds max_bid, so the pass declines it outright."""
     _result, state = _run(squad_size=12, listing_price=12_000_000, max_bid=11_000_000)
+
+    assert "new" not in state.squad
+
+
+def test_a_flip_is_bought_at_its_own_bid_under_competition():
+    """Under competition the pass must pay what IT bid, not what the rival
+    paid. A membership-only assertion would pass even if the engine had wrongly
+    charged listing.price, so this pins the budget debit to max_bid."""
+    _result, state = _run(
+        squad_size=12,
+        listing_price=9_000_000,
+        max_bid=11_000_000,
+        with_competition=True,
+    )
+
+    assert "new" in state.squad
+    assert state.budget == 50_000_000 - 11_000_000
+
+
+def test_a_flip_is_outbid_when_its_ceiling_does_not_exceed_the_real_price():
+    """Without competition, a bid at or below the ceiling still wins (the
+    listing has no rival to beat). With competition the bid must strictly
+    exceed listing.price -- an equal max_bid still loses the auction."""
+    _result, state = _run(
+        squad_size=12,
+        listing_price=9_000_000,
+        max_bid=9_000_000,
+        with_competition=True,
+    )
 
     assert "new" not in state.squad
 
