@@ -61,3 +61,31 @@ def history_at(corpus: TrainingCorpus, player_id: str, at: float) -> dict:
             (str(player_id), float(at)),
         ).fetchall()
     return {"it": [{"dt": int(snapshot / SECONDS_PER_DAY), "mv": int(mv)} for snapshot, mv in rows]}
+
+
+# Statuses in which the player actually took the pitch: 3 = came on as a sub,
+# 5 = started. Deliberately NARROWER than `driver.PLAYED_STATUSES`, which is
+# (1, 3, 4, 5) because the availability model needs a fitted rate for every
+# state including "not in squad". Kickbase's own average points is per
+# APPEARANCE, so counting non-appearances here would understate every player.
+APPEARANCE_STATUSES = (3, 5)
+
+
+def average_points_at(
+    corpus: TrainingCorpus, player_id: str, *, season: str, day_number: int
+) -> float:
+    """Mean points per appearance over matches strictly before ``day_number``.
+
+    Reuses the v2 scorer's ``matches_before`` boundary rather than introducing a
+    second truncation rule, so the flip path and the EP path cannot disagree
+    about what was knowable at the decision instant.
+    """
+    from rehoboam.backtest.snapshot import matches_before
+
+    history = matches_before(
+        corpus.matches_for_player(player_id), season=season, day_number=day_number
+    )
+    played = [m for m in history if m.get("status") in APPEARANCE_STATUSES]
+    if not played:
+        return 0.0
+    return sum(float(m["points"] or 0) for m in played) / len(played)

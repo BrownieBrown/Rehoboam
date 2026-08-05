@@ -15,7 +15,7 @@ import sqlite3
 import textwrap
 
 from rehoboam.enrichment.corpus import TrainingCorpus
-from rehoboam.replay.flip_buys import CorpusMarketPlayer, history_at
+from rehoboam.replay.flip_buys import CorpusMarketPlayer, average_points_at, history_at
 
 
 def _attributes_read_off(name: str, *functions) -> set[str]:
@@ -94,3 +94,43 @@ def test_days_since_epoch_round_trips_exactly(tmp_path):
     corpus = _corpus_with_mv(tmp_path, [(7 * DAY, 500)])
 
     assert history_at(corpus, "p1", 8 * DAY)["it"] == [{"dt": 7, "mv": 500}]
+
+
+SEASON = "2025/2026"
+
+
+def _corpus_with_matches(tmp_path, rows: list[tuple[int, int, int]]) -> TrainingCorpus:
+    """rows: (day_number, points, status)."""
+    corpus = TrainingCorpus(tmp_path / "corpus.db")
+    with sqlite3.connect(corpus.db_path) as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO player_match_history "
+            "(player_id, season, day_number, points, minutes, is_home, status) "
+            "VALUES ('p1', ?, ?, ?, 90, 1, ?)",
+            [(SEASON, day, points, status) for day, points, status in rows],
+        )
+        conn.commit()
+    return corpus
+
+
+def test_average_points_ignores_matchdays_at_or_after_the_cutoff(tmp_path):
+    corpus = _corpus_with_matches(tmp_path, [(1, 100, 5), (2, 200, 5), (3, 900, 5)])
+
+    assert average_points_at(corpus, "p1", season=SEASON, day_number=3) == 150.0
+
+
+def test_only_appearances_count_towards_the_average(tmp_path):
+    """Kickbase's own average is per appearance. Averaging in matchdays the
+    player was not in the squad (status 1) or sat unused (status 4) drags a fit
+    player under ProfitTrader's MIN_AVG_POINTS gate of 20 and silently removes
+    him from every flip branch.
+    """
+    corpus = _corpus_with_matches(tmp_path, [(1, 60, 5), (2, 0, 1), (3, 0, 4)])
+
+    assert average_points_at(corpus, "p1", season=SEASON, day_number=4) == 60.0
+
+
+def test_a_player_with_no_appearances_averages_zero(tmp_path):
+    corpus = _corpus_with_matches(tmp_path, [(1, 0, 1)])
+
+    assert average_points_at(corpus, "p1", season=SEASON, day_number=2) == 0.0
