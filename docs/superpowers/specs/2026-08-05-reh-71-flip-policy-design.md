@@ -129,8 +129,38 @@ faithful reading: the live bot only flips `is_kickbase_seller()` listings
 (`trader.py:685`), where price *is* market value by construction.
 
 - **Decision**: the adapter sets `price = market_value = corpus.market_value_at(pid, decide_at)`.
-- **Execution**: the engine pays `listing.price`, or our winning bid when
-  competition is modelled.
+- **Execution**: the engine pays our winning bid, sized as below.
+
+### Flip bids face competition, at an economically-derived ceiling
+
+Rival managers can target the same flip candidate, so flip buys are subject to
+the same competition model as EP buys. But `make_ep_bid_fn` is the wrong bidder
+for them: it sizes from `marginal_ep_gain`, which is ~0 for a flip by
+construction, so every flip bid would land in the bottom tier, fail the
+`our_bid > listing.price` test, and collapse arms C and D into A and B — the
+experiment would report "flip buys do nothing" as a modelling artifact.
+
+Flips bid on their own economics instead. Paying `P` is only rational if the
+expected exit still clears the margin `ProfitTrader` itself demands. Exit
+proceeds are `MV × 1.00` (`INSTANT_SELL_PCT`, measured in REH-67), so:
+
+```
+ceiling = MV_now × (1 + expected_appreciation / 100) / (1 + min_profit_pct / 100)
+```
+
+`expected_appreciation` comes from the `ProfitOpportunity`; `min_profit_pct` is
+8.0, read from `Trader.find_profit_opportunities`'s call site (`trader.py:719`)
+rather than `ProfitTrader.__init__`'s unused default. The bid is additionally
+capped by what the budget allows, and we win only if it exceeds
+`listing.price`.
+
+Losing a contested flip is a real economic outcome — a rival paid more than the
+flip could ever return — and must not be papered over by bidding higher.
+
+The alternative considered and rejected: paying `listing.price` uncontested.
+That charges a measured 11.7% premium against an 8% expected appreciation, so
+nearly every flip loses by construction and the verdict is baked in before the
+run.
 
 ### Pinned inputs
 
