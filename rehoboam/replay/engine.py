@@ -212,6 +212,74 @@ def _flip_sells(
     return sells
 
 
+def _flip_buys(
+    state: ReplayState,
+    scores: dict[str, float],
+    listings: list,
+    at: float,
+    *,
+    flip_buy_fn: Callable[[list, float, int, int], list],
+    score_fn: Callable[[str, float], float],
+    mv_fn: Callable[[str, float], int | None],
+    position_fn: Callable[[str], str | None],
+    team_fn: Callable[[str], str | None],
+    with_competition: bool,
+) -> int:
+    """Buy for expected appreciation with the slots the EP pass left (REH-71).
+
+    Mirrors the live ordering: EP candidates execute first and flips take
+    "remaining slots" (auto_trader.py:533). A flip never displaces a squad
+    member, so this stops at MAX_SQUAD_SIZE rather than calling
+    ``_fieldable_sale_victim``.
+
+    Candidates carry their own ``max_bid`` from ``flip_buys.flip_bid_ceiling``
+    rather than going through ``bid_fn``: a flip's marginal EP gain is ~0 by
+    construction, so the EP bidder would put every flip in its bottom tier and
+    lose every contested listing, reporting a bidder artifact as a fact about
+    flipping.
+    """
+    from rehoboam.scoring.decision import _would_create_dead_weight
+
+    by_id = {listing.player_id: listing for listing in listings}
+    team_value = _team_value(state, mv_fn, at)
+    buys = 0
+
+    for candidate in flip_buy_fn(listings, at, state.budget, team_value):
+        if state.squad_size >= MAX_SQUAD_SIZE:
+            break
+        pid = candidate.player_id
+        listing = by_id.get(pid)
+        position = position_fn(pid)
+        if listing is None or not position or pid in state.squad:
+            continue
+
+        # Under competition we must outbid what the real buyer paid, and we then
+        # pay our own bid. Without it the listing is ours at its asking price --
+        # but never above the ceiling, which is an economic limit either way.
+        if with_competition:
+            if candidate.max_bid <= listing.price:
+                continue
+            cost = int(candidate.max_bid)
+        else:
+            if listing.price > candidate.max_bid:
+                continue
+            cost = int(listing.price)
+
+        player = ReplayPlayer(id=pid, position=position, team_id=team_fn(pid))
+        if _would_create_dead_weight(player, state.players):
+            continue
+        allowed, _reason = can_buy(state, player, cost, team_value=team_value)
+        if not allowed or not _solvent_after(state, cost):
+            continue
+
+        state.buy(player, cost, at=at)
+        scores[pid] = score_fn(pid, at)
+        team_value = _team_value(state, mv_fn, at)
+        buys += 1
+
+    return buys
+
+
 def shipped_min_ep_gain() -> float:
     """The marginal-gain floor the live bot actually ships with (REH-66).
 
@@ -265,6 +333,10 @@ def run_season(
     # sells only to make room or to restore solvency.
     profit_take_pct: float | None = None,
     loss_cut_pct: float | None = None,
+    # REH-71 flip buys. Given (listings, at, budget, team_value), returns
+    # candidates carrying their own economic max_bid. None keeps the shipped
+    # behaviour, in which every buy is justified by marginal expected points.
+    flip_buy_fn: Callable[[list, float, int, int], list] | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -364,6 +436,20 @@ def run_season(
             state.buy(candidate, cost, at=decide_at)
             scores[candidate.id] = cand_ep
             buys += 1
+
+        if flip_buy_fn is not None:
+            buys += _flip_buys(
+                state,
+                scores,
+                listings,
+                decide_at,
+                flip_buy_fn=flip_buy_fn,
+                score_fn=score_fn,
+                mv_fn=mv_fn,
+                position_fn=position_fn,
+                team_fn=team_fn,
+                with_competition=bid_fn is not None,
+            )
 
         # Budget must be non-negative at kickoff or the matchday scores zero.
         sells += _restore_budget(state, scores, mv_fn, decide_at)
