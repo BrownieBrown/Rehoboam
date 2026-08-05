@@ -31,6 +31,11 @@ class ReplayPlayer:
     team_id: str | None = None
     buy_price: int | None = None
     bought_at: float | None = None
+    # "assigned" for the randomly-allocated opening squad, "bought" for anything
+    # the replay actually purchased. Both carry a cost basis, so the basis alone
+    # cannot distinguish them -- and counting assigned disposals as round trips
+    # would make the ledger incomparable to the real 151 flips (REH-71).
+    acquired: str = "assigned"
 
 
 @dataclass
@@ -54,7 +59,9 @@ class ReplayState:
 
     def buy(self, player: ReplayPlayer, price: int, at: float | None = None) -> None:
         """Add ``player`` to the squad, recording the cost basis (REH-68)."""
-        self.squad[player.id] = replace(player, buy_price=int(price), bought_at=at)
+        self.squad[player.id] = replace(
+            player, buy_price=int(price), bought_at=at, acquired="bought"
+        )
         self.budget -= int(price)
 
     def sell(self, player_id: str, proceeds: int) -> None:

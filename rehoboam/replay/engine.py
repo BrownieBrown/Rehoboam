@@ -58,11 +58,23 @@ class MatchdayOutcome:
     sells: int
 
 
+@dataclass(frozen=True)
+class FlipRecord:
+    """One completed round trip: a player the replay bought and later sold."""
+
+    player_id: str
+    buy_price: int
+    proceeds: int
+    bought_at: float | None
+    sold_at: float
+
+
 @dataclass
 class SeasonResult:
     outcomes: list[MatchdayOutcome] = field(default_factory=list)
     total_points: int = 0
     final_budget: int = 0
+    flips: list[FlipRecord] = field(default_factory=list)
 
 
 def _team_value(state: ReplayState, mv_fn: Callable[[str, float], int | None], at: float) -> int:
@@ -162,6 +174,7 @@ def _flip_sells(
     *,
     profit_take_pct: float | None,
     loss_cut_pct: float | None,
+    ledger: list[FlipRecord],
 ) -> int:
     """Take profit and cut losses on squad players; returns sells (REH-68).
 
@@ -206,6 +219,16 @@ def _flip_sells(
         remaining = {k: v for k, v in state.squad.items() if k != pid}
         if not can_field_eleven(ReplayState(budget=state.budget, squad=remaining)):
             continue
+        if player.acquired == "bought":
+            ledger.append(
+                FlipRecord(
+                    player_id=pid,
+                    buy_price=int(player.buy_price),
+                    proceeds=_proceeds(pid, mv_fn, at),
+                    bought_at=player.bought_at,
+                    sold_at=at,
+                )
+            )
         state.sell(pid, _proceeds(pid, mv_fn, at))
         scores.pop(pid, None)
         sells += 1
@@ -354,6 +377,7 @@ def run_season(
             decide_at,
             profit_take_pct=profit_take_pct,
             loss_cut_pct=loss_cut_pct,
+            ledger=result.flips,
         )
         rank_fn = buy_rank_fn or score_fn
         quota = None if buy_quota is None else buy_quota.get(md.day_number, 0)
