@@ -9,6 +9,7 @@ shipped rule shows up in the replay instead of silently drifting from it.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from rehoboam.enrichment.corpus import TrainingCorpus
@@ -116,3 +117,101 @@ def flip_bid_ceiling(
 
     exit_value = market_value * (1.0 + expected_appreciation / 100.0) * INSTANT_SELL_PCT
     return int(exit_value / (1.0 + min_profit_pct / 100.0))
+
+
+# Thresholds read from `Trader.find_profit_opportunities`'s call site
+# (trader.py:715-721), NOT from `ProfitTrader.__init__`'s defaults, which no
+# caller in the codebase actually uses.
+FLIP_MIN_PROFIT_PCT = 8.0
+FLIP_MAX_HOLD_DAYS = 7
+FLIP_MAX_RISK_SCORE = 60.0
+# The live path scores only the first 50 market entries (trader.py:711).
+FLIP_MARKET_SCAN_LIMIT = 50
+
+
+@dataclass(frozen=True)
+class FlipCandidate:
+    """A player worth buying for appreciation, with what he is worth paying."""
+
+    player_id: str
+    market_value: int
+    expected_appreciation: float
+    max_bid: int
+
+
+def make_flip_buy_fn(
+    corpus: TrainingCorpus,
+    *,
+    season: str,
+    day_fn: Callable[[float], int],
+    position_fn: Callable[[str], str | None],
+) -> Callable[[list, float, int, int], list[FlipCandidate]]:
+    """Rank flip candidates with the bot's own profit-trading logic (REH-71).
+
+    DECISION PRICE vs EXECUTION PRICE. The adapter reports
+    ``price == market_value`` while the engine pays a bid derived from
+    ``flip_bid_ceiling``. This is not a fudge. The live bot only ever flips
+    ``is_kickbase_seller()`` listings (trader.py:685), where the two are equal by
+    construction, and ``ProfitTrader`` *branches* on that equality
+    (profit_trader.py:121). Feeding it a real transaction price -- which averages
+    1.117x market value -- sends every candidate down the non-Kickbase branch,
+    where ``value_gap`` is negative and the candidate is dropped at
+    profit_trader.py:194. The pass would look modelled and never fire once.
+
+    ``status`` is pinned to 0 (available) because the corpus's per-match status
+    is participation, not injury. Nothing is therefore skipped as injured, so
+    this buys MORE flips than the live bot would -- an upper bound on flip
+    activity, and hence on flip harm.
+    """
+    from rehoboam.profit_trader import ProfitTrader
+    from rehoboam.services.trend_service import TrendService
+
+    trader = ProfitTrader(
+        min_profit_pct=FLIP_MIN_PROFIT_PCT,
+        max_hold_days=FLIP_MAX_HOLD_DAYS,
+        max_risk_score=FLIP_MAX_RISK_SCORE,
+    )
+
+    def candidates(listings: list, at: float, budget: int, team_value: int) -> list[FlipCandidate]:
+        day = day_fn(at)
+        players: list[CorpusMarketPlayer] = []
+        trends: dict[str, dict] = {}
+
+        for listing in listings[:FLIP_MARKET_SCAN_LIMIT]:
+            pid = listing.player_id
+            market_value = corpus.market_value_at(pid, at)
+            position = position_fn(pid)
+            if not market_value or not position:
+                continue
+            players.append(
+                CorpusMarketPlayer(
+                    id=pid,
+                    price=market_value,
+                    market_value=market_value,
+                    average_points=average_points_at(corpus, pid, season=season, day_number=day),
+                    position=position,
+                )
+            )
+            trends[pid] = TrendService.analyze(history_at(corpus, pid, at), market_value).to_dict()
+
+        opportunities = trader.find_profit_opportunities(
+            market_players=players,
+            current_budget=budget,
+            player_trends=trends,
+            team_value=team_value,
+        )
+        return [
+            FlipCandidate(
+                player_id=o.player.id,
+                market_value=o.market_value,
+                expected_appreciation=o.expected_appreciation,
+                max_bid=flip_bid_ceiling(
+                    o.market_value,
+                    o.expected_appreciation,
+                    min_profit_pct=FLIP_MIN_PROFIT_PCT,
+                ),
+            )
+            for o in opportunities
+        ]
+
+    return candidates

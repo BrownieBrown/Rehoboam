@@ -20,7 +20,9 @@ from rehoboam.replay.flip_buys import (
     average_points_at,
     flip_bid_ceiling,
     history_at,
+    make_flip_buy_fn,
 )
+from rehoboam.replay.market import MarketListing
 
 
 def _attributes_read_off(name: str, *functions) -> set[str]:
@@ -165,3 +167,61 @@ def test_a_bigger_expected_move_justifies_a_bigger_bid():
 def test_a_flip_with_no_expected_upside_bids_below_market_value():
     """Otherwise the bot pays full price for a player it expects to stagnate."""
     assert flip_bid_ceiling(10_000_000, 0.0, min_profit_pct=8.0) < 10_000_000
+
+
+def _rising_corpus(tmp_path) -> TrainingCorpus:
+    """A player on a steady climb who also scores well -- the shape
+    ProfitTrader's `rising` branch is looking for."""
+    corpus = TrainingCorpus(tmp_path / "corpus.db")
+    with sqlite3.connect(corpus.db_path) as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO mv_series (player_id, snapshot_at, market_value) "
+            "VALUES ('p1', ?, ?)",
+            [(day * DAY, 10_000_000 + day * 400_000) for day in range(1, 31)],
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO player_match_history "
+            "(player_id, season, day_number, points, minutes, is_home, status) "
+            "VALUES ('p1', ?, ?, ?, 90, 1, 5)",
+            [(SEASON, day, 80) for day in range(1, 5)],
+        )
+        conn.commit()
+    return corpus
+
+
+def _candidates(corpus, at: float):
+    fn = make_flip_buy_fn(
+        corpus,
+        season=SEASON,
+        day_fn=lambda _at: 10,
+        position_fn=lambda _pid: "Forward",
+    )
+    listings = [MarketListing(player_id="p1", price=11_000_000, transfer_at=at - DAY)]
+    return fn(listings, at, 50_000_000, 100_000_000)
+
+
+def test_a_rising_high_scorer_is_offered_as_a_flip_candidate(tmp_path):
+    """The regression test that matters most. If the adapter fed ProfitTrader a
+    real transaction price instead of market value, EVERY candidate would take
+    the non-Kickbase branch, `value_gap` would be negative, and the whole pass
+    would return an empty list on every matchday while appearing to work.
+    """
+    found = _candidates(_rising_corpus(tmp_path), 31 * DAY)
+
+    assert [c.player_id for c in found] == ["p1"]
+
+
+def test_the_candidate_carries_an_economically_sized_max_bid(tmp_path):
+    found = _candidates(_rising_corpus(tmp_path), 31 * DAY)
+
+    assert found[0].max_bid == flip_bid_ceiling(
+        found[0].market_value, found[0].expected_appreciation, min_profit_pct=8.0
+    )
+
+
+def test_a_player_with_no_market_value_is_skipped(tmp_path):
+    """`market_value_at` returns None outside the recorded series; a zero-value
+    adapter would divide by zero inside the trend model."""
+    corpus = TrainingCorpus(tmp_path / "corpus.db")
+
+    assert _candidates(corpus, 31 * DAY) == []
