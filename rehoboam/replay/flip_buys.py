@@ -8,7 +8,10 @@ shipped rule shows up in the replay instead of silently drifting from it.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+
+from rehoboam.enrichment.corpus import TrainingCorpus
 
 
 @dataclass(frozen=True)
@@ -33,3 +36,28 @@ class CorpusMarketPlayer:
     status: int = 0
     first_name: str = ""
     last_name: str = ""
+
+
+SECONDS_PER_DAY = 86400.0
+
+
+def history_at(corpus: TrainingCorpus, player_id: str, at: float) -> dict:
+    """A `TrendService.analyze`-shaped history, truncated strictly before ``at``.
+
+    ``hmv``/``lmv`` are deliberately omitted rather than computed. ``analyze``
+    derives ``peak_value = max(api_peak, data_peak, current)`` and
+    ``low_value = min(v for v in [api_low, data_low, current] if v > 0)``, so an
+    absent key drops out of both and the extremes come from the truncated series
+    alone. Supplying the season-wide peak would leak the future into
+    ``ProfitTrader``'s mean-reversion branch.
+
+    ``snapshot_at`` is exactly ``dt * 86400`` (``corpus.record_mv_series``), so
+    the round trip back to ``dt`` is lossless.
+    """
+    with sqlite3.connect(corpus.db_path) as conn:
+        rows = conn.execute(
+            "SELECT snapshot_at, market_value FROM mv_series "
+            "WHERE player_id = ? AND snapshot_at < ? ORDER BY snapshot_at",
+            (str(player_id), float(at)),
+        ).fetchall()
+    return {"it": [{"dt": int(snapshot / SECONDS_PER_DAY), "mv": int(mv)} for snapshot, mv in rows]}
