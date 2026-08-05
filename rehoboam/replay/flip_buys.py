@@ -89,3 +89,30 @@ def average_points_at(
     if not played:
         return 0.0
     return sum(float(m["points"] or 0) for m in played) / len(played)
+
+
+def flip_bid_ceiling(
+    market_value: int, expected_appreciation: float, *, min_profit_pct: float
+) -> int:
+    """The most a flip can rationally cost and still clear its own margin.
+
+    A flip bought at ``P`` exits at ``MV x (1 + a/100) x INSTANT_SELL_PCT``,
+    where ``INSTANT_SELL_PCT`` is 1.00 as measured in REH-67. Requiring the
+    round trip to still return ``min_profit_pct`` gives::
+
+        P <= MV x (1 + a/100) / (1 + m/100)
+
+    Bidding above this guarantees a loss even when the expected appreciation
+    fully materialises, so losing a listing to a rival who paid more is the
+    correct outcome, not a modelling failure.
+
+    Deliberately NOT `SmartBidding.calculate_ep_bid`: that sizes an overbid from
+    the marginal-gain tier, and a flip's marginal EP gain is ~0 by construction,
+    so every flip would bid into the bottom tier and lose every contested
+    listing -- reporting "flip buys do nothing" as an artifact of the bidder
+    rather than a fact about flipping.
+    """
+    from rehoboam.replay.engine import INSTANT_SELL_PCT
+
+    exit_value = market_value * (1.0 + expected_appreciation / 100.0) * INSTANT_SELL_PCT
+    return int(exit_value / (1.0 + min_profit_pct / 100.0))

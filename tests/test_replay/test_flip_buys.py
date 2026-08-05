@@ -15,7 +15,12 @@ import sqlite3
 import textwrap
 
 from rehoboam.enrichment.corpus import TrainingCorpus
-from rehoboam.replay.flip_buys import CorpusMarketPlayer, average_points_at, history_at
+from rehoboam.replay.flip_buys import (
+    CorpusMarketPlayer,
+    average_points_at,
+    flip_bid_ceiling,
+    history_at,
+)
 
 
 def _attributes_read_off(name: str, *functions) -> set[str]:
@@ -134,3 +139,29 @@ def test_a_player_with_no_appearances_averages_zero(tmp_path):
     corpus = _corpus_with_matches(tmp_path, [(1, 0, 1)])
 
     assert average_points_at(corpus, "p1", season=SEASON, day_number=2) == 0.0
+
+
+def test_the_ceiling_leaves_the_required_margin_intact():
+    """Buy at the ceiling, sell at the appreciated value, and the round trip
+    still returns exactly min_profit_pct."""
+    ceiling = flip_bid_ceiling(10_000_000, 20.0, min_profit_pct=8.0)
+
+    exit_value = 10_000_000 * 1.20
+    realised_pct = (exit_value - ceiling) / ceiling * 100
+
+    assert abs(realised_pct - 8.0) < 0.01
+
+
+def test_a_bigger_expected_move_justifies_a_bigger_bid():
+    """The gradient must discriminate across the operating range -- the missing
+    test class that let REH-69 ship a saturated bid function."""
+    low = flip_bid_ceiling(10_000_000, 10.0, min_profit_pct=8.0)
+    mid = flip_bid_ceiling(10_000_000, 20.0, min_profit_pct=8.0)
+    high = flip_bid_ceiling(10_000_000, 40.0, min_profit_pct=8.0)
+
+    assert low < mid < high
+
+
+def test_a_flip_with_no_expected_upside_bids_below_market_value():
+    """Otherwise the bot pays full price for a player it expects to stagnate."""
+    assert flip_bid_ceiling(10_000_000, 0.0, min_profit_pct=8.0) < 10_000_000
