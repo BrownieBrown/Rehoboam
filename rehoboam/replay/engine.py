@@ -160,7 +160,7 @@ def _restore_budget(
             # Nothing can be sold without breaking the eleven, but a zero is
             # worse than the penalty — sell the cheapest player regardless.
             victim = min(state.player_ids, key=lambda p: scores.get(p, 0.0))
-        state.sell(victim, _proceeds(victim, mv_fn, at))
+        state.sell(victim, _proceeds(victim, mv_fn, at), at=at)
         scores.pop(victim, None)
         sells += 1
     return sells
@@ -229,7 +229,7 @@ def _flip_sells(
                     sold_at=at,
                 )
             )
-        state.sell(pid, _proceeds(pid, mv_fn, at))
+        state.sell(pid, _proceeds(pid, mv_fn, at), at=at)
         scores.pop(pid, None)
         sells += 1
     return sells
@@ -247,6 +247,7 @@ def _flip_buys(
     position_fn: Callable[[str], str | None],
     team_fn: Callable[[str], str | None],
     with_competition: bool,
+    wash_trade_block_seconds: float | None = None,
 ) -> int:
     """Buy for expected appreciation with the slots the EP pass left (REH-71).
 
@@ -275,6 +276,20 @@ def _flip_buys(
         position = position_fn(pid)
         if listing is None or not position or pid in state.squad:
             continue
+
+        # Live wash-trade guard (auto_trader.py:374, applying
+        # Settings.wash_trade_block_hours, default 168h/7d): refuse to re-buy a
+        # player sold within the block window. Applied here only, not in the EP
+        # loop above -- the EP loop already gates on gain >= min_ep_gain, so
+        # re-buying a just-sold player there requires them to be a large
+        # upgrade, whereas the flip pass has no such gate and is where a
+        # same-matchday wash trade actually appeared (REH-71). Extending the
+        # guard to the EP loop would also change that experiment's baseline
+        # arms, which is not this task's call to make.
+        if wash_trade_block_seconds is not None:
+            sold = state.sold_at.get(pid)
+            if sold is not None and at - sold < wash_trade_block_seconds:
+                continue
 
         # Under competition we must outbid what the real buyer paid, and we then
         # pay our own bid. Without it the listing is ours at its asking price --
@@ -360,6 +375,12 @@ def run_season(
     # candidates carrying their own economic max_bid. None keeps the shipped
     # behaviour, in which every buy is justified by marginal expected points.
     flip_buy_fn: Callable[[list, float, int, int], list] | None = None,
+    # REH-71 wash-trade guard, ported from the live bot's
+    # `AutoTrader._is_wash_trade` (auto_trader.py:667) and
+    # `Settings.wash_trade_block_hours` (config.py, default 168h/7d). Applied
+    # to flip candidates only (see `_flip_buys`). None keeps the shipped
+    # replay behaviour, in which nothing blocks a re-buy.
+    wash_trade_block_seconds: float | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -441,7 +462,7 @@ def run_season(
                 # candidate never costs us a player we then cannot replace.
                 if not _solvent_after(state, cost, sale_proceeds):
                     continue
-                state.sell(sold_id, sale_proceeds)
+                state.sell(sold_id, sale_proceeds, at=decide_at)
                 scores.pop(sold_id, None)
                 sells += 1
                 # The credit floor is 70% of *current* team value, so it has to
@@ -473,6 +494,7 @@ def run_season(
                 position_fn=position_fn,
                 team_fn=team_fn,
                 with_competition=bid_fn is not None,
+                wash_trade_block_seconds=wash_trade_block_seconds,
             )
 
         # Budget must be non-negative at kickoff or the matchday scores zero.

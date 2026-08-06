@@ -44,6 +44,7 @@ class ReplayState:
 
     budget: int
     squad: dict[str, ReplayPlayer] = field(default_factory=dict)
+    sold_at: dict[str, float] = field(default_factory=dict)
 
     @property
     def squad_size(self) -> int:
@@ -64,9 +65,19 @@ class ReplayState:
         )
         self.budget -= int(price)
 
-    def sell(self, player_id: str, proceeds: int) -> None:
+    def sell(self, player_id: str, proceeds: int, at: float | None = None) -> None:
+        """Remove ``player_id`` from the squad, crediting ``proceeds`` (REH-71).
+
+        Records ``at`` in ``sold_at`` regardless of *why* the sale happened —
+        make-room, solvency, or profit-taking — mirroring the live bot, where
+        the ``recently_sold`` table (``auto_trader.py``) is written on every
+        sale, not just profit-motivated ones. This is the wash-trade block's
+        data source: it must see every disposal to refuse every re-buy.
+        """
         del self.squad[player_id]
         self.budget += int(proceeds)
+        if at is not None:
+            self.sold_at[player_id] = at
 
     def team_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

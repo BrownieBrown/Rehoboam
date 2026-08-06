@@ -123,6 +123,12 @@ def test_a_flip_bought_then_sold_closes_as_exactly_one_round_trip():
                 max_bid=9_000_000,
             )
         ],
+        # Without this, the flip pass would re-buy "new" from the same stale
+        # listing the instant _flip_sells closes him out, on the same
+        # matchday -- the live bot's wash-trade guard (auto_trader.py:374,
+        # Settings.wash_trade_block_hours, default 168h) exists precisely to
+        # stop that.
+        wash_trade_block_seconds=168.0 * 3600.0,
     )
 
     assert "new" not in state.squad
