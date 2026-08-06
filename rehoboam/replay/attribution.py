@@ -14,7 +14,7 @@ FIDELITY_NOTES = [
     ("Points scoring", "exact", "real per-match points from the corpus"),
     ("Penalty avoidance", "exact", "deterministic"),
     ("Lineup selection", "high", "real squad, real formation rules"),
-    ("Sell decisions", "medium", "instant sell at MV; profit flips NOT modelled"),
+    ("Sell decisions", "medium", "instant sell at MV; profit flips per --with-flips"),
     ("Buy prices", "high", "real transaction prices"),
     ("Buy availability", "medium", "only players who actually traded are visible"),
     ("Bid competition", "see footer", "absent unless --with-competition"),
@@ -32,6 +32,20 @@ def place_in_league(simulated_total: int, standings: list[LeagueStanding]) -> in
     """1-indexed finishing position. Ties do not overtake the real manager."""
     ahead = sum(1 for s in standings if s.total_points >= simulated_total)
     return ahead + 1
+
+
+# The real 2025/26 season, for comparison. Without a reference the replay's own
+# P&L is uninterpretable.
+REAL_FLIP_PNL = -55_256_064
+REAL_FLIP_TRIPS = 151
+REAL_FLIP_WIN_RATE = 27.8
+
+
+def trading_summary(result: SeasonResult) -> tuple[int, int, int]:
+    """``(realised_pnl, round_trips, wins)`` over completed round trips."""
+    pnl = sum(f.proceeds - f.buy_price for f in result.flips)
+    wins = sum(1 for f in result.flips if f.proceeds > f.buy_price)
+    return pnl, len(result.flips), wins
 
 
 def attribution_rows(
@@ -67,6 +81,7 @@ def format_report(
     min_ep_gain: float,
     with_competition: bool = False,
     with_flips: bool = False,
+    with_flip_buys: bool = False,
 ) -> str:
     """Human-readable replay report with fidelity caveats attached.
 
@@ -100,6 +115,20 @@ def format_report(
         f"  {'Marginal EP gain floor':<34}{min_ep_gain:>9,.1f}   real points, "
         "buys below this are skipped"
     )
+
+    if with_flips or with_flip_buys:
+        pnl, trips, wins = trading_summary(result)
+        rate = (100.0 * wins / trips) if trips else 0.0
+        lines += [
+            "",
+            "Trading (cash - does not enter the points attribution above)",
+            "-" * 68,
+            f"  {'Realised flip P&L':<34}{'EUR ' + format(pnl, '+,'):>21}",
+            f"  {'Round trips completed':<34}{trips:>21,}",
+            f"  {'Win rate':<34}{rate:>20.1f}%   ({wins} of {trips})",
+            f"  {'Real 2025/26, for comparison':<34}" f"{'EUR ' + format(REAL_FLIP_PNL, '+,'):>21}",
+            f"  {'':<34}{REAL_FLIP_TRIPS:>21,} trips, {REAL_FLIP_WIN_RATE}%",
+        ]
 
     lines += ["", "Fidelity", "-" * 68]
     for component, level, basis in FIDELITY_NOTES:
@@ -135,7 +164,17 @@ def format_report(
             "Profit flipping is NOT modelled: the bot sells only to make room or",
             "to restore solvency, while the live bot also trades for gain.",
         ]
-    if not (with_competition and with_flips):
+    if with_flip_buys:
+        lines += [
+            "Flip BUYING is modelled: candidates come from the real ProfitTrader,",
+            "bid at an economic ceiling rather than by marginal EP gain.",
+        ]
+    else:
+        lines += [
+            "Flip BUYING is NOT modelled: every buy here is justified by expected",
+            "points, while the live bot also buys purely for appreciation.",
+        ]
+    if not (with_competition and with_flips and with_flip_buys):
         lines += ["INCOMPLETE - diagnostic only, not a season result."]
     lines += [
         "=" * 68,
