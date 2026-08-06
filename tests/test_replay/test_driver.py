@@ -1,3 +1,4 @@
+import inspect
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from rehoboam.enrichment.corpus import TrainingCorpus
+from rehoboam.replay import driver
 from rehoboam.replay.driver import (
     LEAGUE_ID,
     build_matchdays,
@@ -148,3 +150,39 @@ def test_real_calendar_has_34_matchdays_starting_on_the_official_day_one():
     assert datetime.fromtimestamp(cal[1], timezone.utc) == datetime(
         2025, 8, 23, 13, 30, tzinfo=timezone.utc
     )
+
+
+def test_run_replay_accepts_a_flip_buy_switch():
+    assert "with_flip_buys" in inspect.signature(driver.run_replay).parameters
+
+
+def test_run_replay_passes_the_flip_buy_fn_to_the_engine():
+    """A switch that never reaches run_season changes nothing -- the exact
+    defect REH-66 caught on the gain floor."""
+    source = inspect.getsource(driver.run_replay)
+
+    assert "flip_buy_fn=" in source
+
+
+def test_the_flip_buy_fn_uses_the_same_matchday_resolver_as_the_scorer():
+    """Two different cutoff rules in one run would let the flip path see a
+    matchday the EP path cannot."""
+    source = inspect.getsource(driver.run_replay)
+
+    assert "day_fn=" in source
+    assert "day_for_kickoff" in source
+
+
+def test_run_replay_passes_the_wash_trade_guard_to_the_engine():
+    """Without this the flip pass can rebuy the very player the sell pass just
+    sold, paying the round-trip cost twice for nothing (REH-71 review of
+    REH-66/68: `wash_trade_block_seconds` existed on `run_season` but nothing
+    called it)."""
+    source = inspect.getsource(driver.run_replay)
+
+    assert "wash_trade_block_seconds=" in source
+    # Wired unconditionally -- it guards how the bot trades, not which
+    # experiment arm is running -- and it must read the shipped Settings
+    # default rather than a hard-coded literal, which is exactly the drift
+    # REH-66 exists to prevent.
+    assert '_shipped_default("wash_trade_block_hours")' in source

@@ -186,6 +186,7 @@ def run_replay(
     buy_quota: dict[int, int] | None = None,
     with_competition: bool = False,
     with_flips: bool = False,
+    with_flip_buys: bool = False,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -220,6 +221,19 @@ def run_replay(
 
     gain_floor = shipped_min_ep_gain() if min_ep_gain is None else min_ep_gain
 
+    flip_buy_fn = None
+    if with_flip_buys:
+        from rehoboam.replay.flip_buys import make_flip_buy_fn
+
+        flip_buy_fn = make_flip_buy_fn(
+            corpus,
+            season=SEASON,
+            # The SAME resolver the scorer uses, so the flip path and the EP
+            # path cannot disagree about which matchday is being predicted.
+            day_fn=lambda at: day_for_kickoff(kickoffs, at),
+            position_fn=position_fn,
+        )
+
     result = run_season(
         state=state,
         market=market,
@@ -241,6 +255,11 @@ def run_replay(
         # re-tune must not leave the harness describing a bot nobody deployed.
         profit_take_pct=_shipped_default("min_sell_profit_pct") if with_flips else None,
         loss_cut_pct=_shipped_default("max_loss_pct") if with_flips else None,
+        flip_buy_fn=flip_buy_fn,
+        # Wired unconditionally: this guards how the bot trades, not which
+        # experiment arm is running. `_flip_buys` is the only consumer, so it
+        # is a no-op whenever flip_buy_fn is None (REH-71 review of REH-66/68).
+        wash_trade_block_seconds=_shipped_default("wash_trade_block_hours") * 3600.0,
     )
 
     with sqlite3.connect(learning_db_path) as conn:
@@ -261,6 +280,7 @@ def run_replay(
         min_ep_gain=gain_floor,
         with_competition=with_competition,
         with_flips=with_flips,
+        with_flip_buys=with_flip_buys,
     )
     return result, report
 

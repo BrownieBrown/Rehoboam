@@ -705,6 +705,15 @@ def replay_season(
             "lands, so treat the output as a diagnostic, not a season result."
         ),
     ),
+    with_flip_buys: bool = typer.Option(
+        False,
+        "--with-flip-buys",
+        help=(
+            "Model profit-flip BUYING (REH-71): candidates from the real "
+            "ProfitTrader, bid at an economic ceiling. The live bot does this; "
+            "--with-flips alone only models the selling half."
+        ),
+    ),
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
@@ -722,6 +731,7 @@ def replay_season(
         min_ep_gain=min_ep_gain,
         with_competition=with_competition,
         with_flips=with_flips,
+        with_flip_buys=with_flip_buys,
     )
     console.print(report)
 
