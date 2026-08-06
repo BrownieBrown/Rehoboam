@@ -7,6 +7,7 @@ would be a category error, so the ledger stands apart.
 
 from __future__ import annotations
 
+from rehoboam.config import Settings
 from rehoboam.replay.engine import Matchday, run_season
 from rehoboam.replay.state import ReplayPlayer, ReplayState
 
@@ -126,9 +127,11 @@ def test_a_flip_bought_then_sold_closes_as_exactly_one_round_trip():
         # Without this, the flip pass would re-buy "new" from the same stale
         # listing the instant _flip_sells closes him out, on the same
         # matchday -- the live bot's wash-trade guard (auto_trader.py:374,
-        # Settings.wash_trade_block_hours, default 168h) exists precisely to
-        # stop that.
-        wash_trade_block_seconds=168.0 * 3600.0,
+        # Settings.wash_trade_block_hours) exists precisely to stop that. Read
+        # off the field default rather than hard-coding it (REH-66): a
+        # production re-tune of wash_trade_block_hours must not leave this
+        # test silently asserting against a stale window.
+        wash_trade_block_seconds=Settings.model_fields["wash_trade_block_hours"].default * 3600.0,
     )
 
     assert "new" not in state.squad

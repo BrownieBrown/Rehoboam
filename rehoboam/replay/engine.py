@@ -195,6 +195,12 @@ def _flip_sells(
     worse, since re-entry pays a measured 1.117x market value.
 
     Players with no cost basis are skipped rather than assumed free.
+
+    Every sale here also gets a shot at ``ledger``: a completed round trip is
+    recorded, but only for players whose ``acquired == "bought"``. The opening
+    squad was *assigned*, not bought (REH-68), so counting its disposals would
+    inflate the round-trip count and make ``ledger`` incomparable to the real
+    151 round trips it exists to be compared against (REH-71).
     """
     if profit_take_pct is None and loss_cut_pct is None:
         return 0
