@@ -758,6 +758,28 @@ def replay_buy_control(
     console.print(run_buy_control(corpus_path=corpus, learning_db_path=learning_db))
 
 
+@app.command("replay-flip-policy")
+def replay_flip_policy(
+    corpus: Path = typer.Option(  # noqa: B008
+        Path("logs/training_corpus.db"), help="Path to the training corpus DB"
+    ),
+    learning_db: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"), help="Path to the learning DB with real standings"
+    ),
+) -> None:
+    """REH-71: 2x2 over flip buys x profit sells, with competition on."""
+    from rehoboam.replay.driver import run_flip_policy
+
+    if not corpus.exists():
+        console.print(f"[red]Corpus not found: {corpus}[/red]")
+        raise typer.Exit(1)
+    if not learning_db.exists():
+        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
+        raise typer.Exit(1)
+
+    console.print(run_flip_policy(corpus_path=corpus, learning_db_path=learning_db))
+
+
 @app.command("fit-scorer")
 def fit_scorer(
     availability_k: float = typer.Option(

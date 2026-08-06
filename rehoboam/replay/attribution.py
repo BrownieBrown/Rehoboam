@@ -180,3 +180,66 @@ def format_report(
         "=" * 68,
     ]
     return "\n".join(lines)
+
+
+# REH-68 measured a single faithfulness decision moving the season total by this
+# much. Any flip delta smaller than it is modelling noise, not a finding. Fixed
+# BEFORE the runs so the result cannot be rationalised after it is seen.
+NOISE_FLOOR_POINTS = 6_162
+
+ARM_LABELS = {
+    "A": "flip buys off, profit sells off",
+    "B": "flip buys off, profit sells ON",
+    "C": "flip buys ON,  profit sells off",
+    "D": "flip buys ON,  profit sells ON",
+}
+
+
+def format_flip_policy(arms: dict, *, actual_total: int) -> str:
+    """The 2x2, its main effects, and the pre-committed decision rule."""
+    points = {key: arms[key].total_points for key in ("A", "B", "C", "D")}
+    buy_effect = (points["C"] + points["D"]) / 2 - (points["A"] + points["B"]) / 2
+    sell_effect = (points["B"] + points["D"]) / 2 - (points["A"] + points["C"]) / 2
+    interaction = (points["D"] - points["C"]) - (points["B"] - points["A"])
+
+    lines = [
+        "=" * 68,
+        "FLIP POLICY 2x2 - REH-71",
+        "=" * 68,
+        "",
+        f"Human actual: {actual_total:>8,}",
+        "",
+    ]
+    for key in ("A", "B", "C", "D"):
+        delta = points[key] - actual_total
+        lines.append(f"  {key}  {ARM_LABELS[key]:<34}{points[key]:>9,}  ({delta:+,})")
+
+    lines += [
+        "",
+        "Main effects (points)",
+        "-" * 68,
+        f"  {'Flip buying':<34}{buy_effect:>+9,.0f}",
+        f"  {'Profit selling':<34}{sell_effect:>+9,.0f}",
+        f"  {'Interaction':<34}{interaction:>+9,.0f}",
+        "",
+        f"Noise floor (REH-68): {NOISE_FLOOR_POINTS:,} points",
+        "",
+    ]
+
+    effects = (abs(buy_effect), abs(sell_effect), abs(interaction))
+    if max(effects) < NOISE_FLOOR_POINTS:
+        lines += [
+            "INCONCLUSIVE on points - every effect is inside the noise floor.",
+            "Per the pre-committed rule, the decision falls to the cash evidence:",
+            f"real flipping lost EUR {abs(REAL_FLIP_PNL):,} at a "
+            f"{REAL_FLIP_WIN_RATE}% win rate over {REAL_FLIP_TRIPS} round trips,",
+            "and every round trip pays a measured 11.7% toll. Both switches",
+            "default OFF, decided on cash rather than on points.",
+        ]
+    else:
+        lines += [
+            "An effect clears the noise floor. Adopt that arm's verdict for its",
+            "own switch; the other switch follows the same rule independently.",
+        ]
+    lines += ["", "A labelled control, not the counterfactual season result.", "=" * 68]
+    return "\n".join(lines)

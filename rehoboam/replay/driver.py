@@ -345,6 +345,38 @@ def run_buy_control(*, corpus_path: Path, learning_db_path: Path) -> str:
     return "\n".join(lines)
 
 
+def run_flip_policy(*, corpus_path: Path, learning_db_path: Path) -> str:
+    """REH-71: the 2x2 over flip buys x profit sells.
+
+    Every arm runs with bid competition on, because the whole question is what
+    flipping is worth when rivals contest the same listings. Nothing else varies
+    between arms.
+    """
+    from rehoboam.replay.attribution import format_flip_policy
+
+    arms = {}
+    for key, flip_buys, profit_sells in (
+        ("A", False, False),
+        ("B", False, True),
+        ("C", True, False),
+        ("D", True, True),
+    ):
+        arms[key], _report = run_replay(
+            corpus_path=corpus_path,
+            learning_db_path=learning_db_path,
+            with_competition=True,
+            with_flips=profit_sells,
+            with_flip_buys=flip_buys,
+        )
+
+    with sqlite3.connect(learning_db_path) as conn:
+        actual_total = conn.execute(
+            "SELECT MAX(total_points) FROM league_rank_history WHERE is_self = 1"
+        ).fetchone()[0]
+
+    return format_flip_policy(arms, actual_total=int(actual_total or 0))
+
+
 def make_ep_bid_fn(
     *,
     mv_fn: Callable[[str, float], int | None],
