@@ -58,3 +58,11 @@ def test_report_states_the_gain_floor_it_used():
 
     assert "40" in report
     assert "gain" in report.lower()
+
+
+def test_the_flip_switches_default_off():
+    """REH-71's pre-committed rule: absent a points effect clearing the 6,162
+    noise floor, the decision falls to cash evidence and both switches are off.
+    """
+    assert Settings.model_fields["enable_flip_buys"].default is False
+    assert Settings.model_fields["enable_profit_sells"].default is False

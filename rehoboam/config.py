@@ -63,6 +63,18 @@ class Settings(BaseSettings):
         default=-15.0,
         description="Maximum loss percentage before triggering sell (relaxed — daily fluctuations of 3-10% are normal)",
     )
+    # REH-71. Real flipping lost EUR 55,256,064 over 151 round trips at a 27.8%
+    # win rate, and every round trip pays a measured 11.7% toll. Split in two
+    # because buying for appreciation and taking profit on the squad are
+    # distinct behaviours that need not share a verdict.
+    enable_flip_buys: bool = Field(
+        default=False,
+        description="Buy players for expected appreciation rather than expected points",
+    )
+    enable_profit_sells: bool = Field(
+        default=False,
+        description="Take profit / cut losses on squad players against their cost basis",
+    )
     min_buy_value_increase_pct: float = Field(
         default=10.0,
         description="Minimum market value increase to consider buying",

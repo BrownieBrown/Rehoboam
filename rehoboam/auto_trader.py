@@ -341,7 +341,11 @@ class AutoTrader:
 
         # Also add profit flip candidates if phase allows and there are open slots
         profit_flip_candidates = []
-        if ctx.matchday_phase.allow_flips and available_slots > 0:
+        if (
+            self.settings.enable_flip_buys
+            and ctx.matchday_phase.allow_flips
+            and available_slots > 0
+        ):
             try:
                 from .trader import Trader
 
@@ -755,6 +759,10 @@ class AutoTrader:
         to dynamically adjust sell thresholds. Only sells best-11 members when
         a replacement is lined up in the EP pipeline.
         """
+        if not self.settings.enable_profit_sells:
+            console.print("[dim]Profit selling disabled (REH-71)[/dim]")
+            return []
+
         from .formation import select_best_eleven
         from .trader import Trader
 
