@@ -2,9 +2,53 @@
 
 Ticket: https://linear.app/jovily/issue/REH-71
 Date: 2026-08-06
-Status: measurement complete, decision recorded (corrected 2026-08-06 — see
-"Correction" note below; further corrections from the whole-branch review
-appended 2026-08-07, marked "fix round 2")
+Status: **measurement valid, conclusion WITHDRAWN 2026-08-07.** The numbers
+below stand. The decision they were used to justify does not — see
+"Withdrawal" immediately below before reading anything else.
+
+## Withdrawal (2026-08-07)
+
+This document originally concluded that `auto` should stop trading for profit,
+and shipped both `Settings` switches defaulting to `False`. That conclusion is
+withdrawn and the defaults are back to `True`. Two things were wrong with it.
+
+**The structural argument rested on a number measured on the wrong channel.**
+The pre-committed rule routes an inconclusive points result to cash evidence,
+and the cash argument leaned on "every round trip pays a measured 11.7% toll"
+(mean transaction price 1.117× market value against an instant sell returning
+1.00×). The 1.117× is real, but it was measured across `transfer_type = 2`
+rows — *manager-to-manager* transfers, i.e. contested auctions. The bot only
+flips `is_kickbase_seller()` listings (`trader.py`), where price **is** market
+value by construction and instant sell returns 1.00× (REH-67). A
+Kickbase-sourced round trip carries **no structural toll**. Buy at market
+value, hold for appreciation, sell back at market value is a real mechanism,
+and the toll argument does not touch it. Tracked as REH-76.
+
+**The league data says the winners traded, and traded profitably.**
+
+| Manager         |     Points |     Transfer P&L |
+| --------------- | ---------: | ---------------: |
+| 1st             |     37,887 |    +€130,755,595 |
+| 2nd             |     37,277 |    +€164,729,132 |
+| 3rd             |     32,971 |     +€48,883,370 |
+| 4th             |     32,150 |     +€65,527,250 |
+| **ours (10th)** | **26,172** | **−€55,256,064** |
+
+The top two are #1 and #2 on **both** points and trading profit, a gap of
+€185–220M against us. So −€55.3M is evidence that our flip *selection* is bad,
+not that flipping is bad. Selection problems are fixed, not switched off.
+
+Note also that `manager_transfers` covers only 2026-04-06 → 2026-05-16, so the
+38 and 42 trades visible there for the top two are a six-week window; across a
+season they made several hundred each. Full-season backfill is REH-74.
+
+What survives: the harness now models flip buying, the cash ledger and its
+reporting, both switches as a control surface, and two bugs found on the way
+(the replay had no wash-trade guard; the profit-sell gate was also disabling
+dead-weight selling, which serves points). What does not survive: the verdict,
+and the framing that produced it. Follow-ups are REH-72, REH-74, REH-75, REH-76.
+
+______________________________________________________________________
 
 This document records the single, once-only run of `rehoboam replay-flip-policy`
 against the 2025/26 season replay, per the design in
@@ -252,11 +296,17 @@ against an instant sell returning 1.00×).
 
 ## Resulting switch values
 
-Both `Settings.enable_flip_buys` and `Settings.enable_profit_sells` remain
-**`False`** (unchanged from their Task 11 defaults). The verdict did not
-change anything in `rehoboam/config.py`: an INCONCLUSIVE points result means
-the pre-committed rule's cash branch applies, and that branch is what the
-existing `False` defaults already encode. `tests/test_replay/test_shipped_config.py::test_the_flip_switches_default_off` continues to assert exactly this and was left unchanged, since what it asserts is still what this run supports.
+**Superseded by the Withdrawal at the top of this document.** Both
+`Settings.enable_flip_buys` and `Settings.enable_profit_sells` now default to
+**`True`** — the behaviour that shipped before these switches existed. They are
+a control surface, not a decision.
+
+What this section said when the verdict stood, kept for the record: an
+INCONCLUSIVE points result routes to the pre-committed rule's cash branch, and
+both switches were therefore set `False`. That branch's cash argument has since
+been withdrawn (REH-76), so the defaults no longer follow from it.
+`tests/test_replay/test_shipped_config.py::test_the_flip_switches_preserve_the_shipped_behaviour`
+asserts the `True` defaults and explains why.
 
 **Scope of `enable_profit_sells` (corrected in fix round 2, I2).** The switch
 originally early-returned from `AutoTrader.run_profit_sell_phase`, which also
