@@ -186,3 +186,8 @@ def test_run_replay_passes_the_wash_trade_guard_to_the_engine():
     # default rather than a hard-coded literal, which is exactly the drift
     # REH-66 exists to prevent.
     assert '_shipped_default("wash_trade_block_hours")' in source
+    # The setting is in HOURS and the engine compares against SECONDS. Without
+    # this assertion a regression that forwards the raw 168 shrinks a seven-day
+    # guard to 168 seconds -- still a number, still passing every check above,
+    # and undetectable in a season total.
+    assert "* 3600" in source

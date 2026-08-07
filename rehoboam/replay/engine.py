@@ -60,7 +60,27 @@ class MatchdayOutcome:
 
 @dataclass(frozen=True)
 class FlipRecord:
-    """One completed round trip: a player the replay bought and later sold."""
+    """One completed round trip: a player the replay bought and later sold.
+
+    NARROWER THAN THE LIVE DEFINITION, AND OPTIMISTIC (REH-71 review). Records
+    are appended in exactly one place — ``_flip_sells`` — so a round trip
+    counts here only when the *profit-taking* pass is what closed it. The live
+    counterpart, ``LearningTracker.record_flip_outcome``, fires on every instant
+    sell of a tracked purchase, forced and make-room exits included (see
+    ``services/execution.py:instant_sell``).
+
+    So a replay player liquidated by ``_restore_budget`` or sold to make room
+    for an EP buy never enters this ledger at all: arm D of the 2x2 shows 35
+    buys and 32 sells against only 23 recorded round trips. The excluded exits
+    are precisely the forced ones — sales made under solvency pressure or to
+    fund a better player — which skew loss-making, so omitting them flatters
+    the replay's P&L.
+
+    The reported cash figure is therefore NOT like-for-like with the real 151
+    round trips printed beside it. It is a lower bound on flip harm, not a
+    measurement of it. Left as measured on purpose: REH-71's numbers were
+    recorded once and are not to be re-cut after the fact.
+    """
 
     player_id: str
     buy_price: int
@@ -201,6 +221,14 @@ def _flip_sells(
     squad was *assigned*, not bought (REH-68), so counting its disposals would
     inflate the round-trip count and make ``ledger`` incomparable to the real
     151 round trips it exists to be compared against (REH-71).
+
+    THIS IS ALSO THE ONLY PLACE THE LEDGER IS WRITTEN, which makes the replay's
+    round-trip definition narrower than the live one and its cash figure
+    optimistic. Sales by ``_restore_budget`` and by the EP make-room path are
+    invisible to it, while ``LearningTracker.record_flip_outcome`` counts them.
+    See ``FlipRecord`` for the full statement of the gap; it is documented
+    rather than closed, because closing it would change numbers that were
+    recorded once by design.
     """
     if profit_take_pct is None and loss_cut_pct is None:
         return 0
@@ -310,7 +338,13 @@ def _flip_buys(
             cost = int(listing.price)
 
         player = ReplayPlayer(id=pid, position=position, team_id=team_fn(pid))
-        if _would_create_dead_weight(player, state.players):
+        # Deliberate duck typing, sanctioned by the REH-71 plan: the shipped
+        # guard is annotated against `MarketPlayer` but reads only `.position`,
+        # which `ReplayPlayer` has. Calling the real rule beats reimplementing
+        # it; the alternative -- widening the shipped signature to a Protocol --
+        # is a refactor of live scoring code that this replay-only change has no
+        # business making. Scoped to this call, not silenced module-wide.
+        if _would_create_dead_weight(player, state.players):  # type: ignore[arg-type]
             continue
         allowed, _reason = can_buy(state, player, cost, team_value=team_value)
         if not allowed or not _solvent_after(state, cost):

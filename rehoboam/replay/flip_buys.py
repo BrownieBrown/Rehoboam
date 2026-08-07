@@ -129,6 +129,26 @@ FLIP_MAX_RISK_SCORE = 60.0
 FLIP_MARKET_SCAN_LIMIT = 50
 
 
+def shipped_max_debt_pct() -> float:
+    """The debt ceiling the live flip path actually passes (REH-71 review).
+
+    ``ProfitTrader.find_profit_opportunities`` *defaults* ``max_debt_pct`` to
+    60.0, and ``Settings.max_debt_pct_of_team_value`` is also 60.0 today — but
+    the live call site forwards the Settings field explicitly
+    (``trader.py:728``), so the agreement is a coincidence, not a contract.
+    Leaning on it is exactly the config drift this harness reads shipped
+    defaults to avoid: re-tune the field in production and the replay would go
+    on describing a bot nobody deployed.
+
+    Reuses ``driver._shipped_default`` rather than a fourth copy of the same
+    two-line read. No import cycle: ``driver`` imports this module lazily,
+    inside ``run_replay``.
+    """
+    from rehoboam.replay.driver import _shipped_default
+
+    return _shipped_default("max_debt_pct_of_team_value")
+
+
 @dataclass(frozen=True)
 class FlipCandidate:
     """A player worth buying for appreciation, with what he is worth paying."""
@@ -171,6 +191,7 @@ def make_flip_buy_fn(
         max_hold_days=FLIP_MAX_HOLD_DAYS,
         max_risk_score=FLIP_MAX_RISK_SCORE,
     )
+    max_debt_pct = shipped_max_debt_pct()
 
     def candidates(listings: list, at: float, budget: int, team_value: int) -> list[FlipCandidate]:
         day = day_fn(at)
@@ -199,10 +220,17 @@ def make_flip_buy_fn(
             current_budget=budget,
             player_trends=trends,
             team_value=team_value,
+            max_debt_pct=max_debt_pct,
         )
         return [
             FlipCandidate(
-                player_id=o.player.id,
+                # `ProfitOpportunity.player` is annotated `any` -- the builtin
+                # function, not `typing.Any` -- in shipped code this module does
+                # not own (profit_trader.py:14), so mypy cannot see `.id` on it.
+                # Scoped to this expression rather than fixed here: retyping a
+                # shipped dataclass is a separate change with its own blast
+                # radius, and REH-71 is not the ticket for it.
+                player_id=o.player.id,  # type: ignore[attr-defined]
                 market_value=o.market_value,
                 expected_appreciation=o.expected_appreciation,
                 max_bid=flip_bid_ceiling(

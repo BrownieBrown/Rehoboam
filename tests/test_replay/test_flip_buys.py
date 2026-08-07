@@ -219,6 +219,39 @@ def test_the_candidate_carries_an_economically_sized_max_bid(tmp_path):
     )
 
 
+def _forwarded_debt_pct(tmp_path) -> float:
+    from unittest.mock import patch
+
+    with patch(
+        "rehoboam.profit_trader.ProfitTrader.find_profit_opportunities", return_value=[]
+    ) as call:
+        _candidates(_rising_corpus(tmp_path), 31 * DAY)
+    return call.call_args.kwargs["max_debt_pct"]
+
+
+def test_the_debt_ceiling_is_the_one_the_live_call_site_passes(tmp_path):
+    """`ProfitTrader` defaults `max_debt_pct` to 60.0 and
+    `Settings.max_debt_pct_of_team_value` also ships 60.0, so leaving the
+    argument off looked harmless. The live call site forwards the Settings
+    field explicitly (trader.py:728), so the agreement is coincidence, not
+    contract (REH-71 fix round 2, M3).
+    """
+    from rehoboam.config import Settings
+
+    assert _forwarded_debt_pct(tmp_path) == float(
+        Settings.model_fields["max_debt_pct_of_team_value"].default
+    )
+
+
+def test_a_retuned_debt_ceiling_reaches_the_replay(tmp_path, monkeypatch):
+    """The half that catches a hard-coded 60.0 masquerading as the default."""
+    from rehoboam.config import Settings
+
+    monkeypatch.setattr(Settings.model_fields["max_debt_pct_of_team_value"], "default", 12.5)
+
+    assert _forwarded_debt_pct(tmp_path) == 12.5
+
+
 def test_a_player_with_no_market_value_is_skipped(tmp_path):
     """`market_value_at` returns None outside the recorded series; a zero-value
     adapter would divide by zero inside the trend model."""
