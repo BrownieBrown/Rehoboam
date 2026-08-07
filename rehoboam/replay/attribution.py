@@ -48,6 +48,18 @@ def trading_summary(result: SeasonResult) -> tuple[int, int, int]:
     return pnl, len(result.flips), wins
 
 
+# Printed whenever a Trading block appears with profit selling switched off.
+# The ledger is only ever appended to by `_flip_sells`, which returns
+# immediately when both thresholds are None, so such a run CANNOT close a round
+# trip no matter how much it bought. Without this note "EUR +0 / 0 trips /
+# 0.0%" reads as "flipping cost nothing here", which is the opposite of what a
+# structural zero means.
+STRUCTURAL_ZERO_NOTE = [
+    "  NOTE: profit selling is OFF in this run, so no round trip can close and",
+    "  the zero above is STRUCTURAL - not evidence that flipping was free.",
+]
+
+
 def attribution_rows(
     result: SeasonResult,
     *,
@@ -129,6 +141,8 @@ def format_report(
             f"  {'Real 2025/26, for comparison':<34}" f"{'EUR ' + format(REAL_FLIP_PNL, '+,'):>21}",
             f"  {'':<34}{REAL_FLIP_TRIPS:>21,} trips, {REAL_FLIP_WIN_RATE}%",
         ]
+        if not with_flips:
+            lines += STRUCTURAL_ZERO_NOTE
 
     lines += ["", "Fidelity", "-" * 68]
     for component, level, basis in FIDELITY_NOTES:
@@ -194,6 +208,10 @@ ARM_LABELS = {
     "D": "flip buys ON,  profit sells ON",
 }
 
+# Which arms have the sell side enabled — the arms in which a round trip is
+# even capable of closing. Kept beside ARM_LABELS so the two cannot drift.
+ARM_PROFIT_SELLS = {"A": False, "B": True, "C": False, "D": True}
+
 
 def format_flip_policy(arms: dict, *, actual_total: int) -> str:
     """The 2x2, its main effects, and the pre-committed decision rule."""
@@ -221,6 +239,31 @@ def format_flip_policy(arms: dict, *, actual_total: int) -> str:
         f"  {'Flip buying':<34}{buy_effect:>+9,.0f}",
         f"  {'Profit selling':<34}{sell_effect:>+9,.0f}",
         f"  {'Interaction':<34}{interaction:>+9,.0f}",
+        "",
+    ]
+
+    # Per-arm cash, printed HERE rather than left to a separate `replay-season`
+    # run per arm (design doc S3: "The Trading block appears in both"). The
+    # decision rule below routes an inconclusive points result to the cash
+    # evidence, so a report that shows no cash sends the reader looking for
+    # numbers this command already holds.
+    lines += [
+        "Trading (cash - does not enter the points above)",
+        "-" * 68,
+        f"  {'Arm':<4}{'Realised flip P&L':>20}{'Round trips':>13}{'Win rate':>11}",
+    ]
+    for key in ("A", "B", "C", "D"):
+        pnl, trips, wins = trading_summary(arms[key])
+        rate = (100.0 * wins / trips) if trips else 0.0
+        note = "" if ARM_PROFIT_SELLS[key] else "  structural zero"
+        lines.append(f"  {key:<4}{'EUR ' + format(pnl, '+,'):>20}{trips:>13,}{rate:>10.1f}%{note}")
+    lines += [
+        f"  {'real':<4}{'EUR ' + format(REAL_FLIP_PNL, '+,'):>20}"
+        f"{REAL_FLIP_TRIPS:>13,}{REAL_FLIP_WIN_RATE:>10.1f}%",
+        "",
+        "'structural zero' marks an arm with profit selling OFF: the ledger is",
+        "only written when a position is sold back, so no round trip can close",
+        "there however much the arm bought. Read it as unmeasurable, not free.",
         "",
         f"Noise floor (REH-68): {NOISE_FLOOR_POINTS:,} points",
         "",

@@ -115,3 +115,32 @@ def test_the_report_prints_the_real_season_for_comparison():
 
     assert "55,256,064" in report
     assert "151" in report
+
+
+def test_a_flip_buy_only_run_labels_its_zero_as_structural():
+    """With profit selling off the ledger can never be written, so `EUR +0 /
+    0 trips` is unmeasurable, not "flipping was free" (REH-71 fix round 2, M1).
+    """
+    report = format_report(
+        SeasonResult(),
+        actual_total=0,
+        actual_per_matchday={},
+        standings=[],
+        min_ep_gain=40.0,
+        with_flip_buys=True,
+    )
+
+    assert "STRUCTURAL" in report
+
+
+def test_a_run_that_can_close_round_trips_carries_no_structural_note():
+    report = format_report(
+        _result_with_flips(),
+        actual_total=0,
+        actual_per_matchday={},
+        standings=[],
+        min_ep_gain=40.0,
+        with_flips=True,
+    )
+
+    assert "STRUCTURAL" not in report
