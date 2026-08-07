@@ -753,21 +753,44 @@ class AutoTrader:
         return trend_7d_pct < 1.0
 
     def run_profit_sell_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
-        """Trend-aware profit sell monitoring.
+        """Trend-aware sell monitoring: profit/loss exits AND dead-weight release.
 
         Uses formation-aware best-11 to protect true starters, and trend data
         to dynamically adjust sell thresholds. Only sells best-11 members when
         a replacement is lined up in the EP pipeline.
-        """
-        if not self.settings.enable_profit_sells:
-            console.print("[dim]Profit selling disabled (REH-71)[/dim]")
-            return []
 
+        Two different behaviours live in this one method, and only one of them
+        is flipping (REH-71):
+
+        * **Profit-taking / loss-cutting** against the cost basis. This is
+          trading for cash, and it is what ``Settings.enable_profit_sells``
+          exists to switch off.
+        * **Dead-weight release** — dumping a position-saturated bench player
+          (a 5th goalkeeper, a 6th defender) who can never enter any starting
+          eleven under any formation, so that the squad slot is free for a
+          points upgrade. The slot is the asset; the branch deliberately
+          accepts a small market-value loss to obtain it.
+
+        The dead-weight branch serves POINTS, not profit. It was never part of
+        the flip question REH-71 asked, the season replay never modelled it,
+        and the 2x2 factorial measured nothing about it — so
+        ``enable_profit_sells=False`` must leave it running. Gating it too
+        would be an unmeasured live regression, not a decision anyone made.
+        Hence the switch guards the candidate loop below rather than the whole
+        method: both branches share the squad refresh, the best-11
+        computation, the position counts and the trend lookups.
+        """
         from .formation import select_best_eleven
         from .trader import Trader
 
+        profit_sells_enabled = self.settings.enable_profit_sells
+
         results = []
-        console.print("\n[bold cyan]📈 Profit Sell Monitoring (trend-aware)[/bold cyan]")
+        console.print("\n[bold cyan]📈 Sell Monitoring (trend-aware)[/bold cyan]")
+        if not profit_sells_enabled:
+            console.print(
+                "[dim]Profit selling disabled (REH-71) — dead-weight release still runs[/dim]"
+            )
 
         # Refresh squad — earlier phases (auction resolution, deferred sells)
         # may have changed the squad since ctx was built.
@@ -823,82 +846,91 @@ class AutoTrader:
         trend_7d_by_id: dict[str, float | None] = {}
 
         sell_candidates = []
-        for player in squad:
-            if player.id in best_11_ids:
-                continue
+        # Profit-taking and loss-cutting: the flip behaviour, and the only
+        # part of this method REH-71's switch governs.
+        if profit_sells_enabled:
+            for player in squad:
+                if player.id in best_11_ids:
+                    continue
 
-            if not player.buy_price or player.buy_price <= 0:
-                continue
+                if not player.buy_price or player.buy_price <= 0:
+                    continue
 
-            # Min-hold guard: refuse to sell a player we just bought. Same-
-            # session reversals (bid → win → instant-sell at -71% within 7h
-            # for Niang in production) cost both the bid spread and a
-            # market-value loss, with no signal change to justify them.
-            held_too_briefly, hours_held = self._was_recently_bought(player.id)
-            if held_too_briefly:
-                console.print(
-                    f"[dim]Hold-period guard {player.last_name} — "
-                    f"held {hours_held:.1f}h (< {self._min_hold_seconds() / 3600:.0f}h min)[/dim]"
-                )
-                continue
-
-            # Hard block: never sell if it would drop a position below its
-            # formation minimum. A squad with 0 FW loses -100 pts every matchday.
-            pos_min = POSITION_MINIMUMS.get(player.position, 0)
-            if position_counts.get(player.position, 0) <= pos_min:
-                console.print(
-                    f"[dim]Protected {player.last_name} ({player.position}) — "
-                    f"at position minimum ({pos_min})[/dim]"
-                )
-                continue
-
-            profit = player.market_value - player.buy_price
-            profit_pct = (profit / player.buy_price) * 100
-
-            # Get trend to determine dynamic threshold
-            try:
-                trend = trader.trend_service.get_trend(player.id, player.market_value, league.id)
-                trend_7d = trend.trend_7d_pct
-            except Exception:
-                trend_7d = None
-            trend_7d_by_id[player.id] = trend_7d
-
-            sell_threshold = self._sell_threshold_for_trend(trend_7d)
-
-            # Profit target hit (trend-adjusted)
-            if profit_pct >= sell_threshold:
-                trend_info = f", trend {trend_7d:+.1f}%/wk" if trend_7d is not None else ""
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Profit target ({sell_threshold:.0f}%) hit: +{profit_pct:.1f}% (€{profit:,}{trend_info})",
+                # Min-hold guard: refuse to sell a player we just bought. Same-
+                # session reversals (bid → win → instant-sell at -71% within 7h
+                # for Niang in production) cost both the bid spread and a
+                # market-value loss, with no signal change to justify them.
+                held_too_briefly, hours_held = self._was_recently_bought(player.id)
+                if held_too_briefly:
+                    console.print(
+                        f"[dim]Hold-period guard {player.last_name} — held "
+                        f"{hours_held:.1f}h (< {self._min_hold_seconds() / 3600:.0f}h min)[/dim]"
                     )
-                )
-            # Stop-loss: only if a same-position upgrade is queued AND the
-            # price isn't already rebounding (locking in a loss while the
-            # recovery is in progress is the worst possible exit).
-            elif (
-                profit_pct <= -5.0
-                and self._has_position_replacement(
-                    player.position, buy_recs, trade_pairs, stop_loss_min_ep_gain
-                )
-                and self._can_loss_sell_with_replacement(trend_7d)
-            ):
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Stop-loss ({player.position} upgrade queued): "
-                        f"{profit_pct:.1f}% (€{profit:,})",
+                    continue
+
+                # Hard block: never sell if it would drop a position below its
+                # formation minimum. A squad with 0 FW loses -100 pts every matchday.
+                pos_min = POSITION_MINIMUMS.get(player.position, 0)
+                if position_counts.get(player.position, 0) <= pos_min:
+                    console.print(
+                        f"[dim]Protected {player.last_name} ({player.position}) — "
+                        f"at position minimum ({pos_min})[/dim]"
                     )
-                )
+                    continue
+
+                profit = player.market_value - player.buy_price
+                profit_pct = (profit / player.buy_price) * 100
+
+                # Get trend to determine dynamic threshold
+                try:
+                    trend = trader.trend_service.get_trend(
+                        player.id, player.market_value, league.id
+                    )
+                    trend_7d = trend.trend_7d_pct
+                except Exception:
+                    trend_7d = None
+                trend_7d_by_id[player.id] = trend_7d
+
+                sell_threshold = self._sell_threshold_for_trend(trend_7d)
+
+                # Profit target hit (trend-adjusted)
+                if profit_pct >= sell_threshold:
+                    trend_info = f", trend {trend_7d:+.1f}%/wk" if trend_7d is not None else ""
+                    sell_candidates.append(
+                        (
+                            player,
+                            profit_pct,
+                            f"Profit target ({sell_threshold:.0f}%) hit: "
+                            f"+{profit_pct:.1f}% (€{profit:,}{trend_info})",
+                        )
+                    )
+                # Stop-loss: only if a same-position upgrade is queued AND the
+                # price isn't already rebounding (locking in a loss while the
+                # recovery is in progress is the worst possible exit).
+                elif (
+                    profit_pct <= -5.0
+                    and self._has_position_replacement(
+                        player.position, buy_recs, trade_pairs, stop_loss_min_ep_gain
+                    )
+                    and self._can_loss_sell_with_replacement(trend_7d)
+                ):
+                    sell_candidates.append(
+                        (
+                            player,
+                            profit_pct,
+                            f"Stop-loss ({player.position} upgrade queued): "
+                            f"{profit_pct:.1f}% (€{profit:,})",
+                        )
+                    )
 
         # Dead-weight sell: surplus-position bench players (e.g. 2nd/3rd GK)
         # that block the squad from buying useful players.  Even at a small
         # loss, freeing the slot is worth it when the EP pipeline has buy
         # candidates waiting — the matchday points gained over a season
         # vastly outweigh a one-time market value loss.
+        #
+        # DELIBERATELY NOT gated on `enable_profit_sells` (REH-71): this is a
+        # points move, not a flip. See the method docstring.
         from .formation import _POSITION_MAX_STARTERS
 
         already_selling = {p.id for p, _, _ in sell_candidates}
@@ -912,6 +944,10 @@ class AutoTrader:
             if held_too_briefly:
                 continue  # Already logged in the loop above; skip silently here.
 
+            # Saturation implies the position is comfortably above its
+            # formation minimum (max starters >= minimum for every position),
+            # so loop 1's explicit POSITION_MINIMUMS guard is redundant here —
+            # which is why this branch stays correct when loop 1 is skipped.
             max_starters = _POSITION_MAX_STARTERS.get(player.position, 3)
             if position_counts.get(player.position, 0) <= max_starters:
                 continue  # Position not saturated — not dead weight
@@ -919,11 +955,13 @@ class AutoTrader:
             profit = player.market_value - player.buy_price
             profit_pct = (profit / player.buy_price) * 100
 
-            # Reuse the trend cached in the first loop. Every player that
-            # reaches this point passed the same best_11 + buy_price gates
-            # in loop 1 and either landed in `already_selling` (filtered
-            # above) or had its trend cached, so a missing key would mean
-            # an upstream filter changed — fetch defensively in that case.
+            # Reuse the trend cached in the first loop when there is one. With
+            # profit selling enabled, every player reaching this point passed
+            # the same best_11 + buy_price gates in loop 1 and either landed in
+            # `already_selling` (filtered above) or had its trend cached, so a
+            # missing key would mean an upstream filter changed. With profit
+            # selling disabled the cache is empty by construction because loop
+            # 1 never ran. Both cases fall through to the same lookup.
             if player.id in trend_7d_by_id:
                 trend_7d = trend_7d_by_id[player.id]
             else:

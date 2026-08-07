@@ -71,6 +71,10 @@ class Settings(BaseSettings):
         default=False,
         description="Buy players for expected appreciation rather than expected points",
     )
+    # Scope note: this switches off profit-taking and loss-cutting only. The
+    # dead-weight release inside the same phase (dumping a position-saturated
+    # bench player to free a squad slot for a points upgrade) keeps running —
+    # it serves points, not profit, and was never part of what REH-71 measured.
     enable_profit_sells: bool = Field(
         default=False,
         description="Take profit / cut losses on squad players against their cost basis",

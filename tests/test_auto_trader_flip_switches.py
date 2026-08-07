@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
@@ -17,23 +16,12 @@ def test_both_switches_exist():
     assert "enable_profit_sells" in Settings.model_fields
 
 
-def test_the_flip_buy_block_is_gated_on_its_switch():
-    source = inspect.getsource(AutoTrader.run_unified_trade_phase)
-
-    assert "enable_flip_buys" in source
-
-
-def test_the_profit_sell_phase_is_gated_on_its_switch():
-    source = inspect.getsource(AutoTrader.run_profit_sell_phase)
-
-    assert "enable_profit_sells" in source
-
-
 # ---------------------------------------------------------------------------
-# Fix round 1: the two source-inspection tests above pass on an inverted
-# gate, a gate that reads the setting and ignores it, or a gate sitting in
-# unreachable code — they only prove the setting name is *mentioned*. These
-# tests observe actual behaviour instead, for the one task in this plan that
+# Fix round 1 added source-inspection gate tests here; fix round 2 deleted
+# them (M5). They passed on an inverted gate, on a gate that reads the setting
+# and ignores it, and on a gate sitting in unreachable code — they only proved
+# the setting name was *mentioned*. The behavioural tests below observe actual
+# behaviour and supersede them entirely, for the one task in this plan that
 # flips live trading defaults.
 # ---------------------------------------------------------------------------
 
@@ -57,30 +45,116 @@ def trader(tmp_path, settings, monkeypatch) -> AutoTrader:
     return AutoTrader(api=api, settings=settings, dry_run=True)
 
 
-class TestProfitSellPhaseGate:
-    """`run_profit_sell_phase` must return [] AND do no work when disabled.
+def _player(pid: str, position: str, buy_price: int, market_value: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=pid,
+        position=position,
+        buy_price=buy_price,
+        market_value=market_value,
+        first_name="P",
+        last_name=pid,
+    )
 
-    Returning [] alone is a weak assertion — an enabled run that finds no
-    sell candidates also returns []. The "did no work" half (never even
-    fetching the squad) is what actually distinguishes disabled from
-    enabled-but-idle.
+
+# A 14-man squad chosen so that exactly three players sit outside the
+# formation-aware best eleven, and each of them exercises a different branch:
+#
+#   f2  Forward, +20% — a PROFIT sell. Forwards are not position-saturated
+#       (2 of a possible 3 starters), so nothing else can pick him up.
+#   g2  Goalkeeper, -3% — DEAD WEIGHT. Three keepers against one startable
+#       slot; the loss is accepted to free the squad slot.
+#   g3  Goalkeeper, -3% — dead weight, same as g2.
+#
+# Everyone else is a best-eleven starter and therefore protected. Keeping the
+# profit candidate at an unsaturated position is what makes the two branches
+# separable: a saturated profit candidate would be sold by the dead-weight
+# branch anyway and the test would prove nothing.
+_SQUAD = [
+    _player("g1", "Goalkeeper", 1_000_000, 1_000_000),
+    _player("g2", "Goalkeeper", 1_000_000, 970_000),
+    _player("g3", "Goalkeeper", 2_000_000, 1_940_000),
+    *[_player(f"d{i}", "Defender", 1_000_000, 1_000_000) for i in range(1, 6)],
+    *[_player(f"m{i}", "Midfielder", 1_000_000, 1_000_000) for i in range(1, 5)],
+    _player("f1", "Forward", 1_000_000, 1_000_000),
+    _player("f2", "Forward", 1_000_000, 1_200_000),
+]
+
+_SCORES = {
+    "g1": 90.0,
+    "g2": 5.0,
+    "g3": 4.0,
+    "d1": 80.0,
+    "d2": 79.0,
+    "d3": 78.0,
+    "d4": 77.0,
+    "d5": 76.0,
+    "m1": 70.0,
+    "m2": 69.0,
+    "m3": 68.0,
+    "m4": 67.0,
+    "f1": 60.0,
+    "f2": 59.0,
+}
+
+
+def _sell_ctx() -> SimpleNamespace:
+    """A session context with one queued buy — the dead-weight branch requires
+    a buy to be waiting before it will realise a loss to free the slot."""
+    buy_rec = SimpleNamespace(
+        player=SimpleNamespace(id="x", position="Midfielder"),
+        marginal_ep_gain=100.0,
+    )
+    return SimpleNamespace(
+        ep_result={
+            "squad_scores": [
+                SimpleNamespace(player_id=pid, expected_points=ep) for pid, ep in _SCORES.items()
+            ],
+            "buy_recs": [buy_rec],
+            "trade_pairs": [],
+        }
+    )
+
+
+def _sold_names(results) -> set[str]:
+    return {r.player_name.split()[-1] for r in results if r.action == "SELL"}
+
+
+class TestProfitSellPhaseGate:
+    """`enable_profit_sells` must gate profit-taking and loss-cutting ONLY.
+
+    The same method also holds the dead-weight release: dumping a
+    position-saturated bench player to free a squad slot for a points upgrade.
+    That branch serves points, not profit — REH-71 never measured it, so the
+    flip switch must not silently disable it (fix round 2, I2).
     """
 
-    def test_disabled_returns_empty_and_never_touches_the_squad(self, trader):
-        trader.settings.enable_profit_sells = False
+    @staticmethod
+    def _run(trader, *, enabled: bool):
+        trader.settings.enable_profit_sells = enabled
+        trader.api.get_squad.return_value = list(_SQUAD)
+        trader.learner = Mock()
+        trader.learner.get_tracked_purchase.return_value = None
+        with patch(
+            "rehoboam.services.trend_service.TrendService.get_trend",
+            return_value=SimpleNamespace(trend_7d_pct=0.0),
+        ):
+            return trader.run_profit_sell_phase(league=SimpleNamespace(id="L"), ctx=_sell_ctx())
 
-        result = trader.run_profit_sell_phase(league=SimpleNamespace(id="L"), ctx=SimpleNamespace())
+    def test_disabled_still_releases_dead_weight_but_takes_no_profit(self, trader):
+        sold = _sold_names(self._run(trader, enabled=False))
 
-        assert result == []
-        trader.api.get_squad.assert_not_called()
+        assert sold == {"g2", "g3"}, "dead weight must still be released"
+        assert "f2" not in sold, "profit selling was disabled"
 
-    def test_enabled_gets_past_the_early_return(self, trader):
-        trader.settings.enable_profit_sells = True
-        # Empty squad short-circuits the method shortly after — that's fine,
-        # we only need proof it got past the disabled-path's early return.
-        trader.api.get_squad.return_value = []
+    def test_enabled_takes_profit_as_well_as_releasing_dead_weight(self, trader):
+        sold = _sold_names(self._run(trader, enabled=True))
 
-        trader.run_profit_sell_phase(league=SimpleNamespace(id="L"), ctx=SimpleNamespace())
+        assert sold == {"f2", "g2", "g3"}
+
+    def test_disabled_still_reads_the_squad(self, trader):
+        """The old gate early-returned before `get_squad`, which is precisely
+        how the dead-weight branch got switched off with it."""
+        self._run(trader, enabled=False)
 
         trader.api.get_squad.assert_called_once()
 
