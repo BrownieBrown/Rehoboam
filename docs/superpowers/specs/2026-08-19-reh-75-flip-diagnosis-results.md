@@ -633,6 +633,16 @@ Stated because they bound what the numbers above may be used for.
 
 1. **The branch labels evaluate the ladder's points gates against a *career*
    average, not the season figure the live path reads.**
+   **Fixed 2026-08-19 in REH-77, after this document's run.** `average_points_at`
+   is now narrowed to the season, and the premise was verified rather than
+   assumed: against the eight `flip_outcomes` rows that recorded a real `ap` at
+   buy time, season-to-date tracks it within ~1–2 points on all eight (mean
+   absolute error ~1.0) while a career mean is off by up to 19.5 in **both**
+   directions (~9.9). **The figures in this document were produced before that
+   fix and still carry the defect** — §8's table and the 108/28 split remain
+   provisional until a re-run, which is deliberately gated on REH-78 (the
+   dominance rule must be re-registered *before*, never after, the next run).
+   The original description follows.
    `average_points_at` (`replay/flip_buys.py`) truncates through
    `backtest.snapshot.matches_before`, which by design **includes every match
    from earlier seasons in full** — and the corpus holds seasons back to
@@ -661,14 +671,22 @@ ______________________________________________________________________
    should be a lookup. Recording the buy's *motive* (EP pipeline vs. profit
    flip) at the same moment would retire the §0 population correction entirely.
 
-1. **Fix the replayed `average_points` statistic (REH-77).** Sitting beside the
-   item above, and more urgent than it: `average_points_at` returns a career
-   mean per appearance where the live ladder reads a season figure (§10, caveat
-   7). This is **not** local to REH-75 — `replay/flip_buys.py` is REH-71's
-   module and its replay reads the same statistic, so the fix belongs to shared
-   replay foundations rather than to either diagnosis. Whatever replaces it
-   needs a test that fails on a player with prior-season history, which the
-   mirror reconciliation structurally cannot provide.
+1. **~~Fix the replayed `average_points` statistic (REH-77).~~ DONE
+   2026-08-19.** `average_points_at` now narrows to the season after
+   `matches_before`, with tests that fail on a player carrying prior-season
+   history — including one whose only appearances are in an earlier season,
+   which the mirror reconciliation structurally could not provide, since it
+   feeds both sides the same value. `matches_before` itself was left alone: it
+   is shared with the v2 scorer's leak boundary, where including earlier
+   seasons is correct. The two callers want different windows from one
+   truncation, and assuming a single window served both is what made this
+   wrong.
+
+   **What remains: the re-run.** This document's figures predate the fix. The
+   re-run is gated on REH-78, whose own text requires the dominance rule be
+   re-registered before `diagnose-flips` runs again. REH-71's replay reads the
+   same statistic and also wants re-running; both should be deliberate, gated
+   acts rather than side effects of a code fix.
 
 1. **Re-register a non-degenerate dominance rule before the next re-run
    (REH-78).** §4 shows the pre-registered rule could never have named

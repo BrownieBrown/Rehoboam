@@ -80,11 +80,14 @@ def reconstruct_branch(
     count derived from this function is an UPPER BOUND on the set -- never a
     bound on any sum over it.
 
-    Nor, finally, is the STATISTIC the ladder's points gates read. Callers
-    supply `average_points` from `replay.flip_buys.average_points_at`, a career
-    mean per appearance, where the shipped path reads Kickbase's season `ap`
-    (`kickbase_client.py:88`). See REH-77; the mirror reconciliation cannot
-    detect it, because it feeds both sides the same value.
+    The STATISTIC the ladder's points gates read was also wrong until REH-77.
+    Callers supply `average_points` from `replay.flip_buys.average_points_at`,
+    which returned a CAREER mean per appearance where the shipped path reads
+    Kickbase's season-to-date `ap` (`kickbase_client.py:88`). It is now narrowed
+    to the season and verified against the eight recorded `ap` values. Note the
+    mirror reconciliation could never have caught this: it feeds both sides the
+    same value, so a wrong input agrees with itself. Figures published before
+    2026-08-19 were produced with the career mean.
     """
     if not trend.get("has_data", False):
         return "no_trend_data", 0.0
