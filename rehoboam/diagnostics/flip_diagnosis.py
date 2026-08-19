@@ -125,3 +125,126 @@ def peak_between(db_path: Path, player_id: str, start: float, end: float) -> int
             (str(player_id), float(start), float(end)),
         ).fetchone()
     return int(row[0]) if row and row[0] is not None else None
+
+
+HORIZONS = (14, 21, 30, 45, 60)
+HEADLINE_HORIZON = 30
+
+# Kickbase's price floor. Round trips at buy == sell == this value have market
+# value pinned, so all three terms are structurally zero -- and during design
+# that exact pattern produced a false "15 flips at market value, EUR 0 P&L"
+# reading. They are separated, never silently mixed in.
+FLOOR_PRICE = 500_000
+
+TEMPORAL_BOUNDARY_ISO = "2026-01-03"
+
+
+@dataclass(frozen=True)
+class TripRow:
+    """One round trip with everything the diagnosis needs about it."""
+
+    trip: RoundTrip
+    mv_buy: int | None
+    branch: str
+    expected_appreciation: float
+    by_horizon: dict[int, Decomposition]
+    peak_during_hold: int | None
+    is_floor_trip: bool
+
+
+@dataclass(frozen=True)
+class DiagnosisResult:
+    rows: list[TripRow]
+    horizons: tuple[int, ...]
+    censored: dict[int, int]
+
+    def scored(self) -> list[TripRow]:
+        """Rows carried in the headline totals: everything but the floor group."""
+        return [r for r in self.rows if not r.is_floor_trip]
+
+
+def load_round_trips(learner_db: Path) -> list[RoundTrip]:
+    """Every completed round trip in `flip_outcomes`, oldest first.
+
+    NOT "every flip" -- see this module's docstring.
+    """
+    with sqlite3.connect(learner_db) as conn:
+        rows = conn.execute(
+            "SELECT id, player_id, player_name, buy_price, sell_price, "
+            "buy_date, sell_date, hold_days FROM flip_outcomes ORDER BY buy_date"
+        ).fetchall()
+    return [
+        RoundTrip(
+            trip_id=int(r[0]),
+            player_id=str(r[1]),
+            player_name=str(r[2]),
+            buy_price=int(r[3]),
+            sell_price=int(r[4]),
+            buy_date=float(r[5]),
+            sell_date=float(r[6]),
+            hold_days=int(r[7]),
+        )
+        for r in rows
+    ]
+
+
+def _sum(decompositions: list[Decomposition]) -> Decomposition:
+    total = Decomposition(selection=0, exit_timing=0, entry_premium=0)
+    for d in decompositions:
+        total = total + d
+    return total
+
+
+def totals_by_horizon(result: DiagnosisResult) -> dict[int, Decomposition]:
+    return {
+        h: _sum([r.by_horizon[h] for r in result.scored() if h in r.by_horizon])
+        for h in result.horizons
+    }
+
+
+def totals_by_branch(result: DiagnosisResult, horizon: int) -> dict[str, Decomposition]:
+    totals: dict[str, Decomposition] = {}
+    for row in result.scored():
+        if horizon not in row.by_horizon:
+            continue
+        current = totals.get(row.branch)
+        totals[row.branch] = (
+            row.by_horizon[horizon] if current is None else current + row.by_horizon[horizon]
+        )
+    return totals
+
+
+def temporal_split(
+    result: DiagnosisResult, horizon: int, boundary: float
+) -> dict[str, Decomposition]:
+    before = [
+        r.by_horizon[horizon]
+        for r in result.scored()
+        if r.trip.buy_date < boundary and horizon in r.by_horizon
+    ]
+    after = [
+        r.by_horizon[horizon]
+        for r in result.scored()
+        if r.trip.buy_date >= boundary and horizon in r.by_horizon
+    ]
+    return {"before": _sum(before), "after": _sum(after)}
+
+
+def dominant_mechanism(totals: Decomposition, *, tie_band: float = 0.20) -> str:
+    """Apply REH-75's pre-registered rule. Fixed before any real number existed.
+
+    Contributions are compared as the magnitude of each term's SIGNED sum, with
+    entry premium entering negated exactly as it does in the identity.
+    """
+    contributions = {
+        "selection": totals.selection,
+        "exit_timing": totals.exit_timing,
+        "entry_premium": -totals.entry_premium,
+    }
+    ranked = sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True)
+    (winner, top), (_, second) = ranked[0], ranked[1]
+    if abs(top) == 0:
+        return "no single dominant mechanism"
+    if (abs(top) - abs(second)) <= tie_band * abs(top):
+        return "no single dominant mechanism"
+    return winner
