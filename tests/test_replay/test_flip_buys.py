@@ -120,6 +120,55 @@ def _corpus_with_matches(tmp_path, rows: list[tuple[int, int, int]]) -> Training
     return corpus
 
 
+def _corpus_across_seasons(tmp_path, rows: list[tuple[str, int, int, int]]) -> TrainingCorpus:
+    """rows: (season, day_number, points, status)."""
+    corpus = TrainingCorpus(tmp_path / "corpus.db")
+    with sqlite3.connect(corpus.db_path) as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO player_match_history "
+            "(player_id, season, day_number, points, minutes, is_home, status) "
+            "VALUES ('p1', ?, ?, ?, 90, 1, ?)",
+            rows,
+        )
+        conn.commit()
+    return corpus
+
+
+def test_earlier_seasons_do_not_count_towards_the_average(tmp_path):
+    """REH-77. Kickbase's `ap` is a SEASON-to-date mean per appearance, and the
+    ProfitTrader ladder gates on it at 20/30/40. `matches_before` deliberately
+    includes every earlier season in full -- correct for the scorer, which
+    should use all the history it has, and wrong here.
+
+    Measured against the eight `flip_outcomes` rows that recorded a real `ap`
+    at buy time: season-to-date tracks the recorded value within ~1-2 points on
+    all eight (mean absolute error ~1.0), while a career mean is off by up to
+    19.5 and in both directions (mean absolute error ~9.9). Engelhardt's
+    recorded 66.0 is 65.5 season-to-date and 83.7 career; Da Costa's 74.0 is
+    75.5 season-to-date and 54.5 career.
+    """
+    corpus = _corpus_across_seasons(
+        tmp_path,
+        [
+            ("2024/2025", 1, 900, 5),
+            ("2024/2025", 2, 900, 5),
+            (SEASON, 1, 100, 5),
+            (SEASON, 2, 200, 5),
+        ],
+    )
+
+    assert average_points_at(corpus, "p1", season=SEASON, day_number=3) == 150.0
+
+
+def test_a_player_who_has_only_played_in_earlier_seasons_averages_zero(tmp_path):
+    """The case that actually bit: a buy early in the season, before the player
+    has appeared in it. A career mean labels him from years he no longer plays
+    like -- three of REH-75's ten worst losses were bought this way."""
+    corpus = _corpus_across_seasons(tmp_path, [("2024/2025", 30, 800, 5)])
+
+    assert average_points_at(corpus, "p1", season=SEASON, day_number=2) == 0.0
+
+
 def test_average_points_ignores_matchdays_at_or_after_the_cutoff(tmp_path):
     corpus = _corpus_with_matches(tmp_path, [(1, 100, 5), (2, 200, 5), (3, 900, 5)])
 

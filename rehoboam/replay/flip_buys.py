@@ -75,18 +75,35 @@ APPEARANCE_STATUSES = (3, 5)
 def average_points_at(
     corpus: TrainingCorpus, player_id: str, *, season: str, day_number: int
 ) -> float:
-    """Mean points per appearance over matches strictly before ``day_number``.
+    """Mean points per appearance in ``season``, strictly before ``day_number``.
 
     Reuses the v2 scorer's ``matches_before`` boundary rather than introducing a
     second truncation rule, so the flip path and the EP path cannot disagree
     about what was knowable at the decision instant.
+
+    THEN narrows to ``season`` (REH-77). ``matches_before`` deliberately keeps
+    every earlier season in full, which is right for the scorer -- it should use
+    all the history it has -- and wrong here. This function stands in for
+    Kickbase's ``ap`` field, which ``ProfitTrader``'s ladder gates on at 20/30/40
+    (profit_trader.py:126-180), and ``ap`` is a SEASON-to-date mean. The two
+    callers want different windows from the same truncation; assuming one window
+    served both is what made this wrong.
+
+    Measured, not assumed: against the eight ``flip_outcomes`` rows that recorded
+    a real ``ap`` at buy time, season-to-date tracks the recorded value within
+    ~1-2 points on all eight (mean absolute error ~1.0), while a career mean is
+    off by up to 19.5 in BOTH directions (mean absolute error ~9.9) -- Engelhardt
+    66.0 recorded against 65.5 season and 83.7 career; Da Costa 74.0 against 75.5
+    season and 54.5 career.
     """
     from rehoboam.backtest.snapshot import matches_before
 
     history = matches_before(
         corpus.matches_for_player(player_id), season=season, day_number=day_number
     )
-    played = [m for m in history if m.get("status") in APPEARANCE_STATUSES]
+    played = [
+        m for m in history if m.get("status") in APPEARANCE_STATUSES and m.get("season") == season
+    ]
     if not played:
         return 0.0
     return sum(float(m["points"] or 0) for m in played) / len(played)
