@@ -248,3 +248,84 @@ def dominant_mechanism(totals: Decomposition, *, tie_band: float = 0.20) -> str:
     if (abs(top) - abs(second)) <= tie_band * abs(top):
         return "no single dominant mechanism"
     return winner
+
+
+def run_diagnosis(
+    learner_db: Path, corpus_db: Path, *, horizons: tuple[int, ...] = HORIZONS
+) -> DiagnosisResult:
+    """Replay every completed round trip through the decomposition and the
+    branch-ladder mirror.
+
+    Read-only: no API calls, no login, no writes. `label_for` (not
+    `reconstruct_branch` alone) supplies the branch, because it is the only
+    function that reconciles the mirror against the shipped `ProfitTrader`
+    verdict -- see `flip_branches.label_for`'s docstring. Calling
+    `profit_trader_accepts` directly on unfiltered rows would also trigger its
+    small-sample console warning with blank player names.
+    """
+    from rehoboam.diagnostics.flip_branches import label_for, reconstruct_branch
+    from rehoboam.enrichment.corpus import TrainingCorpus
+    from rehoboam.replay.driver import LEAGUE_ID, SEASON, day_for_kickoff, load_calendar
+    from rehoboam.replay.flip_buys import average_points_at, history_at
+    from rehoboam.services.trend_service import TrendService
+
+    trips = load_round_trips(learner_db)
+    corpus = TrainingCorpus(corpus_db)
+    kickoffs = load_calendar(learner_db, league_id=LEAGUE_ID)
+    censored = dict.fromkeys(horizons, 0)
+    rows: list[TripRow] = []
+
+    for trip in trips:
+        mv_buy = mv_nearest(corpus_db, trip.player_id, trip.buy_date)
+        peak = peak_between(corpus_db, trip.player_id, trip.buy_date, trip.sell_date)
+        is_floor = trip.buy_price == trip.sell_price == FLOOR_PRICE
+
+        if mv_buy is None:
+            # No usable market value at the buy instant: SELECTION and ENTRY
+            # PREMIUM both need it, so every horizon is censored for this row,
+            # and the branch cannot be honestly reconstructed either -- label
+            # it the same way the ladder already labels "no history to go on"
+            # rather than inventing a new bucket.
+            for h in horizons:
+                censored[h] += 1
+            rows.append(
+                TripRow(
+                    trip=trip,
+                    mv_buy=None,
+                    branch="no_trend_data",
+                    expected_appreciation=0.0,
+                    by_horizon={},
+                    peak_during_hold=peak,
+                    is_floor_trip=is_floor,
+                )
+            )
+            continue
+
+        history = history_at(corpus, trip.player_id, trip.buy_date)
+        trend = TrendService.analyze(history, mv_buy).to_dict()
+        day_number = day_for_kickoff(kickoffs, trip.buy_date)
+        avg_points = average_points_at(corpus, trip.player_id, season=SEASON, day_number=day_number)
+        branch = label_for(trend, avg_points, mv_buy)
+        _, expected_appreciation = reconstruct_branch(trend, avg_points, market_value=mv_buy)
+
+        by_horizon: dict[int, Decomposition] = {}
+        for h in horizons:
+            mv_h = mv_nearest(corpus_db, trip.player_id, trip.buy_date + h * SECONDS_PER_DAY)
+            if mv_h is None:
+                censored[h] += 1
+                continue
+            by_horizon[h] = decompose(trip, mv_buy=mv_buy, mv_h=mv_h)
+
+        rows.append(
+            TripRow(
+                trip=trip,
+                mv_buy=mv_buy,
+                branch=branch,
+                expected_appreciation=expected_appreciation,
+                by_horizon=by_horizon,
+                peak_during_hold=peak,
+                is_floor_trip=is_floor,
+            )
+        )
+
+    return DiagnosisResult(rows=rows, horizons=horizons, censored=censored)
