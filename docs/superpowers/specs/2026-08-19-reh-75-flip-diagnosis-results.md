@@ -401,6 +401,10 @@ the largest thing in the diagnosis that any decision can actually reach.
 | Trips paying **exactly** market value     |                                 0 / 136 |
 | Premium percentiles (p10/p25/p50/p75/p90) | −2.3% / +1.1% / +9.1% / +15.3% / +22.3% |
 
+Percentiles here use the `sorted[int(n·p)]` convention, which differs from
+`numpy.percentile`'s default by up to 0.6 points on this sample — see the
+appendix.
+
 This is REH-71's withdrawn "toll" question asked in a form that needs no
 provenance data. **It is not a toll and this document does not call it one.** A
 toll is a structural cost of a channel; this is simply *what we paid*, whatever
@@ -761,9 +765,32 @@ the headline totals above)
 ```
 
 Figures in this document that are **not** in that output — the per-trip
-percentage distributions, the contemporaneous exit measure, the staleness
-bound, the in-season balanced panel, the loss-concentration table, the
-per-branch premium ratios and median holds, and the `player_mv_history`
-cross-check — were computed read-only over the same two databases using
-`rehoboam.diagnostics.flip_diagnosis`'s public functions, with no code changes
-and no writes.
+percentage distributions (§5 Q1), the contemporaneous exit measure and the peak
+sub-measure (§5 Q2), the in-season balanced panel (§5 Q3), the entry-premium
+percentiles and staleness bound (§6), the same-day cohort, the
+loss-concentration table (§7), the per-branch premium ratios and median holds
+(§8), the `Σ(s − mv_buy)` cohort table (§9), and the `player_mv_history`
+cross-check (§1) — are **not** covered by the determinism gate above, which
+ran `diagnose-flips` only. That is roughly two thirds of the quantitative
+content of this document, including §6, §7 and §9 in their entirety.
+
+They are reproduced by **`scripts/reh75_supplementary.py`**, committed for
+exactly the reason the design doc gave for building a CLI command in the first
+place — *"a one-shot script that produces a headline number is what nobody can
+re-check later."* It reads the same two pinned databases strictly read-only,
+prints every figure listed above under its section number, and needs no tests:
+its correctness criterion is that its output matches this document.
+
+```
+uv run python scripts/reh75_supplementary.py
+```
+
+Two conventions it states that this document otherwise leaves implicit, both
+of which change the numbers a re-deriver would get:
+
+- **Percentiles** use `sorted[int(n·p)]`, a nearest-rank variant — not
+  `statistics.quantiles` and not linear interpolation. The five entry-premium
+  percentiles in §6 differ by up to 0.6 points between conventions.
+- **The sale instant** uses the at-or-before lookup (§5 Q2), never
+  `mv_nearest`. The script prints the nearest-lookup value beside it so the
+  difference is visible rather than assumed.
