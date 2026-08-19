@@ -36,14 +36,24 @@ Three things make the correction stick:
    P&L is **€0**. The test finds floor-priced filler, not flips. They are
    reported separately throughout and never mixed into a headline total.
 
-1. **The best available upper bound is much smaller than the headline.** Of the
-   136 non-floor round trips, **108 were flip-eligible at buy time** (the
-   shipped `ProfitTrader` ladder would have accepted them) and those 108 net
-   **−€33,929,767**. The other 28 were rejections the flip path would never have
-   bought, and they net **−€21,326,297**. So even the most generous attribution
-   caps the flip channel's share at **−€33.9M, not −€55.3M** — and that is a
-   ceiling on a labelling, not a measurement of what the flip path actually
-   bought.
+1. **The eligible *set* is much smaller than the population — which bounds the
+   set, not the loss.** Of the 136 non-floor round trips, **108 were
+   flip-eligible at buy time** (the shipped `ProfitTrader` ladder would have
+   accepted them) and those 108 net **−€33,929,767**. The other 28 were
+   rejections the flip path would never have bought, and they net
+   **−€21,326,297**. So: **if every eligible trip were a flip**, the channel
+   netted −€33.9M rather than −€55.3M.
+
+   **That is not a ceiling on the flip channel's losses and must not be quoted
+   as one.** The flip path bought some unknown *subset* of the 108, and a sum
+   over a subset is not bounded by the sum over its superset when the superset
+   contains positive terms — and this one does. The `rising` rung alone is
+   **+€8,832,920** across 74 trips. Drop only that rung and the remaining
+   eligible rungs net **−€42,762,687** (`falling_mean_reversion` −€6,654,959 +
+   `recovery` −€10,166,472 + `stable` −€25,941,256), already outside the
+   −€33.9M figure; isolating the loss-makers *inside* each rung pushes it
+   further still. **108 bounds which round trips the flip path could have
+   bought. Nothing in this document bounds what it lost.**
 
 The single largest loss in the table, **Woltemade (−€19,443,381, 35% of the
 whole season's round-trip loss)**, is labelled `no_pattern` — a rung the flip
@@ -88,6 +98,13 @@ the buy instant, 0 rows labelled `no_trend_data`. The sweep is a balanced panel
 of n=136 at every H, so the curve across H is comparable point to point. Every
 horizon endpoint resolved to a snapshot within **0.50 days** of its target
 (mean 0.26), well inside the 3-day guard.
+
+*(The design doc quotes 0.99 days, mean 0.46, for what sounds like the same
+quantity. Both are correct and they measure different lookups. 0.99/0.46 is
+the age of a **backwards-only** lookup, which over daily snapshots can reach a
+full interval. 0.50/0.26 is the gap of the **nearest** lookup `mv_nearest`
+actually performs at horizon endpoints, which over daily snapshots can never
+exceed half an interval. Neither is a correction of the other.)*
 
 **Cross-check against the second MV source.** The design named
 `training_corpus.mv_series` the source of record and `player_mv_history` a
@@ -172,7 +189,7 @@ Gap between first and second: **34.4%**, outside the 20% tie band.
 > ### The rule names **exit timing** as the dominant mechanism.
 
 That is the answer the rule gives and it is recorded as such. It is not the
-answer I expected, and it deserves two honest qualifications rather than a
+answer I expected, and it deserves three honest qualifications rather than a
 narrative.
 
 **First: the dominant term is positive.** Exit timing contributed +€177.7M — a
@@ -182,7 +199,28 @@ that helped. Read literally, the rule's verdict is "the biggest single number in
 the decomposition is what our sales got relative to the market thirty days after
 we bought". It is not "exit timing lost us the money".
 
-**Second: the verdict is not stable, and the instability is measurable.**
+**Second: the rule was structurally incapable of naming Selection.** From §2,
+`Selection(H) + Exit(H) = Σ(s − mv_buy) = K = +€61,145,264`, constant in `H`.
+So for any horizon where Selection is negative:
+
+```
+Selection(H) + Exit(H) ≡ K = +€61,145,264      (constant in H)
+⇒  Exit(H) = K − Selection(H) = K + |Selection(H)|
+⇒  |Exit(H)| = K + |Selection(H)| > |Selection(H)|,   always
+```
+
+Exit beats Selection by **exactly €61,145,264 at every horizon** — which is why
+the 30d, 45d and 60d gaps below all rest on one and the same absolute number.
+On any dataset where Selection is negative and `Σ(s − mv_buy)` is positive, the
+rule *cannot* return `selection`. Its verdict was settled by the algebra of the
+decomposition before any data existed. This is a defect in the **rule**, which
+the design authored; `dominant_mechanism` transcribes it faithfully. Read
+"exit timing won" as *the comparison was degenerate by construction*, not as
+*exit timing was a close-run but real winner*. Re-registering a rule over
+non-collinear quantities is filed as **REH-78** (§11), and it has to be
+re-registered **before** the next re-run, not after seeing its output.
+
+**Third: the verdict is not stable, and the instability is measurable.**
 
 | H   | 1st                       | 2nd                         | Gap   | Verdict                      |
 | --- | ------------------------- | --------------------------- | ----- | ---------------------------- |
@@ -199,7 +237,8 @@ weak verdict. I am reporting it because it was pre-registered, not because I
 think it is load-bearing.
 
 **Why the H=30 anchor behaves this way.** The median hold in this population is
-**6 days**, and **88% of round trips had already been sold before day 30**. So
+**6 days**, and **87.5% of the 136 scored round trips had already been sold
+before day 30**. So
 `mv(30)` is, for almost every trip, a market value measured well *after* we were
 out. The Exit term at H=30 is not "we sold worse or better than a contemporaneous
 market" — it is "we sold before a decline that carried on without us". That
@@ -253,10 +292,39 @@ and it is bad in the middle of the distribution, not just in the tail.
 
 **No, on the evidence available, and this is the clearest negative result here.**
 
-The clean contemporaneous measure — sale price against market value *on the sell
+The contemporaneous measure — sale price against market value *on the sell
 date* — is **+€17,774,062** across 136 trips, a mean ratio of **1.015** and a
-median of **1.020**, with **91 of 136** sold above market. Execution at the exit
-was slightly *better* than market. There is no exit-side leak.
+median of **1.020**, with **91 of 136** sold above market.
+
+**The lookup rule, stated because it decides what that number means.**
+`mv(sell)` is the most recent snapshot **at or before** `sell_date`
+(`TrainingCorpus.market_value_at`) — the same at-or-before rule §6 applies to
+`mv_buy`, for the same reason: a sale is a *pricing instant*, so only data at
+or before it may enter. `mv_nearest` is deliberately **not** used here; on most
+rows it resolves to a post-sale snapshot and would leak price action from after
+the exit into the measure. `scripts/reh75_supplementary.py` prints both, so the
+difference is checkable: the nearest lookup would read **+€26,191,913**, mean
+ratio 1.025.
+
+**The staleness bracket, which §6 gives the entry premium and this measure
+needs too.** The at-or-before snapshot has a median age of **0.52 days** (max
+0.91) at the sell instant. Recomputing against the *next* snapshot after the
+sale — the opposite-signed extreme, which leaks future information and is
+therefore the other end of the bracket rather than an estimate — gives
+**+€36,003,050**. The contemporaneous value therefore lies inside
+**\[+€17.8M, +€36.0M\]**, a bracket **€18.2M wide — wider than the measure
+itself**. That is a far weaker bound than the 6% §6 achieves on the entry
+premium, and it is why the claim here is deliberately narrow.
+
+**So: exit execution was at market value, within snapshot resolution.** Both
+ends of the bracket are positive, so the *direction* is robust and it is Q2's
+answer: **we did not sell below market, and there is no exit-side leak.** What
+the data does **not** support is "execution was better than market".
+`INSTANT_SELL_PCT = 1.00` (REH-67) means an instant sell transacts *at* market
+value by construction, and a +1.5–2.0% edge is the same order as the +0.73%
+median day-over-day drift §6 measures — so a small positive is at least as
+consistent with snapshot timing as with execution skill. There is no exit-side
+leak; there is also no exit-side edge to bank on.
 
 The REH-33 sub-measure, `peak_during_hold − sell_price`, does show money left on
 the table: **+€73,912,890** in aggregate, median **+€130,011** per trip,
@@ -283,8 +351,9 @@ the population worse, not better.** The equal-weighted median tells the same
 story (−11.7% at 14d deepening to −22.3% at 60d).
 
 **REH-43's premise is refuted, twice over.** REH-43 rests on holding longer —
-"median hold ≥ 21 days". The current median hold is **6 days** and 82.8% of
-round trips are under 21 days, so REH-43 would be a real behavioural change, not
+"median hold ≥ 21 days". The current median hold is **6 days** and 83.8% of the
+136 scored round trips are under 21 days, so REH-43 would be a real behavioural
+change, not
 a formalisation of what already happens. And the change would have cost money:
 at H=21 the population's Selection is −€115.3M against −€64.9M at H=14. **REH-43
 should not be built on this premise.** If there is a case for longer holds, it
@@ -383,8 +452,13 @@ This was not a designed measurement and it is the finding I would act on first.
 | The other 126 round trips | **+€5,274,950** |                    — |
 
 **Ten round trips out of 136 account for more than the entire season's loss.
-The remaining 126 were collectively profitable.** Those ten carry €38,920,173
-of entry premium between them — a third of the whole premium term.
+The remaining 126 were collectively profitable** — but only just, and the
+margin should not be read as health: **+€5,274,950 on €780,867,595 of market
+value deployed is +0.68% across a whole season**, earned *after* paying the
+same chronic entry premium §6 documents (this cohort's own ratio is 1.0992).
+This row does not say "everything except ten trades was fine"; it says the
+other 126 roughly broke even while ten destroyed the season. Those ten carry
+€38,920,173 of entry premium between them — a third of the whole premium term.
 
 The worst ten, with their reconstructed branch labels:
 
@@ -417,6 +491,25 @@ That sentence governs every number in this section. The reconstruction is a
 *mirror* of `ProfitTrader`'s ladder that names the rung; the shipped code
 remains the authority on the eligible/not-eligible verdict, and the two are
 reconciled on every row.
+
+**What that reconciliation does and does not prove.** It proves the mirror and
+the shipped ladder return the same verdict *given identical inputs*. It says
+nothing about whether those inputs match what the live bot saw — a wrong
+statistic fed to both sides would still reconcile at zero divergence. One such
+mismatch is known and is stated in §10 (caveat 7): the replayed
+`average_points` is a career mean per appearance, while the shipped ladder
+reads a season figure.
+
+**The eligible count of 108 is an upper bound on the eligible set, and a loose
+one.** `reconstruct_branch` models the ladder, not the whole live buy path.
+Beyond `status != 0` and affordability, the live path only ever considers
+listings passing `is_kickbase_seller()` (`trader.py:685`) — the hardest
+provenance gate of all, and unmodelled here; `max_opportunities` caps bids at
+5–10 per session (`trader.py:719`); and `BidEvaluator` cancels a flip bid more
+than 25% over market value (`bid_evaluator.py:116-119`), against a p90 entry
+premium of +22.3% (§6). Every one of those shrinks the true eligible set below
+108, all in the same direction. This matters beyond this section: 108 is
+load-bearing for §0's reframing.
 
 **Mirror divergence: 0 rows of 151.** The reconstruction agrees with the shipped
 `ProfitTrader` ladder on every labelled row. This is the expected result at the
@@ -534,6 +627,24 @@ Stated because they bound what the numbers above may be used for.
 1. **Branch labels are eligibility, not provenance.** Repeated here because it
    is the claim most likely to be quoted out of §8.
 
+1. **The branch labels evaluate the ladder's points gates against a *career*
+   average, not the season figure the live path reads.**
+   `average_points_at` (`replay/flip_buys.py`) truncates through
+   `backtest.snapshot.matches_before`, which by design **includes every match
+   from earlier seasons in full** — and the corpus holds seasons back to
+   2013/2014. It therefore returns a career mean points-per-appearance,
+   whereas the shipped ladder reads `player.average_points` ← Kickbase `ap`
+   (`kickbase_client.py:88`), a season statistic. **94 of the 115 distinct
+   flipped players carry pre-2025/26 history**, and for **74 of the 136 scored
+   round trips the two averages differ by more than 10 points** — a full step
+   across the ladder's 20/30/40 gates. Early-season buys are the worst
+   affected, because almost all of their prior appearances are from earlier
+   seasons: Woltemade, Stiller and Anselmino — three of the worst ten (§7) —
+   are labelled essentially from previous-season form. The §8 reconciliation
+   cannot detect this (see §8), because it compares the mirror against the
+   shipped ladder on the *same* inputs. Filed as **REH-77**; the labels in §8
+   are the only figures affected, and §2-§7 and §9 do not use them.
+
 ______________________________________________________________________
 
 ## 11. What I would file next
@@ -545,6 +656,25 @@ ______________________________________________________________________
    for what should be a column read. Next season's version of this diagnosis
    should be a lookup. Recording the buy's *motive* (EP pipeline vs. profit
    flip) at the same moment would retire the §0 population correction entirely.
+
+1. **Fix the replayed `average_points` statistic (REH-77).** Sitting beside the
+   item above, and more urgent than it: `average_points_at` returns a career
+   mean per appearance where the live ladder reads a season figure (§10, caveat
+   7). This is **not** local to REH-75 — `replay/flip_buys.py` is REH-71's
+   module and its replay reads the same statistic, so the fix belongs to shared
+   replay foundations rather than to either diagnosis. Whatever replaces it
+   needs a test that fails on a player with prior-season history, which the
+   mirror reconciliation structurally cannot provide.
+
+1. **Re-register a non-degenerate dominance rule before the next re-run
+   (REH-78).** §4 shows the pre-registered rule could never have named
+   Selection: `Selection + Exit` is the H-invariant constant `Σ(s − mv_buy)`, so
+   the two terms it ranks are collinear by construction. A replacement must
+   compare quantities that are not — e.g. Selection, Entry premium, and Exit
+   evaluated at each trip's **realised hold**, the only non-degenerate exit
+   measure available. Pre-registration is the whole value of the rule, so this
+   must be fixed **before** REH-72 or the fix ticket re-runs `diagnose-flips`,
+   never afterwards.
 
 1. **A per-trade entry-premium cap, and a per-trade size cap.** §6 and §7
    together are the actionable pair: a chronic +12% premium with a tail where
@@ -561,8 +691,9 @@ ______________________________________________________________________
 
 1. **REH-33 (peak-MV sell timing) has a real signal but a smaller one than it
    looks.** €73.9M against an ex-post oracle peak, median €130k per trip, and
-   exit execution is already +2.0% above contemporaneous market value. Size the
-   ticket against the median, not the aggregate.
+   exit execution is already at contemporaneous market value within snapshot
+   resolution (§5 Q2) — so there is no below-market execution gap for it to
+   recover. Size the ticket against the median, not the aggregate.
 
 1. **Investigate the winter-break selection break** (§9), ideally against
    REH-72/REH-74's competitor data. Something changed between the two halves of
