@@ -672,6 +672,36 @@ def backtest_baseline(
     console.print(table)
 
 
+@app.command("diagnose-flips")
+def diagnose_flips(
+    learner_db: Path = typer.Option(
+        Path("logs") / "bid_learning.db",
+        "--learner-db",
+        help="Path to bid_learning.db (flip_outcomes).",
+    ),
+    corpus_db: Path = typer.Option(
+        Path("logs") / "training_corpus.db",
+        "--corpus-db",
+        help="Path to training_corpus.db (mv_series + player_match_history).",
+    ),
+):
+    """Decompose every completed round trip's P&L into selection, exit and entry premium (REH-75).
+
+    Read-only, no API calls and no login. See
+    docs/superpowers/specs/2026-08-19-reh-75-flip-diagnosis-design.md for the
+    identity, the horizon sweep, and the pre-registered dominance rule.
+    """
+    from rehoboam.diagnostics.flip_diagnosis import run_diagnosis
+    from rehoboam.diagnostics.flip_report import format_report
+
+    # soft_wrap + crop=False: Console() reports width=80 whenever stdout is
+    # redirected (is_terminal=False) -- the default TTY-shaped wrapping, and
+    # Task 6's determinism gate redirects this straight to a file, so without
+    # these the report's own tables would wrap mid-number in the delivered
+    # artifact.
+    console.print(format_report(run_diagnosis(learner_db, corpus_db)), soft_wrap=True, crop=False)
+
+
 @app.command("replay-season")
 def replay_season(
     corpus: Path = typer.Option(  # noqa: B008
