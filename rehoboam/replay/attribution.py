@@ -275,9 +275,16 @@ def format_flip_policy(arms: dict, *, actual_total: int) -> str:
             "INCONCLUSIVE on points - every effect is inside the noise floor.",
             "Per the pre-committed rule, the decision falls to the cash evidence:",
             f"real flipping lost EUR {abs(REAL_FLIP_PNL):,} at a "
-            f"{REAL_FLIP_WIN_RATE}% win rate over {REAL_FLIP_TRIPS} round trips,",
-            "and every round trip pays a measured 11.7% toll. Both switches",
-            "default OFF, decided on cash rather than on points.",
+            f"{REAL_FLIP_WIN_RATE}% win rate over {REAL_FLIP_TRIPS} round trips.",
+            "NOTE (REH-76): this rule once continued 'and every round trip pays",
+            "a measured 11.7% toll', and routed to BOTH SWITCHES OFF. That toll",
+            "was measured on transfer_type = 2 rows -- manager-to-manager",
+            "auctions -- not on the is_kickbase_seller() listings the flip path",
+            "buys, so it never described this channel. The verdict was withdrawn",
+            "and both switches ship ON. What REH-75 did measure, across all 136",
+            "scored round trips, is a 12.2% premium over market value actually",
+            "paid at entry -- real, but a property of what we bid, not a toll",
+            "the channel charges.",
         ]
     else:
         lines += [

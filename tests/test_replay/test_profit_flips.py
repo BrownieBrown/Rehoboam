@@ -58,8 +58,11 @@ def test_a_player_up_twenty_percent_is_sold_for_profit():
 
 
 def test_a_player_up_five_percent_is_held():
-    """Below the take-profit threshold — churning him would just pay the
-    ~11.7% buy-side premium again on the way back in."""
+    """Below the take-profit threshold — churning him is a round trip that has
+    to earn back whatever re-entry costs. Deliberately not stated as "~11.7%":
+    that mean was measured on manager-to-manager auctions, and a Kickbase
+    listing is bought at market value exactly (REH-76). The behaviour under
+    test — hold below the threshold — does not depend on which channel it is."""
     _result, state = _run(current_mv=10_500_000, profit_take_pct=15.0)
 
     assert "11" in state.squad

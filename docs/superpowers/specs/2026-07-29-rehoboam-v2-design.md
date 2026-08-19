@@ -76,10 +76,30 @@ Average hold: 15.2 days. **Only the >2-month bucket was profitable.** 125 of 151
 flips were held under three weeks and lost 69M between them.
 
 **Why short flips cannot work.** Bought at an average **+12.2% overbid**
-(`auction_outcomes`, won bids); instant sell returns **95% of MV**
-(`decision.py:230`). A round trip requires MV to rise `1.122 / 0.95` = **18.1%** just
-to break even. An elite player appreciates ~100% across a *season* — roughly 4% per
-fortnight. The bot paid an 18% toll to chase a 4% move, 151 times.
+(`auction_outcomes`, won bids); instant sell returns **market value**
+(`INSTANT_SELL_PCT = 1.00`). A round trip requires MV to rise `1.122 / 1.00` =
+**12.2%** just to break even. An elite player appreciates ~100% across a
+*season* — roughly 4% per fortnight. The bot paid a 12% toll to chase a 4%
+move, 151 times.
+
+**Corrected 2026-08-19 (REH-76).** This paragraph originally divided by an
+instant sell of **95% of MV** (`decision.py:230`) and concluded the break-even
+was **18.1%**, "an 18% toll". The 0.95 was an unchecked assumption inherited
+from REH-51's plan. REH-67 measured it: across all 151 flips joined to
+`player_mv_history` within a day of sale, the sell/MV ratio has a hard mode of
+41 rows at exactly 1.00 and **zero** rows at 0.95. The toll is therefore
+**12.2%, not 18.1%** — inflated by half.
+
+The conclusion is unchanged and the argument is if anything cleaner: 12.2%
+still dwarfs a ~4%-per-fortnight move, so short flips still cannot work. Two
+things are worth carrying forward. The +12.2% overbid measured here from
+`auction_outcomes` was independently reproduced by REH-75 at **1.1217** from
+`flip_outcomes` against `mv_series` — different tables, different method, same
+number. And `INSTANT_SELL_PCT = 1.00` was fixed only in the replay; **live code
+still assumes 0.95 in seven places** (`trader.py`, `auto_trader.py`,
+`scoring/decision.py`), which understates sell proceeds and suppresses buys the
+bot can actually afford. Tracked separately — it is a live bug, not a
+documentation error.
 
 ### 1.4 Self-inflicted penalties cost ~1,400 points
 
