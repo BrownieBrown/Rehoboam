@@ -27,7 +27,7 @@ from .bidding_strategy import (
     TIER_STRONG_UPGRADE,
     SmartBidding,
 )
-from .config import Settings
+from .config import INSTANT_SELL_PCT, Settings
 from .formation import can_fill_starting_eleven
 from .kickbase_client import League
 from .matchup_analyzer import MatchupAnalyzer
@@ -524,7 +524,7 @@ class Trader:
                 # perfectly affordable trade pairs get silently dropped.
                 from .scoring.models import SellPlan
 
-                sell_recovery = int(pair.sell_player.market_value * 0.95)
+                sell_recovery = int(pair.sell_player.market_value * INSTANT_SELL_PCT)
                 synthetic_sell_plan = SellPlan(
                     players_to_sell=[],
                     total_recovery=sell_recovery,
@@ -640,7 +640,7 @@ class Trader:
 
                 from .scoring.models import SellPlan
 
-                sell_recovery = int(pair.sell_player.market_value * 0.95)
+                sell_recovery = int(pair.sell_player.market_value * INSTANT_SELL_PCT)
                 synthetic_sell_plan = SellPlan(
                     players_to_sell=[],
                     total_recovery=sell_recovery,

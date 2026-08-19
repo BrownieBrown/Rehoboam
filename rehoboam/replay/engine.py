@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from rehoboam.config import INSTANT_SELL_PCT
 from rehoboam.formation import select_best_eleven
 from rehoboam.replay.rules import (
     MAX_SQUAD_SIZE,
@@ -19,20 +20,12 @@ from rehoboam.replay.rules import (
 )
 from rehoboam.replay.state import ReplayPlayer, ReplayState
 
-# Selling instantly to Kickbase returns the FULL market value.
-#
-# REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured across
-# all 151 real flips in `flip_outcomes`, joined to `player_mv_history` within a
-# day of the sale: the sell/MV ratio has a hard mode of 41 rows at exactly 1.00
-# and ZERO rows at 0.95 (2 anywhere in 0.94-0.96). A 5% haircut would leave a
-# cluster at 0.95; there is none. Ratios above 1.00 are sales to other managers
-# at a premium, a channel this replay deliberately does not model.
-# `api.sell_player_instant` documents the same: "sell instantly to Kickbase at
-# market value".
-#
-# This is not cosmetic: proceeds feed `_solvent_after`, so a 5% understatement
-# suppressed buys the bot could actually afford.
-INSTANT_SELL_PCT = 1.0
+# `INSTANT_SELL_PCT` (imported above) is the FULL market value, 1.00. It is
+# re-exported from `config` rather than redeclared here: REH-67 measured it and
+# corrected this module, but seven live sites kept 0.95 for a season because the
+# two were separate literals (REH-79). One definition, so they cannot drift
+# again. Ratios above 1.00 are sales to other managers at a premium, a channel
+# this replay deliberately does not model.
 # Decisions are made this long before kickoff, mirroring the live bot's
 # pre-matchday session rather than pretending to trade at the whistle.
 DECISION_LEAD_SECONDS = 3600.0

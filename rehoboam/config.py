@@ -22,6 +22,31 @@ MIN_UPGRADE_THRESHOLD = 10.0
 # 1 = starter, 2 = rotation, 3 = bench; 4+ = unlikely to play
 MAX_LINEUP_PROB_FOR_BUY = 3
 
+# Selling instantly to Kickbase returns the FULL market value.
+#
+# REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured in
+# REH-67 across all 151 real flips in `flip_outcomes`, joined to
+# `player_mv_history` within a day of the sale: the sell/MV ratio has a hard
+# mode of 41 rows at exactly 1.00 and ZERO rows at 0.95 (2 anywhere in
+# 0.94-0.96). A 5% haircut would leave a cluster at 0.95; there is none. Ratios
+# above 1.00 are sales to other managers at a premium, a different channel.
+# `api.sell_player_instant` documents the same: "sell instantly to Kickbase at
+# market value".
+#
+# It lives here, not in `replay/`, so the replay and the live path cannot drift
+# apart: REH-67 corrected the replay and left seven live sites on 0.95 for a
+# season (REH-79). Understating recovery is NOT harmlessly conservative --
+# trade pairs compute `net_cost = bid - sell_recovery`, so it inflates every
+# pair's net cost and rejects upgrades the bot can afford, and
+# `bidding_strategy.calculate_ep_bid` derives `budget_ceiling` from it.
+#
+# It does not weaken the kickoff guard. `services/execution.py`'s REH-11 block
+# tests `(current_budget - price) < 0` against ACTUAL budget and ignores sell
+# recovery entirely, because buy-first-sell-after means the sale has not
+# happened when the bid is placed. That protection is independent of this
+# number.
+INSTANT_SELL_PCT = 1.0
+
 
 # Find .env file - look in current directory first, then in home directory
 def find_env_file() -> Path:

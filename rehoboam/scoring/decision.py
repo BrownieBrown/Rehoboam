@@ -7,7 +7,7 @@ builds sell plans to fund purchases, and ranks squad players by expendability.
 
 import logging
 
-from rehoboam.config import MAX_LINEUP_PROB_FOR_BUY, POSITION_MINIMUMS
+from rehoboam.config import INSTANT_SELL_PCT, MAX_LINEUP_PROB_FOR_BUY, POSITION_MINIMUMS
 from rehoboam.formation import _POSITION_MAX_STARTERS, select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
 
@@ -132,7 +132,8 @@ class DecisionEngine:
         - Otherwise greedily sell bench players (not in best-11) sorted by
           lowest EP first, then add the displaced player if still short.
         - Non-displaced best-11 starters are protected and cannot be sold.
-        - ``expected_sell_value = market_value * 0.95``.
+        - ``expected_sell_value = market_value * INSTANT_SELL_PCT`` (1.00,
+          measured in REH-67 — see `config.INSTANT_SELL_PCT`).
 
         *incoming_position* (optional): the position of the player being
         bought.  When set, the position count for that position is
@@ -227,7 +228,7 @@ class DecisionEngine:
 
             ps = score_map.get(player.id)
             player_ep = ps.expected_points if ps else 0.0
-            sell_value = int(player.market_value * 0.95)
+            sell_value = int(player.market_value * INSTANT_SELL_PCT)
 
             players_to_sell.append(
                 SellPlanEntry(
@@ -443,7 +444,7 @@ class DecisionEngine:
                     continue
 
                 dw_ep = score_lookup.get(dead_weight.id, 0.0)
-                dw_sell_value = int(dead_weight.market_value * 0.95)
+                dw_sell_value = int(dead_weight.market_value * INSTANT_SELL_PCT)
                 net_after = int(budget) - player.price + dw_sell_value
 
                 forced_sell_plan = SellPlan(
@@ -634,7 +635,7 @@ class DecisionEngine:
                 continue
 
             sell_mp = best_sell.player
-            sell_value = int(sell_mp.market_value * 0.95)
+            sell_value = int(sell_mp.market_value * INSTANT_SELL_PCT)
             net_cost = buy_player.price - sell_value
             ep_gain = ps.expected_points - best_sell.score.expected_points
 

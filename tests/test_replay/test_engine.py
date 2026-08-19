@@ -40,7 +40,8 @@ def test_scores_the_points_of_the_fielded_eleven():
 
 def test_negative_budget_at_kickoff_zeroes_the_matchday():
     # The debt is far beyond what liquidating this squad could raise (11 players
-    # at EUR 1,000,000 yields EUR 10,450,000 at the 95% instant-sell rate), so
+    # at EUR 1,000,000 yields EUR 11,000,000 at the measured 1.00 instant-sell
+    # rate -- see config.INSTANT_SELL_PCT, REH-67), so
     # the engine cannot trade its way out and eats the zero. A *recoverable*
     # deficit is covered by test_sells_below_eleven_to_avoid_a_zeroed_matchday.
     state = ReplayState(budget=-100_000_000, squad=_full_squad())
@@ -309,8 +310,9 @@ def test_budget_never_goes_negative_at_kickoff_with_an_expensive_market():
     which to recover — the credit line is a mid-week facility this engine does
     not model. Gated on the credit line alone, the engine leveraged to many
     times its cash (a squad worth EUR 220,000,000 licenses a EUR -154,000,000
-    floor) and then liquidated the squad at 95% of MV to get back to zero,
-    losing ~15% on every forced round trip. Here it must simply decline: it
+    floor) and then liquidated the squad at market value to get back to zero,
+    losing the buy-side premium on every forced round trip. Here it must simply
+    decline: it
     can afford the EUR 3,000,000 listing and nothing else.
     """
     squad = {str(i): ReplayPlayer(id=str(i), position=POS[i], team_id=str(i)) for i in range(11)}
