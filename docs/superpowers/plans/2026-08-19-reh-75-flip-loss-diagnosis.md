@@ -412,9 +412,14 @@ ______________________________________________________________________
 **Interfaces:**
 
 - Consumes: `rehoboam.replay.flip_buys.FLIP_MIN_PROFIT_PCT`, `CorpusMarketPlayer`; `rehoboam.services.trend_service.TrendService`; `rehoboam.profit_trader.ProfitTrader`.
-- Produces: `BRANCHES: tuple[str, ...]`, `reconstruct_branch(trend: dict, average_points: float, *, min_profit_pct: float = FLIP_MIN_PROFIT_PCT) -> tuple[str, float]` returning `(branch_name, expected_appreciation)`, and `profit_trader_accepts(trend: dict, average_points: float, market_value: int) -> bool`.
+- Produces: `BRANCHES: tuple[str, ...]`, `ELIGIBLE_BRANCHES: frozenset[str]`, `reconstruct_branch(trend: dict, average_points: float, *, min_profit_pct: float = FLIP_MIN_PROFIT_PCT) -> tuple[str, float]` returning `(branch_name, expected_appreciation)`, `profit_trader_accepts(trend: dict, average_points: float, market_value: int) -> bool`, and `label_for(trend: dict, average_points: float, market_value: int) -> str`.
 
-Branch names, mirroring `profit_trader.py:126-190` in ladder order: `"low_points"`, `"small_sample"`, `"rising"`, `"recovery"`, `"dip_in_uptrend"`, `"stable"`, `"falling_mean_reversion"`, `"secular_decline"`, `"shallow_dip"`, `"no_pattern"`, `"below_min_profit"`. Only `rising`, `recovery`, `dip_in_uptrend`, `stable` and `falling_mean_reversion` are eligible outcomes; the rest are rejections named by their cause.
+**Controller ruling (pre-flight).** `ProfitTrader` applies a **risk filter after the ladder** — `risk_score > self.max_risk_score → continue` (profit_trader.py:214-217) — via `_calculate_risk`, a shipped heuristic this plan must not reimplement. Two consequences, both binding:
+
+1. `profit_trader_accepts` constructs `ProfitTrader` with the **live flip thresholds** — `min_profit_pct=FLIP_MIN_PROFIT_PCT`, `max_hold_days=FLIP_MAX_HOLD_DAYS`, `max_risk_score=FLIP_MAX_RISK_SCORE` — exactly as `flip_buys.make_flip_buy_fn` does. The constructor defaults (10.0 / 7 / **50.0**) are not what the live flip path uses and must never be relied on.
+1. Ladder eligibility alone therefore cannot equal the shipped verdict. `reconstruct_branch` stays pure and names only the **ladder** rung; `label_for` is the wrapper that combines it with the real verdict, and returns `"too_risky"` where the ladder accepted but `ProfitTrader` rejected. Eligibility is always the shipped verdict, never the mirror's.
+
+Branch names, mirroring `profit_trader.py:126-190` in ladder order: `"low_points"`, `"small_sample"`, `"rising"`, `"recovery"`, `"dip_in_uptrend"`, `"stable"`, `"falling_mean_reversion"`, `"secular_decline"`, `"shallow_dip"`, `"no_pattern"`, `"below_min_profit"`, `"no_trend_data"`, plus `"too_risky"` from the post-ladder risk filter. Only `rising`, `recovery`, `dip_in_uptrend`, `stable` and `falling_mean_reversion` are eligible outcomes; the rest are rejections named by their cause.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -439,6 +444,8 @@ from __future__ import annotations
 import pytest
 
 from rehoboam.diagnostics.flip_branches import (
+    ELIGIBLE_BRANCHES,
+    label_for,
     profit_trader_accepts,
     reconstruct_branch,
 )
@@ -520,20 +527,30 @@ def test_expected_appreciation_below_the_profit_floor_is_a_rejection():
         (_trend(has_data=False), 45.0),
     ],
 )
-def test_reconstruction_agrees_with_the_real_profit_trader(trend, average_points):
-    """The reconciliation gate. `profit_trader_accepts` calls the shipped
-    `ProfitTrader.find_profit_opportunities`; the reconstruction must reach the
-    same verdict on every case."""
-    eligible_branches = {
-        "rising",
-        "recovery",
-        "dip_in_uptrend",
-        "stable",
-        "falling_mean_reversion",
-    }
-    branch, _ = reconstruct_branch(trend, average_points)
-    assert (branch in eligible_branches) == profit_trader_accepts(
+def test_the_label_never_disagrees_with_the_shipped_verdict(trend, average_points):
+    """The reconciliation gate. `label_for` reports an eligible branch if and
+    only if the shipped `ProfitTrader` accepted the candidate -- when the
+    ladder accepts but the post-ladder risk filter rejects, the label is
+    `too_risky`, which is NOT an eligible branch. Eligibility is always the
+    shipped verdict; the mirror only names the rung."""
+    label = label_for(trend, average_points, market_value=1_000_000)
+    assert (label in ELIGIBLE_BRANCHES) == profit_trader_accepts(
         trend, average_points, market_value=1_000_000
+    )
+
+
+def test_a_ladder_accepted_candidate_rejected_on_risk_is_labelled_too_risky(
+    monkeypatch,
+):
+    """The risk filter is a rejection cause the ladder cannot see. Without its
+    own label it would masquerade as an eligible branch in the per-branch
+    table, overstating how much money each rung actually sourced."""
+    import rehoboam.diagnostics.flip_branches as fb
+
+    monkeypatch.setattr(fb, "profit_trader_accepts", lambda *a, **kw: False)
+    assert (
+        fb.label_for(_trend(trend="rising", trend_pct=12.0), 45.0, 1_000_000)
+        == "too_risky"
     )
 ```
 
@@ -558,7 +575,12 @@ to the shipped ladder breaks this loudly instead of relabelling silently.
 
 from __future__ import annotations
 
-from rehoboam.replay.flip_buys import FLIP_MIN_PROFIT_PCT, CorpusMarketPlayer
+from rehoboam.replay.flip_buys import (
+    FLIP_MAX_HOLD_DAYS,
+    FLIP_MAX_RISK_SCORE,
+    FLIP_MIN_PROFIT_PCT,
+    CorpusMarketPlayer,
+)
 
 BRANCHES = (
     "low_points",
@@ -573,6 +595,7 @@ BRANCHES = (
     "no_pattern",
     "below_min_profit",
     "no_trend_data",
+    "too_risky",
 )
 
 ELIGIBLE_BRANCHES = frozenset(
@@ -643,7 +666,11 @@ def profit_trader_accepts(
     """
     from rehoboam.profit_trader import ProfitTrader
 
-    trader = ProfitTrader(min_profit_pct=FLIP_MIN_PROFIT_PCT)
+    trader = ProfitTrader(
+        min_profit_pct=FLIP_MIN_PROFIT_PCT,
+        max_hold_days=FLIP_MAX_HOLD_DAYS,
+        max_risk_score=FLIP_MAX_RISK_SCORE,
+    )
     player = CorpusMarketPlayer(
         id="reconcile",
         price=market_value,
@@ -658,12 +685,30 @@ def profit_trader_accepts(
         team_value=market_value * 10,
     )
     return bool(opportunities)
+
+
+def label_for(trend: dict, average_points: float, market_value: int) -> str:
+    """The branch label for one buy: the ladder rung, or why it was rejected.
+
+    Eligibility is the SHIPPED verdict, never the mirror's. `ProfitTrader`
+    applies `_calculate_risk` after the ladder (profit_trader.py:214-217), a
+    heuristic this module must not reimplement -- so a candidate the ladder
+    accepts can still be rejected on risk. That case gets its own label rather
+    than being counted as an eligible branch, which would overstate how much
+    money each rung actually sourced.
+    """
+    branch, _ = reconstruct_branch(trend, average_points)
+    if branch not in ELIGIBLE_BRANCHES:
+        return branch
+    if not profit_trader_accepts(trend, average_points, market_value):
+        return "too_risky"
+    return branch
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_diagnostics/test_branch_reconstruction.py -v`
-Expected: PASS, 19 tests
+Expected: PASS, 20 tests
 
 If a reconciliation case fails, the mirror is wrong and **the mirror gets fixed** — never the assertion, and never `profit_trader.py`.
 
@@ -998,7 +1043,7 @@ ______________________________________________________________________
 
 **Interfaces:**
 
-- Consumes: everything from Tasks 1–4; `rehoboam.enrichment.corpus.TrainingCorpus`; `rehoboam.replay.flip_buys.average_points_at`, `history_at`; `rehoboam.replay.driver.SEASON`, `day_for_kickoff`, `load_calendar`, `LEAGUE_ID`; `rehoboam.services.trend_service.TrendService`.
+- Consumes: everything from Tasks 1–4, including `label_for` and `reconstruct_branch` from Task 3; `rehoboam.enrichment.corpus.TrainingCorpus`; `rehoboam.replay.flip_buys.average_points_at`, `history_at`; `rehoboam.replay.driver.SEASON`, `day_for_kickoff`, `load_calendar`, `LEAGUE_ID`; `rehoboam.services.trend_service.TrendService`.
 
 - Produces: `run_diagnosis(learner_db: Path, corpus_db: Path, *, horizons: tuple[int, ...] = HORIZONS) -> DiagnosisResult`; `format_report(result: DiagnosisResult) -> str`.
 
@@ -1058,12 +1103,17 @@ def test_every_horizon_appears_in_the_sweep():
         assert f"{h}d" in report
 
 
+LABEL_SEMANTICS = (
+    "Branch labels mean flip-eligible at buy time. They do not mean the flip "
+    "path bought the player — provenance is unrecorded before 2026-01-03."
+)
+
+
 def test_the_report_states_the_label_semantics():
     """Per-branch numbers without this wording invite exactly the causal
-    reading the data cannot support."""
-    report = format_report(_result())
-    assert "flip-eligible" in report
-    assert "not" in report.lower()
+    reading the data cannot support. Asserted verbatim: a substring check
+    would pass on a sentence softened into meaning something else."""
+    assert LABEL_SEMANTICS in format_report(_result())
 
 
 def test_the_report_names_the_population_correctly():
@@ -1095,7 +1145,7 @@ Create `rehoboam/diagnostics/flip_report.py` with a `format_report(result)` that
 1. The temporal split at `TEMPORAL_BOUNDARY_ISO`.
 1. The floor group, reported separately with its count and P&L.
 
-Then add `run_diagnosis` to `flip_diagnosis.py`: load round trips, and for each one resolve `mv_buy = mv_nearest(corpus_db, pid, buy_date)`, `mv_h = mv_nearest(corpus_db, pid, buy_date + h * SECONDS_PER_DAY)` per horizon (absent `mv_h` increments `censored[h]` and omits that horizon for the row), `peak_between(corpus_db, pid, buy_date, sell_date)`, and the branch via `TrendService.analyze(history_at(corpus, pid, buy_date), mv_buy).to_dict()` plus `average_points_at(corpus, pid, season=SEASON, day_number=day_for_kickoff(kickoffs, buy_date))` fed to `reconstruct_branch`. Mark `is_floor_trip` when `buy_price == sell_price == FLOOR_PRICE`.
+Then add `run_diagnosis` to `flip_diagnosis.py`: load round trips, and for each one resolve `mv_buy = mv_nearest(corpus_db, pid, buy_date)`, `mv_h = mv_nearest(corpus_db, pid, buy_date + h * SECONDS_PER_DAY)` per horizon (absent `mv_h` increments `censored[h]` and omits that horizon for the row), `peak_between(corpus_db, pid, buy_date, sell_date)`, and the branch via `TrendService.analyze(history_at(corpus, pid, buy_date), mv_buy).to_dict()` plus `average_points_at(corpus, pid, season=SEASON, day_number=day_for_kickoff(kickoffs, buy_date))` fed to **`label_for`** (not `reconstruct_branch` — see Task 3's controller ruling: only `label_for` reconciles with the shipped risk filter). `expected_appreciation` comes from `reconstruct_branch`'s second return value. Mark `is_floor_trip` when `buy_price == sell_price == FLOOR_PRICE`.
 
 Finally register the command in `rehoboam/cli.py`, following `backtest-baseline`'s shape exactly:
 
