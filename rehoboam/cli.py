@@ -694,7 +694,12 @@ def diagnose_flips(
     from rehoboam.diagnostics.flip_diagnosis import run_diagnosis
     from rehoboam.diagnostics.flip_report import format_report
 
-    console.print(format_report(run_diagnosis(learner_db, corpus_db)))
+    # soft_wrap + crop=False: Console() reports width=80 whenever stdout is
+    # redirected (is_terminal=False) -- the default TTY-shaped wrapping, and
+    # Task 6's determinism gate redirects this straight to a file, so without
+    # these the report's own tables would wrap mid-number in the delivered
+    # artifact.
+    console.print(format_report(run_diagnosis(learner_db, corpus_db)), soft_wrap=True, crop=False)
 
 
 @app.command("replay-season")

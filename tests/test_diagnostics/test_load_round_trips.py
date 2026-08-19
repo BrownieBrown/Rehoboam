@@ -33,23 +33,12 @@ _SCHEMA = """
 
 # Two rows with deliberately distinct values in every column `load_round_trips`
 # selects, so a positional mis-mapping (buy_price/sell_price swapped, dates
-# transposed, ...) fails loudly instead of coincidentally matching.
+# transposed, ...) fails loudly instead of coincidentally matching. p2 is
+# listed (and therefore inserted, and therefore assigned the lower rowid)
+# FIRST despite having the LATER buy_date, so the ordering test below can
+# only pass if `load_round_trips` actually orders by buy_date -- insertion
+# order or rowid order would return them the other way round.
 _ROWS = [
-    (
-        "p1",
-        "Player One",
-        1_000_000,
-        1_200_000,
-        200_000,
-        20.0,
-        10,
-        1_700_000_000.0,
-        1_700_864_000.0,
-        "rising",
-        35.0,
-        "Midfielder",
-        0,
-    ),
     (
         "p2",
         "Player Two",
@@ -64,6 +53,21 @@ _ROWS = [
         12.0,
         "Defender",
         1,
+    ),
+    (
+        "p1",
+        "Player One",
+        1_000_000,
+        1_200_000,
+        200_000,
+        20.0,
+        10,
+        1_700_000_000.0,
+        1_700_864_000.0,
+        "rising",
+        35.0,
+        "Midfielder",
+        0,
     ),
 ]
 
@@ -108,3 +112,11 @@ def test_every_selected_column_lands_on_the_right_field(tmp_path):
     # trip_id is the autoincrement id -- confirm it survived the mapping as an
     # int and stayed distinct per row (would collide under a broken mapping).
     assert {p1.trip_id, p2.trip_id} == {1, 2}
+
+
+def test_rows_are_ordered_by_buy_date_not_by_insertion_order(tmp_path):
+    """`load_round_trips` promises "oldest first" (see its docstring). p2 was
+    inserted first (rowid 1) but bought later, so this can only pass if the
+    ORDER BY clause -- not insertion or rowid order -- decided the result."""
+    trips = load_round_trips(_db(tmp_path))
+    assert [t.player_id for t in trips] == ["p1", "p2"]

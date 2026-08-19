@@ -69,13 +69,25 @@ buy. Then, identically:
 ```
 
 `mv_buy`, `mv(H)` and `peak_during_hold` all come from
-`training_corpus.mv_series`, taken as the snapshot nearest the target instant.
-That series, not `player_mv_history`, is the source of record here: it is
-denser (531 players against 206) and runs to 2026-07-31, which is what makes
-the 60-day horizon reachable. `player_mv_history` is used only as a
-cross-check on the 150 trips it covers, and a disagreement between the two is
-a finding to report, not a number to average away. `peak_during_hold` is the
-maximum over snapshots in the closed interval `[buy_date, sell_date]`.
+`training_corpus.mv_series`, but not by one uniform rule. **Amendment
+(task-5 review):** `mv_buy` stands for a *decision instant* — only market
+value knowable at-or-before `buy_date` may enter the branch label or the
+entry-premium baseline, so it is the most recent snapshot at or before
+`buy_date` (`TrainingCorpus.market_value_at`), never the nearest one. Taking
+the nearest snapshot leaks price action from *after* the buy into both the
+trend reconstruction and entry premium whenever the buy lands more than half
+a day before the next snapshot — which is most buys, since `mv_series` is
+daily and `buy_date` carries a real time of day. `mv(H)` and
+`peak_during_hold`, by contrast, are *measurement endpoints*: `buy_date + H`
+is an arbitrary instant that daily snapshots straddle on both sides, with no
+decision being modelled, so the nearest snapshot is the right and deliberate
+choice there (see the horizon-lookup rationale below). `training_corpus`, not
+`player_mv_history`, is the source of record for all of these: it is denser
+(531 players against 206) and runs to 2026-07-31, which is what makes the
+60-day horizon reachable. `player_mv_history` is used only as a cross-check
+on the 150 trips it covers, and a disagreement between the two is a finding
+to report, not a number to average away. `peak_during_hold` is the maximum
+over snapshots in the closed interval `[buy_date, sell_date]`.
 
 **Horizon coverage is complete, so nothing is censored.** The latest buy is
 2026-05-10 and the corpus runs to 2026-07-31, so all 151 trips have a

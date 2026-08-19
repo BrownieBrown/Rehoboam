@@ -276,18 +276,33 @@ def run_diagnosis(
     rows: list[TripRow] = []
 
     for trip in trips:
-        mv_buy = mv_nearest(corpus_db, trip.player_id, trip.buy_date)
+        # `mv_buy` stands for a DECISION instant, not a measurement endpoint:
+        # only what was knowable at-or-before `buy_date` may enter it, so this
+        # is `market_value_at` (most recent <= at), never `mv_nearest`
+        # (nearest, which can resolve to a snapshot AFTER buy_date and leak
+        # future price action into both the branch label and the entry
+        # premium baseline). `mv_nearest` stays correct for `mv_h` below and
+        # for `peak_between`, because a horizon endpoint `buy + H` is an
+        # arbitrary instant that daily snapshots straddle on both sides, not
+        # a decision this diagnosis is honouring. Do not unify the two.
+        mv_buy = corpus.market_value_at(trip.player_id, trip.buy_date)
         peak = peak_between(corpus_db, trip.player_id, trip.buy_date, trip.sell_date)
         is_floor = trip.buy_price == trip.sell_price == FLOOR_PRICE
 
         if mv_buy is None:
             # No usable market value at the buy instant: SELECTION and ENTRY
-            # PREMIUM both need it, so every horizon is censored for this row,
-            # and the branch cannot be honestly reconstructed either -- label
-            # it the same way the ladder already labels "no history to go on"
-            # rather than inventing a new bucket.
-            for h in horizons:
-                censored[h] += 1
+            # PREMIUM both need it, so every horizon is censored for this row
+            # (floor trips excepted -- see below), and the branch cannot be
+            # honestly reconstructed either -- label it the same way the
+            # ladder already labels "no history to go on" rather than
+            # inventing a new bucket.
+            if not is_floor:
+                # The EUR 500k floor group is reported separately and never
+                # mixed into the headline totals (`DiagnosisResult.scored()`
+                # already excludes it) -- so it must not be mixed into
+                # Censored either, which lives in the same headline sweep.
+                for h in horizons:
+                    censored[h] += 1
             rows.append(
                 TripRow(
                     trip=trip,
@@ -312,7 +327,8 @@ def run_diagnosis(
         for h in horizons:
             mv_h = mv_nearest(corpus_db, trip.player_id, trip.buy_date + h * SECONDS_PER_DAY)
             if mv_h is None:
-                censored[h] += 1
+                if not is_floor:
+                    censored[h] += 1
                 continue
             by_horizon[h] = decompose(trip, mv_buy=mv_buy, mv_h=mv_h)
 

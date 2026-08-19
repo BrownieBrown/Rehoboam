@@ -3,7 +3,7 @@
 Layout follows the task-5 brief's ordered content contract: population
 header, horizon sweep, headline mechanism, per-branch table (preceded by the
 label-semantics sentence verbatim), temporal split, and the floor group
-reported separately. `format_report` computes nothing new -- every number
+reported separately. `format_report` computes nothing new — every number
 comes from `flip_diagnosis`'s pure aggregation functions applied to a
 `DiagnosisResult` that `run_diagnosis` already built.
 """
@@ -23,7 +23,7 @@ from rehoboam.diagnostics.flip_diagnosis import (
     totals_by_horizon,
 )
 
-# Asserted verbatim by tests/test_diagnostics/test_flip_report.py -- do not
+# Asserted verbatim by tests/test_diagnostics/test_flip_report.py — do not
 # reword. "flip-eligible at buy time" is the only claim a branch label can
 # support; whether the flip path actually bought the player is a provenance
 # question this data cannot answer before 2026-01-03. See the design doc's
@@ -41,6 +41,10 @@ def _eur(n: int) -> str:
     return "EUR " + format(n, "+,")
 
 
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _boundary_epoch(iso_date: str) -> float:
     return datetime.strptime(iso_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
 
@@ -48,12 +52,30 @@ def _boundary_epoch(iso_date: str) -> float:
 def format_report(result: DiagnosisResult) -> str:
     """Plain text: everything `diagnose-flips` prints, in one string.
 
-    Read-only over an already-computed `DiagnosisResult` -- no DB access, and
+    Read-only over an already-computed `DiagnosisResult` — no DB access, and
     no computation beyond calling `flip_diagnosis`'s pure aggregators.
     """
+    if HEADLINE_HORIZON not in result.horizons:
+        # The headline line and the per-branch table are both anchored at
+        # HEADLINE_HORIZON (the pre-registered dominance rule names it
+        # explicitly) — a `result` swept over a horizon set that omits it has
+        # nothing for either section to show, so fail clearly here instead of
+        # a bare KeyError three sections down.
+        raise ValueError(
+            f"format_report requires HEADLINE_HORIZON={HEADLINE_HORIZON} in "
+            f"result.horizons, got {result.horizons}"
+        )
+
     scored = result.scored()
     floor_rows = [r for r in result.rows if r.is_floor_trip]
     divergent = [r for r in result.rows if r.branch == "mirror_divergence"]
+    # Distinct from an ordinary per-horizon gap: these rows have no usable
+    # market value at the buy instant AT ALL, so `run_diagnosis` censors
+    # every configured horizon for them (floor trips excepted — they are
+    # never folded into Censored; see `run_diagnosis`). Surfaced separately
+    # so a reader of the Censored column cannot mistake "gapped at this one
+    # horizon" for "this row contributed nothing anywhere".
+    no_mv_at_buy = [r for r in result.rows if r.mv_buy is None and not r.is_floor_trip]
 
     horizon_totals = totals_by_horizon(result)
     headline = horizon_totals[HEADLINE_HORIZON]
@@ -78,7 +100,7 @@ def format_report(result: DiagnosisResult) -> str:
 
     lines = [
         _DRULE,
-        "FLIP LOSS DIAGNOSIS -- REH-75",
+        "FLIP LOSS DIAGNOSIS — REH-75",
         _DRULE,
         "",
         f"{len(result.rows)} completed ROUND TRIPS (not flips — see REH-75 design §1)",
@@ -93,14 +115,14 @@ def format_report(result: DiagnosisResult) -> str:
             f"*** MIRROR DIVERGENCE: {len(divergent)} / {len(result.rows)} rows ***",
             "The branch reconstruction disagrees with the shipped ProfitTrader",
             "ladder on at least one row. This is a DEFECT in flip_branches.py,",
-            "not a market outcome -- see label_for's docstring. Every per-branch",
+            "not a market outcome — see label_for's docstring. Every per-branch",
             "number below is unreliable until this is fixed.",
             "",
         ]
     else:
         lines += [
-            "Mirror divergence: 0 rows (expected -- the branch reconstruction "
-            "agrees with the shipped ProfitTrader ladder on every row).",
+            "Mirror divergence: 0 rows (expected — the branch reconstruction "
+            "agrees with the shipped ProfitTrader ladder on every labelled row).",
             "",
         ]
 
@@ -116,7 +138,11 @@ def format_report(result: DiagnosisResult) -> str:
             f"{f'{h}d':<9}{_eur(d.selection):>18}{_eur(d.exit_timing):>18}"
             f"{_eur(d.entry_premium):>18}{_eur(d.total):>18}{result.censored[h]:>10}"
         )
-    lines.append("")
+    lines += [
+        f"Rows with no market value at buy: {len(no_mv_at_buy)} "
+        "(fully censored, unlabelled — not the floor group)",
+        "",
+    ]
 
     lines += [
         f"Headline at H={HEADLINE_HORIZON}d: dominant mechanism = {mechanism}",
@@ -132,15 +158,15 @@ def format_report(result: DiagnosisResult) -> str:
         "",
         f"Per-branch decomposition at H={HEADLINE_HORIZON}d",
         _RULE,
-        f"{'Branch':<26}{'Selection':>14}{'Exit':>14}{'Entry premium':>14}{'Total':>14}"
+        f"{'Branch':<24}{'Selection':>18}{'Exit':>18}{'Entry premium':>18}{'Total':>18}"
         f"{'Trips':>8}",
     ]
     for branch in sorted(branch_totals):
         d = branch_totals[branch]
         n = branch_counts.get(branch, 0)
         lines.append(
-            f"{branch:<26}{_eur(d.selection):>14}{_eur(d.exit_timing):>14}"
-            f"{_eur(d.entry_premium):>14}{_eur(d.total):>14}{n:>8}"
+            f"{branch:<24}{_eur(d.selection):>18}{_eur(d.exit_timing):>18}"
+            f"{_eur(d.entry_premium):>18}{_eur(d.total):>18}{n:>8}"
         )
     lines.append("")
 
@@ -148,15 +174,15 @@ def format_report(result: DiagnosisResult) -> str:
         f"Temporal split at {TEMPORAL_BOUNDARY_ISO} (boundary on buy_date, H={HEADLINE_HORIZON}d)",
         _RULE,
         f"  Before {TEMPORAL_BOUNDARY_ISO}:    {_eur(split['before'].total)}  "
-        f"({split_counts['before']} trips)",
+        f"({_plural(split_counts['before'], 'trip')})",
         f"  On/after {TEMPORAL_BOUNDARY_ISO}: {_eur(split['after'].total)}  "
-        f"({split_counts['after']} trips)",
+        f"({_plural(split_counts['after'], 'trip')})",
         "",
     ]
 
     floor_pnl = sum(r.trip.realised for r in floor_rows)
     lines += [
-        f"EUR {FLOOR_PRICE:,} floor group (reported separately -- never mixed into",
+        f"EUR {FLOOR_PRICE:,} floor group (reported separately — never mixed into",
         "the headline totals above)",
         _RULE,
         f"  Trips: {len(floor_rows)}",
