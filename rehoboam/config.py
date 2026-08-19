@@ -63,6 +63,34 @@ class Settings(BaseSettings):
         default=-15.0,
         description="Maximum loss percentage before triggering sell (relaxed — daily fluctuations of 3-10% are normal)",
     )
+    # REH-71. Both default True, which is the behaviour that shipped before
+    # these switches existed — they are a control surface, not a decision.
+    #
+    # REH-71 originally set both False, arguing that flipping is structurally
+    # unprofitable because every round trip pays an 11.7% toll. That argument
+    # was withdrawn: the 1.117x mean transaction price was measured on
+    # manager-to-manager transfers, but the bot only flips is_kickbase_seller()
+    # listings (trader.py), where price IS market value and instant sell
+    # returns 1.00x (REH-67). A Kickbase-sourced round trip has no structural
+    # toll. The league's top two managers finished 1st and 2nd on points AND on
+    # transfer profit (+EUR 130.8M and +EUR 164.7M) against our -EUR 55.3M, so
+    # our loss is a selection failure, not proof the channel cannot pay.
+    #
+    # Diagnosing that failure is REH-75; reconstructing what the winners did is
+    # REH-72. Turn either switch off from .env if the bleeding needs stopping
+    # before those land.
+    enable_flip_buys: bool = Field(
+        default=True,
+        description="Buy players for expected appreciation rather than expected points",
+    )
+    # Scope note: this switches off profit-taking and loss-cutting only. The
+    # dead-weight release inside the same phase (dumping a position-saturated
+    # bench player to free a squad slot for a points upgrade) keeps running —
+    # it serves points, not profit, and was never part of what REH-71 measured.
+    enable_profit_sells: bool = Field(
+        default=True,
+        description="Take profit / cut losses on squad players against their cost basis",
+    )
     min_buy_value_increase_pct: float = Field(
         default=10.0,
         description="Minimum market value increase to consider buying",

@@ -58,3 +58,17 @@ def test_report_states_the_gain_floor_it_used():
 
     assert "40" in report
     assert "gain" in report.lower()
+
+
+def test_the_flip_switches_preserve_the_shipped_behaviour():
+    """Both default True — the behaviour that ran before these switches existed.
+
+    They are a control surface, not a verdict. REH-71 briefly set them False on
+    the argument that flipping is structurally unprofitable; that argument was
+    withdrawn once the toll it rested on turned out to have been measured on
+    manager-to-manager transfers rather than the Kickbase listings the bot
+    actually flips (REH-76). Whether to switch either off is REH-72/REH-75 work,
+    and until then this asserts the switches change nothing by default.
+    """
+    assert Settings.model_fields["enable_flip_buys"].default is True
+    assert Settings.model_fields["enable_profit_sells"].default is True

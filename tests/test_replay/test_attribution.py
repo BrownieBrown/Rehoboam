@@ -3,8 +3,9 @@ from rehoboam.replay.attribution import (
     attribution_rows,
     format_report,
     place_in_league,
+    trading_summary,
 )
-from rehoboam.replay.engine import MatchdayOutcome, SeasonResult
+from rehoboam.replay.engine import FlipRecord, MatchdayOutcome, SeasonResult
 
 
 def _outcome(day, pts, zeroed=False, penalty=0):
@@ -71,3 +72,75 @@ def test_format_report_states_finishing_position_and_fidelity():
     )
     assert "FINISHING POSITION" in text
     assert "Bid competition" in text  # fidelity caveat must be printed
+
+
+def _result_with_flips() -> SeasonResult:
+    return SeasonResult(
+        flips=[
+            FlipRecord("a", 10_000_000, 12_000_000, 0.0, 1.0),
+            FlipRecord("b", 10_000_000, 7_000_000, 0.0, 1.0),
+        ]
+    )
+
+
+def test_trading_summary_nets_wins_against_losses():
+    assert trading_summary(_result_with_flips()) == (-1_000_000, 2, 1)
+
+
+def test_the_report_keeps_cash_out_of_the_points_attribution():
+    """Euros minus points is a category error. The Trading block must say so on
+    its face, so no reader ever adds it to the attribution table."""
+    report = format_report(
+        _result_with_flips(),
+        actual_total=0,
+        actual_per_matchday={},
+        standings=[],
+        min_ep_gain=40.0,
+        with_flips=True,
+    )
+
+    assert "does not enter the points attribution" in report
+
+
+def test_the_report_prints_the_real_season_for_comparison():
+    """A replay P&L with nothing to compare it against is uninterpretable."""
+    report = format_report(
+        _result_with_flips(),
+        actual_total=0,
+        actual_per_matchday={},
+        standings=[],
+        min_ep_gain=40.0,
+        with_flips=True,
+    )
+
+    assert "55,256,064" in report
+    assert "151" in report
+
+
+def test_a_flip_buy_only_run_labels_its_zero_as_structural():
+    """With profit selling off the ledger can never be written, so `EUR +0 /
+    0 trips` is unmeasurable, not "flipping was free" (REH-71 fix round 2, M1).
+    """
+    report = format_report(
+        SeasonResult(),
+        actual_total=0,
+        actual_per_matchday={},
+        standings=[],
+        min_ep_gain=40.0,
+        with_flip_buys=True,
+    )
+
+    assert "STRUCTURAL" in report
+
+
+def test_a_run_that_can_close_round_trips_carries_no_structural_note():
+    report = format_report(
+        _result_with_flips(),
+        actual_total=0,
+        actual_per_matchday={},
+        standings=[],
+        min_ep_gain=40.0,
+        with_flips=True,
+    )
+
+    assert "STRUCTURAL" not in report

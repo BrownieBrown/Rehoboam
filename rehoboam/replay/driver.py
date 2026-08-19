@@ -186,6 +186,7 @@ def run_replay(
     buy_quota: dict[int, int] | None = None,
     with_competition: bool = False,
     with_flips: bool = False,
+    with_flip_buys: bool = False,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -220,6 +221,19 @@ def run_replay(
 
     gain_floor = shipped_min_ep_gain() if min_ep_gain is None else min_ep_gain
 
+    flip_buy_fn = None
+    if with_flip_buys:
+        from rehoboam.replay.flip_buys import make_flip_buy_fn
+
+        flip_buy_fn = make_flip_buy_fn(
+            corpus,
+            season=SEASON,
+            # The SAME resolver the scorer uses, so the flip path and the EP
+            # path cannot disagree about which matchday is being predicted.
+            day_fn=lambda at: day_for_kickoff(kickoffs, at),
+            position_fn=position_fn,
+        )
+
     result = run_season(
         state=state,
         market=market,
@@ -241,6 +255,11 @@ def run_replay(
         # re-tune must not leave the harness describing a bot nobody deployed.
         profit_take_pct=_shipped_default("min_sell_profit_pct") if with_flips else None,
         loss_cut_pct=_shipped_default("max_loss_pct") if with_flips else None,
+        flip_buy_fn=flip_buy_fn,
+        # Wired unconditionally: this guards how the bot trades, not which
+        # experiment arm is running. `_flip_buys` is the only consumer, so it
+        # is a no-op whenever flip_buy_fn is None (REH-71 review of REH-66/68).
+        wash_trade_block_seconds=_shipped_default("wash_trade_block_hours") * 3600.0,
     )
 
     with sqlite3.connect(learning_db_path) as conn:
@@ -261,6 +280,7 @@ def run_replay(
         min_ep_gain=gain_floor,
         with_competition=with_competition,
         with_flips=with_flips,
+        with_flip_buys=with_flip_buys,
     )
     return result, report
 
@@ -323,6 +343,38 @@ def run_buy_control(*, corpus_path: Path, learning_db_path: Path) -> str:
         "=" * 68,
     ]
     return "\n".join(lines)
+
+
+def run_flip_policy(*, corpus_path: Path, learning_db_path: Path) -> str:
+    """REH-71: the 2x2 over flip buys x profit sells.
+
+    Every arm runs with bid competition on, because the whole question is what
+    flipping is worth when rivals contest the same listings. Nothing else varies
+    between arms.
+    """
+    from rehoboam.replay.attribution import format_flip_policy
+
+    arms = {}
+    for key, flip_buys, profit_sells in (
+        ("A", False, False),
+        ("B", False, True),
+        ("C", True, False),
+        ("D", True, True),
+    ):
+        arms[key], _report = run_replay(
+            corpus_path=corpus_path,
+            learning_db_path=learning_db_path,
+            with_competition=True,
+            with_flips=profit_sells,
+            with_flip_buys=flip_buys,
+        )
+
+    with sqlite3.connect(learning_db_path) as conn:
+        actual_total = conn.execute(
+            "SELECT MAX(total_points) FROM league_rank_history WHERE is_self = 1"
+        ).fetchone()[0]
+
+    return format_flip_policy(arms, actual_total=int(actual_total or 0))
 
 
 def make_ep_bid_fn(

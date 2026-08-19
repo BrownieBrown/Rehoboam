@@ -58,11 +58,43 @@ class MatchdayOutcome:
     sells: int
 
 
+@dataclass(frozen=True)
+class FlipRecord:
+    """One completed round trip: a player the replay bought and later sold.
+
+    NARROWER THAN THE LIVE DEFINITION, AND OPTIMISTIC (REH-71 review). Records
+    are appended in exactly one place — ``_flip_sells`` — so a round trip
+    counts here only when the *profit-taking* pass is what closed it. The live
+    counterpart, ``LearningTracker.record_flip_outcome``, fires on every instant
+    sell of a tracked purchase, forced and make-room exits included (see
+    ``services/execution.py:instant_sell``).
+
+    So a replay player liquidated by ``_restore_budget`` or sold to make room
+    for an EP buy never enters this ledger at all: arm D of the 2x2 shows 35
+    buys and 32 sells against only 23 recorded round trips. The excluded exits
+    are precisely the forced ones — sales made under solvency pressure or to
+    fund a better player — which skew loss-making, so omitting them flatters
+    the replay's P&L.
+
+    The reported cash figure is therefore NOT like-for-like with the real 151
+    round trips printed beside it. It is a lower bound on flip harm, not a
+    measurement of it. Left as measured on purpose: REH-71's numbers were
+    recorded once and are not to be re-cut after the fact.
+    """
+
+    player_id: str
+    buy_price: int
+    proceeds: int
+    bought_at: float | None
+    sold_at: float
+
+
 @dataclass
 class SeasonResult:
     outcomes: list[MatchdayOutcome] = field(default_factory=list)
     total_points: int = 0
     final_budget: int = 0
+    flips: list[FlipRecord] = field(default_factory=list)
 
 
 def _team_value(state: ReplayState, mv_fn: Callable[[str, float], int | None], at: float) -> int:
@@ -148,7 +180,7 @@ def _restore_budget(
             # Nothing can be sold without breaking the eleven, but a zero is
             # worse than the penalty — sell the cheapest player regardless.
             victim = min(state.player_ids, key=lambda p: scores.get(p, 0.0))
-        state.sell(victim, _proceeds(victim, mv_fn, at))
+        state.sell(victim, _proceeds(victim, mv_fn, at), at=at)
         scores.pop(victim, None)
         sells += 1
     return sells
@@ -162,6 +194,7 @@ def _flip_sells(
     *,
     profit_take_pct: float | None,
     loss_cut_pct: float | None,
+    ledger: list[FlipRecord],
 ) -> int:
     """Take profit and cut losses on squad players; returns sells (REH-68).
 
@@ -182,6 +215,20 @@ def _flip_sells(
     worse, since re-entry pays a measured 1.117x market value.
 
     Players with no cost basis are skipped rather than assumed free.
+
+    Every sale here also gets a shot at ``ledger``: a completed round trip is
+    recorded, but only for players whose ``acquired == "bought"``. The opening
+    squad was *assigned*, not bought (REH-68), so counting its disposals would
+    inflate the round-trip count and make ``ledger`` incomparable to the real
+    151 round trips it exists to be compared against (REH-71).
+
+    THIS IS ALSO THE ONLY PLACE THE LEDGER IS WRITTEN, which makes the replay's
+    round-trip definition narrower than the live one and its cash figure
+    optimistic. Sales by ``_restore_budget`` and by the EP make-room path are
+    invisible to it, while ``LearningTracker.record_flip_outcome`` counts them.
+    See ``FlipRecord`` for the full statement of the gap; it is documented
+    rather than closed, because closing it would change numbers that were
+    recorded once by design.
     """
     if profit_take_pct is None and loss_cut_pct is None:
         return 0
@@ -206,10 +253,109 @@ def _flip_sells(
         remaining = {k: v for k, v in state.squad.items() if k != pid}
         if not can_field_eleven(ReplayState(budget=state.budget, squad=remaining)):
             continue
-        state.sell(pid, _proceeds(pid, mv_fn, at))
+        if player.acquired == "bought":
+            ledger.append(
+                FlipRecord(
+                    player_id=pid,
+                    buy_price=int(player.buy_price),
+                    proceeds=_proceeds(pid, mv_fn, at),
+                    bought_at=player.bought_at,
+                    sold_at=at,
+                )
+            )
+        state.sell(pid, _proceeds(pid, mv_fn, at), at=at)
         scores.pop(pid, None)
         sells += 1
     return sells
+
+
+def _flip_buys(
+    state: ReplayState,
+    scores: dict[str, float],
+    listings: list,
+    at: float,
+    *,
+    flip_buy_fn: Callable[[list, float, int, int], list],
+    score_fn: Callable[[str, float], float],
+    mv_fn: Callable[[str, float], int | None],
+    position_fn: Callable[[str], str | None],
+    team_fn: Callable[[str], str | None],
+    with_competition: bool,
+    wash_trade_block_seconds: float | None = None,
+) -> int:
+    """Buy for expected appreciation with the slots the EP pass left (REH-71).
+
+    Mirrors the live ordering: EP candidates execute first and flips take
+    "remaining slots" (auto_trader.py:533). A flip never displaces a squad
+    member, so this stops at MAX_SQUAD_SIZE rather than calling
+    ``_fieldable_sale_victim``.
+
+    Candidates carry their own ``max_bid`` from ``flip_buys.flip_bid_ceiling``
+    rather than going through ``bid_fn``: a flip's marginal EP gain is ~0 by
+    construction, so the EP bidder would put every flip in its bottom tier and
+    lose every contested listing, reporting a bidder artifact as a fact about
+    flipping.
+    """
+    from rehoboam.scoring.decision import _would_create_dead_weight
+
+    by_id = {listing.player_id: listing for listing in listings}
+    team_value = _team_value(state, mv_fn, at)
+    buys = 0
+
+    for candidate in flip_buy_fn(listings, at, state.budget, team_value):
+        if state.squad_size >= MAX_SQUAD_SIZE:
+            break
+        pid = candidate.player_id
+        listing = by_id.get(pid)
+        position = position_fn(pid)
+        if listing is None or not position or pid in state.squad:
+            continue
+
+        # Live wash-trade guard (auto_trader.py:374, applying
+        # Settings.wash_trade_block_hours, default 168h/7d): refuse to re-buy a
+        # player sold within the block window. Applied here only, not in the EP
+        # loop above -- the EP loop already gates on gain >= min_ep_gain, so
+        # re-buying a just-sold player there requires them to be a large
+        # upgrade, whereas the flip pass has no such gate and is where a
+        # same-matchday wash trade actually appeared (REH-71). Extending the
+        # guard to the EP loop would also change that experiment's baseline
+        # arms, which is not this task's call to make.
+        if wash_trade_block_seconds is not None:
+            sold = state.sold_at.get(pid)
+            if sold is not None and at - sold < wash_trade_block_seconds:
+                continue
+
+        # Under competition we must outbid what the real buyer paid, and we then
+        # pay our own bid. Without it the listing is ours at its asking price --
+        # but never above the ceiling, which is an economic limit either way.
+        if with_competition:
+            if candidate.max_bid <= listing.price:
+                continue
+            cost = int(candidate.max_bid)
+        else:
+            if listing.price > candidate.max_bid:
+                continue
+            cost = int(listing.price)
+
+        player = ReplayPlayer(id=pid, position=position, team_id=team_fn(pid))
+        # Deliberate duck typing, sanctioned by the REH-71 plan: the shipped
+        # guard is annotated against `MarketPlayer` but reads only `.position`,
+        # which `ReplayPlayer` has. Calling the real rule beats reimplementing
+        # it; the alternative -- widening the shipped signature to a Protocol --
+        # is a refactor of live scoring code that this replay-only change has no
+        # business making. Scoped to this call, not silenced module-wide.
+        if _would_create_dead_weight(player, state.players):  # type: ignore[arg-type]
+            continue
+        allowed, _reason = can_buy(state, player, cost, team_value=team_value)
+        if not allowed or not _solvent_after(state, cost):
+            continue
+
+        state.buy(player, cost, at=at)
+        scores[pid] = score_fn(pid, at)
+        team_value = _team_value(state, mv_fn, at)
+        buys += 1
+
+    return buys
 
 
 def shipped_min_ep_gain() -> float:
@@ -265,6 +411,16 @@ def run_season(
     # sells only to make room or to restore solvency.
     profit_take_pct: float | None = None,
     loss_cut_pct: float | None = None,
+    # REH-71 flip buys. Given (listings, at, budget, team_value), returns
+    # candidates carrying their own economic max_bid. None keeps the shipped
+    # behaviour, in which every buy is justified by marginal expected points.
+    flip_buy_fn: Callable[[list, float, int, int], list] | None = None,
+    # REH-71 wash-trade guard, ported from the live bot's
+    # `AutoTrader._is_wash_trade` (auto_trader.py:667) and
+    # `Settings.wash_trade_block_hours` (config.py, default 168h/7d). Applied
+    # to flip candidates only (see `_flip_buys`). None keeps the shipped
+    # replay behaviour, in which nothing blocks a re-buy.
+    wash_trade_block_seconds: float | None = None,
 ) -> SeasonResult:
     """Replay every matchday in order, mutating ``state`` as the bot would."""
     result = SeasonResult()
@@ -282,6 +438,7 @@ def run_season(
             decide_at,
             profit_take_pct=profit_take_pct,
             loss_cut_pct=loss_cut_pct,
+            ledger=result.flips,
         )
         rank_fn = buy_rank_fn or score_fn
         quota = None if buy_quota is None else buy_quota.get(md.day_number, 0)
@@ -345,7 +502,7 @@ def run_season(
                 # candidate never costs us a player we then cannot replace.
                 if not _solvent_after(state, cost, sale_proceeds):
                     continue
-                state.sell(sold_id, sale_proceeds)
+                state.sell(sold_id, sale_proceeds, at=decide_at)
                 scores.pop(sold_id, None)
                 sells += 1
                 # The credit floor is 70% of *current* team value, so it has to
@@ -364,6 +521,21 @@ def run_season(
             state.buy(candidate, cost, at=decide_at)
             scores[candidate.id] = cand_ep
             buys += 1
+
+        if flip_buy_fn is not None:
+            buys += _flip_buys(
+                state,
+                scores,
+                listings,
+                decide_at,
+                flip_buy_fn=flip_buy_fn,
+                score_fn=score_fn,
+                mv_fn=mv_fn,
+                position_fn=position_fn,
+                team_fn=team_fn,
+                with_competition=bid_fn is not None,
+                wash_trade_block_seconds=wash_trade_block_seconds,
+            )
 
         # Budget must be non-negative at kickoff or the matchday scores zero.
         sells += _restore_budget(state, scores, mv_fn, decide_at)

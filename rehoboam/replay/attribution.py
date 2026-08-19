@@ -14,7 +14,7 @@ FIDELITY_NOTES = [
     ("Points scoring", "exact", "real per-match points from the corpus"),
     ("Penalty avoidance", "exact", "deterministic"),
     ("Lineup selection", "high", "real squad, real formation rules"),
-    ("Sell decisions", "medium", "instant sell at MV; profit flips NOT modelled"),
+    ("Sell decisions", "medium", "instant sell at MV; profit flips per --with-flips"),
     ("Buy prices", "high", "real transaction prices"),
     ("Buy availability", "medium", "only players who actually traded are visible"),
     ("Bid competition", "see footer", "absent unless --with-competition"),
@@ -32,6 +32,32 @@ def place_in_league(simulated_total: int, standings: list[LeagueStanding]) -> in
     """1-indexed finishing position. Ties do not overtake the real manager."""
     ahead = sum(1 for s in standings if s.total_points >= simulated_total)
     return ahead + 1
+
+
+# The real 2025/26 season, for comparison. Without a reference the replay's own
+# P&L is uninterpretable.
+REAL_FLIP_PNL = -55_256_064
+REAL_FLIP_TRIPS = 151
+REAL_FLIP_WIN_RATE = 27.8
+
+
+def trading_summary(result: SeasonResult) -> tuple[int, int, int]:
+    """``(realised_pnl, round_trips, wins)`` over completed round trips."""
+    pnl = sum(f.proceeds - f.buy_price for f in result.flips)
+    wins = sum(1 for f in result.flips if f.proceeds > f.buy_price)
+    return pnl, len(result.flips), wins
+
+
+# Printed whenever a Trading block appears with profit selling switched off.
+# The ledger is only ever appended to by `_flip_sells`, which returns
+# immediately when both thresholds are None, so such a run CANNOT close a round
+# trip no matter how much it bought. Without this note "EUR +0 / 0 trips /
+# 0.0%" reads as "flipping cost nothing here", which is the opposite of what a
+# structural zero means.
+STRUCTURAL_ZERO_NOTE = [
+    "  NOTE: profit selling is OFF in this run, so no round trip can close and",
+    "  the zero above is STRUCTURAL - not evidence that flipping was free.",
+]
 
 
 def attribution_rows(
@@ -67,6 +93,7 @@ def format_report(
     min_ep_gain: float,
     with_competition: bool = False,
     with_flips: bool = False,
+    with_flip_buys: bool = False,
 ) -> str:
     """Human-readable replay report with fidelity caveats attached.
 
@@ -100,6 +127,22 @@ def format_report(
         f"  {'Marginal EP gain floor':<34}{min_ep_gain:>9,.1f}   real points, "
         "buys below this are skipped"
     )
+
+    if with_flips or with_flip_buys:
+        pnl, trips, wins = trading_summary(result)
+        rate = (100.0 * wins / trips) if trips else 0.0
+        lines += [
+            "",
+            "Trading (cash - does not enter the points attribution above)",
+            "-" * 68,
+            f"  {'Realised flip P&L':<34}{'EUR ' + format(pnl, '+,'):>21}",
+            f"  {'Round trips completed':<34}{trips:>21,}",
+            f"  {'Win rate':<34}{rate:>20.1f}%   ({wins} of {trips})",
+            f"  {'Real 2025/26, for comparison':<34}" f"{'EUR ' + format(REAL_FLIP_PNL, '+,'):>21}",
+            f"  {'':<34}{REAL_FLIP_TRIPS:>21,} trips, {REAL_FLIP_WIN_RATE}%",
+        ]
+        if not with_flips:
+            lines += STRUCTURAL_ZERO_NOTE
 
     lines += ["", "Fidelity", "-" * 68]
     for component, level, basis in FIDELITY_NOTES:
@@ -135,9 +178,111 @@ def format_report(
             "Profit flipping is NOT modelled: the bot sells only to make room or",
             "to restore solvency, while the live bot also trades for gain.",
         ]
-    if not (with_competition and with_flips):
+    if with_flip_buys:
+        lines += [
+            "Flip BUYING is modelled: candidates come from the real ProfitTrader,",
+            "bid at an economic ceiling rather than by marginal EP gain.",
+        ]
+    else:
+        lines += [
+            "Flip BUYING is NOT modelled: every buy here is justified by expected",
+            "points, while the live bot also buys purely for appreciation.",
+        ]
+    if not (with_competition and with_flips and with_flip_buys):
         lines += ["INCOMPLETE - diagnostic only, not a season result."]
     lines += [
         "=" * 68,
     ]
+    return "\n".join(lines)
+
+
+# REH-68 measured a single faithfulness decision moving the season total by this
+# much. Any flip delta smaller than it is modelling noise, not a finding. Fixed
+# BEFORE the runs so the result cannot be rationalised after it is seen.
+NOISE_FLOOR_POINTS = 6_162
+
+ARM_LABELS = {
+    "A": "flip buys off, profit sells off",
+    "B": "flip buys off, profit sells ON",
+    "C": "flip buys ON,  profit sells off",
+    "D": "flip buys ON,  profit sells ON",
+}
+
+# Which arms have the sell side enabled — the arms in which a round trip is
+# even capable of closing. Kept beside ARM_LABELS so the two cannot drift.
+ARM_PROFIT_SELLS = {"A": False, "B": True, "C": False, "D": True}
+
+
+def format_flip_policy(arms: dict, *, actual_total: int) -> str:
+    """The 2x2, its main effects, and the pre-committed decision rule."""
+    points = {key: arms[key].total_points for key in ("A", "B", "C", "D")}
+    buy_effect = (points["C"] + points["D"]) / 2 - (points["A"] + points["B"]) / 2
+    sell_effect = (points["B"] + points["D"]) / 2 - (points["A"] + points["C"]) / 2
+    interaction = (points["D"] - points["C"]) - (points["B"] - points["A"])
+
+    lines = [
+        "=" * 68,
+        "FLIP POLICY 2x2 - REH-71",
+        "=" * 68,
+        "",
+        f"Human actual: {actual_total:>8,}",
+        "",
+    ]
+    for key in ("A", "B", "C", "D"):
+        delta = points[key] - actual_total
+        lines.append(f"  {key}  {ARM_LABELS[key]:<34}{points[key]:>9,}  ({delta:+,})")
+
+    lines += [
+        "",
+        "Main effects (points)",
+        "-" * 68,
+        f"  {'Flip buying':<34}{buy_effect:>+9,.0f}",
+        f"  {'Profit selling':<34}{sell_effect:>+9,.0f}",
+        f"  {'Interaction':<34}{interaction:>+9,.0f}",
+        "",
+    ]
+
+    # Per-arm cash, printed HERE rather than left to a separate `replay-season`
+    # run per arm (design doc S3: "The Trading block appears in both"). The
+    # decision rule below routes an inconclusive points result to the cash
+    # evidence, so a report that shows no cash sends the reader looking for
+    # numbers this command already holds.
+    lines += [
+        "Trading (cash - does not enter the points above)",
+        "-" * 68,
+        f"  {'Arm':<4}{'Realised flip P&L':>20}{'Round trips':>13}{'Win rate':>11}",
+    ]
+    for key in ("A", "B", "C", "D"):
+        pnl, trips, wins = trading_summary(arms[key])
+        rate = (100.0 * wins / trips) if trips else 0.0
+        note = "" if ARM_PROFIT_SELLS[key] else "  structural zero"
+        lines.append(f"  {key:<4}{'EUR ' + format(pnl, '+,'):>20}{trips:>13,}{rate:>10.1f}%{note}")
+    lines += [
+        f"  {'real':<4}{'EUR ' + format(REAL_FLIP_PNL, '+,'):>20}"
+        f"{REAL_FLIP_TRIPS:>13,}{REAL_FLIP_WIN_RATE:>10.1f}%",
+        "",
+        "'structural zero' marks an arm with profit selling OFF: the ledger is",
+        "only written when a position is sold back, so no round trip can close",
+        "there however much the arm bought. Read it as unmeasurable, not free.",
+        "",
+        f"Noise floor (REH-68): {NOISE_FLOOR_POINTS:,} points",
+        "",
+    ]
+
+    effects = (abs(buy_effect), abs(sell_effect), abs(interaction))
+    if max(effects) < NOISE_FLOOR_POINTS:
+        lines += [
+            "INCONCLUSIVE on points - every effect is inside the noise floor.",
+            "Per the pre-committed rule, the decision falls to the cash evidence:",
+            f"real flipping lost EUR {abs(REAL_FLIP_PNL):,} at a "
+            f"{REAL_FLIP_WIN_RATE}% win rate over {REAL_FLIP_TRIPS} round trips,",
+            "and every round trip pays a measured 11.7% toll. Both switches",
+            "default OFF, decided on cash rather than on points.",
+        ]
+    else:
+        lines += [
+            "An effect clears the noise floor. Adopt that arm's verdict for its",
+            "own switch; the other switch follows the same rule independently.",
+        ]
+    lines += ["", "A labelled control, not the counterfactual season result.", "=" * 68]
     return "\n".join(lines)

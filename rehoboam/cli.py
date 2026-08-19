@@ -705,6 +705,15 @@ def replay_season(
             "lands, so treat the output as a diagnostic, not a season result."
         ),
     ),
+    with_flip_buys: bool = typer.Option(
+        False,
+        "--with-flip-buys",
+        help=(
+            "Model profit-flip BUYING (REH-71): candidates from the real "
+            "ProfitTrader, bid at an economic ceiling. The live bot does this; "
+            "--with-flips alone only models the selling half."
+        ),
+    ),
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
@@ -722,6 +731,7 @@ def replay_season(
         min_ep_gain=min_ep_gain,
         with_competition=with_competition,
         with_flips=with_flips,
+        with_flip_buys=with_flip_buys,
     )
     console.print(report)
 
@@ -746,6 +756,28 @@ def replay_buy_control(
         raise typer.Exit(1)
 
     console.print(run_buy_control(corpus_path=corpus, learning_db_path=learning_db))
+
+
+@app.command("replay-flip-policy")
+def replay_flip_policy(
+    corpus: Path = typer.Option(  # noqa: B008
+        Path("logs/training_corpus.db"), help="Path to the training corpus DB"
+    ),
+    learning_db: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"), help="Path to the learning DB with real standings"
+    ),
+) -> None:
+    """REH-71: 2x2 over flip buys x profit sells, with competition on."""
+    from rehoboam.replay.driver import run_flip_policy
+
+    if not corpus.exists():
+        console.print(f"[red]Corpus not found: {corpus}[/red]")
+        raise typer.Exit(1)
+    if not learning_db.exists():
+        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
+        raise typer.Exit(1)
+
+    console.print(run_flip_policy(corpus_path=corpus, learning_db_path=learning_db))
 
 
 @app.command("fit-scorer")
