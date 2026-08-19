@@ -122,7 +122,15 @@ def _solvent_after(state: ReplayState, price: int, proceeds: int = 0) -> bool:
     nothing was left. The round-trip cost is the buy-side premium alone — a
     measured mean transaction price of 1.117x market value against an instant
     sell that returns the full market value, so ~11.7%, not the ~15% claimed
-    while ``INSTANT_SELL_PCT`` was wrongly 0.95 (see REH-67). ``can_buy``'s
+    while ``INSTANT_SELL_PCT`` was wrongly 0.95 (see REH-67).
+
+    KEEP THE 1.117x HERE (REH-76). That mean was measured on ``transfer_type = 2``
+    rows — manager-to-manager auctions — and this gate is about exactly those:
+    contested purchases the engine wins by outbidding a rival. REH-76 corrected
+    the figure everywhere it was wrongly generalised to Kickbase-sourced flips,
+    where price IS market value by construction. This site is not one of those,
+    and narrowing it to match them would understate the real cost of a
+    contested buy. ``can_buy``'s
     credit-line check stays as the standing legality rule; this is an
     additional decision-time one.
     """
@@ -212,7 +220,10 @@ def _flip_sells(
     ("Non-displaced best-11 starters are protected and cannot be sold",
     decision.py). Without that, the replay banks a 15% gain by selling the very
     player it needs on Saturday — converting points into cash it then spends
-    worse, since re-entry pays a measured 1.117x market value.
+    worse. Re-entry through a contested auction pays a measured 1.117x market
+    value (``transfer_type = 2`` rows); re-entry through a Kickbase listing pays
+    market value exactly, so the loss there is the forgone points and the spread
+    on whatever the cash buys instead, not a fixed premium (REH-76).
 
     Players with no cost basis are skipped rather than assumed free.
 

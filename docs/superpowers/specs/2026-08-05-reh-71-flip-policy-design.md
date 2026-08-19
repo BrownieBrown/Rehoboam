@@ -2,7 +2,33 @@
 
 Ticket: https://linear.app/jovily/issue/REH-71
 Date: 2026-08-05
-Status: design approved, not yet implemented
+Status: implemented; **one premise corrected 2026-08-19 — read the correction
+below before using anything in this document.**
+
+## Correction (2026-08-19, REH-76)
+
+This design's cash branch rests on "every round trip pays a measured 11.7%
+toll" — a mean transaction price of 1.117× market value against an instant
+sell returning 1.00×. **The 1.117× is real but was measured on the wrong
+channel.** It came from `transfer_type = 2` rows: manager-to-manager
+auctions. The live flip path buys only `is_kickbase_seller()` listings
+(`trader.py:685`), where price **is** market value by construction and
+`ProfitTrader` branches on that equality (`profit_trader.py:121`). A
+Kickbase-sourced round trip carries no structural toll, so the argument never
+touched the channel it was used to condemn. The verdict it produced was
+withdrawn on 2026-08-07 and both switches ship `True`.
+
+What *is* measured, by REH-75 across 136 scored round trips: we paid a **12.2%
+premium over market value at entry** (ratio 1.1217), invariant across every
+horizon. That is a property of what we bid, not a fee the channel charges —
+and note it exceeds the 0–11.7% bracket this document assumed the true
+flip-channel premium had to lie within.
+
+The measurement protocol, the 2×2 arm totals and the effects below all stand.
+Only this premise, and the conclusion drawn from it, do not. The body is left
+as written so the record of what was believed on 2026-08-05 stays legible.
+
+______________________________________________________________________
 
 ## Problem
 
