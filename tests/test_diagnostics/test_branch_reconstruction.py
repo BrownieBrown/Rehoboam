@@ -17,10 +17,11 @@ import pytest
 
 from rehoboam.diagnostics.flip_branches import (
     ELIGIBLE_BRANCHES,
-    label_for,
-    profit_trader_accepts,
     reconstruct_branch,
+    shipped_opportunity,
 )
+
+MARKET_VALUE = 1_000_000
 
 
 def _trend(**kw) -> dict:
@@ -66,23 +67,43 @@ def _trend(**kw) -> dict:
     ],
 )
 def test_each_ladder_rung_is_named(trend, average_points, expected_branch):
-    branch, _ = reconstruct_branch(trend, average_points)
+    branch, _ = reconstruct_branch(trend, average_points, market_value=MARKET_VALUE)
     assert branch == expected_branch
 
 
 def test_the_ladder_is_ordered_points_gate_before_pattern():
     """A player under the points floor is rejected for THAT reason even when a
     pattern would otherwise fire -- the order is what makes the label causal."""
-    branch, _ = reconstruct_branch(_trend(trend="rising", trend_pct=12.0), 5.0)
+    branch, _ = reconstruct_branch(
+        _trend(trend="rising", trend_pct=12.0), 5.0, market_value=MARKET_VALUE
+    )
     assert branch == "low_points"
 
 
 def test_expected_appreciation_below_the_profit_floor_is_a_rejection():
     """`ProfitTrader` drops candidates whose expected appreciation is under
     `min_profit_pct`, so an eligible-looking pattern can still be rejected."""
-    branch, appreciation = reconstruct_branch(_trend(trend="stable"), 45.0, min_profit_pct=20.0)
+    branch, appreciation = reconstruct_branch(
+        _trend(trend="stable"), 45.0, market_value=MARKET_VALUE, min_profit_pct=20.0
+    )
     assert appreciation == 8.0
     assert branch == "below_min_profit"
+
+
+def test_current_value_defaults_to_market_value_not_zero():
+    """A trend dict without `current_value` must default to `market_value`,
+    matching `profit_trader.py:114` -- defaulting to 0 instead fabricates a
+    -100% below-peak reading and wrongly fires `falling_mean_reversion` for
+    what is actually a shallow (0%) dip."""
+    trend = {
+        "has_data": True,
+        "trend": "falling",
+        "trend_pct": -5,
+        "peak_value": 1_000_000,
+    }
+    branch, _ = reconstruct_branch(trend, 45.0, market_value=1_000_000)
+    assert branch == "shallow_dip"
+    assert shipped_opportunity(trend, 45.0, 1_000_000) is None
 
 
 @pytest.mark.parametrize(
@@ -97,25 +118,46 @@ def test_expected_appreciation_below_the_profit_floor_is_a_rejection():
         (_trend(has_data=False), 45.0),
     ],
 )
-def test_the_label_never_disagrees_with_the_shipped_verdict(trend, average_points):
-    """The reconciliation gate. `label_for` reports an eligible branch if and
-    only if the shipped `ProfitTrader` accepted the candidate -- when the
-    ladder accepts but the post-ladder risk filter rejects, the label is
-    `too_risky`, which is NOT an eligible branch. Eligibility is always the
-    shipped verdict; the mirror only names the rung."""
-    label = label_for(trend, average_points, market_value=1_000_000)
-    assert (label in ELIGIBLE_BRANCHES) == profit_trader_accepts(
-        trend, average_points, market_value=1_000_000
-    )
+def test_the_mirror_never_diverges_from_the_shipped_ladder(trend, average_points):
+    """The reconciliation gate, asserted directly against `reconstruct_branch`
+    and `shipped_opportunity` -- NOT through `label_for`, whose own use of
+    `profit_trader_accepts` would make the assertion true by construction.
+
+    Eligible: the shipped trader must also accept, AND at the SAME expected
+    appreciation -- the values (20/12/10/8/15) fingerprint the rung, so this
+    pins rung identity, not merely eligibility. Rejected: the shipped trader
+    must also reject."""
+    branch, appreciation = reconstruct_branch(trend, average_points, market_value=MARKET_VALUE)
+    shipped = shipped_opportunity(trend, average_points, MARKET_VALUE)
+    if branch in ELIGIBLE_BRANCHES:
+        assert shipped is not None, f"mirror accepted via {branch}, shipped ProfitTrader rejected"
+        assert appreciation == shipped.expected_appreciation
+    else:
+        assert shipped is None, f"mirror rejected as {branch}, shipped ProfitTrader accepted"
 
 
 def test_a_ladder_accepted_candidate_rejected_on_risk_is_labelled_too_risky(
     monkeypatch,
 ):
-    """The risk filter is a rejection cause the ladder cannot see. Without its
-    own label it would masquerade as an eligible branch in the per-branch
-    table, overstating how much money each rung actually sourced."""
+    """A genuine risk-filter rejection: the shipped trader rejects at the live
+    risk threshold but accepts once risk is disabled -- exactly what
+    distinguishes a real risk rejection from a mirror/ladder disagreement."""
+    import rehoboam.diagnostics.flip_branches as fb
+
+    def fake_accepts(trend, average_points, market_value, *, max_risk_score=fb.FLIP_MAX_RISK_SCORE):
+        return max_risk_score == fb.RISK_DISABLED
+
+    monkeypatch.setattr(fb, "profit_trader_accepts", fake_accepts)
+    assert fb.label_for(_trend(trend="rising", trend_pct=12.0), 45.0, 1_000_000) == "too_risky"
+
+
+def test_a_ladder_shipped_disagreement_is_labelled_mirror_divergence(monkeypatch):
+    """When the shipped trader rejects even with risk disabled, the rejection
+    was never about risk -- the mirror and the shipped ladder have diverged.
+    That is a defect signal, never `too_risky`, and never a market outcome."""
     import rehoboam.diagnostics.flip_branches as fb
 
     monkeypatch.setattr(fb, "profit_trader_accepts", lambda *a, **kw: False)
-    assert fb.label_for(_trend(trend="rising", trend_pct=12.0), 45.0, 1_000_000) == "too_risky"
+    assert (
+        fb.label_for(_trend(trend="rising", trend_pct=12.0), 45.0, 1_000_000) == "mirror_divergence"
+    )

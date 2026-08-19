@@ -30,6 +30,7 @@ BRANCHES = (
     "below_min_profit",
     "no_trend_data",
     "too_risky",
+    "mirror_divergence",
 )
 
 ELIGIBLE_BRANCHES = frozenset(
@@ -38,24 +39,40 @@ ELIGIBLE_BRANCHES = frozenset(
 
 MIN_AVG_POINTS = 20.0
 
+# `_calculate_risk`'s scale, with its filter effectively switched off (its max
+# attainable value is 100, so nothing can ever exceed this). Used to tell a
+# genuine risk-filter rejection apart from a mirror/shipped-ladder
+# disagreement -- see `label_for`.
+RISK_DISABLED = 100.0
+
 
 def reconstruct_branch(
     trend: dict,
     average_points: float,
     *,
+    market_value: int,
     min_profit_pct: float = FLIP_MIN_PROFIT_PCT,
 ) -> tuple[str, float]:
     """Name the rung that decides this candidate, and its expected appreciation.
 
     Rung order is the shipped order; it is what makes the label causal rather
-    than merely descriptive.
+    than merely descriptive. `market_value` is required (not merely accepted)
+    because `current_value` falls back to it -- `profit_trader.py:114` -- and
+    a wrong fallback fabricates a bogus below-peak reading (see the
+    `current_value` regression test).
+
+    NOT modelled here: the pre-ladder skips the shipped code applies before
+    reaching this logic at all -- `player.status != 0` and the affordability
+    gate (`profit_trader.py:93-101`). Defensible for buys that actually
+    executed (they must have passed both to exist), but this function alone
+    cannot see either one.
     """
     if not trend.get("has_data", False):
         return "no_trend_data", 0.0
 
     trend_direction = trend.get("trend", "unknown")
     trend_pct = trend.get("trend_pct", 0)
-    current_value = trend.get("current_value", 0)
+    current_value = trend.get("current_value", market_value)
     peak_value = trend.get("peak_value", 0)
 
     if average_points < MIN_AVG_POINTS:
@@ -88,8 +105,19 @@ def reconstruct_branch(
     return branch, float(appreciation)
 
 
-def profit_trader_accepts(trend: dict, average_points: float, market_value: int) -> bool:
-    """The shipped verdict, for reconciling against `reconstruct_branch`.
+def shipped_opportunity(
+    trend: dict,
+    average_points: float,
+    market_value: int,
+    *,
+    max_risk_score: float = FLIP_MAX_RISK_SCORE,
+):
+    """The shipped `ProfitTrader`'s `ProfitOpportunity` for one candidate, or
+    `None` if it rejected the candidate.
+
+    The single call site into shipped code that `profit_trader_accepts` and
+    the reconciliation test both build on, so there is exactly one place that
+    constructs `ProfitTrader` and its `CorpusMarketPlayer` stand-in.
 
     `price == market_value` because `ProfitTrader` BRANCHES on that equality
     (profit_trader.py:121) -- feeding anything else sends the candidate down
@@ -101,7 +129,7 @@ def profit_trader_accepts(trend: dict, average_points: float, market_value: int)
     trader = ProfitTrader(
         min_profit_pct=FLIP_MIN_PROFIT_PCT,
         max_hold_days=FLIP_MAX_HOLD_DAYS,
-        max_risk_score=FLIP_MAX_RISK_SCORE,
+        max_risk_score=max_risk_score,
     )
     player = CorpusMarketPlayer(
         id="reconcile",
@@ -116,7 +144,26 @@ def profit_trader_accepts(trend: dict, average_points: float, market_value: int)
         player_trends={"reconcile": trend},
         team_value=market_value * 10,
     )
-    return bool(opportunities)
+    return opportunities[0] if opportunities else None
+
+
+def profit_trader_accepts(
+    trend: dict,
+    average_points: float,
+    market_value: int,
+    *,
+    max_risk_score: float = FLIP_MAX_RISK_SCORE,
+) -> bool:
+    """Whether the shipped `ProfitTrader` accepts this candidate.
+
+    `max_risk_score` defaults to the live flip threshold; `label_for` passes
+    `RISK_DISABLED` on a second call to tell a genuine risk rejection apart
+    from a mirror/ladder disagreement.
+    """
+    return (
+        shipped_opportunity(trend, average_points, market_value, max_risk_score=max_risk_score)
+        is not None
+    )
 
 
 def label_for(trend: dict, average_points: float, market_value: int) -> str:
@@ -124,14 +171,29 @@ def label_for(trend: dict, average_points: float, market_value: int) -> str:
 
     Eligibility is the SHIPPED verdict, never the mirror's. `ProfitTrader`
     applies `_calculate_risk` after the ladder (profit_trader.py:214-217), a
-    heuristic this module must not reimplement -- so a candidate the ladder
-    accepts can still be rejected on risk. That case gets its own label rather
-    than being counted as an eligible branch, which would overstate how much
-    money each rung actually sourced.
+    heuristic this module must not reimplement.
+
+    `too_risky` is UNREACHABLE at the live threshold today: the maximum risk
+    score attainable by a ladder-accepted candidate is 55 (falling +30,
+    avg_points<40 +15, Goalkeeper +10 -- the value-gap term is always 0
+    because a ladder-accepted `expected_appreciation` is capped at 20, below
+    its +10 threshold of 30), against `FLIP_MAX_RISK_SCORE = 60.0`. The label
+    exists for when that threshold is later re-tuned tighter, not because it
+    fires today.
+
+    So when the ladder accepts but the shipped trader still rejects, this
+    re-checks with risk effectively disabled (`RISK_DISABLED`). If THAT still
+    rejects, the rejection had nothing to do with risk -- the mirror and the
+    shipped ladder have diverged, which is a DEFECT in this module, not a
+    market outcome, and is labelled `mirror_divergence`. A reader of the
+    per-branch table must never interpret `mirror_divergence` as a rejection
+    cause: it means this module needs fixing, not that the candidate was bad.
     """
-    branch, _ = reconstruct_branch(trend, average_points)
+    branch, _ = reconstruct_branch(trend, average_points, market_value=market_value)
     if branch not in ELIGIBLE_BRANCHES:
         return branch
-    if not profit_trader_accepts(trend, average_points, market_value):
+    if profit_trader_accepts(trend, average_points, market_value):
+        return branch
+    if profit_trader_accepts(trend, average_points, market_value, max_risk_score=RISK_DISABLED):
         return "too_risky"
-    return branch
+    return "mirror_divergence"
