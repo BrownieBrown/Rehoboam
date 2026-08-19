@@ -7,6 +7,7 @@ from datetime import datetime
 
 from rich.console import Console
 
+from .config import INSTANT_SELL_PCT
 from .services import AutoTradeResult, ExecutionService
 
 console = Console()
@@ -472,7 +473,9 @@ class AutoTrader:
                         f"[dim]Skip pair {obj.buy_player.last_name} — already have active bid[/dim]"
                     )
                     continue
-                net_cost = obj.recommended_bid - int(obj.sell_player.market_value * 0.95)
+                net_cost = obj.recommended_bid - int(
+                    obj.sell_player.market_value * INSTANT_SELL_PCT
+                )
                 if net_cost > ctx.flip_budget:
                     console.print(
                         f"[yellow]Cannot afford trade pair "

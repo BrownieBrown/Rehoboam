@@ -121,7 +121,7 @@ class SellPlanEntry:
 
     player_id: str
     player_name: str
-    expected_sell_value: int  # market_value * 0.95
+    expected_sell_value: int  # market_value * INSTANT_SELL_PCT (1.00, REH-67)
     player_ep: float
     is_in_best_11: bool
 
