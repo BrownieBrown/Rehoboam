@@ -10,7 +10,7 @@ from rehoboam.diagnostics.flip_diagnosis import (
     RoundTrip,
     TripRow,
 )
-from rehoboam.diagnostics.flip_report import format_report
+from rehoboam.diagnostics.flip_report import POSITIVE_WINNER_NOTE, format_report
 
 DAY0 = 1_700_000_000.0
 
@@ -30,7 +30,6 @@ def _result():
         trip=trip,
         mv_buy=1_000_000,
         branch="rising",
-        expected_appreciation=10.0,
         by_horizon={
             h: Decomposition(selection=10 * h, exit_timing=-50, entry_premium=100_000)
             for h in (14, 21, 30, 45, 60)
@@ -61,7 +60,6 @@ def test_a_horizon_sweep_missing_the_headline_horizon_fails_clearly():
         trip=result.rows[0].trip,
         mv_buy=result.rows[0].mv_buy,
         branch=result.rows[0].branch,
-        expected_appreciation=result.rows[0].expected_appreciation,
         by_horizon={h: d for h, d in result.rows[0].by_horizon.items() if h != 30},
         peak_during_hold=result.rows[0].peak_during_hold,
         is_floor_trip=result.rows[0].is_floor_trip,
@@ -124,7 +122,6 @@ def test_rows_with_no_market_value_at_buy_are_counted_when_present():
         trip=trip,
         mv_buy=None,
         branch="no_trend_data",
-        expected_appreciation=0.0,
         by_horizon={},
         peak_during_hold=None,
         is_floor_trip=False,
@@ -170,7 +167,6 @@ def test_mirror_divergence_is_surfaced_prominently_when_present():
         trip=trip,
         mv_buy=1_000_000,
         branch="mirror_divergence",
-        expected_appreciation=0.0,
         by_horizon={
             h: Decomposition(selection=0, exit_timing=0, entry_premium=0)
             for h in (14, 21, 30, 45, 60)
@@ -190,3 +186,79 @@ def test_mirror_divergence_is_surfaced_prominently_when_present():
     divergence_pos = lowered.index("mirror divergence")
     branch_table_pos = lowered.index("per-branch")
     assert divergence_pos < branch_table_pos
+
+
+def _positive_winner_result():
+    """A population whose dominant term GAINED money -- the shape of the real
+    2025/26 data, where exit timing wins the rule at +EUR177.7M."""
+    trip = RoundTrip(
+        trip_id=9,
+        player_id="p9",
+        player_name="PositiveExit",
+        buy_price=1_000_000,
+        sell_price=1_500_000,
+        buy_date=DAY0,
+        sell_date=DAY0 + 30 * 86400,
+        hold_days=30,
+    )
+    row = TripRow(
+        trip=trip,
+        mv_buy=1_000_000,
+        branch="rising",
+        by_horizon={
+            h: Decomposition(selection=-100, exit_timing=500_100, entry_premium=0)
+            for h in (14, 21, 30, 45, 60)
+        },
+        peak_during_hold=1_500_000,
+        is_floor_trip=False,
+    )
+    return DiagnosisResult(
+        rows=[row],
+        horizons=(14, 21, 30, 45, 60),
+        censored=dict.fromkeys((14, 21, 30, 45, 60), 0),
+    )
+
+
+def test_a_positive_winning_term_is_flagged_as_positive():
+    """The rule ranks by MAGNITUDE of a signed contribution, so it can name the
+    term that helped. The results document spends two pages on that; someone
+    who only runs the tool must not be handed the verdict bare."""
+    report = format_report(_positive_winner_result())
+    assert "dominant mechanism = exit_timing" in report
+    assert POSITIVE_WINNER_NOTE in report
+
+
+def test_a_negative_winning_term_carries_no_such_note():
+    """The note must not become decoration printed on every run -- it means
+    something specific, and a term that genuinely lost money gets no caveat."""
+    report = format_report(_result())
+    assert "dominant mechanism = entry_premium" in report
+    assert POSITIVE_WINNER_NOTE not in report
+
+
+def test_the_report_prints_its_own_closure_evidence():
+    """Total is the identity's output; sum(realised) is the ground truth it
+    must equal. A re-runner without the source databases can only check the two
+    against each other if the artifact carries both. `_positive_winner_result`
+    is used because its terms genuinely cancel to the realised P&L."""
+    report = format_report(_positive_winner_result())
+    assert "Ground truth: sum(realised) over the 1 scored round trips" in report
+    assert "EUR +500,000" in report
+    assert "the identity closes with no residual" in report
+
+
+def test_a_broken_identity_is_announced_rather_than_printed_quietly():
+    """`_result()`'s synthetic terms do NOT cancel to its realised P&L, which
+    is exactly the condition the closure check exists to catch. Without it the
+    Total column looks entirely plausible."""
+    report = format_report(_result())
+    assert "IDENTITY DOES NOT CLOSE" in report
+
+
+def test_the_scored_count_is_printed_beside_the_population_count():
+    """Every table below the header is n=scored, while the header names the
+    population. Printing only one of the two is how a reader ends up dividing
+    a scored total by the population count."""
+    report = format_report(_result())
+    assert "1 completed ROUND TRIPS" in report
+    assert "1 scored below" in report

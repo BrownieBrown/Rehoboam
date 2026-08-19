@@ -104,11 +104,28 @@ def _to_epoch(iso_str: str) -> float:
 class TrainingCorpus:
     """Read/write access to the training corpus database."""
 
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None, *, read_only: bool = False):
+        """Open the corpus, creating and migrating its schema unless ``read_only``.
+
+        ``read_only=True`` skips the whole construction-time write block --
+        ``mkdir``, ``executescript(_SCHEMA)``, ``_migrate`` and ``commit`` --
+        and requires the file to already exist. Both halves matter to a caller
+        that pins its inputs by digest (REH-75's ``diagnose-flips``): ``_migrate``
+        issues ``ALTER TABLE`` when a column is missing, so a read-write
+        construction can mutate the very database a report cites the SHA-256 of,
+        and the ``CREATE TABLE`` half silently manufactures an empty corpus from
+        a mistyped path, which then produces a plausible all-zero report instead
+        of an error.
+        """
         if db_path is None:
             db_path = DEFAULT_CORPUS_PATH
-        db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
+        self.read_only = read_only
+        if read_only:
+            if not db_path.exists():
+                raise FileNotFoundError(f"corpus database not found: {db_path}")
+            return
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript(_SCHEMA)
             self._migrate(conn)

@@ -44,7 +44,6 @@ def _row(
         trip=trip,
         mv_buy=1_000_000,
         branch=branch,
-        expected_appreciation=10.0,
         by_horizon={
             30: Decomposition(
                 selection=selection,

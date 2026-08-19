@@ -16,6 +16,10 @@ from rehoboam.replay.flip_buys import (
     CorpusMarketPlayer,
 )
 
+# Every label `label_for` may return, in ladder order. Not decoration:
+# `label_for` validates against it, so a typo'd or newly-invented rung name
+# fails loudly instead of quietly opening an extra row in the results
+# document's per-branch table that nothing accounts for.
 BRANCHES = (
     "low_points",
     "small_sample",
@@ -66,6 +70,21 @@ def reconstruct_branch(
     gate (`profit_trader.py:93-101`). Defensible for buys that actually
     executed (they must have passed both to exist), but this function alone
     cannot see either one.
+
+    Nor are the gates the LIVE BUY PATH applies around the ladder: only
+    listings passing `is_kickbase_seller()` are ever considered (`trader.py:685`
+    -- the hardest provenance gate of all), `max_opportunities` caps bids at
+    5-10 per session (`trader.py:719`), and `BidEvaluator` cancels a flip bid
+    more than 25% over market value (`bid_evaluator.py:116-119`). Each of these
+    shrinks the truly-eligible set, all in the same direction, so an eligible
+    count derived from this function is an UPPER BOUND on the set -- never a
+    bound on any sum over it.
+
+    Nor, finally, is the STATISTIC the ladder's points gates read. Callers
+    supply `average_points` from `replay.flip_buys.average_points_at`, a career
+    mean per appearance, where the shipped path reads Kickbase's season `ap`
+    (`kickbase_client.py:88`). See REH-77; the mirror reconciliation cannot
+    detect it, because it feeds both sides the same value.
     """
     if not trend.get("has_data", False):
         return "no_trend_data", 0.0
@@ -123,6 +142,15 @@ def shipped_opportunity(
     (profit_trader.py:121) -- feeding anything else sends the candidate down
     the non-Kickbase path where `value_gap` is negative and it is dropped, and
     the reconciliation would pass vacuously with everything rejected.
+
+    `position` is PINNED to "Midfielder" and is not reconstructed. The corpus
+    does carry positions, but feeding the real one would change
+    `_calculate_risk` (Goalkeeper +10, profit_trader.py:313-314) and therefore
+    could change a published label, so the pin is deliberate rather than
+    pending. Its one consequence: the maximum risk score attainable under this
+    harness is **45** (falling +30, avg_points<40 +15), not the 55 a Goalkeeper
+    could reach -- see `label_for`'s docstring, which depends on this number.
+    Feeding a real position would need a re-run and a fresh determinism gate.
     """
     from rehoboam.profit_trader import ProfitTrader
 
@@ -173,12 +201,17 @@ def label_for(trend: dict, average_points: float, market_value: int) -> str:
     applies `_calculate_risk` after the ladder (profit_trader.py:214-217), a
     heuristic this module must not reimplement.
 
-    `too_risky` is UNREACHABLE at the live threshold today: the maximum risk
-    score attainable by a ladder-accepted candidate is 55 (falling +30,
-    avg_points<40 +15, Goalkeeper +10 -- the value-gap term is always 0
-    because a ladder-accepted `expected_appreciation` is capped at 20, below
-    its +10 threshold of 30), against `FLIP_MAX_RISK_SCORE = 60.0`. The label
-    exists for when that threshold is later re-tuned tighter, not because it
+    `too_risky` is UNREACHABLE here, and by two margins rather than one. The
+    maximum risk score a ladder-accepted candidate can reach IN PRINCIPLE is 55
+    (falling +30, avg_points<40 +15, Goalkeeper +10 -- the value-gap term is
+    always 0 because a ladder-accepted `expected_appreciation` is capped at 20,
+    below its +10 threshold of 30), against `FLIP_MAX_RISK_SCORE = 60.0`. Under
+    THIS harness the ceiling is lower still: `shipped_opportunity` pins
+    `position="Midfielder"`, so the Goalkeeper +10 is unreachable and the real
+    maximum is **45**. Both are below 60, so the label is correct today either
+    way -- but if `FLIP_MAX_RISK_SCORE` is ever re-tuned to 50, as the 55 figure
+    anticipates, the pinned position would make this reconstruction disagree
+    with the live path. The label exists for that re-tuning, not because it
     fires today.
 
     So when the ladder accepts but the shipped trader still rejects, this
@@ -190,6 +223,8 @@ def label_for(trend: dict, average_points: float, market_value: int) -> str:
     cause: it means this module needs fixing, not that the candidate was bad.
     """
     branch, _ = reconstruct_branch(trend, average_points, market_value=market_value)
+    if branch not in BRANCHES:
+        raise ValueError(f"reconstruct_branch returned an unknown rung: {branch!r}")
     if branch not in ELIGIBLE_BRANCHES:
         return branch
     if profit_trader_accepts(trend, average_points, market_value):

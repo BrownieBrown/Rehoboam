@@ -18,6 +18,7 @@ from rehoboam.diagnostics.flip_diagnosis import (
     TEMPORAL_BOUNDARY_ISO,
     DiagnosisResult,
     dominant_mechanism,
+    signed_contributions,
     temporal_split,
     totals_by_branch,
     totals_by_horizon,
@@ -35,6 +36,17 @@ LABEL_SEMANTICS = (
 
 _RULE = "-" * 72
 _DRULE = "=" * 72
+
+# Asserted by tests/test_diagnostics/test_flip_report.py. The pre-registered
+# rule ranks by MAGNITUDE of a signed contribution, so it can name a term that
+# GAINED money -- as it does on the real 2025/26 data, where exit timing is
+# +EUR177.7M. The results document spends two pages qualifying that; a reader
+# who only runs the tool must not get the verdict bare.
+POSITIVE_WINNER_NOTE = (
+    "(note: this term's contribution is POSITIVE — the rule ranks by "
+    "magnitude, so the named term is the largest number, not necessarily the "
+    "cause of the loss)"
+)
 
 
 def _eur(n: int) -> str:
@@ -104,6 +116,9 @@ def format_report(result: DiagnosisResult) -> str:
         _DRULE,
         "",
         f"{len(result.rows)} completed ROUND TRIPS (not flips — see REH-75 design §1)",
+        f"{len(scored)} scored below; the remaining {len(floor_rows)} are the "
+        f"EUR {FLOOR_PRICE:,} floor group, reported separately at the end.",
+        "Divide by the scored count, never by the population count.",
         "",
     ]
 
@@ -130,15 +145,38 @@ def format_report(result: DiagnosisResult) -> str:
         f"Horizon sweep (population totals; the EUR {FLOOR_PRICE:,} floor group is excluded)",
         _RULE,
         f"{'Horizon':<9}{'Selection':>18}{'Exit':>18}{'Entry premium':>18}{'Total':>18}"
-        f"{'Censored':>10}",
+        f"{'n':>7}{'Censored':>10}",
     ]
     for h in result.horizons:
         d = horizon_totals[h]
+        n = sum(1 for r in scored if h in r.by_horizon)
         lines.append(
             f"{f'{h}d':<9}{_eur(d.selection):>18}{_eur(d.exit_timing):>18}"
-            f"{_eur(d.entry_premium):>18}{_eur(d.total):>18}{result.censored[h]:>10}"
+            f"{_eur(d.entry_premium):>18}{_eur(d.total):>18}{n:>7}{result.censored[h]:>10}"
         )
+    # The decomposition is an identity with no residual bucket, so every Total
+    # above MUST equal the realised P&L of the same rows. Printing the ground
+    # truth beside them is what makes this artifact self-validating on a re-run
+    # by someone who no longer has the databases that produced it.
+    realised = sum(r.trip.realised for r in scored)
+    # Compared per horizon against the rows that actually contributed there:
+    # a censored row is legitimately absent from that horizon's Total, so
+    # comparing every horizon against the whole-population figure would raise a
+    # false alarm the moment censoring is non-zero.
+    mismatched = [
+        h
+        for h in result.horizons
+        if horizon_totals[h].total != sum(r.trip.realised for r in scored if h in r.by_horizon)
+    ]
     lines += [
+        f"Ground truth: sum(realised) over the {len(scored)} scored round trips "
+        f"= {_eur(realised)}",
+        (
+            "  Every Total above equals the realised P&L of the rows behind it — "
+            "the identity closes with no residual."
+            if not mismatched
+            else f"  *** IDENTITY DOES NOT CLOSE at H={mismatched} — this report is broken ***"
+        ),
         f"Rows with no market value at buy: {len(no_mv_at_buy)} "
         "(fully censored, unlabelled — not the floor group)",
         "",
@@ -146,6 +184,12 @@ def format_report(result: DiagnosisResult) -> str:
 
     lines += [
         f"Headline at H={HEADLINE_HORIZON}d: dominant mechanism = {mechanism}",
+    ]
+    # A named term whose signed contribution is positive is a term that HELPED;
+    # the rule still names it because it ranks on magnitude alone.
+    if signed_contributions(headline).get(mechanism, 0) > 0:
+        lines.append(f"  {POSITIVE_WINNER_NOTE}")
+    lines += [
         f"  Selection:      {_eur(headline.selection)}",
         f"  Exit timing:    {_eur(headline.exit_timing)}",
         f"  Entry premium:  {_eur(headline.entry_premium)}  (paid over market value, unnegated)",

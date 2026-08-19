@@ -7,7 +7,10 @@ would reach the human-facing artifact unchallenged unless it is tested here.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
+
+import pytest
 
 from rehoboam.diagnostics.flip_diagnosis import (
     FLOOR_PRICE,
@@ -165,7 +168,6 @@ def test_run_diagnosis_over_a_small_fixture(tmp_path):
     assert no_mv_row.is_floor_trip is False
     assert no_mv_row.mv_buy is None
     assert no_mv_row.branch == "no_trend_data"
-    assert no_mv_row.expected_appreciation == 0.0
     assert no_mv_row.by_horizon == {}
 
     # The no-future-leak regression: a snapshot 0.5 days AFTER buy_date is
@@ -182,3 +184,45 @@ def test_run_diagnosis_over_a_small_fixture(tmp_path):
     # the floor group is reported separately and must not leak into
     # Censored, which lives inside the headline sweep.
     assert result.censored == {14: 2, 30: 3}
+
+
+def test_a_nonexistent_corpus_path_fails_loudly_instead_of_reporting_zeros(tmp_path):
+    """A mistyped `--corpus-db` used to CREATE an empty database (via
+    `TrainingCorpus.__init__`'s schema block) and then produce a complete,
+    plausible, all-zero report. `run_diagnosis` opens the corpus read-only, so
+    the path now raises -- and, just as importantly, no database is written."""
+    learner_db, _ = _dbs(tmp_path)
+    mistyped = tmp_path / "trainig_corpus.db"
+
+    with pytest.raises(FileNotFoundError):
+        run_diagnosis(learner_db, mistyped, horizons=HORIZONS)
+
+    assert not mistyped.exists(), "a read-only run must not create its own input"
+
+
+def test_the_corpus_is_never_written_to_by_a_run(tmp_path):
+    """The results document pins both input databases by SHA-256. An
+    instrument that can `ALTER TABLE` its own cited evidence -- which
+    `TrainingCorpus._migrate` does whenever a column is missing -- invalidates
+    that chain mid-run. Asserted on bytes, not on intent."""
+    learner_db, corpus_db = _dbs(tmp_path)
+    before = hashlib.sha256(corpus_db.read_bytes()).hexdigest()
+
+    run_diagnosis(learner_db, corpus_db, horizons=HORIZONS)
+
+    assert hashlib.sha256(corpus_db.read_bytes()).hexdigest() == before
+
+
+def test_read_only_corpus_skips_the_schema_and_migrate_block(tmp_path):
+    """The flag is the mechanism the two tests above rely on, so it is pinned
+    directly: read-only construction neither creates a missing database nor
+    touches an existing one."""
+    missing = tmp_path / "absent.db"
+    with pytest.raises(FileNotFoundError):
+        TrainingCorpus(missing, read_only=True)
+    assert not missing.exists()
+
+    _, corpus_db = _dbs(tmp_path)
+    before = hashlib.sha256(corpus_db.read_bytes()).hexdigest()
+    TrainingCorpus(corpus_db, read_only=True)
+    assert hashlib.sha256(corpus_db.read_bytes()).hexdigest() == before

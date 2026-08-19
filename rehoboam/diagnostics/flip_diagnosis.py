@@ -74,6 +74,18 @@ def decompose(trip: RoundTrip, *, mv_buy: int, mv_h: int) -> Decomposition:
 
 SECONDS_PER_DAY = 86400.0
 
+
+def _connect_ro(db_path: Path) -> sqlite3.Connection:
+    """A connection that cannot write, and that fails loudly on a missing file.
+
+    This module's whole output is quoted against two SHA-256 digests, so the
+    instrument must not be able to alter its own pinned inputs -- and a plain
+    ``sqlite3.connect`` on a mistyped path CREATES an empty database, which then
+    yields a plausible all-zero report rather than an error.
+    """
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+
 # Corpus snapshots are daily, and every round trip in scope resolves to within
 # 0.99 days of every horizon (measured during design). Three days is therefore
 # a guard against a future rerun over sparser data, not a threshold this run
@@ -98,7 +110,7 @@ def mv_nearest(
     Returns None rather than 0 when nothing is close enough: a fabricated zero
     would enter the SELECTION term as a full loss of market value.
     """
-    with sqlite3.connect(db_path) as conn:
+    with _connect_ro(db_path) as conn:
         rows = conn.execute(
             "SELECT snapshot_at, market_value FROM mv_series WHERE player_id = ? "
             "AND snapshot_at BETWEEN ? AND ? ORDER BY ABS(snapshot_at - ?) LIMIT 1",
@@ -118,7 +130,7 @@ def peak_between(db_path: Path, player_id: str, start: float, end: float) -> int
     Feeds the `peak_during_hold - sell_price` sub-measure (REH-33's angle):
     how much of the appreciation we did capture was given back before selling.
     """
-    with sqlite3.connect(db_path) as conn:
+    with _connect_ro(db_path) as conn:
         row = conn.execute(
             "SELECT MAX(market_value) FROM mv_series "
             "WHERE player_id = ? AND snapshot_at BETWEEN ? AND ?",
@@ -146,7 +158,6 @@ class TripRow:
     trip: RoundTrip
     mv_buy: int | None
     branch: str
-    expected_appreciation: float
     by_horizon: dict[int, Decomposition]
     peak_during_hold: int | None
     is_floor_trip: bool
@@ -168,7 +179,7 @@ def load_round_trips(learner_db: Path) -> list[RoundTrip]:
 
     NOT "every flip" -- see this module's docstring.
     """
-    with sqlite3.connect(learner_db) as conn:
+    with _connect_ro(learner_db) as conn:
         rows = conn.execute(
             "SELECT id, player_id, player_name, buy_price, sell_price, "
             "buy_date, sell_date, hold_days FROM flip_outcomes ORDER BY buy_date"
@@ -230,17 +241,34 @@ def temporal_split(
     return {"before": _sum(before), "after": _sum(after)}
 
 
+def signed_contributions(totals: Decomposition) -> dict[str, int]:
+    """Each term's contribution to the population total, signed as it enters
+    the identity.
+
+    Entry premium is negated here and only here -- `Decomposition` stores it
+    unnegated. One definition, shared by the dominance rule and by the report's
+    caveat on the rule's answer, so the two can never disagree about a sign.
+    """
+    return {
+        "selection": totals.selection,
+        "exit_timing": totals.exit_timing,
+        "entry_premium": -totals.entry_premium,
+    }
+
+
 def dominant_mechanism(totals: Decomposition, *, tie_band: float = 0.20) -> str:
     """Apply REH-75's pre-registered rule. Fixed before any real number existed.
 
     Contributions are compared as the magnitude of each term's SIGNED sum, with
     entry premium entering negated exactly as it does in the identity.
+
+    KNOWN DEGENERACY (results doc section 4, follow-up REH-78): `selection` and
+    `exit_timing` sum to the H-invariant constant `sum(s - mv_buy)`, so on any
+    population where Selection is negative and that constant is positive,
+    |Exit| = constant + |Selection| and the rule CANNOT return `selection`. The
+    rule is reproduced here as pre-registered; it is not a good rule.
     """
-    contributions = {
-        "selection": totals.selection,
-        "exit_timing": totals.exit_timing,
-        "entry_premium": -totals.entry_premium,
-    }
+    contributions = signed_contributions(totals)
     ranked = sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True)
     (winner, top), (_, second) = ranked[0], ranked[1]
     if abs(top) == 0:
@@ -263,14 +291,19 @@ def run_diagnosis(
     `profit_trader_accepts` directly on unfiltered rows would also trigger its
     small-sample console warning with blank player names.
     """
-    from rehoboam.diagnostics.flip_branches import label_for, reconstruct_branch
+    from rehoboam.diagnostics.flip_branches import label_for
     from rehoboam.enrichment.corpus import TrainingCorpus
     from rehoboam.replay.driver import LEAGUE_ID, SEASON, day_for_kickoff, load_calendar
     from rehoboam.replay.flip_buys import average_points_at, history_at
     from rehoboam.services.trend_service import TrendService
 
     trips = load_round_trips(learner_db)
-    corpus = TrainingCorpus(corpus_db)
+    # read_only: this run's inputs are pinned by SHA-256 in the results
+    # document, and a read-write construction would `ALTER TABLE` the corpus
+    # whenever `_migrate` finds a missing column -- an instrument that can
+    # mutate its own cited evidence. It also makes a mistyped `--corpus-db`
+    # raise instead of manufacturing an empty database and reporting zeros.
+    corpus = TrainingCorpus(corpus_db, read_only=True)
     kickoffs = load_calendar(learner_db, league_id=LEAGUE_ID)
     censored = dict.fromkeys(horizons, 0)
     rows: list[TripRow] = []
@@ -308,7 +341,6 @@ def run_diagnosis(
                     trip=trip,
                     mv_buy=None,
                     branch="no_trend_data",
-                    expected_appreciation=0.0,
                     by_horizon={},
                     peak_during_hold=peak,
                     is_floor_trip=is_floor,
@@ -321,7 +353,6 @@ def run_diagnosis(
         day_number = day_for_kickoff(kickoffs, trip.buy_date)
         avg_points = average_points_at(corpus, trip.player_id, season=SEASON, day_number=day_number)
         branch = label_for(trend, avg_points, mv_buy)
-        _, expected_appreciation = reconstruct_branch(trend, avg_points, market_value=mv_buy)
 
         by_horizon: dict[int, Decomposition] = {}
         for h in horizons:
@@ -337,7 +368,6 @@ def run_diagnosis(
                 trip=trip,
                 mv_buy=mv_buy,
                 branch=branch,
-                expected_appreciation=expected_appreciation,
                 by_horizon=by_horizon,
                 peak_during_hold=peak,
                 is_floor_trip=is_floor,
