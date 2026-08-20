@@ -85,7 +85,9 @@ output is in the appendix.
 
 The supplementary script (§7 below, and the source of REH-75's §5–§9 figures)
 is **not** covered by that gate — the same limitation REH-75's appendix states.
-It was nonetheless run twice here and its output diffed byte-for-byte: identical.
+It was nonetheless run twice here and its output diffed byte-for-byte:
+identical, 9,929 bytes, SHA-256
+`18655400bed73f00c276ff8d6f8e22de3e11995fe061ef0150fbd8edb4887b67`.
 
 ______________________________________________________________________
 
@@ -397,9 +399,20 @@ The 18 transitions:
 population and is net positive (+€8.8M over 74 trips) with the lowest entry
 premium of any rung (1.0807)"*. Under the corrected statistic `rising` is 72
 trips (53%) netting **−€10,706,950**, at a premium ratio of **1.0753**. It is
-still the cheapest-entry rung and still the largest; it is no longer profitable.
-REH-75's other §8 reading survives: `stable` is still the worst eligible rung
-(−€21.6M over 9 trips, the longest eligible median hold at 12 days).
+still the largest rung, and it is no longer profitable.
+
+**The "lowest entry premium of any rung" half of that reading also fails, and
+§7.2's own relabelling is what broke it.** `no_pattern` now sits at **1.0119**
+against `rising`'s 1.0753 (appendix, supplementary §8), so `rising` is the
+*second*-cheapest rung overall. Under REH-75's labels `no_pattern` was 1.5246,
+which is why the unqualified claim held there. What survives is the scoped
+version: **`rising` is the cheapest-entry rung among the four eligible ones**
+(1.0753, against `stable` 1.0970, `recovery` 1.0977 and
+`falling_mean_reversion` 1.1473).
+
+REH-75's other §8 reading survives unscoped: `stable` is still the worst
+eligible rung (−€21.6M over 9 trips, the longest eligible median hold at 12
+days).
 
 **Two of REH-75's named labels change, and one narrative claim survives on a
 different label.** Woltemade moves `no_pattern` → `low_points` and Stiller moves
@@ -438,15 +451,26 @@ becomes **−€48.8M rather than −€55.3M**. The gap between the two closes
 substantially: the eligible set is now smaller *and* carries a much larger share
 of the loss.
 
-**§0's "this is not a ceiling" argument is unchanged and, if anything,
-stronger.** Its worked demonstration used `rising`'s positive total; under the
-corrected labels `rising` is negative, so that particular arithmetic no longer
-reads the same. It is replaced by the same instrument's other two figures, both
-from `scripts/reh75_supplementary.py`: eligible-minus-`rising` (n=30) nets
-**−€38,126,930**, and the loss-makers *within* the eligible set (n=69) net
-**−€86,090,901** — far outside the −€48.8M cohort figure. A subset sum is still
-not bounded by its superset. **102 bounds which round trips the flip path could
-have bought. Nothing in this document bounds what it lost.**
+**§0's "this is not a ceiling" conclusion still holds, but only one of its two
+demonstrations survives — and it is not the one REH-75 led with.**
+
+REH-75 made the point at *rung* level: `rising` was positive, so dropping it
+left −€42,762,687 against a −€33.9M cohort figure, genuinely outside it. That
+version is gone. All four eligible rungs are now negative (`rising`
+−€10,706,950, `recovery` −€10,484,178, `stable` −€21,609,744,
+`falling_mean_reversion` −€6,033,008), so there is no positive rung left to
+drop, and the arithmetic runs the other way: eligible-minus-`rising` (n=30)
+nets **−€38,126,930**, which is *inside* the −€48,833,880 cohort figure, not
+outside it. **That figure is a counterexample to the rung-level demonstration,
+not support for it**, and it is recorded here so nobody quotes it as support.
+
+The *trip*-level demonstration does survive, and it is what carries the
+conclusion: the loss-makers *within* the eligible set (n=69) net
+**−€86,090,901** (`scripts/reh75_supplementary.py` §8), far outside the
+−€48.8M cohort figure. A subset sum is still not bounded by its superset when
+the superset contains positive terms, and at trip level it plainly does.
+**102 bounds which round trips the flip path could have bought. Nothing in this
+document bounds what it lost.**
 
 ### 7.4 What did not move that a reader might expect to
 
@@ -536,11 +560,17 @@ ______________________________________________________________________
 - **`rising` is not a profitable rung.** REH-75's one clearly positive eligible
   rung was an artifact of the career-mean statistic. Any ticket resting on
   "the `rising` rung pays for itself" needs re-reading.
-- **The entry premium is now named by the rule at every horizon** — alone at
-  14d, co-dominant at 21d/30d/45d, and it is the single eligible term in the
-  hold-instant view. REH-75 §11's proposed per-trade entry-premium cap is the
-  action this verdict points at, and it is unaffected by anything REH-77 changed:
-  +€116,401,328 is H-invariant, label-invariant and unmoved across both runs.
+- **The entry premium is eligible at all five horizons and named at four.**
+  Eligible at five because −€116,401,328 is its signed contribution at every
+  H; named alone at 14d, co-dominant at 21d/30d/45d, and **not named at 60d**,
+  where selection alone wins by 29.4% — outside the 20% band. It is also the
+  single eligible term in the hold-instant view. The eligible-at-five /
+  named-at-four split is the more informative fact than either number alone:
+  the premium is always a loss mechanism, and it stops being the *dominant*
+  one only once selection has had two months to deepen past it. REH-75 §11's
+  proposed per-trade entry-premium cap is the action this verdict points at,
+  and it is unaffected by anything REH-77 changed: +€116,401,328 is
+  H-invariant, label-invariant and unmoved across both runs.
 - **REH-71's replay re-run is still outstanding**, deliberately out of scope
   here. It reads the same corrected statistic and has its own design doc and a
   once-only-run convention.
