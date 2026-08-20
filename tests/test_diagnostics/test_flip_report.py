@@ -328,17 +328,23 @@ def test_the_report_prints_the_registered_verdict_and_marks_the_old_one_supersed
 
 
 def test_the_report_prints_a_verdict_for_every_horizon():
+    """Anchored on the full rendered line (`f"{f'{h}d':<9}{verdict}"`), not on
+    substrings: the horizon sweep table above this block also contains every
+    "{h}d" substring, and the "Registered verdict" line above it satisfies
+    the 14d/30d/45d/60d verdict substrings on its own -- only the 21d verdict
+    text is unique to this block. A bare substring check would therefore not
+    catch a bug that swapped the 14d and 60d rows, or that rendered the H=30
+    verdict on the 45d row."""
     text = format_report(_published_result())
     assert "Dominance by horizon (REH-78 rule)" in text
-    for horizon, expected in (
+    for horizon, verdict in (
         (14, "entry premium"),
         (21, "entry premium + selection (co-dominant)"),
         (30, "selection + entry premium (co-dominant)"),
         (45, "selection + entry premium (co-dominant)"),
         (60, "selection"),
     ):
-        assert f"{horizon}d" in text
-        assert expected in text
+        assert f"{f'{horizon}d':<9}{verdict}" in text
 
 
 def test_the_report_prints_the_hold_view_with_its_agreement_label():
@@ -348,6 +354,16 @@ def test_the_report_prints_the_hold_view_with_its_agreement_label():
     # Registered verdict is {selection, entry premium}; the hold view has one
     # eligible term, entry premium. They share a term without being equal.
     assert "Agreement with the registered verdict: overlapping" in text
+
+
+def test_the_hold_block_prints_its_contributing_n():
+    """`hold_censored` only increments when mv_buy resolved and mv_sell did
+    not -- a row that never got mv_buy at all is invisible to that counter,
+    so "Censored: 0" alone cannot be trusted to mean every scored row fed the
+    totals. `_published_result`'s one row has an `at_hold` value, so n must
+    read 1, matching its single scored trip."""
+    text = format_report(_published_result())
+    assert "  n: 1 scored round trips contribute to the totals below" in text
 
 
 def test_a_population_that_lost_nothing_is_rendered_as_no_loss_to_explain():

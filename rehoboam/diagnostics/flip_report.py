@@ -224,6 +224,13 @@ def format_report(result: DiagnosisResult) -> str:
     registered = dominant_loss_mechanisms(headline)
     hold = totals_at_hold(result)
     hold_verdict = dominant_loss_mechanisms(hold)
+    # `hold_censored` only increments when mv_buy resolved and mv_sell did
+    # not -- a row that never got mv_buy in the first place (excluded from
+    # `scored()`'s hold view via `at_hold is None`, but never counted here)
+    # is invisible to that counter. Printing the rows that actually fed the
+    # totals below means the block cannot silently under-report its
+    # population the way Censored alone could.
+    hold_n = sum(1 for r in scored if r.at_hold is not None)
     lines += [
         "",
         f"Registered verdict at H={HEADLINE_HORIZON}d (REH-78): {_verdict_text(registered)}",
@@ -241,6 +248,7 @@ def format_report(result: DiagnosisResult) -> str:
         "(NOT the registered instrument: the sale date is bot-chosen, so "
         "selection is conditioned on the outcome)",
         _RULE,
+        f"  n: {hold_n} scored round trips contribute to the totals below",
         f"  Selection:      {_eur(hold.selection)}",
         f"  Exit timing:    {_eur(hold.exit_timing)}",
         f"  Entry premium:  {_eur(hold.entry_premium)}  (paid over market value, unnegated)",

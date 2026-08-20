@@ -79,9 +79,14 @@ uv run rehoboam diagnose-flips > run2.txt
 diff run1.txt run2.txt   →   exit 0
 ```
 
-**DETERMINISTIC.** Both files are 4,968 bytes and share the SHA-256
-`723bb546c24c0ebfb7594fa1a06239ea0ba9120b0129bfb63f838b22c1b41f26`. The verbatim
+**DETERMINISTIC.** Both files are 5,027 bytes and share the SHA-256
+`9d378bde5b7ec028f7727787a55e8ae4dc08180816da9346430b39b95e72740a`. The verbatim
 output is in the appendix.
+
+(Superseded hash from before this document's post-review fix wave: 4,968
+bytes, `723bb546c24c0ebfb7594fa1a06239ea0ba9120b0129bfb63f838b22c1b41f26` — a
+fix to the hold block, printing its contributing `n` (§6), added one line to
+the tool's output and is the sole cause of the new hash.)
 
 The supplementary script (§7 below, and the source of REH-75's §5–§9 figures)
 is **not** covered by that gate — the same limitation REH-75's appendix states.
@@ -281,8 +286,11 @@ in H, so those two remain mirror images — a property of the decomposition, not
 of the rule. But entry premium is invariant in H while selection is not, and the
 sweep above shows the consequence: the verdict genuinely migrates from entry
 premium at 14d, through a co-dominant band, to selection at 60d, as selection
-deepens past the fixed premium. Under REH-75's rule every horizon returned the
-same term for the same algebraic reason.
+deepens past the fixed premium. Under REH-75's rule, exit timing ranked first
+by magnitude at every horizon, for the same algebraic reason — but it was
+only *named* at four of the five: at 14d the gap to entry premium (7.7%) fell
+inside the 20% tie band, so the rule returned *no single dominant mechanism*
+instead (comparison table above).
 
 ______________________________________________________________________
 
@@ -294,6 +302,7 @@ The design moved this out of `scripts/reh75_supplementary.py` §4 and into
 ```
 Supplementary — the identity at each trip's realised hold (NOT the registered instrument: the sale date is bot-chosen, so selection is conditioned on the outcome)
 ------------------------------------------------------------------------
+  n: 136 scored round trips contribute to the totals below
   Selection:      EUR +43,371,202
   Exit timing:    EUR +17,774,062
   Entry premium:  EUR +116,401,328  (paid over market value, unnegated)
@@ -308,8 +317,12 @@ printed for REH-75, which is the check that the move into `run_diagnosis` was
 faithful rather than a re-derivation. `mv_sell` is
 `TrainingCorpus.market_value_at` — the **at-or-before** lookup, never
 `mv_nearest`, because the sale is a decision instant and a bidirectional lookup
-can resolve to a snapshot taken after we sold. **0 trips censored**: every trip
-has a snapshot at or before its sale.
+can resolve to a snapshot taken after we sold. **0 trips censored** — this is
+a structural invariant, not a finding: once `mv_buy` resolves for a trip, its
+own buy-date snapshot is itself a valid at-or-before candidate for the
+(necessarily later) sale date, so `market_value_at(sell_date)` cannot return
+`None`. The `n: 136` line above is the direct check: all 136 scored trips
+(§4.1's population total) fed the totals, not merely `Censored` reading zero.
 
 The verdict here has exactly one eligible term, as the design predicted:
 selection (+€43.4M) and exit (+€17.8M) are both gains at the realised hold, and
@@ -509,6 +522,16 @@ REH-78 exists to correct — it is the same move as repairing REH-75's rule in
 place after seeing what it returned. The contradiction stands in the design, and
 this paragraph is the record of which reading was followed and why.
 
+**A second, unrecorded deviation of the same class.** The design's test list
+registers "the hold view censors explicitly when no snapshot exists at or
+before the sale" (design lines 173-174); that test was never written, because
+it is unbuildable — `mv_buy` resolving guarantees a snapshot at or before any
+later `sell_date`, so no fixture can manufacture a censored hold row without
+breaking the lookup it is testing. `test_the_hold_view_cannot_be_censored_once_the_buy_resolved`
+(`tests/test_diagnostics/test_run_diagnosis.py`) was substituted instead — a
+tripwire asserting the structural invariant itself — and its docstring
+records the same reasoning.
+
 ______________________________________________________________________
 
 ## 9. Caveats
@@ -580,7 +603,7 @@ ______________________________________________________________________
 ## Appendix — verbatim run output
 
 `uv run rehoboam diagnose-flips`, the first of the two determinism-gate runs
-(SHA-256 `723bb546c24c0ebfb7594fa1a06239ea0ba9120b0129bfb63f838b22c1b41f26`):
+(SHA-256 `9d378bde5b7ec028f7727787a55e8ae4dc08180816da9346430b39b95e72740a`):
 
 ```
 ========================================================================
@@ -626,6 +649,7 @@ Dominance by horizon (REH-78 rule)
 
 Supplementary — the identity at each trip's realised hold (NOT the registered instrument: the sale date is bot-chosen, so selection is conditioned on the outcome)
 ------------------------------------------------------------------------
+  n: 136 scored round trips contribute to the totals below
   Selection:      EUR +43,371,202
   Exit timing:    EUR +17,774,062
   Entry premium:  EUR +116,401,328  (paid over market value, unnegated)

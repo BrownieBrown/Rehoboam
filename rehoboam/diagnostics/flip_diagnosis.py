@@ -324,13 +324,20 @@ def dominant_loss_mechanisms(totals: Decomposition, *, tie_band: float = 0.20) -
 
 
 def agreement_label(a: tuple[str, ...], b: tuple[str, ...]) -> str:
-    """How two verdict sets relate: identical, overlapping, or disjoint.
+    """How two verdict SETS relate: identical, overlapping, or disjoint.
+
+    Compared as sets, not tuples: the two verdicts are computed over different
+    populations (the H=30 sweep total vs. the hold-instant total), so a shared
+    set of terms is not guaranteed to share a magnitude ordering between them.
+    Tuple equality would print "overlapping" for two identical sets whose
+    terms merely came out in a different order (REH-78 fix wave, fix 2).
 
     Two empty sets are identical; one empty against one non-empty is disjoint.
     """
-    if a == b:
+    set_a, set_b = set(a), set(b)
+    if set_a == set_b:
         return "identical"
-    return "overlapping" if set(a) & set(b) else "disjoint"
+    return "overlapping" if set_a & set_b else "disjoint"
 
 
 def run_diagnosis(

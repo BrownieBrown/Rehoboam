@@ -214,3 +214,14 @@ def test_agreement_labels():
     assert agreement_label(("selection",), ("entry_premium",)) == "disjoint"
     assert agreement_label((), ()) == "identical"
     assert agreement_label((), ("entry_premium",)) == "disjoint"
+
+
+def test_agreement_label_compares_sets_not_tuples():
+    """The two verdicts are computed over different populations (H=30 sweep
+    totals vs. hold-instant totals), so a shared set of terms is not
+    guaranteed to share an ordering. Tuple equality would wrongly print
+    "overlapping" here instead of "identical"."""
+    assert (
+        agreement_label(("selection", "entry_premium"), ("entry_premium", "selection"))
+        == "identical"
+    )
