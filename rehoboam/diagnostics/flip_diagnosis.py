@@ -278,6 +278,49 @@ def dominant_mechanism(totals: Decomposition, *, tie_band: float = 0.20) -> str:
     return winner
 
 
+def dominant_loss_mechanisms(totals: Decomposition, *, tie_band: float = 0.20) -> tuple[str, ...]:
+    """Apply REH-78's re-registered rule (design doc 2026-08-20).
+
+    Only NEGATIVE signed contributions are eligible: a term that reduced the
+    loss cannot be its cause. Exactly zero is not negative. The largest
+    eligible magnitude is the dominant loss mechanism; any other eligible term
+    within `tie_band` of it is co-dominant and returned alongside, ordered by
+    magnitude descending. An empty tuple means NO LOSS TO EXPLAIN -- the only
+    circumstance in which this rule declines to answer.
+
+    This replaces `dominant_mechanism`, which is retained above so the re-run
+    can print both. Do not delete that one.
+    """
+    # Strictly `< 0`: a term contributing exactly zero moved no money and is
+    # not a loss mechanism.
+    eligible = sorted(
+        ((term, value) for term, value in signed_contributions(totals).items() if value < 0),
+        key=lambda kv: abs(kv[1]),
+        reverse=True,
+    )
+    if not eligible:
+        return ()
+    winner_term, winner_value = eligible[0]
+    # The band is anchored on the WINNER, not chained pairwise: chaining would
+    # let a tail of near-misses walk an unrelated term into the verdict one
+    # 20% step at a time.
+    return (winner_term,) + tuple(
+        term
+        for term, value in eligible[1:]
+        if abs(winner_value) - abs(value) <= tie_band * abs(winner_value)
+    )
+
+
+def agreement_label(a: tuple[str, ...], b: tuple[str, ...]) -> str:
+    """How two verdict sets relate: identical, overlapping, or disjoint.
+
+    Two empty sets are identical; one empty against one non-empty is disjoint.
+    """
+    if a == b:
+        return "identical"
+    return "overlapping" if set(a) & set(b) else "disjoint"
+
+
 def run_diagnosis(
     learner_db: Path, corpus_db: Path, *, horizons: tuple[int, ...] = HORIZONS
 ) -> DiagnosisResult:

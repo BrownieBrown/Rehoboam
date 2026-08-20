@@ -12,6 +12,8 @@ from rehoboam.diagnostics.flip_diagnosis import (
     DiagnosisResult,
     RoundTrip,
     TripRow,
+    agreement_label,
+    dominant_loss_mechanisms,
     dominant_mechanism,
     temporal_split,
     totals_by_branch,
@@ -131,3 +133,83 @@ def test_a_clear_win_outside_the_band_is_named():
         dominant_mechanism(Decomposition(selection=-1_000, exit_timing=-500, entry_premium=0))
         == "selection"
     )
+
+
+# --- REH-78: the re-registered rule -------------------------------------
+
+# The population totals REH-75 published (results doc section 3), pre-REH-77.
+# Entry premium is stored UNNEGATED on Decomposition, so +116_401_328 here is
+# a signed contribution of -116_401_328 -- which is what makes it eligible.
+REH75_TOTALS = {
+    14: Decomposition(selection=-64_936_734, exit_timing=+126_081_998, entry_premium=116_401_328),
+    21: Decomposition(selection=-115_271_263, exit_timing=+176_416_527, entry_premium=116_401_328),
+    30: Decomposition(selection=-116_527_447, exit_timing=+177_672_711, entry_premium=116_401_328),
+    45: Decomposition(selection=-141_559_888, exit_timing=+202_705_152, entry_premium=116_401_328),
+    60: Decomposition(selection=-164_802_412, exit_timing=+225_947_676, entry_premium=116_401_328),
+}
+
+
+def test_a_positive_term_is_never_eligible_however_large():
+    """The defect REH-78 exists to fix: exit timing is +EUR177.7M at H=30 and
+    was named the dominant mechanism OF A LOSS. A gain cannot cause a loss."""
+    assert "exit_timing" not in dominant_loss_mechanisms(REH75_TOTALS[30])
+
+
+def test_the_five_published_horizons_return_the_pre_registered_verdicts():
+    """Pinned to numbers that existed before this code did (design doc,
+    'What the rule returns, stated before it is run')."""
+    assert dominant_loss_mechanisms(REH75_TOTALS[14]) == ("entry_premium",)
+    assert dominant_loss_mechanisms(REH75_TOTALS[21]) == ("entry_premium", "selection")
+    assert dominant_loss_mechanisms(REH75_TOTALS[30]) == ("selection", "entry_premium")
+    assert dominant_loss_mechanisms(REH75_TOTALS[45]) == ("selection", "entry_premium")
+    assert dominant_loss_mechanisms(REH75_TOTALS[60]) == ("selection",)
+
+
+def test_the_old_rule_still_returns_its_degenerate_answer():
+    """Kept callable on purpose: it makes the re-run a controlled comparison
+    (same data, two rules) instead of a claim about deleted code."""
+    assert dominant_mechanism(REH75_TOTALS[30]) == "exit_timing"
+
+
+def test_no_negative_term_means_no_loss_to_explain():
+    assert (
+        dominant_loss_mechanisms(Decomposition(selection=100, exit_timing=50, entry_premium=0))
+        == ()
+    )
+
+
+def test_exactly_zero_is_not_negative_and_not_eligible():
+    verdict = dominant_loss_mechanisms(
+        Decomposition(selection=-1_000, exit_timing=0, entry_premium=0)
+    )
+    assert verdict == ("selection",)
+
+
+def test_a_gap_at_exactly_the_band_is_co_dominant():
+    """`<=`, matching the old rule's arithmetic: 800 is exactly 20% below 1000."""
+    verdict = dominant_loss_mechanisms(
+        Decomposition(selection=-1_000, exit_timing=-800, entry_premium=0)
+    )
+    assert verdict == ("selection", "exit_timing")
+
+
+def test_a_gap_outside_the_band_names_one_term():
+    verdict = dominant_loss_mechanisms(
+        Decomposition(selection=-1_000, exit_timing=-799, entry_premium=0)
+    )
+    assert verdict == ("selection",)
+
+
+def test_verdicts_are_ordered_by_magnitude_descending():
+    verdict = dominant_loss_mechanisms(
+        Decomposition(selection=-900, exit_timing=-1_000, entry_premium=0)
+    )
+    assert verdict == ("exit_timing", "selection")
+
+
+def test_agreement_labels():
+    assert agreement_label(("selection",), ("selection",)) == "identical"
+    assert agreement_label(("selection", "entry_premium"), ("entry_premium",)) == "overlapping"
+    assert agreement_label(("selection",), ("entry_premium",)) == "disjoint"
+    assert agreement_label((), ()) == "identical"
+    assert agreement_label((), ("entry_premium",)) == "disjoint"
