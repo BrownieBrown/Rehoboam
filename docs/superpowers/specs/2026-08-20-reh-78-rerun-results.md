@@ -361,8 +361,10 @@ appendix below.
 | **Total**                |        **136** |     **136** | **−€55,256,064** | **−€55,256,064** |
 
 Both columns sum to −€55,256,064 over 136 trips: relabelling redistributes the
-loss between rungs and cannot change it. `no_pattern` keeps a count of 2 while
-its total swings by +€20.0M — both of its members changed.
+loss between rungs and cannot change it. A count that did not move is not
+evidence that a rung did not change: `no_pattern` holds at 2 while its total
+swings by +€19,999,535, because one member left (Woltemade, to `low_points`) and
+one arrived (from `stable`).
 
 **Exactly 18 of the 136 scored trips changed label** (23 of 151 including the
 floor group, whose labels appear in no published table). That count is *not*
