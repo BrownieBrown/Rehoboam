@@ -159,6 +159,7 @@ class TripRow:
     mv_buy: int | None
     branch: str
     by_horizon: dict[int, Decomposition]
+    at_hold: Decomposition | None
     peak_during_hold: int | None
     is_floor_trip: bool
 
@@ -168,6 +169,7 @@ class DiagnosisResult:
     rows: list[TripRow]
     horizons: tuple[int, ...]
     censored: dict[int, int]
+    hold_censored: int = 0
 
     def scored(self) -> list[TripRow]:
         """Rows carried in the headline totals: everything but the floor group."""
@@ -211,6 +213,16 @@ def totals_by_horizon(result: DiagnosisResult) -> dict[int, Decomposition]:
         h: _sum([r.by_horizon[h] for r in result.scored() if h in r.by_horizon])
         for h in result.horizons
     }
+
+
+def totals_at_hold(result: DiagnosisResult) -> Decomposition:
+    """Population totals of the identity evaluated at each trip's sale instant.
+
+    A supplementary view, NOT the registered instrument: the sale date is
+    chosen by the bot, usually at a local high, so its selection term is
+    conditioned on the outcome. See the REH-78 design doc.
+    """
+    return _sum([r.at_hold for r in result.scored() if r.at_hold is not None])
 
 
 def totals_by_branch(result: DiagnosisResult, horizon: int) -> dict[str, Decomposition]:
@@ -278,6 +290,56 @@ def dominant_mechanism(totals: Decomposition, *, tie_band: float = 0.20) -> str:
     return winner
 
 
+def dominant_loss_mechanisms(totals: Decomposition, *, tie_band: float = 0.20) -> tuple[str, ...]:
+    """Apply REH-78's re-registered rule (design doc 2026-08-20).
+
+    Only NEGATIVE signed contributions are eligible: a term that reduced the
+    loss cannot be its cause. Exactly zero is not negative. The largest
+    eligible magnitude is the dominant loss mechanism; any other eligible term
+    within `tie_band` of it is co-dominant and returned alongside, ordered by
+    magnitude descending. An empty tuple means NO LOSS TO EXPLAIN -- the only
+    circumstance in which this rule declines to answer.
+
+    This replaces `dominant_mechanism`, which is retained above so the re-run
+    can print both. Do not delete that one.
+    """
+    # Strictly `< 0`: a term contributing exactly zero moved no money and is
+    # not a loss mechanism.
+    eligible = sorted(
+        ((term, value) for term, value in signed_contributions(totals).items() if value < 0),
+        key=lambda kv: abs(kv[1]),
+        reverse=True,
+    )
+    if not eligible:
+        return ()
+    winner_term, winner_value = eligible[0]
+    # The band is anchored on the WINNER, not chained pairwise: chaining would
+    # let a tail of near-misses walk an unrelated term into the verdict one
+    # 20% step at a time.
+    return (winner_term,) + tuple(
+        term
+        for term, value in eligible[1:]
+        if abs(winner_value) - abs(value) <= tie_band * abs(winner_value)
+    )
+
+
+def agreement_label(a: tuple[str, ...], b: tuple[str, ...]) -> str:
+    """How two verdict SETS relate: identical, overlapping, or disjoint.
+
+    Compared as sets, not tuples: the two verdicts are computed over different
+    populations (the H=30 sweep total vs. the hold-instant total), so a shared
+    set of terms is not guaranteed to share a magnitude ordering between them.
+    Tuple equality would print "overlapping" for two identical sets whose
+    terms merely came out in a different order (REH-78 fix wave, fix 2).
+
+    Two empty sets are identical; one empty against one non-empty is disjoint.
+    """
+    set_a, set_b = set(a), set(b)
+    if set_a == set_b:
+        return "identical"
+    return "overlapping" if set_a & set_b else "disjoint"
+
+
 def run_diagnosis(
     learner_db: Path, corpus_db: Path, *, horizons: tuple[int, ...] = HORIZONS
 ) -> DiagnosisResult:
@@ -306,6 +368,7 @@ def run_diagnosis(
     corpus = TrainingCorpus(corpus_db, read_only=True)
     kickoffs = load_calendar(learner_db, league_id=LEAGUE_ID)
     censored = dict.fromkeys(horizons, 0)
+    hold_censored = 0
     rows: list[TripRow] = []
 
     for trip in trips:
@@ -342,6 +405,7 @@ def run_diagnosis(
                     mv_buy=None,
                     branch="no_trend_data",
                     by_horizon={},
+                    at_hold=None,
                     peak_during_hold=peak,
                     is_floor_trip=is_floor,
                 )
@@ -353,6 +417,16 @@ def run_diagnosis(
         day_number = day_for_kickoff(kickoffs, trip.buy_date)
         avg_points = average_points_at(corpus, trip.player_id, season=SEASON, day_number=day_number)
         branch = label_for(trend, avg_points, mv_buy)
+
+        # The identity again at the SALE instant. `market_value_at` (at-or-
+        # before), never `mv_nearest`: the sale date is a decision instant,
+        # and `mv_nearest` is bidirectional -- it can resolve to a snapshot
+        # taken after we sold and leak post-sale price action into the exit
+        # term. Same reasoning as `mv_buy` above; see the REH-78 design doc.
+        mv_sell = corpus.market_value_at(trip.player_id, trip.sell_date)
+        at_hold = None if mv_sell is None else decompose(trip, mv_buy=mv_buy, mv_h=mv_sell)
+        if mv_sell is None and not is_floor:
+            hold_censored += 1
 
         by_horizon: dict[int, Decomposition] = {}
         for h in horizons:
@@ -369,9 +443,12 @@ def run_diagnosis(
                 mv_buy=mv_buy,
                 branch=branch,
                 by_horizon=by_horizon,
+                at_hold=at_hold,
                 peak_during_hold=peak,
                 is_floor_trip=is_floor,
             )
         )
 
-    return DiagnosisResult(rows=rows, horizons=horizons, censored=censored)
+    return DiagnosisResult(
+        rows=rows, horizons=horizons, censored=censored, hold_censored=hold_censored
+    )

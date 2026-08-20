@@ -17,9 +17,12 @@ from rehoboam.diagnostics.flip_diagnosis import (
     HEADLINE_HORIZON,
     TEMPORAL_BOUNDARY_ISO,
     DiagnosisResult,
+    agreement_label,
+    dominant_loss_mechanisms,
     dominant_mechanism,
     signed_contributions,
     temporal_split,
+    totals_at_hold,
     totals_by_branch,
     totals_by_horizon,
 )
@@ -47,6 +50,27 @@ POSITIVE_WINNER_NOTE = (
     "magnitude, so the named term is the largest number, not necessarily the "
     "cause of the loss)"
 )
+
+# Printed on the REH-75 headline block. That block is kept verbatim so the
+# re-run stays line-comparable against the results document's appendix; this
+# note is what stops a reader taking its verdict as current.
+SUPERSEDED_NOTE = (
+    "  (superseded: this rule could not name selection — see the registered "
+    "verdict below and REH-78)"
+)
+
+_DISPLAY = {
+    "selection": "selection",
+    "exit_timing": "exit timing",
+    "entry_premium": "entry premium",
+}
+
+
+def _verdict_text(terms: tuple[str, ...]) -> str:
+    if not terms:
+        return "no loss to explain"
+    named = " + ".join(_DISPLAY[t] for t in terms)
+    return f"{named} (co-dominant)" if len(terms) > 1 else named
 
 
 def _eur(n: int) -> str:
@@ -194,6 +218,44 @@ def format_report(result: DiagnosisResult) -> str:
         f"  Exit timing:    {_eur(headline.exit_timing)}",
         f"  Entry premium:  {_eur(headline.entry_premium)}  (paid over market value, unnegated)",
         f"  Total:          {_eur(headline.total)}",
+        SUPERSEDED_NOTE,
+    ]
+
+    registered = dominant_loss_mechanisms(headline)
+    hold = totals_at_hold(result)
+    hold_verdict = dominant_loss_mechanisms(hold)
+    # `hold_censored` only increments when mv_buy resolved and mv_sell did
+    # not -- a row that never got mv_buy in the first place (excluded from
+    # `scored()`'s hold view via `at_hold is None`, but never counted here)
+    # is invisible to that counter. Printing the rows that actually fed the
+    # totals below means the block cannot silently under-report its
+    # population the way Censored alone could.
+    hold_n = sum(1 for r in scored if r.at_hold is not None)
+    lines += [
+        "",
+        f"Registered verdict at H={HEADLINE_HORIZON}d (REH-78): {_verdict_text(registered)}",
+        "  Only negative contributions are eligible; a term that reduced the "
+        "loss cannot be its cause.",
+        "",
+        "Dominance by horizon (REH-78 rule)",
+        _RULE,
+    ]
+    for h in result.horizons:
+        lines.append(f"{f'{h}d':<9}{_verdict_text(dominant_loss_mechanisms(horizon_totals[h]))}")
+    lines += [
+        "",
+        "Supplementary — the identity at each trip's realised hold "
+        "(NOT the registered instrument: the sale date is bot-chosen, so "
+        "selection is conditioned on the outcome)",
+        _RULE,
+        f"  n: {hold_n} scored round trips contribute to the totals below",
+        f"  Selection:      {_eur(hold.selection)}",
+        f"  Exit timing:    {_eur(hold.exit_timing)}",
+        f"  Entry premium:  {_eur(hold.entry_premium)}  (paid over market value, unnegated)",
+        f"  Total:          {_eur(hold.total)}",
+        f"  Verdict: {_verdict_text(hold_verdict)}",
+        f"  Agreement with the registered verdict: " f"{agreement_label(registered, hold_verdict)}",
+        f"  Censored (no market value at or before the sale): {result.hold_censored}",
         "",
     ]
 

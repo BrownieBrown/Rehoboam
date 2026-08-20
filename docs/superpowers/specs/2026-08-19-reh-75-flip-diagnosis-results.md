@@ -5,6 +5,13 @@ Date: 2026-08-19
 Design: `2026-08-19-reh-75-flip-diagnosis-design.md` (binding on method)
 Status: measurement complete. This is a diagnosis, not a fix.
 
+**Superseded in part (2026-08-20, REH-78).** Section 4's dominance rule was
+degenerate: it could not return `selection`, and it named a gain as the cause
+of a loss. The rule and its verdict are re-registered in
+`2026-08-20-reh-78-dominance-rule-design.md`, and re-run in
+`2026-08-20-reh-78-rerun-results.md`. Everything else in this document
+stands; section 4's verdict remains a true record of what that rule returned.
+
 ______________________________________________________________________
 
 ## 0. The population correction — read this before any number

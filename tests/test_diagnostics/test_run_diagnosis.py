@@ -16,6 +16,7 @@ from rehoboam.diagnostics.flip_diagnosis import (
     FLOOR_PRICE,
     Decomposition,
     run_diagnosis,
+    totals_at_hold,
 )
 from rehoboam.enrichment.corpus import TrainingCorpus
 
@@ -73,6 +74,12 @@ _TRIPS = [
     # snapshot (leaking future price into mv_buy); `market_value_at` must
     # not.
     ("p_leak_check", "LeakCheck", 600_000, 700_000, DAY0, DAY0 + 40 * 86400, 40),
+    # A snapshot 0.5 days AFTER sell_date is numerically nearer than the one a
+    # day before it. `mv_nearest` would pick it, leaking post-sale price action
+    # into the exit term; `market_value_at` must not. The +14d and +30d
+    # snapshots exist so this row decomposes at both horizons and leaves the
+    # censoring bookkeeping below unchanged.
+    ("p_sale_leak", "SaleLeak", 1_000_000, 1_050_000, DAY0, DAY0 + 40 * 86400, 40),
 ]
 
 _MV_SERIES = {
@@ -89,6 +96,13 @@ _MV_SERIES = {
     "p_leak_check": [
         (DAY0 - 2 * 86400, 500_000),
         (DAY0 + 0.5 * 86400, 900_000),
+    ],
+    "p_sale_leak": [
+        (DAY0 - 86400, 1_000_000),
+        (DAY0 + 14 * 86400, 1_010_000),
+        (DAY0 + 30 * 86400, 1_015_000),
+        (DAY0 + 39 * 86400, 1_020_000),
+        (DAY0 + 40.5 * 86400, 5_000_000),
     ],
 }
 
@@ -126,7 +140,7 @@ def test_run_diagnosis_over_a_small_fixture(tmp_path):
     learner_db, corpus_db = _dbs(tmp_path)
     result = run_diagnosis(learner_db, corpus_db, horizons=HORIZONS)
 
-    assert len(result.rows) == 5
+    assert len(result.rows) == 6
     by_player = {r.trip.player_id: r for r in result.rows}
 
     # A fully-decomposed row: pins the buy_date + h * SECONDS_PER_DAY offset
@@ -226,3 +240,46 @@ def test_read_only_corpus_skips_the_schema_and_migrate_block(tmp_path):
     before = hashlib.sha256(corpus_db.read_bytes()).hexdigest()
     TrainingCorpus(corpus_db, read_only=True)
     assert hashlib.sha256(corpus_db.read_bytes()).hexdigest() == before
+
+
+def test_the_hold_view_uses_the_at_or_before_lookup(tmp_path):
+    """The sale is a DECISION instant, so it follows mv_buy's rule. A snapshot
+    taken after we sold must not reach the term that measures our exit."""
+    learner_db, corpus_db = _dbs(tmp_path)
+    result = run_diagnosis(learner_db, corpus_db, horizons=HORIZONS)
+    row = {r.trip.player_id: r for r in result.rows}["p_sale_leak"]
+    assert row.at_hold == Decomposition(
+        selection=20_000,  # 1_020_000 - 1_000_000, NOT 5_000_000 - 1_000_000
+        exit_timing=30_000,  # 1_050_000 - 1_020_000
+        entry_premium=0,  # bought at market value
+    )
+
+
+def test_the_hold_identity_closes_to_realised_pnl(tmp_path):
+    learner_db, corpus_db = _dbs(tmp_path)
+    result = run_diagnosis(learner_db, corpus_db, horizons=HORIZONS)
+    contributing = [r for r in result.scored() if r.at_hold is not None]
+    assert totals_at_hold(result).total == sum(r.trip.realised for r in contributing)
+
+
+def test_the_hold_view_cannot_be_censored_once_the_buy_resolved(tmp_path):
+    """A STRUCTURAL invariant, not an observation. `market_value_at` returns the
+    most recent snapshot at or before its argument, and buy_date < sell_date, so
+    whatever resolved `mv_buy` is still a candidate at the sale: a row with a
+    buy market value can never lack a sale one. `hold_censored` is therefore a
+    tripwire that must read 0 on every dataset -- it exists so that a change to
+    that lookup's semantics surfaces here instead of silently zeroing an exit
+    term. Do not replace this with a test that manufactures a censored row; it
+    cannot be built without breaking the lookup itself."""
+    learner_db, corpus_db = _dbs(tmp_path)
+    result = run_diagnosis(learner_db, corpus_db, horizons=HORIZONS)
+    assert all(r.at_hold is not None for r in result.rows if r.mv_buy is not None)
+    assert result.hold_censored == 0
+
+
+def test_a_row_with_no_market_value_at_buy_has_no_hold_view_either(tmp_path):
+    learner_db, corpus_db = _dbs(tmp_path)
+    result = run_diagnosis(learner_db, corpus_db, horizons=HORIZONS)
+    no_mv = {r.trip.player_id: r for r in result.rows}["p_no_mv"]
+    assert no_mv.mv_buy is None
+    assert no_mv.at_hold is None
