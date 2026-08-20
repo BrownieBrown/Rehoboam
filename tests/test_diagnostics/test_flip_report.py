@@ -34,6 +34,7 @@ def _result():
             h: Decomposition(selection=10 * h, exit_timing=-50, entry_premium=100_000)
             for h in (14, 21, 30, 45, 60)
         },
+        at_hold=None,
         peak_during_hold=1_200_000,
         is_floor_trip=False,
     )
@@ -61,6 +62,7 @@ def test_a_horizon_sweep_missing_the_headline_horizon_fails_clearly():
         mv_buy=result.rows[0].mv_buy,
         branch=result.rows[0].branch,
         by_horizon={h: d for h, d in result.rows[0].by_horizon.items() if h != 30},
+        at_hold=result.rows[0].at_hold,
         peak_during_hold=result.rows[0].peak_during_hold,
         is_floor_trip=result.rows[0].is_floor_trip,
     )
@@ -123,6 +125,7 @@ def test_rows_with_no_market_value_at_buy_are_counted_when_present():
         mv_buy=None,
         branch="no_trend_data",
         by_horizon={},
+        at_hold=None,
         peak_during_hold=None,
         is_floor_trip=False,
     )
@@ -171,6 +174,7 @@ def test_mirror_divergence_is_surfaced_prominently_when_present():
             h: Decomposition(selection=0, exit_timing=0, entry_premium=0)
             for h in (14, 21, 30, 45, 60)
         },
+        at_hold=None,
         peak_during_hold=1_100_000,
         is_floor_trip=False,
     )
@@ -209,6 +213,7 @@ def _positive_winner_result():
             h: Decomposition(selection=-100, exit_timing=500_100, entry_premium=0)
             for h in (14, 21, 30, 45, 60)
         },
+        at_hold=None,
         peak_during_hold=1_500_000,
         is_floor_trip=False,
     )

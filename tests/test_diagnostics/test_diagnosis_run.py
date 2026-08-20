@@ -53,6 +53,7 @@ def _row(
                 entry_premium=entry_premium,
             )
         },
+        at_hold=None,
         peak_during_hold=1_000_000,
         is_floor_trip=floor,
     )
