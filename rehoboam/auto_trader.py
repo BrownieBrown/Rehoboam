@@ -89,6 +89,31 @@ def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUA
     return cap - squad_size - open_bid_count
 
 
+def _starter_swap_has_recovery_time(days_until_match: int | None, min_days: int) -> bool:
+    """May a trade pair break up the best eleven for a bid that might not land?
+
+    A pair sells before it bids, and that ordering is forced rather than
+    careless: Kickbase counts open bids toward the 15-player cap, so at 15/15
+    the sell is what frees the slot the bid needs. The plain-buy path can defer
+    its sell until the auction resolves (`sell_plan_player_ids`); the pair path
+    has nothing to defer into.
+
+    So the sell is certain and the buy is only a bid. Lose the auction and the
+    squad is simply one player lighter until a later session replaces him --
+    which costs nothing on the pitch for a bench player, and real points every
+    matchday for a member of the best eleven.
+
+    The bot runs twice a day, so that risk is only material when there is no
+    time left to refill before kickoff. An unknown date counts as no time: this
+    guard's whole point is the case we cannot see, and `get_days_until_match`
+    returning None is exactly how the matchday phase silently degraded for
+    months (PR #66).
+    """
+    if days_until_match is None:
+        return False
+    return days_until_match >= min_days
+
+
 def _emergency_slots_short(squad: list) -> int:
     """How many players must be bought to make a legal eleven fieldable.
 
@@ -552,6 +577,29 @@ class AutoTrader:
                         f"[yellow]Cannot afford trade pair "
                         f"{obj.sell_player.last_name}→{obj.buy_player.last_name} "
                         f"(net €{net_cost:,} > €{ctx.flip_budget:,})[/yellow]"
+                    )
+                    continue
+
+                # The sell below is irreversible while the buy is only a bid,
+                # so refuse to open a hole in the starting eleven that we may
+                # not have time to close again. Bench sells pass freely.
+                if obj.sell_is_starter and not _starter_swap_has_recovery_time(
+                    ctx.matchday_phase.days_until_match,
+                    self.settings.min_days_to_match_for_starter_swap,
+                ):
+                    console.print(
+                        f"[yellow]Skip pair {obj.sell_player.last_name}→"
+                        f"{obj.buy_player.last_name} — would sell a starter with "
+                        f"{ctx.matchday_phase.days_until_match} day(s) to kickoff "
+                        f"(need {self.settings.min_days_to_match_for_starter_swap}+); "
+                        f"a lost auction would leave the eleven short[/yellow]"
+                    )
+                    logger.info(
+                        "trade-pair skip starter-swap sell=%s buy=%s days_to_match=%s min=%d",
+                        obj.sell_player.id,
+                        obj.buy_player.id,
+                        ctx.matchday_phase.days_until_match,
+                        self.settings.min_days_to_match_for_starter_swap,
                     )
                     continue
 
