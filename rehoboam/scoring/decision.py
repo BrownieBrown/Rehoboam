@@ -545,6 +545,42 @@ class DecisionEngine:
                     )
         return top
 
+    def trade_ep_gain(
+        self,
+        buy_score: PlayerScore,
+        buy_player: MarketPlayer,
+        sell_player_id: str,
+        squad: list[MarketPlayer],
+        squad_scores: list[PlayerScore],
+    ) -> float:
+        """Best-11 EP delta of swapping *sell_player_id* out for *buy_player*.
+
+        This is the trade-pair analogue of :meth:`calculate_marginal_ep`: both
+        answer "how much better is the starting 11 afterwards?", the only
+        difference being that a trade also *removes* a player.
+
+        Measured against the squad we would keep by doing nothing, so selling
+        a contributor is charged for the hole it leaves. Deliberately not
+        clamped at zero — a negative result means the swap actively hurts the
+        best 11, and the caller's threshold check needs to see that.
+
+        Using the raw ``buy.ep - sell.ep`` difference instead credits the full
+        EP of a player who was contributing nothing (a bench player scores no
+        matchday points) and ignores whether the incoming player can even
+        enter the best 11 — only one goalkeeper ever starts.
+        """
+        score_map = self.select_lineup(squad_scores)
+        current_best = select_best_eleven(squad, score_map)
+        current_total = sum(score_map.get(p.id, 0.0) for p in current_best)
+
+        new_squad = [p for p in squad if p.id != sell_player_id] + [buy_player]
+        new_score_map = dict(score_map)
+        new_score_map[buy_score.player_id] = buy_score.expected_points
+        new_best = select_best_eleven(new_squad, new_score_map)
+        new_total = sum(new_score_map.get(p.id, 0.0) for p in new_best)
+
+        return new_total - current_total
+
     def build_trade_pairs(
         self,
         market_scores: list[PlayerScore],
@@ -637,10 +673,28 @@ class DecisionEngine:
             sell_mp = best_sell.player
             sell_value = int(sell_mp.market_value * INSTANT_SELL_PCT)
             net_cost = buy_player.price - sell_value
-            ep_gain = ps.expected_points - best_sell.score.expected_points
+            ep_gain = self.trade_ep_gain(
+                buy_score=ps,
+                buy_player=buy_player,
+                sell_player_id=best_sell.score.player_id,
+                squad=squad_list,
+                squad_scores=squad_scores,
+            )
 
-            # Starter swaps churn team value — require a significant EP boost
-            # (2x the normal threshold) to justify the cost.
+            # Starter swaps must clear 2x the normal threshold.
+            #
+            # This multiplier predates formation-aware ep_gain, where it was a
+            # blunt correction for arithmetic that overstated every swap. It is
+            # kept deliberately, for a different reason: trade_ep_gain now
+            # prices the starter's lost EP correctly, but three costs of the
+            # swap still sit outside that delta --
+            #   1. instant sell takes the INSTANT_SELL_PCT haircut
+            #   2. the sell executes immediately while the buy is only a BID
+            #      (auto_trader.run_unified_trade_phase), so a lost auction on a
+            #      starter swap leaves a hole in the real starting 11
+            #   3. week-to-week lineup churn
+            # (2) is the binding one. Revisit this premium when the trade phase
+            # defers the sell until the auction resolves.
             min_gain = self.min_ep_upgrade * 2 if is_starter_sell else self.min_ep_upgrade
             if ep_gain < min_gain:
                 continue

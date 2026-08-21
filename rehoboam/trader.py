@@ -15,6 +15,7 @@ Everything else from the old trader.py (legacy analyze/trade/display logic)
 has been removed.
 """
 
+import logging
 from datetime import datetime, timezone
 
 from rich.console import Console
@@ -33,6 +34,8 @@ from .kickbase_client import League
 from .matchup_analyzer import MatchupAnalyzer
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -67,6 +70,24 @@ def _determine_emergency(squad: list) -> tuple[bool, str]:
     if fieldability["ok"]:
         return False, ""
     return True, fieldability["reason"]
+
+
+def _parse_match_date(value) -> datetime | None:
+    """Parse a Kickbase match date from either an epoch number or an ISO string.
+
+    Returns None for anything unparseable so callers can keep collecting
+    candidates instead of aborting on one bad entry.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, int | float):
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, OSError, OverflowError):
+        return None
+    return None
 
 
 class Trader:
@@ -104,28 +125,75 @@ class Trader:
     # ------------------------------------------------------------------
 
     def get_days_until_match(self, league) -> int | None:
-        """Return days until the next match, or None if unknown.
+        """Return days until the next match, or None if genuinely unknown.
 
         Uses timezone-aware datetime comparison to avoid the naive/aware
         TypeError that silently broke matchday-phase detection in early
         revisions of this code.
+
+        Kickbase has moved this value between aliases across seasons. Up to
+        2025/26 it was a single ``nm``/``nextMatch``; as of 2026/27 the
+        /myeleven response carries no such key and the fixture date is
+        instead attached per player under ``md``, split across ``lp`` (the
+        set lineup) and ``nlp`` (everyone else). Both shapes are read,
+        newest first, and a shape we cannot read at all is logged rather than
+        swallowed -- returning None here disables both the matchday "locked"
+        phase and the budget-at-kickoff guard, so a silent None is expensive.
         """
         try:
             starting_eleven = self.api.get_starting_eleven(league)
-            next_match = starting_eleven.get("nm") or starting_eleven.get("nextMatch")
-            if not next_match:
-                return None
-            if isinstance(next_match, int | float):
-                next_match_date = datetime.fromtimestamp(next_match, tz=timezone.utc)
-            elif isinstance(next_match, str):
-                next_match_date = datetime.fromisoformat(next_match.replace("Z", "+00:00"))
-            else:
-                return None
-            now = datetime.now(tz=timezone.utc)
-            days = (next_match_date - now).days
-            return max(days, 0)
         except Exception:
+            logger.warning("next-match: /myeleven fetch failed", exc_info=True)
             return None
+
+        if not isinstance(starting_eleven, dict):
+            logger.warning(
+                "next-match: unexpected /myeleven payload type=%s",
+                type(starting_eleven).__name__,
+            )
+            return None
+
+        now = datetime.now(tz=timezone.utc)
+        candidates: list[datetime] = []
+
+        # Legacy single-value aliases (pre-2026/27).
+        legacy = starting_eleven.get("nm") or starting_eleven.get("nextMatch")
+        parsed = _parse_match_date(legacy)
+        if parsed is not None:
+            candidates.append(parsed)
+
+        # 2026/27 shape: one fixture date per player, under "md".
+        # lp[] is the set lineup, nlp[] the players outside it -- read BOTH.
+        # Before a lineup is set lp[] is empty and nlp[] holds the whole squad;
+        # afterwards the starters move to lp[], and reading only nlp[] would
+        # time the guard off the bench's fixtures.
+        for key in ("lp", "nlp"):
+            for entry in starting_eleven.get(key) or []:
+                if isinstance(entry, dict):
+                    parsed = _parse_match_date(entry.get("md"))
+                    if parsed is not None:
+                        candidates.append(parsed)
+
+        upcoming = [d for d in candidates if d >= now]
+        if not upcoming:
+            logger.warning(
+                "next-match: no upcoming fixture found in /myeleven "
+                "(keys=%s, parsed=%d date(s)) - matchday phase detection and "
+                "the budget-at-kickoff guard are both disabled",
+                sorted(starting_eleven.keys()),
+                len(candidates),
+            )
+            return None
+
+        # Budget must be non-negative at the FIRST kickoff among our players,
+        # so the earliest upcoming fixture is the one that binds.
+        next_match_date = min(upcoming)
+        logger.debug(
+            "next-match: %s (from %d candidate date(s))",
+            next_match_date.isoformat(),
+            len(candidates),
+        )
+        return max((next_match_date - now).days, 0)
 
     # ------------------------------------------------------------------
     # EP pipeline
