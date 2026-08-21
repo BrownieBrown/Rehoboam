@@ -188,7 +188,16 @@ jobs:
         # Pinned, not floating on `@4`: this step runs package install scripts
         # as root in a job that deploys to Azure, so the exact code executed
         # here must change only when this file changes. Bump deliberately.
-        run: npm install -g azure-functions-core-tools@4.13.2 --unsafe-perm true
+        #
+        # 4.13.0 is what npm's `latest` tag points at. 4.13.1 and 4.13.2 are
+        # published but DEPRECATED, and their CDN payloads 404:
+        #   Error downloading .../Azure.Functions.Cli.linux-x64.4.13.2.zip
+        #   Expected: 200, Actual: 404
+        # `@4` resolves to the highest semver match, i.e. the broken 4.13.2 --
+        # so the unpinned form was failing for this reason too. When bumping,
+        # check `npm view azure-functions-core-tools dist-tags`, not the
+        # version list.
+        run: npm install -g azure-functions-core-tools@4.13.0 --unsafe-perm true
 
       - name: Login to Azure
         uses: azure/login@v2
