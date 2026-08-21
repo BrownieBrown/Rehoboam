@@ -23,6 +23,7 @@ from rehoboam.replay.engine import (
 )
 from rehoboam.replay.market import ReplayMarket
 from rehoboam.replay.state import initial_state
+from rehoboam.scoring.v2.adapter import compose_ep
 from rehoboam.scoring.v2.coefficients import load_coefficients
 
 SEASON = "2025/2026"
@@ -150,8 +151,19 @@ def _make_score_fn(
         if player_id not in positions:
             positions.update(corpus.positions_for([player_id]))
         position = positions.get(player_id)
-        probs = availability.predict(prev_status)
-        return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
+        # REH-84: compose through `compose_ep`, never a local copy of its body.
+        # This function used to inline `sum(probs[s] * rate.predict(...))`, which
+        # agreed with the live scorer until REH-80 added a cold-start discount
+        # inside `compose_ep`. After that the replay silently kept scoring
+        # unfitted players 30% higher (79.3 against 61.1), and a season replay
+        # run either side of that change printed an identical 26,960 points --
+        # the harness could not see the very change it existed to evaluate.
+        # `scoring/v2/thresholds.py` already states the rule: "A second
+        # implementation would drift."
+        #
+        # The leak boundary stays here: `prev_status` above is derived from
+        # `matches_before`, so only pre-matchday history reaches the model.
+        return compose_ep(player_id, prev_status, position, availability, rate)
 
     return score
 

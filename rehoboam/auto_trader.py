@@ -89,6 +89,35 @@ def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUA
     return cap - squad_size - open_bid_count
 
 
+def _emergency_slots_short(squad: list) -> int:
+    """How many players must be bought to make a legal eleven fieldable.
+
+    Zero when the squad can already field one. REH-82: this used to be
+    ``11 - len(squad)``, which is a headcount and therefore blind to the case
+    that actually costs -100 -- eleven players whose POSITIONS cannot fill any
+    legal formation (no goalkeeper, say) yields zero and triggers nothing,
+    while the emergency fill sitting behind the gate would have handled it
+    correctly, since it already prioritises positions below their minimum.
+
+    ``can_fill_starting_eleven`` subsumes the headcount test -- it reports
+    "Only N available players, need 11" as well as a broken position mix -- so
+    this is strictly more coverage, not a trade.
+
+    The squad is passed unfiltered, exactly as the headcount version did.
+    ``can_fill_starting_eleven`` documents that injured and suspended players
+    should be excluded, which would be better still, but that makes emergencies
+    fire more often in the locked phase and is a behaviour change worth
+    measuring on its own.
+    """
+    from .formation import FormationRequirements, can_fill_starting_eleven
+
+    if can_fill_starting_eleven(squad)["ok"]:
+        return 0
+    # Unfieldable despite enough bodies: buy at least one, and let the fill
+    # path's `gap_positions` choose which position it must be.
+    return max(FormationRequirements().starting_eleven_size - len(squad), 1)
+
+
 @dataclass
 class EPSessionContext:
     """Single-fetch context for the entire auto session."""
@@ -1160,11 +1189,15 @@ class AutoTrader:
         # the no-trade safety rule has to yield to the larger penalty.
         if ctx.matchday_phase.phase == "locked":
             fresh_squad = self.api.get_squad(league)
-            slots_short = 11 - len(fresh_squad)
+            slots_short = _emergency_slots_short(fresh_squad)
             if slots_short > 0:
+                from .formation import can_fill_starting_eleven
+
+                reason = can_fill_starting_eleven(fresh_squad)["reason"]
                 console.print(
-                    f"[bold red]⚠ LINEUP EMERGENCY — squad has {len(fresh_squad)}/11 "
-                    f"({slots_short} empty slot(s)). Locked-phase trading override.[/bold red]"
+                    f"[bold red]⚠ LINEUP EMERGENCY — {reason} "
+                    f"(squad {len(fresh_squad)}, buying {slots_short}). "
+                    f"Locked-phase trading override.[/bold red]"
                 )
                 try:
                     emergency_results = self._run_emergency_squad_fill(
