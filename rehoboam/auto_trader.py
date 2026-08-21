@@ -277,6 +277,33 @@ class AutoTrader:
             flip_budget=flip_budget,
         )
 
+    def _record_decline(self, player, reason: str, *, ep_gain=None, ceiling=None) -> None:
+        """Best-effort record of a candidate the bot evaluated and did not bid on.
+
+        REH-86. Declines were invisible: `run_unified_trade_phase` drops any
+        candidate whose `recommended_bid` is <= 0 without a trace, so a session
+        that bought nothing looked identical whether it found nothing worth
+        buying or wanted a player it could not afford. Wrapped in try/except
+        like every other learning write -- instrumentation must never be able
+        to stop a trade.
+        """
+        if self.learner is None:
+            return
+        try:
+            self.learner.record_buy_decision(
+                player_id=getattr(player, "id", ""),
+                player_name=getattr(player, "last_name", None),
+                decision="declined",
+                reason=reason,
+                marginal_ep_gain=ep_gain,
+                asking_price=getattr(player, "price", None)
+                or getattr(player, "market_value", None),
+                market_value=getattr(player, "market_value", None),
+                budget_ceiling=ceiling,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("record_buy_decision failed: %s", e)
+
     def run_unified_trade_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Execute all qualifying trades from a single ranked candidate list.
 
@@ -302,6 +329,15 @@ class AutoTrader:
         for rec in buy_recs:
             if rec.recommended_bid and rec.recommended_bid > 0:
                 candidates.append(("buy", rec.marginal_ep_gain, rec))
+            else:
+                # REH-86: the bot looked at this player and did not bid. That
+                # is a decision, and it was previously unrecorded.
+                self._record_decline(
+                    rec.player,
+                    rec.reason or "no_bid",
+                    ep_gain=rec.marginal_ep_gain,
+                    ceiling=int(ctx.current_budget),
+                )
         for pair in trade_pairs:
             if pair.recommended_bid and pair.recommended_bid > 0:
                 candidates.append(("pair", pair.ep_gain, pair))
@@ -317,6 +353,12 @@ class AutoTrader:
             target_name = obj.player.last_name if kind == "buy" else obj.buy_player.last_name
             if self._is_wash_trade(target_id):
                 wash_skipped += 1
+                self._record_decline(
+                    obj.player if kind == "buy" else obj.buy_player,
+                    "wash_trade_block",
+                    ep_gain=ep_val,
+                    ceiling=int(ctx.current_budget),
+                )
                 console.print(f"[dim]Skip {target_name} — wash-trade block (sold recently)[/dim]")
                 logger.info(
                     "guard-wash-trade: skipped %s (id=%s) — sold within block window",
@@ -1093,6 +1135,16 @@ class AutoTrader:
         try:
             squad = self.api.get_squad(league)
             bids = self.api.get_my_bids(league)
+            # REH-86: fill winning_bid/winner_user_id on auctions we lost,
+            # from the transfer feed earlier sessions already ingested. Runs
+            # before resolution so this session's newly-resolved losses are
+            # picked up on the next pass, once their transfer has landed.
+            try:
+                if self.learner is not None:
+                    self.learner.resolve_auction_winners()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("resolve_auction_winners failed: %s", e)
+
             deferred_sell_ids = self.tracker.resolve_auctions(
                 squad_ids={p.id for p in squad},
                 active_bid_ids={p.id for p in bids},
