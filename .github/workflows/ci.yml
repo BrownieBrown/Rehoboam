@@ -184,13 +184,16 @@ jobs:
             mcr.microsoft.com/azure-functions/python:4-python3.11 \
             bash -c "pip install --target=/pkg/.python_packages/lib/site-packages -r /pkg/requirements.txt"
 
+      - name: Install Azure Functions Core Tools
+        # Pinned, not floating on `@4`: this step runs package install scripts
+        # as root in a job that deploys to Azure, so the exact code executed
+        # here must change only when this file changes. Bump deliberately.
+        run: npm install -g azure-functions-core-tools@4.13.2 --unsafe-perm true
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Install Azure Functions Core Tools
-        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
 
       - name: Deploy to Azure Functions
         # REH-65: `azure/functions-action@v1` cannot deploy this app since the
