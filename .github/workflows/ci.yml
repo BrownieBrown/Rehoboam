@@ -222,12 +222,23 @@ jobs:
         # unproven path through the same Linux Consumption zip-deploy
         # machinery that requires the storage access REH-48 removed.
         #
-        # `--no-build` because the previous step already installed the
-        # dependencies inside the official runtime image. That step exists to
-        # fix a real bug (a72fd1b: cryptography's _rust.abi3.so must match the
-        # runtime's glibc); letting Oryx rebuild remotely would discard it.
+        # NO `--no-build`, deliberately. `--no-build` takes the run-from-
+        # package path, which stages the zip as a blob and needs a
+        # connection-string `AzureWebJobsStorage` -- the exact thing REH-48
+        # removed, and the exact thing that killed `azure/functions-action`:
+        #   Uploading package...
+        #   Error creating a Blob container reference. Please make sure your
+        #   connection string in "AzureWebJobsStorage" is valid
+        # Omitting it requests a REMOTE build, which uploads through Kudu and
+        # never touches storage. That is also why `deploy/deploy.sh` still
+        # works: it omits the flag too.
+        #
+        # A remote build makes the container-built `.python_packages` above
+        # redundant rather than wrong -- Oryx rebuilds on the target platform,
+        # so a72fd1b's glibc concern is satisfied by construction. The step is
+        # left in place for one deploy so this change moves one variable.
         working-directory: deploy_package
-        run: func azure functionapp publish func-rehoboam --python --no-build
+        run: func azure functionapp publish func-rehoboam --python
 
       - name: Open an issue if the deploy failed
         # A job that can only fail after merge is a job whose failures nobody
