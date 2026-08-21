@@ -37,27 +37,6 @@ from rehoboam.scoring.v2.rate import RateModel
 
 DGW_MULTIPLIER = 1.8
 
-# REH-80: what an unmeasured player's prior is worth.
-#
-# A player with no fitted quality falls back to the position prior, which is
-# the median of ALL players at that position. Newcomers are not median players.
-# Measured over `training_corpus.player_match_history`, splitting each season's
-# players into those with a prior season in the corpus and those without:
-#
-#   season     newcomers                returning              gap
-#   2024/2025  56.7 pts/app (n=74)      74.0 pts/app (n=286)   -23%
-#   2025/2026  52.3 pts/app (n=86)      67.8 pts/app (n=365)   -23%
-#
-# The same -23% in two independent seasons, so 1 - 0.23 = 0.77. It corrects the
-# RATE only. Newcomers also play far less (median 19 appearances against 26),
-# but availability is the availability model's job, and for a player with no
-# history that model already falls back to its marginal prior -- discounting
-# here as well would count the same deficit twice.
-#
-# This is a measured population effect, not a taste setting. Re-derive it
-# against new seasons rather than nudging it; the query is in REH-80.
-COLD_START_DISCOUNT = 0.77
-
 
 @lru_cache(maxsize=1)
 def _models() -> tuple[AvailabilityModel, RateModel, dict]:
@@ -100,15 +79,7 @@ def compose_ep(
 ) -> float:
     """Probability-weighted expected points, in real Kickbase points."""
     probs = availability.predict(prev_status)
-    ep = sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
-    # Applied here rather than in `score_player_v2` because this is the one
-    # composition point every caller shares -- the lineup fallback in
-    # `auto_trader` scores cold players through this function too, and a
-    # discount that only the market path applied would rank the same player
-    # two different ways inside one session.
-    if player_id not in rate.quality:
-        ep *= COLD_START_DISCOUNT
-    return ep
+    return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
 
 def score_player_v2(data: PlayerData) -> PlayerScore:
@@ -130,10 +101,7 @@ def score_player_v2(data: PlayerData) -> PlayerScore:
         f"rate={rate.predict(player.id, 5, position):.0f} pts if started"
     ]
     if player.id not in rate.quality:
-        notes.append(
-            f"No fitted quality — position prior discounted ×{COLD_START_DISCOUNT:.2f} "
-            f"(cold start, REH-80)"
-        )
+        notes.append("No fitted quality — using position prior (cold start)")
     if data.is_dgw:
         notes.append("DOUBLE GAMEWEEK ×1.8")
 
