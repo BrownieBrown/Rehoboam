@@ -165,7 +165,19 @@ class SquadOptimizer:
                 for player in bench_players_sorted:
                     if player not in players_to_sell:
                         value_score = player_values.get(player.id, 0)
-                        if value_score < 30:  # Very weak player
+                        # REH-83: `0 <`, not just `< 30`. `value_score` is
+                        # `average_points`, which is 0 for EVERY player before a
+                        # season's first matchday -- a bare `< 30` selects the
+                        # whole bench in week 1, and sells all injury cover in
+                        # the week the squad is least replaceable. Zero means
+                        # "no matches played yet", not "weak"; requiring a
+                        # positive measurement makes the rule act on evidence of
+                        # weakness rather than on its absence. Safe to decline
+                        # here: this branch runs only when the budget is already
+                        # POSITIVE (under EUR 2M), so it is opportunistic cash,
+                        # not the negative-budget rescue above -- that path
+                        # sells by market value and never reads this threshold.
+                        if 0 < value_score < 30:  # Measurably weak player
                             players_to_sell.append(player)
                             projected_budget += player.market_value
 
