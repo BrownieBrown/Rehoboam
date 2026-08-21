@@ -34,6 +34,30 @@ def _opt_int(value: Any) -> int | None:
     return int(value)
 
 
+def _opt_float(value: Any) -> float | None:
+    """None-preserving float coercion, matching `_opt_int`'s contract."""
+    if value is None:
+        return None
+    return float(value)
+
+
+def _iso_to_epoch(value: Any) -> float | None:
+    """Parse Kickbase's ISO-8601 transfer timestamps to epoch seconds.
+
+    The feed sends `2026-05-05T10:00:00Z`; `fromisoformat` rejects the literal
+    `Z` before Python 3.11, so it is normalised. Returns None on anything
+    unparseable rather than raising -- this feeds a best-effort learning join,
+    and a malformed row should be skipped, not crash a session.
+    """
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(text).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class FlipOutcome:
     """Record of a completed flip (buy + sell)"""
@@ -422,6 +446,28 @@ class BidLearner:
             # price + datetime. PK on (league, manager, dt, player) makes
             # re-imports idempotent: the same trade always collapses to one
             # row regardless of how many sessions see it.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS buy_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    player_id TEXT NOT NULL,
+                    player_name TEXT,
+                    decision TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    marginal_ep_gain REAL,
+                    asking_price INTEGER,
+                    market_value INTEGER,
+                    budget_ceiling INTEGER
+                )
+            """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_buy_decisions_at
+                ON buy_decisions(timestamp)
+            """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS manager_transfers (
@@ -1037,6 +1083,124 @@ class BidLearner:
             )
             conn.commit()
         return len(rows)
+
+    def record_buy_decision(
+        self,
+        *,
+        player_id: str,
+        player_name: str | None,
+        decision: str,
+        reason: str,
+        marginal_ep_gain: float | None = None,
+        asking_price: int | None = None,
+        market_value: int | None = None,
+        budget_ceiling: int | None = None,
+        timestamp: float | None = None,
+    ) -> None:
+        """Record a buy candidate the bot evaluated, and what it decided.
+
+        REH-86. Until this existed the learning tables recorded only what the
+        bot DID, never what it considered and rejected -- so "the bot bought
+        nothing for three weeks" could not be distinguished from "the bot saw
+        nothing worth buying", and neither from "it wanted a player and could
+        not afford him". That last case is the one REH-85 turns on: a EUR 21.3m
+        listing bid at 1.0% over asking is a budget ceiling talking, not a
+        judgement about the player.
+
+        `reason` is a short stable slug (``below_ep_threshold``,
+        ``unaffordable``, ``contested_skip``, ``squad_full``) so the column can
+        be grouped without parsing prose.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO buy_decisions (
+                    timestamp, player_id, player_name, decision, reason,
+                    marginal_ep_gain, asking_price, market_value, budget_ceiling
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    float(
+                        timestamp
+                        if timestamp is not None
+                        else datetime.now(timezone.utc).timestamp()
+                    ),
+                    str(player_id),
+                    player_name,
+                    str(decision),
+                    str(reason),
+                    _opt_float(marginal_ep_gain),
+                    _opt_int(asking_price),
+                    _opt_int(market_value),
+                    _opt_int(budget_ceiling),
+                ),
+            )
+            conn.commit()
+
+    def resolve_auction_winners(self, *, window_days: float = 3.0) -> int:
+        """Fill `winning_bid` / `winner_user_id` on auctions we lost.
+
+        REH-86. `_record_outcome` marks a bid lost by ELIMINATION -- the player
+        is neither in our squad nor in our active bids -- and never asks who
+        actually took him. So all 26 rows recorded in 2025/26 carry a NULL
+        winning bid, and "how far over asking must we go to win a EUR 20m
+        player?" is unanswerable.
+
+        The answer is already arriving: every session ingests the league
+        transfer feed into `manager_transfers` with price and buyer. This joins
+        the two on `player_id` within `window_days` of the auction.
+
+        Deliberately conservative. A transfer outside the window is not
+        attributed, because a wrong `winning_bid` would corrupt the exact
+        distribution this exists to measure -- and an unfilled row is honestly
+        unknown, where a wrong one is silently misleading. Returns the number
+        of rows filled.
+        """
+        filled = 0
+        window = float(window_days) * 86400.0
+        with sqlite3.connect(self.db_path) as conn:
+            pending = conn.execute(
+                """
+                SELECT id, player_id, timestamp, our_bid, asking_price
+                FROM auction_outcomes
+                WHERE won = 0 AND winning_bid IS NULL
+                """
+            ).fetchall()
+            for row_id, player_id, ts, _our_bid, asking in pending:
+                if ts is None:
+                    continue
+                best = None
+                for mgr, price, dt_str in conn.execute(
+                    """
+                    SELECT manager_id, transfer_price, transfer_dt
+                    FROM manager_transfers
+                    WHERE player_id = ? AND transfer_price IS NOT NULL
+                    """,
+                    (str(player_id),),
+                ):
+                    epoch = _iso_to_epoch(dt_str)
+                    if epoch is None or abs(epoch - float(ts)) > window:
+                        continue
+                    gap = abs(epoch - float(ts))
+                    if best is None or gap < best[0]:
+                        best = (gap, mgr, price)
+                if best is None:
+                    continue
+                _, winner, price = best
+                overbid = None
+                if asking:
+                    overbid = (price - asking) / asking * 100.0
+                conn.execute(
+                    """
+                    UPDATE auction_outcomes
+                    SET winning_bid = ?, winner_user_id = ?, winning_overbid_pct = ?
+                    WHERE id = ?
+                    """,
+                    (int(price), str(winner), overbid, row_id),
+                )
+                filled += 1
+            conn.commit()
+        return filled
 
     def record_manager_transfers(self, rows: list[dict]) -> int:
         """Bulk-upsert per-trade rows into ``manager_transfers``.
