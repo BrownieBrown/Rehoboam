@@ -7,6 +7,7 @@ import pytest
 from rehoboam.kickbase_client import MarketPlayer
 from rehoboam.scoring.models import PlayerData
 from rehoboam.scoring.v2.adapter import (
+    COLD_START_DISCOUNT,
     compose_ep,
     last_played_status,
     score_player_v2,
@@ -153,3 +154,48 @@ def test_dgw_multiplies_the_composed_score():
     doubled = score_player_v2(dgw_data)
     assert doubled.expected_points > single.expected_points
     assert doubled.is_dgw is True
+
+
+# --- REH-80: the cold-start discount ------------------------------------
+
+
+def test_an_unfitted_player_takes_the_measured_cold_start_discount():
+    """A player with no fitted quality falls back to the position prior, which
+    is the median of ALL players. Newcomers are not median players: measured
+    over 2024/25 and 2025/26 they score 23% fewer points per appearance than
+    returning players. The prior is therefore generous, and the discount is
+    what removes that bias."""
+    rows = [_row("1", 5, 5, 90)] * 20
+    av, rate = fit_availability(rows), fit_rate(rows, {"1": "Midfielder"})
+    probs = av.predict(5)
+    undiscounted = sum(probs[s] * rate.predict("newcomer", s, "Midfielder") for s in (1, 3, 4, 5))
+
+    assert compose_ep("newcomer", 5, "Midfielder", av, rate) == pytest.approx(
+        undiscounted * COLD_START_DISCOUNT
+    )
+
+
+def test_a_fitted_player_is_never_discounted():
+    """The discount corrects an unmeasured player's prior. A player with fitted
+    quality has been measured, so it must not touch him."""
+    rows = [_row("1", 5, 5, 90)] * 20
+    av, rate = fit_availability(rows), fit_rate(rows, {"1": "Midfielder"})
+    probs = av.predict(5)
+    expected = sum(probs[s] * rate.predict("1", s, "Midfielder") for s in (1, 3, 4, 5))
+
+    assert compose_ep("1", 5, "Midfielder", av, rate) == pytest.approx(expected)
+
+
+def test_the_discount_is_a_haircut_not_a_rescale():
+    """Guards the direction and the magnitude: it must reduce the score, and
+    must not be so severe that an unknown player becomes unbuyable."""
+    assert 0.5 < COLD_START_DISCOUNT < 1.0
+
+
+def test_score_player_v2_applies_the_discount_and_says_so():
+    """The note is load-bearing: a score that was quietly reduced is worse than
+    one that was not reduced at all."""
+    score = score_player_v2(_data("never-fitted", _perf([])))
+
+    assert any("cold start" in n.lower() for n in score.notes)
+    assert any(f"{COLD_START_DISCOUNT:.2f}" in n for n in score.notes)
