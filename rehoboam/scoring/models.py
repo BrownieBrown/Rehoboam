@@ -97,6 +97,10 @@ class TradePair:
     sell_score: PlayerScore
     net_cost: int
     ep_gain: float
+    # True when the sell target is in the current best eleven. The execution
+    # path needs this: a trade pair sells before it bids, so losing the
+    # auction costs real matchday points only when a starter was the one sold.
+    sell_is_starter: bool = False
     recommended_bid: int | None = None
     metadata: dict | None = None
 

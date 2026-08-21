@@ -713,6 +713,7 @@ class DecisionEngine:
                     sell_score=best_sell.score,
                     net_cost=net_cost,
                     ep_gain=ep_gain,
+                    sell_is_starter=is_starter_sell,
                 )
             )
 

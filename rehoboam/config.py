@@ -195,6 +195,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    min_days_to_match_for_starter_swap: int = Field(
+        default=3,
+        description=(
+            "Days before kickoff below which a trade pair may not sell a member "
+            "of the best eleven. A pair sells before it bids -- Kickbase counts "
+            "open bids toward the 15-player cap, so the sell is what frees the "
+            "slot -- which makes the sell certain and the buy only a bid. Losing "
+            "that auction leaves the starting eleven short until a later session "
+            "refills it, so the swap is only worth risking while sessions remain "
+            "before kickoff. Bench sells are unaffected: they cost nothing on the "
+            "pitch. An unknown match date counts as no time. See REH-87."
+        ),
+    )
+
     # Bid tiers — the marginal-gain bands SmartBidding uses to size an overbid.
     # Fields rather than module constants so they can be re-tuned from `.env`
     # mid-season without shipping a build.
