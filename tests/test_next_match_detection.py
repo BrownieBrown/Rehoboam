@@ -96,3 +96,34 @@ class TestNextMatchDetection:
         with caplog.at_level(logging.WARNING):
             assert trader.get_days_until_match(MagicMock()) is None
         assert caplog.records, "schema miss must be logged, not swallowed"
+
+
+class TestLineupSplit:
+    """lp[] holds the set lineup, nlp[] everyone else -- both carry fixtures.
+
+    Before a lineup is set lp[] is empty and nlp[] holds the whole squad,
+    which is the state the fix was first probed in. Once a lineup exists the
+    starters move into lp[], and reading only nlp[] would time the
+    budget-at-kickoff guard off the bench's fixtures instead of the squad's.
+    """
+
+    def test_reads_fixtures_from_the_set_lineup_too(self):
+        now = datetime.now(tz=timezone.utc)
+        trader = _trader(
+            {
+                # Starters play first -- this is the kickoff that binds.
+                "lp": [{"md": _iso(now + timedelta(days=2, hours=1))}],
+                "nlp": [{"md": _iso(now + timedelta(days=7, hours=1))}],
+            }
+        )
+        assert trader.get_days_until_match(MagicMock()) == 2
+
+    def test_bench_fixture_still_counts_when_it_is_earlier(self):
+        now = datetime.now(tz=timezone.utc)
+        trader = _trader(
+            {
+                "lp": [{"md": _iso(now + timedelta(days=6, hours=1))}],
+                "nlp": [{"md": _iso(now + timedelta(days=3, hours=1))}],
+            }
+        )
+        assert trader.get_days_until_match(MagicMock()) == 3

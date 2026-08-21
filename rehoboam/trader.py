@@ -134,7 +134,8 @@ class Trader:
         Kickbase has moved this value between aliases across seasons. Up to
         2025/26 it was a single ``nm``/``nextMatch``; as of 2026/27 the
         /myeleven response carries no such key and the fixture date is
-        instead attached per player under ``nlp[].md``. Both shapes are read,
+        instead attached per player under ``md``, split across ``lp`` (the
+        set lineup) and ``nlp`` (everyone else). Both shapes are read,
         newest first, and a shape we cannot read at all is logged rather than
         swallowed -- returning None here disables both the matchday "locked"
         phase and the budget-at-kickoff guard, so a silent None is expensive.
@@ -161,12 +162,17 @@ class Trader:
         if parsed is not None:
             candidates.append(parsed)
 
-        # 2026/27 shape: one fixture date per player in the next lineup.
-        for entry in starting_eleven.get("nlp") or []:
-            if isinstance(entry, dict):
-                parsed = _parse_match_date(entry.get("md"))
-                if parsed is not None:
-                    candidates.append(parsed)
+        # 2026/27 shape: one fixture date per player, under "md".
+        # lp[] is the set lineup, nlp[] the players outside it -- read BOTH.
+        # Before a lineup is set lp[] is empty and nlp[] holds the whole squad;
+        # afterwards the starters move to lp[], and reading only nlp[] would
+        # time the guard off the bench's fixtures.
+        for key in ("lp", "nlp"):
+            for entry in starting_eleven.get(key) or []:
+                if isinstance(entry, dict):
+                    parsed = _parse_match_date(entry.get("md"))
+                    if parsed is not None:
+                        candidates.append(parsed)
 
         upcoming = [d for d in candidates if d >= now]
         if not upcoming:
