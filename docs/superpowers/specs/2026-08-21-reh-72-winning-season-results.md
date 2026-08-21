@@ -15,6 +15,39 @@ than the champions do. We simply own a quarter as much, because the bidding
 rule answers "what fraction of my budget does this signing justify?" without
 anything ever asking "how much of my season should one player consume?"
 
+## 0a. CORRECTION (2026-08-21, same day): the bot is not the only actor
+
+Marco reports that the large purchases in the 2025/26 season — including the
+EUR 71m one — were **his own manual trades, not the bot's**. `manager_transfers`
+records a manager's transfers without recording *who initiated them*, so for
+manager `3616202` the bot's actions and Marco's are indistinguishable in this
+data. That was checkable and was not checked before §4 and §5 were written.
+
+**Retracted:** every attribution of the historical capital collapse to the bot.
+The EUR 75.8m end-of-season team value, the +EUR 69.8m net liquidation and the
+−EUR 55.3m of round-trip losses (REH-75) are what *the account* did. How much of
+it the bot did is unknown and, with this schema, unknowable.
+
+**Still standing, because it does not depend on attribution:**
+
+- §2, the shape of the gap. Points scored are points scored.
+- §3, points per EUR 100m. An outcome ratio, not an actor claim.
+- §4's *trajectory* as a description of the account's capital.
+- **§6 entirely.** That evidence comes from the replay, where the bot is the
+  only actor and no manual trade exists. The simulated bot chose to commit
+  EUR 71m of an EUR 80m ceiling and was then locked out for the season. That is
+  bot logic, and it is the finding REH-85 acts on.
+
+The §5 comparison against the winners also weakens: their columns may likewise
+mix manual and automated behaviour, since every rival is a human. It is a
+comparison of *accounts*, not of strategies, and should be read that way.
+
+Recording provenance on transfers going forward would retire this whole class of
+uncertainty — it is the same gap REH-75 §0 hit from the other side, where an
+EP-driven squad buy and a profit flip were indistinguishable in `flip_outcomes`.
+
+______________________________________________________________________
+
 ## 1. Evidence handling
 
 Read-only over `logs/bid_learning.db` and `logs/training_corpus.db`. No API
