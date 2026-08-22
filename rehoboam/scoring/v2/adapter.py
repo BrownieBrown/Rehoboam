@@ -27,6 +27,7 @@ ticket notes before adding overrides.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import lru_cache
 
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
@@ -44,30 +45,45 @@ def _models() -> tuple[AvailabilityModel, RateModel, dict]:
     return load_coefficients()
 
 
+def prev_status_from_history(
+    history: Sequence[tuple[str | None, int | None]],
+) -> int | None:
+    """Most recent *played* status from ``(match_date, status)`` pairs.
+
+    Input is ordered oldest-first. Unplayed fixtures (status 0 or absent)
+    describe a match that has not happened, not a state the player was in, so
+    they are skipped.
+
+    This is the single implementation of that rule. The live scorer and the
+    season replay both call it. They previously derived it separately, which is
+    the drift `scoring/v2/thresholds.py` forbids and REH-84 records the cost of.
+    """
+    latest: int | None = None
+    for _match_date, status in history:
+        if status in PLAYED_STATUSES:
+            latest = int(status)
+    return latest
+
+
 def last_played_status(performance: dict | None) -> int | None:
     """The player's status in his most recent *played* match.
 
-    Unplayed fixtures (status 0 or absent) are skipped — they describe a match
-    that has not happened, not a state the player was in. Returns None when
-    there is no played history, which the availability model handles by falling
-    back to its marginal prior.
+    Returns None when there is no played history, which the availability model
+    handles by falling back to its marginal prior.
     """
     if not performance:
         return None
 
-    latest: tuple[str, int] | None = None
-    latest_status: int | None = None
+    ordered: list[tuple[tuple[str, int], str | None, int | None]] = []
     for season in performance.get("it") or []:
         title = season.get("ti") or ""
         for match in season.get("ph") or []:
-            status = match.get("st")
             day = match.get("day")
-            if status not in PLAYED_STATUSES or day is None:
+            if day is None:
                 continue
-            key = (title, int(day))
-            if latest is None or key > latest:
-                latest, latest_status = key, int(status)
-    return latest_status
+            ordered.append(((title, int(day)), match.get("md"), match.get("st")))
+    ordered.sort(key=lambda row: row[0])
+    return prev_status_from_history([(md, st) for _key, md, st in ordered])
 
 
 def compose_ep(

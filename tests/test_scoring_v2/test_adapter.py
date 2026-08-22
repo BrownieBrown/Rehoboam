@@ -9,6 +9,7 @@ from rehoboam.scoring.models import PlayerData
 from rehoboam.scoring.v2.adapter import (
     compose_ep,
     last_played_status,
+    prev_status_from_history,
     score_player_v2,
 )
 from rehoboam.scoring.v2.availability import fit_availability
@@ -58,6 +59,29 @@ def _row(pid: str, prev: int | None, status: int, points: int) -> FeatureRow:
         target_status=status,
         target_points=points,
     )
+
+
+class TestPrevStatusFromHistory:
+    def test_returns_the_latest_played_status(self):
+        history = [
+            ("2026-05-01T13:30:00Z", 5),
+            ("2026-05-09T16:30:00Z", 4),
+        ]
+        assert prev_status_from_history(history) == 4
+
+    def test_skips_unplayed_fixtures(self):
+        history = [
+            ("2026-05-01T13:30:00Z", 5),
+            ("2026-08-29T13:30:00Z", 0),
+            ("2026-09-05T13:30:00Z", None),
+        ]
+        assert prev_status_from_history(history) == 5
+
+    def test_no_played_history_returns_none(self):
+        assert prev_status_from_history([("2026-08-29T13:30:00Z", 0)]) is None
+
+    def test_empty_history_returns_none(self):
+        assert prev_status_from_history([]) is None
 
 
 def test_last_played_status_reads_the_most_recent_played_match():
