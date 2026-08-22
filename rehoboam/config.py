@@ -207,6 +207,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    uncertain_start_multiplier: float = Field(
+        default=0.5,
+        description=(
+            "How much of a player's start probability survives a Kickbase "
+            "'uncertain' flag (status 2). 1.0 ignores the flag, 0.0 treats it as "
+            "a hard block. Deliberately a haircut rather than a verdict: status 2 "
+            "covers both a player returning to fitness and one falling out of "
+            "favour. On 2026-08-22 it covered Fuehrich (market value +15.7% over "
+            "30d, returning) and Stark (-36.0%, fading) simultaneously — the code "
+            "alone cannot tell them apart. Injuries (status 4/256) are handled "
+            "separately and are not affected by this knob."
+        ),
+    )
+
     max_status_age_days: float = Field(
         default=60.0,
         description=(

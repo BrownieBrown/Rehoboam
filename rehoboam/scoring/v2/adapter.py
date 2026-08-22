@@ -32,7 +32,13 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
-from rehoboam.scoring.v2.availability import AvailabilityModel
+from rehoboam.scoring.v2.availability import (
+    DEFAULT_UNCERTAIN_START_MULTIPLIER,
+    OUT_STATUSES,
+    UNCERTAIN_STATUSES,
+    AvailabilityModel,
+    apply_availability_override,
+)
 from rehoboam.scoring.v2.coefficients import load_coefficients
 from rehoboam.scoring.v2.features import PLAYED_STATUSES
 from rehoboam.scoring.v2.rate import RateModel
@@ -149,19 +155,56 @@ def has_top_flight_history(player_details: dict | None) -> bool:
     return bool(player_details.get("ap") or player_details.get("tp"))
 
 
+def availability_probs(
+    prev_status: int | None,
+    availability: AvailabilityModel,
+    *,
+    live_status: int | None = None,
+    uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
+) -> dict[int, float]:
+    """Fitted transition probabilities with any serving-time override applied.
+
+    One implementation, so the composed EP and the note reporting P(start) can
+    never disagree about what the model believes.
+    """
+    probs = availability.predict(prev_status)
+    return apply_availability_override(
+        probs, live_status, uncertain_start_multiplier=uncertain_start_multiplier
+    )
+
+
 def compose_ep(
     player_id: str | None,
     prev_status: int | None,
     position: str | None,
     availability: AvailabilityModel,
     rate: RateModel,
+    *,
+    live_status: int | None = None,
+    uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
 ) -> float:
-    """Probability-weighted expected points, in real Kickbase points."""
-    probs = availability.predict(prev_status)
+    """Probability-weighted expected points, in real Kickbase points.
+
+    ``live_status`` is Kickbase's current injury flag. It defaults to None so
+    the season replay -- which has per-match history but no historical injury
+    flags -- keeps its existing behaviour and does not silently acquire a
+    signal it cannot evaluate.
+    """
+    probs = availability_probs(
+        prev_status,
+        availability,
+        live_status=live_status,
+        uncertain_start_multiplier=uncertain_start_multiplier,
+    )
     return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
 
-def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = None) -> PlayerScore:
+def score_player_v2(
+    data: PlayerData,
+    *,
+    max_status_age_days: float | None = None,
+    uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
+) -> PlayerScore:
     """Score a player with the fitted v2 models. Pure — no I/O beyond cached load."""
     availability, rate, _meta = _models()
     player = data.player
@@ -177,12 +220,29 @@ def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = Non
     # fitted on inapplicable data.
     quality_key = player.id if has_top_flight_history(data.player_details) else None
 
-    ep = compose_ep(quality_key, prev_status, position, availability, rate)
+    # Kickbase's live injury flag: unfitted, applied at serving time.
+    # Downward-only — see apply_availability_override for why that matters.
+    live_status = (data.player_details or {}).get("st")
+
+    ep = compose_ep(
+        quality_key,
+        prev_status,
+        position,
+        availability,
+        rate,
+        live_status=live_status,
+        uncertain_start_multiplier=uncertain_start_multiplier,
+    )
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
     ep *= dgw_multiplier
 
-    probs = availability.predict(prev_status)
+    probs = availability_probs(
+        prev_status,
+        availability,
+        live_status=live_status,
+        uncertain_start_multiplier=uncertain_start_multiplier,
+    )
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "
         f"(prev status {prev_status if prev_status is not None else 'unknown'}), "
@@ -190,6 +250,10 @@ def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = Non
     ]
     if quality_key not in rate.quality:
         notes.append("No fitted quality — using position prior (cold start)")
+    if live_status in OUT_STATUSES:
+        notes.append(f"UNAVAILABLE — Kickbase status {live_status} (injured)")
+    elif live_status in UNCERTAIN_STATUSES:
+        notes.append(f"Status uncertain ({live_status}) — start probability reduced")
     if data.is_dgw:
         notes.append("DOUBLE GAMEWEEK ×1.8")
 
