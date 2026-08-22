@@ -77,6 +77,36 @@ class FlipOutcome:
     was_injured: bool = False
 
 
+# --- EP overbid recommender (REH-89) --------------------------------------
+#
+# Minimum auctions inside the window before the learner is allowed to move a
+# bid at all. Below this there is nothing measured, so it must defer to the
+# bid stack rather than substitute an assumption for evidence.
+MIN_AUCTIONS_FOR_LEARNED_OVERBID = 5
+
+# How far back auction outcomes stay relevant. Note the off-season is longer
+# than this, so at season start the window is legitimately empty -- which is
+# precisely when the bot spends most.
+AUCTION_HISTORY_WINDOW_DAYS = 90
+
+# Overbid percentage contributed per point of marginal EP gain.
+#
+# NOT re-derived for the real-points scale, and deliberately so: doing that
+# honestly needs auction outcomes measured against v2 gains, and there are
+# currently zero inside the window. It is named and greppable here so the
+# re-derivation is a one-line change once REH-68's replay can measure it.
+#
+# Scale history: on the 0-100 index a gain had to exceed ~27 to beat the
+# MIN_LEARNED_OVERBID_PCT floor below, so this was a rarely-triggered
+# backstop. On real points (p50 gain 43.1) it binds every time, which is how
+# a backstop became the primary driver of bid size. It now only applies when
+# there is auction evidence, which bounds the damage until it is re-derived.
+EP_FLOOR_PCT_PER_POINT = 0.3
+
+# Smallest overbid the learner will ever recommend once it does speak.
+MIN_LEARNED_OVERBID_PCT = 8.0
+
+
 class BidLearner:
     """Learn from auction outcomes to improve bidding strategy"""
 
@@ -1519,9 +1549,6 @@ class BidLearner:
             }
         max_overbid_pct = (max_extra / asking_price) * 100.0
 
-        # EP-gain-based minimum floor (each EP point of marginal gain is worth ~0.3% extra)
-        ep_floor_pct = marginal_ep_gain * 0.3
-
         # Win-rate adjustment from historical auction data
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
@@ -1530,7 +1557,7 @@ class BidLearner:
                 FROM auction_outcomes
                 WHERE timestamp > ?
                 """,
-                (datetime.now().timestamp() - (90 * 24 * 3600),),
+                (datetime.now().timestamp() - (AUCTION_HISTORY_WINDOW_DAYS * 24 * 3600),),
             )
             row = cursor.fetchone()
 
@@ -1538,26 +1565,42 @@ class BidLearner:
         total_auctions = total_auctions or 0
         total_wins = total_wins or 0
 
-        if total_auctions >= 5:
-            win_rate = total_wins / total_auctions
-            if win_rate < 0.30:
-                win_rate_adj = 1.20  # Losing too much — be more aggressive
-                rate_reason = f"low win rate ({win_rate:.0%})"
-            elif win_rate > 0.70:
-                win_rate_adj = 0.90  # Winning easily — can dial back slightly
-                rate_reason = f"high win rate ({win_rate:.0%})"
-            else:
-                win_rate_adj = 1.0
-                rate_reason = f"balanced win rate ({win_rate:.0%})"
+        # No evidence, no opinion. The caller treats any positive value as
+        # authoritative and lets it replace the whole bid stack -- including
+        # the reduction applied when a player's market value is falling. An
+        # EP-derived guess is not a good enough reason to overrule that, so
+        # say nothing and let the stack stand (REH-89).
+        if total_auctions < MIN_AUCTIONS_FOR_LEARNED_OVERBID:
+            return {
+                "recommended_overbid_pct": 0.0,
+                "reason": (
+                    f"only {total_auctions} auction(s) in the last "
+                    f"{AUCTION_HISTORY_WINDOW_DAYS}d "
+                    f"(need {MIN_AUCTIONS_FOR_LEARNED_OVERBID}) — "
+                    f"deferring to the bid stack"
+                ),
+            }
+
+        # EP-gain-based minimum floor.
+        ep_floor_pct = marginal_ep_gain * EP_FLOOR_PCT_PER_POINT
+
+        # Past the early return there is always enough history to divide by.
+        win_rate = total_wins / total_auctions
+        if win_rate < 0.30:
+            win_rate_adj = 1.20  # Losing too much — be more aggressive
+            rate_reason = f"low win rate ({win_rate:.0%})"
+        elif win_rate > 0.70:
+            win_rate_adj = 0.90  # Winning easily — can dial back slightly
+            rate_reason = f"high win rate ({win_rate:.0%})"
         else:
             win_rate_adj = 1.0
-            rate_reason = "insufficient auction history"
+            rate_reason = f"balanced win rate ({win_rate:.0%})"
 
         # Outcome quality adjustment
         outcome_quality = self._get_won_player_outcome_quality()
 
         # Base overbid: use ep floor as the starting point, then scale
-        base_overbid = max(ep_floor_pct, 8.0)  # minimum sensible overbid
+        base_overbid = max(ep_floor_pct, MIN_LEARNED_OVERBID_PCT)
         recommended = base_overbid * win_rate_adj * outcome_quality
 
         # Cap to budget ceiling
