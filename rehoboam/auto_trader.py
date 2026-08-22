@@ -1488,8 +1488,11 @@ class AutoTrader:
 
             # Build ep_scores from the pipeline when available; fall back to a
             # per-player v2 score only for uncovered squad members or when the
-            # caller didn't provide scores. Both sides are real points, so they
-            # are safe to rank against each other below.
+            # caller didn't provide scores. Both sides are real points AND
+            # obey the same availability recency bound (REH-85), so they are
+            # safe to rank against each other below -- a mid-session signing
+            # landing in `missing` must not get a different availability rule
+            # than everyone the pipeline already scored.
             ep_scores: dict[str, float] = {}
             if squad_scores:
                 ep_scores = {s.player_id: s.expected_points for s in squad_scores}
@@ -1539,6 +1542,13 @@ class AutoTrader:
         ordering is deliberate: a 0.0 sorts a player to the bottom of
         ``select_best_eleven``, and benching someone we simply failed to fetch is
         how an avoidable empty slot turns into -100.
+
+        Applies the same ``max_status_age_days`` recency bound (REH-85) the
+        pipeline's own ``score_player_v2`` calls use, via ``last_played_status``.
+        Without it, this path -- which only fires for the highest-stakes case,
+        a player just bought mid-session -- would keep anchoring on a stale
+        end-of-last-season status forever, even after the pipeline everywhere
+        else was fixed.
         """
         from .scoring.v2.adapter import compose_ep, last_played_status
         from .scoring.v2.coefficients import load_coefficients
@@ -1563,7 +1573,7 @@ class AutoTrader:
             availability, rate, _meta = load_coefficients()
             return compose_ep(
                 str(player.id),
-                last_played_status(perf_data),
+                last_played_status(perf_data, max_age_days=self.settings.max_status_age_days),
                 player.position,
                 availability,
                 rate,
