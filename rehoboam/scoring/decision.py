@@ -299,6 +299,16 @@ class DecisionEngine:
         else:
             best_11_ids = set()
 
+        # Skip-reason tally for the INFO summary below — distinguishes "the bot
+        # correctly declined to buy anything" from "the pipeline is broken"
+        # without needing DEBUG. Counted, not restructured: each counter sits
+        # next to the `continue` it already accompanied.
+        skip_ep_floor = 0
+        skip_target_bar = 0
+        skip_lineup_prob = 0
+        skip_declining_minutes = 0
+        skip_marginal_gain = 0
+
         recs: list[BuyRecommendation] = []
         for ps in market_scores:
             player = market_players.get(ps.player_id)
@@ -308,6 +318,7 @@ class DecisionEngine:
             # Filter by minimum EP threshold
             min_ep = 10.0 if is_emergency else self.min_ep_to_buy
             if ps.expected_points < min_ep:
+                skip_ep_floor += 1
                 logger.debug(
                     "buy-skip %s: EP %.1f < min %.1f",
                     player.last_name,
@@ -320,6 +331,7 @@ class DecisionEngine:
             # emergency: an unfieldable squad needs bodies, and -100 for an
             # empty slot dwarfs the cost of a mediocre signing.
             if not is_emergency and ps.expected_points < self.target_ep_bar:
+                skip_target_bar += 1
                 logger.debug(
                     "buy-skip %s: EP %.1f below target bar %.1f — holding the slot",
                     player.last_name,
@@ -333,6 +345,7 @@ class DecisionEngine:
                 ps.lineup_probability is not None
                 and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
             ):
+                skip_lineup_prob += 1
                 logger.debug(
                     "buy-skip %s: lineup_probability=%s > %s (unlikely starter)",
                     player.last_name,
@@ -343,6 +356,7 @@ class DecisionEngine:
 
             # Hard-block players with severely declining minutes
             if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
+                skip_declining_minutes += 1
                 logger.debug(
                     "buy-skip %s: minutes_trend=decreasing, bonus=%.1f",
                     player.last_name,
@@ -427,6 +441,7 @@ class DecisionEngine:
 
             # Only recommend if marginal gain meets threshold (or emergency)
             if not is_emergency and marginal < self.min_ep_upgrade and roster_impact != "fills_gap":
+                skip_marginal_gain += 1
                 logger.debug(
                     "buy-skip %s: marginal %.1f < threshold %.1f and not gap-fill",
                     player.last_name,
@@ -535,7 +550,9 @@ class DecisionEngine:
         top = final_recs[:top_n]
         logger.info(
             "recommend_buys: %d candidates considered, %d viable, returning top %d "
-            "(emergency=%s, budget=%d, min_ep=%.1f, min_upgrade=%.1f)",
+            "(emergency=%s, budget=%d, min_ep=%.1f, min_upgrade=%.1f) | "
+            "skipped: ep_floor=%d target_bar=%d lineup_prob=%d declining_minutes=%d "
+            "marginal_gain=%d",
             len(market_scores),
             len(final_recs),
             len(top),
@@ -543,6 +560,11 @@ class DecisionEngine:
             int(budget),
             self.min_ep_to_buy,
             self.min_ep_upgrade,
+            skip_ep_floor,
+            skip_target_bar,
+            skip_lineup_prob,
+            skip_declining_minutes,
+            skip_marginal_gain,
         )
         for rec in top:
             logger.info(

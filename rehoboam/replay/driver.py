@@ -32,8 +32,6 @@ MANAGER_ID = "3616202"
 ASSIGNED_ON = 1754661947.0  # 2025-08-08T14:05:47Z, verified from /v4/leagues/{id}/overview
 STARTING_BUDGET = 80_000_000
 
-PLAYED_STATUSES = (1, 3, 4, 5)
-
 
 def _parse(dt: str) -> float:
     return datetime.strptime(dt, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()

@@ -134,9 +134,18 @@ def has_top_flight_history(player_details: dict | None) -> bool:
     Mainz backup keeper. The keeper is why the signal is "no top-flight
     history" rather than "promoted club": it is broader, and it needs no
     annually-maintained list of who came up.
+
+    ``player_details=None`` means "unknown", not "no top-flight history" —
+    it is the shape of a transient lookup failure (rate limit, timeout;
+    see ``Trader._fetch_player_data``), which can hit any player including
+    established regulars. This fails OPEN on that case: ``None`` returns
+    True, so the caller keeps the fitted quality coefficient instead of
+    withholding it on a data hiccup. Only a *present* ``player_details``
+    that actually lacks ``ap``/``tp`` (the real Elversberg case) returns
+    False.
     """
-    if not player_details:
-        return False
+    if player_details is None:
+        return True
     return bool(player_details.get("ap") or player_details.get("tp"))
 
 

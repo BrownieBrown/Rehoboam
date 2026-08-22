@@ -224,8 +224,10 @@ class TestTopFlightHistory:
     def test_zero_ap_means_no_top_flight_history(self):
         assert has_top_flight_history({"ap": 0, "tp": 0}) is False
 
-    def test_missing_details_is_not_a_claim_of_history(self):
-        assert has_top_flight_history(None) is False
+    def test_missing_details_fails_open(self):
+        """None means "unknown", not "no top-flight history" — a transient
+        get_player_details failure must not withhold a fitted quality coefficient."""
+        assert has_top_flight_history(None) is True
 
 
 class TestNonTopFlightUsesPositionPrior:
@@ -260,3 +262,37 @@ class TestNonTopFlightUsesPositionPrior:
         assert scored_without.expected_points < scored_with.expected_points
         assert scored_without.data_quality.grade != "A"
         assert any("position prior" in n for n in scored_without.notes)
+
+    def test_missing_player_details_keeps_fitted_quality(self):
+        """The transient-lookup-failure case (REH fail-open fix): a player who IS
+        in the fitted quality table, scored with player_details=None (e.g. a
+        get_player_details HTTP blip mid-session — see Trader._fetch_player_data),
+        must keep his fitted quality — same EP as when details are present —
+        not fall to the position prior. Fails without the fail-open fix."""
+        player = _player("3284")  # Rohr, present in the fitted quality table
+        matches = [
+            {"day": d, "st": 5, "p": 100, "md": "2026-05-16T13:30:00Z"} for d in range(1, 35)
+        ]
+        with_history = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details={"ap": 74, "tp": 1251},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        unknown_details = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+
+        scored_with = score_player_v2(with_history)
+        scored_unknown = score_player_v2(unknown_details)
+
+        assert scored_unknown.expected_points == scored_with.expected_points
+        assert scored_unknown.data_quality.grade == "A"
+        assert not any("position prior" in n for n in scored_unknown.notes)
