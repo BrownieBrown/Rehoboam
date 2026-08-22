@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from rehoboam.kickbase_client import MarketPlayer
 from rehoboam.scoring.models import PlayerData
 from rehoboam.scoring.v2.adapter import (
     compose_ep,
+    has_top_flight_history,
     last_played_status,
+    prev_status_from_history,
     score_player_v2,
 )
 from rehoboam.scoring.v2.availability import fit_availability
@@ -58,6 +62,29 @@ def _row(pid: str, prev: int | None, status: int, points: int) -> FeatureRow:
         target_status=status,
         target_points=points,
     )
+
+
+class TestPrevStatusFromHistory:
+    def test_returns_the_latest_played_status(self):
+        history = [
+            ("2026-05-01T13:30:00Z", 5),
+            ("2026-05-09T16:30:00Z", 4),
+        ]
+        assert prev_status_from_history(history) == 4
+
+    def test_skips_unplayed_fixtures(self):
+        history = [
+            ("2026-05-01T13:30:00Z", 5),
+            ("2026-08-29T13:30:00Z", 0),
+            ("2026-09-05T13:30:00Z", None),
+        ]
+        assert prev_status_from_history(history) == 5
+
+    def test_no_played_history_returns_none(self):
+        assert prev_status_from_history([("2026-08-29T13:30:00Z", 0)]) is None
+
+    def test_empty_history_returns_none(self):
+        assert prev_status_from_history([]) is None
 
 
 def test_last_played_status_reads_the_most_recent_played_match():
@@ -153,3 +180,119 @@ def test_dgw_multiplies_the_composed_score():
     doubled = score_player_v2(dgw_data)
     assert doubled.expected_points > single.expected_points
     assert doubled.is_dgw is True
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TestPrevStatusRecency:
+    def test_stale_status_is_discarded(self):
+        """The live Pavlovic case: an unused-sub appearance from 3 months ago."""
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        history = [("2026-05-16T13:30:00Z", 4)]
+        assert prev_status_from_history(history, now=now, max_age_days=60.0) is None
+
+    def test_recent_status_is_kept(self):
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        history = [(_iso(now - timedelta(days=7)), 4)]
+        assert prev_status_from_history(history, now=now, max_age_days=60.0) == 4
+
+    def test_no_bound_keeps_current_behaviour(self):
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        history = [("2026-05-16T13:30:00Z", 4)]
+        assert prev_status_from_history(history, now=now) == 4
+
+    def test_unparseable_date_is_treated_as_stale(self):
+        """Fail closed: an unknown date cannot be shown to be recent."""
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        assert prev_status_from_history([("not-a-date", 5)], now=now, max_age_days=60.0) is None
+
+    def test_missing_date_is_treated_as_stale(self):
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        assert prev_status_from_history([(None, 5)], now=now, max_age_days=60.0) is None
+
+
+class TestTopFlightHistory:
+    def test_player_with_average_points_has_top_flight_history(self):
+        assert has_top_flight_history({"ap": 119, "tp": 2844}) is True
+
+    def test_missing_ap_means_no_top_flight_history(self):
+        """The live Elversberg case: full 2. Bundesliga record, no `ap` field."""
+        assert has_top_flight_history({"fn": "Maximilian", "ln": "Rohr"}) is False
+
+    def test_zero_ap_means_no_top_flight_history(self):
+        assert has_top_flight_history({"ap": 0, "tp": 0}) is False
+
+    def test_missing_details_fails_open(self):
+        """None means "unknown", not "no top-flight history" — a transient
+        get_player_details failure must not withhold a fitted quality coefficient."""
+        assert has_top_flight_history(None) is True
+
+
+class TestNonTopFlightUsesPositionPrior:
+    def test_fitted_quality_is_withheld_without_top_flight_history(self):
+        """A 2. Bundesliga record must not buy a confident Bundesliga rate."""
+        from rehoboam.scoring.models import PlayerData
+
+        player = _player("3284")  # Rohr, present in the fitted quality table
+        matches = [
+            {"day": d, "st": 5, "p": 100, "md": "2026-05-16T13:30:00Z"} for d in range(1, 35)
+        ]
+        with_history = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details={"ap": 74, "tp": 1251},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        without_history = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details={"fn": "Maximilian", "ln": "Rohr"},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+
+        scored_with = score_player_v2(with_history)
+        scored_without = score_player_v2(without_history)
+
+        assert scored_without.expected_points < scored_with.expected_points
+        assert scored_without.data_quality.grade != "A"
+        assert any("position prior" in n for n in scored_without.notes)
+
+    def test_missing_player_details_keeps_fitted_quality(self):
+        """The transient-lookup-failure case (REH fail-open fix): a player who IS
+        in the fitted quality table, scored with player_details=None (e.g. a
+        get_player_details HTTP blip mid-session — see Trader._fetch_player_data),
+        must keep his fitted quality — same EP as when details are present —
+        not fall to the position prior. Fails without the fail-open fix."""
+        player = _player("3284")  # Rohr, present in the fitted quality table
+        matches = [
+            {"day": d, "st": 5, "p": 100, "md": "2026-05-16T13:30:00Z"} for d in range(1, 35)
+        ]
+        with_history = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details={"ap": 74, "tp": 1251},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        unknown_details = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+
+        scored_with = score_player_v2(with_history)
+        scored_unknown = score_player_v2(unknown_details)
+
+        assert scored_unknown.expected_points == scored_with.expected_points
+        assert scored_unknown.data_quality.grade == "A"
+        assert not any("position prior" in n for n in scored_unknown.notes)

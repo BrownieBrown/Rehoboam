@@ -143,6 +143,29 @@ def _emergency_slots_short(squad: list) -> int:
     return max(FormationRequirements().starting_eleven_size - len(squad), 1)
 
 
+def _target_availability(buy_recs: list, competitor_ids: set, bar: float) -> dict:
+    """How many targets exist, and where they are.
+
+    A target is a player whose ABSOLUTE expected points clear the bar —
+    "is he worth a squad slot at all" — as distinct from marginal gain, which
+    answers "is he worth today's price and who does he displace".
+
+    Split by where they sit, because the two states call for different
+    behaviour: a target that is listed can be bid on now, while one sitting in
+    an opponent's squad is a reason to keep a slot free rather than to act.
+    """
+    listed = 0
+    owned = 0
+    for rec in buy_recs:
+        if rec.score.expected_points < bar:
+            continue
+        if rec.player.id in competitor_ids:
+            owned += 1
+        else:
+            listed += 1
+    return {"listed": listed, "owned_by_opponents": owned, "bar": bar}
+
+
 @dataclass
 class EPSessionContext:
     """Single-fetch context for the entire auto session."""
@@ -338,6 +361,18 @@ class AutoTrader:
         results: list[AutoTradeResult] = []
         buy_recs = ctx.ep_result.get("buy_recs", [])
         trade_pairs = ctx.ep_result.get("trade_pairs", [])
+
+        target_state = _target_availability(
+            buy_recs,
+            ctx.ep_result.get("competitor_player_ids") or set(),
+            self.settings.target_ep_bar,
+        )
+        logger.info(
+            "target-availability listed=%d owned_by_opponents=%d bar=%.1f",
+            target_state["listed"],
+            target_state["owned_by_opponents"],
+            target_state["bar"],
+        )
 
         effective_limit = min(
             self.max_trades_per_session,
@@ -1488,8 +1523,11 @@ class AutoTrader:
 
             # Build ep_scores from the pipeline when available; fall back to a
             # per-player v2 score only for uncovered squad members or when the
-            # caller didn't provide scores. Both sides are real points, so they
-            # are safe to rank against each other below.
+            # caller didn't provide scores. Both sides are real points AND
+            # obey the same availability recency bound (REH-85), so they are
+            # safe to rank against each other below -- a mid-session signing
+            # landing in `missing` must not get a different availability rule
+            # than everyone the pipeline already scored.
             ep_scores: dict[str, float] = {}
             if squad_scores:
                 ep_scores = {s.player_id: s.expected_points for s in squad_scores}
@@ -1539,6 +1577,13 @@ class AutoTrader:
         ordering is deliberate: a 0.0 sorts a player to the bottom of
         ``select_best_eleven``, and benching someone we simply failed to fetch is
         how an avoidable empty slot turns into -100.
+
+        Applies the same ``max_status_age_days`` recency bound (REH-85) the
+        pipeline's own ``score_player_v2`` calls use, via ``last_played_status``.
+        Without it, this path -- which only fires for the highest-stakes case,
+        a player just bought mid-session -- would keep anchoring on a stale
+        end-of-last-season status forever, even after the pipeline everywhere
+        else was fixed.
         """
         from .scoring.v2.adapter import compose_ep, last_played_status
         from .scoring.v2.coefficients import load_coefficients
@@ -1563,7 +1608,7 @@ class AutoTrader:
             availability, rate, _meta = load_coefficients()
             return compose_ep(
                 str(player.id),
-                last_played_status(perf_data),
+                last_played_status(perf_data, max_age_days=self.settings.max_status_age_days),
                 player.position,
                 availability,
                 rate,

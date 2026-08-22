@@ -51,6 +51,7 @@ def _rec(pid: str, bid, gain: float, reason: str):
         marginal_ep_gain=gain,
         reason=reason,
         sell_plan=None,
+        score=SimpleNamespace(expected_points=gain),
     )
 
 

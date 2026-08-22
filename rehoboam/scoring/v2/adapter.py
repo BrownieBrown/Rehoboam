@@ -27,6 +27,8 @@ ticket notes before adding overrides.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from functools import lru_cache
 
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
@@ -44,34 +46,111 @@ def _models() -> tuple[AvailabilityModel, RateModel, dict]:
     return load_coefficients()
 
 
-def last_played_status(performance: dict | None) -> int | None:
+def prev_status_from_history(
+    history: Sequence[tuple[str | None, int | None]],
+    *,
+    now: datetime | None = None,
+    max_age_days: float | None = None,
+) -> int | None:
+    """Most recent *played* status from ``(match_date, status)`` pairs.
+
+    Input is ordered oldest-first. Unplayed fixtures (status 0 or absent)
+    describe a match that has not happened, not a state the player was in, so
+    they are skipped.
+
+    When ``max_age_days`` is set, a status older than that is discarded and
+    None is returned instead. The availability model treats None as "no
+    evidence" and falls back to its marginal prior, which is a weaker claim
+    than a stale transition rather than a stronger one.
+
+    Why this matters: without a bound, the last matchday of the previous season
+    drives availability for the whole of the next one. End-of-season status is
+    a bad prior -- squads rotate through dead rubbers -- and it persists for the
+    entire off-season.
+
+    A date that is missing or unparseable is treated as stale. This guard
+    exists for the case we cannot see, so it fails closed.
+
+    This is the single implementation of that rule. The live scorer and the
+    season replay both call it.
+    """
+    latest: int | None = None
+    for match_date, status in history:
+        if status not in PLAYED_STATUSES:
+            continue
+        if max_age_days is not None:
+            parsed = _parse_iso(match_date)
+            reference = now or datetime.now(tz=timezone.utc)
+            if parsed is None or (reference - parsed).total_seconds() > max_age_days * 86400:
+                continue
+        latest = int(status)
+    return latest
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    """Parse a Kickbase ISO match date, or None if it cannot be read."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def last_played_status(
+    performance: dict | None,
+    *,
+    now: datetime | None = None,
+    max_age_days: float | None = None,
+) -> int | None:
     """The player's status in his most recent *played* match.
 
-    Unplayed fixtures (status 0 or absent) are skipped — they describe a match
-    that has not happened, not a state the player was in. Returns None when
-    there is no played history, which the availability model handles by falling
-    back to its marginal prior.
+    Returns None when there is no played history, which the availability model
+    handles by falling back to its marginal prior.
     """
     if not performance:
         return None
 
-    latest: tuple[str, int] | None = None
-    latest_status: int | None = None
+    ordered: list[tuple[tuple[str, int], str | None, int | None]] = []
     for season in performance.get("it") or []:
         title = season.get("ti") or ""
         for match in season.get("ph") or []:
-            status = match.get("st")
             day = match.get("day")
-            if status not in PLAYED_STATUSES or day is None:
+            if day is None:
                 continue
-            key = (title, int(day))
-            if latest is None or key > latest:
-                latest, latest_status = key, int(status)
-    return latest_status
+            ordered.append(((title, int(day)), match.get("md"), match.get("st")))
+    ordered.sort(key=lambda row: row[0])
+    return prev_status_from_history(
+        [(md, st) for _key, md, st in ordered], now=now, max_age_days=max_age_days
+    )
+
+
+def has_top_flight_history(player_details: dict | None) -> bool:
+    """Has this player ever recorded Bundesliga scoring?
+
+    Kickbase omits ``ap``/``tp`` entirely for players with no top-flight
+    appearances. On 2026-08-22 that was true of seven of 22 buyable listings —
+    six from newly promoted clubs (Elversberg, Schalke, Paderborn) and one
+    Mainz backup keeper. The keeper is why the signal is "no top-flight
+    history" rather than "promoted club": it is broader, and it needs no
+    annually-maintained list of who came up.
+
+    ``player_details=None`` means "unknown", not "no top-flight history" —
+    it is the shape of a transient lookup failure (rate limit, timeout;
+    see ``Trader._fetch_player_data``), which can hit any player including
+    established regulars. This fails OPEN on that case: ``None`` returns
+    True, so the caller keeps the fitted quality coefficient instead of
+    withholding it on a data hiccup. Only a *present* ``player_details``
+    that actually lacks ``ap``/``tp`` (the real Elversberg case) returns
+    False.
+    """
+    if player_details is None:
+        return True
+    return bool(player_details.get("ap") or player_details.get("tp"))
 
 
 def compose_ep(
-    player_id: str,
+    player_id: str | None,
     prev_status: int | None,
     position: str | None,
     availability: AvailabilityModel,
@@ -82,14 +161,23 @@ def compose_ep(
     return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
 
-def score_player_v2(data: PlayerData) -> PlayerScore:
+def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = None) -> PlayerScore:
     """Score a player with the fitted v2 models. Pure — no I/O beyond cached load."""
     availability, rate, _meta = _models()
     player = data.player
     position = player.position or None
 
-    prev_status = last_played_status(data.performance)
-    ep = compose_ep(player.id, prev_status, position, availability, rate)
+    prev_status = last_played_status(data.performance, max_age_days=max_status_age_days)
+
+    # Withhold the fitted quality coefficient from players whose fitted record
+    # is not top-flight: `rate.predict` then falls back to the position prior,
+    # which is exactly the cold-start path an unfitted player already takes.
+    # This is NOT a discount multiplier — REH-80's blanket cold-start discount
+    # was reverted for costing 782 points. It declines to apply a coefficient
+    # fitted on inapplicable data.
+    quality_key = player.id if has_top_flight_history(data.player_details) else None
+
+    ep = compose_ep(quality_key, prev_status, position, availability, rate)
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
     ep *= dgw_multiplier
@@ -98,9 +186,9 @@ def score_player_v2(data: PlayerData) -> PlayerScore:
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "
         f"(prev status {prev_status if prev_status is not None else 'unknown'}), "
-        f"rate={rate.predict(player.id, 5, position):.0f} pts if started"
+        f"rate={rate.predict(quality_key, 5, position):.0f} pts if started"
     ]
-    if player.id not in rate.quality:
+    if quality_key not in rate.quality:
         notes.append("No fitted quality — using position prior (cold start)")
     if data.is_dgw:
         notes.append("DOUBLE GAMEWEEK ×1.8")
@@ -109,7 +197,7 @@ def score_player_v2(data: PlayerData) -> PlayerScore:
         player_id=player.id,
         expected_points=round(ep, 2),
         data_quality=DataQuality(
-            grade="A" if player.id in rate.quality else "C",
+            grade="A" if quality_key in rate.quality else "C",
             games_played=0,
             consistency=0.0,
             has_fixture_data=False,

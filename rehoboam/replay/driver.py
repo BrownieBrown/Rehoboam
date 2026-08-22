@@ -23,7 +23,7 @@ from rehoboam.replay.engine import (
 )
 from rehoboam.replay.market import ReplayMarket
 from rehoboam.replay.state import initial_state
-from rehoboam.scoring.v2.adapter import compose_ep
+from rehoboam.scoring.v2.adapter import compose_ep, prev_status_from_history
 from rehoboam.scoring.v2.coefficients import load_coefficients
 
 SEASON = "2025/2026"
@@ -31,8 +31,6 @@ LEAGUE_ID = "1933872"
 MANAGER_ID = "3616202"
 ASSIGNED_ON = 1754661947.0  # 2025-08-08T14:05:47Z, verified from /v4/leagues/{id}/overview
 STARTING_BUDGET = 80_000_000
-
-PLAYED_STATUSES = (1, 3, 4, 5)
 
 
 def _parse(dt: str) -> float:
@@ -143,11 +141,14 @@ def _make_score_fn(
         history = matches_before(
             corpus.matches_for_player(player_id), season=season, day_number=day
         )
-        prev_status = None
-        for match in reversed(history):
-            if match.get("status") in PLAYED_STATUSES:
-                prev_status = int(match["status"])
-                break
+        # REH-84's rule applies to this traversal too, not just to `compose_ep`:
+        # deriving "most recent played status" here separately is a second
+        # implementation that would drift from the live scorer.
+        prev_status = prev_status_from_history(
+            [(m.get("match_date"), m.get("status")) for m in history],
+            now=datetime.fromtimestamp(at, tz=timezone.utc),
+            max_age_days=_shipped_default("max_status_age_days"),
+        )
         if player_id not in positions:
             positions.update(corpus.positions_for([player_id]))
         position = positions.get(player_id)

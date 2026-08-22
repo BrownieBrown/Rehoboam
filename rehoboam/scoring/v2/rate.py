@@ -58,7 +58,7 @@ class RateModel:
     position_prior: dict[str, float]
     shrinkage_k: float
 
-    def predict(self, player_id: str, status: int, position: str | None) -> float:
+    def predict(self, player_id: str | None, status: int, position: str | None) -> float:
         """Expected points for this player in this availability state.
 
         NOT a calibrated within-status expectation. ``quality`` is normalised

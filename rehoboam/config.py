@@ -194,6 +194,31 @@ class Settings(BaseSettings):
             "this gets harder to clear as the season goes well."
         ),
     )
+    target_ep_bar: float = Field(
+        default=0.0,
+        description=(
+            "Absolute expected points a market player must reach to count as a "
+            "target worth a squad slot, independent of marginal gain against the "
+            "current squad. 0.0 disables the bar and preserves pre-2026-08-22 "
+            "behaviour. Derive this from the measured marginal-gain and EP "
+            "distributions via `rehoboam derive-thresholds` once the market has "
+            "repopulated — it reported n=0 on 2026-07-31 and n=9 on 2026-08-22, "
+            "neither of which is enough to set it from."
+        ),
+    )
+
+    max_status_age_days: float = Field(
+        default=60.0,
+        description=(
+            "Discard a player's last-played availability status when it is older "
+            "than this many days, falling back to the availability model's "
+            "marginal prior. Must exceed the longest in-season gap (the winter "
+            "break, roughly 30 days) and fall below the off-season gap (roughly "
+            "90). Without it, the final matchday of the previous season drives "
+            "availability for the whole of the next: on 2026-08-22 Pavlovic was "
+            "scored P(start)=17% off an unused-sub appearance played 2026-05-16."
+        ),
+    )
 
     min_days_to_match_for_starter_swap: int = Field(
         default=3,

@@ -65,9 +65,9 @@ def history_at(corpus: TrainingCorpus, player_id: str, at: float) -> dict:
 
 
 # Statuses in which the player actually took the pitch: 3 = came on as a sub,
-# 5 = started. Deliberately NARROWER than `driver.PLAYED_STATUSES`, which is
-# (1, 3, 4, 5) because the availability model needs a fitted rate for every
-# state including "not in squad". Kickbase's own average points is per
+# 5 = started. Deliberately NARROWER than `scoring.v2.features.PLAYED_STATUSES`,
+# which is (1, 3, 4, 5) because the availability model needs a fitted rate for
+# every state including "not in squad". Kickbase's own average points is per
 # APPEARANCE, so counting non-appearances here would understate every player.
 APPEARANCE_STATUSES = (3, 5)
 
