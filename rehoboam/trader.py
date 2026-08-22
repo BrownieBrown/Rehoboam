@@ -540,6 +540,7 @@ class Trader:
             # both gates for any caller whose Settings lacks the fields.
             min_ep_to_buy=getattr(self.settings, "min_expected_points_to_buy", 35.0),
             min_ep_upgrade=getattr(self.settings, "min_ep_upgrade_threshold", 40.0),
+            target_ep_bar=getattr(self.settings, "target_ep_bar", 0.0),
         )
 
         # Always compute both buy recs and trade pairs so the unified trade

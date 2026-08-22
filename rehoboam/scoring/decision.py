@@ -30,11 +30,19 @@ class DecisionEngine:
     Args:
         min_ep_to_buy:  Minimum expected points for a player to be worth buying.
         min_ep_upgrade: Minimum marginal EP gain required to recommend a buy.
+        target_ep_bar:  Absolute EP a player must clear to count as a target
+            worth a squad slot, independent of marginal gain. 0.0 disables it.
     """
 
-    def __init__(self, min_ep_to_buy: float = 35.0, min_ep_upgrade: float = 40.0) -> None:
+    def __init__(
+        self,
+        min_ep_to_buy: float = 35.0,
+        min_ep_upgrade: float = 40.0,
+        target_ep_bar: float = 0.0,
+    ) -> None:
         self.min_ep_to_buy = min_ep_to_buy
         self.min_ep_upgrade = min_ep_upgrade
+        self.target_ep_bar = target_ep_bar
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -305,6 +313,18 @@ class DecisionEngine:
                     player.last_name,
                     ps.expected_points,
                     min_ep,
+                )
+                continue
+
+            # The bar is a "worth a squad slot at all" test, so it yields in an
+            # emergency: an unfieldable squad needs bodies, and -100 for an
+            # empty slot dwarfs the cost of a mediocre signing.
+            if not is_emergency and ps.expected_points < self.target_ep_bar:
+                logger.debug(
+                    "buy-skip %s: EP %.1f below target bar %.1f — holding the slot",
+                    player.last_name,
+                    ps.expected_points,
+                    self.target_ep_bar,
                 )
                 continue
 
