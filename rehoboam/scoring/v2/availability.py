@@ -30,6 +30,22 @@ from rehoboam.scoring.v2.features import PLAYED_STATUSES, FeatureRow
 
 DEFAULT_SHRINKAGE_K = 20.0
 
+# --- Serving-time availability overrides (REH-52 item 4) ------------------
+#
+# Kickbase's live status flag has no historical counterpart -- it does not
+# publish what a player's status was on matchday 12 of 2023/24 -- so it cannot
+# be fitted alongside the transitions above. It is applied here at serving
+# time, explicitly unfitted, and kept separate from the fitted model.
+#
+# 0 = healthy, 2 = uncertain, 4 = short-term injury, 256 = long-term injury
+# (kickbase_client.py:488, scorer.py:424). v1 applied -30/-20/-10 point
+# penalties for these; the v2 migration dropped the signal entirely, which is
+# how a long-term-injured player came to be scored 47.2 EP and named in the
+# starting eleven on 2026-08-22.
+OUT_STATUSES: frozenset[int] = frozenset({4, 256})
+UNCERTAIN_STATUSES: frozenset[int] = frozenset({2})
+DEFAULT_UNCERTAIN_START_MULTIPLIER = 0.5
+
 
 @dataclass(frozen=True)
 class AvailabilityModel:
@@ -69,6 +85,46 @@ class AvailabilityModel:
             prior={int(s): float(p) for s, p in data["prior"].items()},
             shrinkage_k=float(data["shrinkage_k"]),
         )
+
+
+def apply_availability_override(
+    probs: dict[int, float],
+    live_status: int | None,
+    *,
+    uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
+) -> dict[int, float]:
+    """Shift probability mass toward "not in squad" from a live status flag.
+
+    **Downward only, by construction.** ``rate.py`` records that quality is
+    pooled across statuses, so ``rate(5)`` overstates a true starter's mean by
+    ~24% and stays calibrated only because ``P(5)`` is the fitted ~82% rather
+    than 100%. Forcing probability *up* would expose that overshoot; forcing it
+    *down* drives EP toward zero and cannot inflate anything. That asymmetry is
+    why this function can exist without renormalising quality within-status.
+
+    An injury (4, 256) moves all mass to "not in squad". An uncertain flag (2)
+    is a haircut, never a block: the same code covers a player returning to
+    fitness and one falling out of favour -- on 2026-08-22 it covered Fuehrich,
+    whose market value was rising 15.7% over 30 days, and Stark, whose was down
+    36% -- so it must not be treated as a verdict.
+
+    Anything else, including an unknown status, is returned unchanged: a details
+    fetch that failed is not evidence of injury.
+    """
+    multiplier = min(max(uncertain_start_multiplier, 0.0), 1.0)
+
+    if live_status in OUT_STATUSES:
+        return {status: (1.0 if status == 1 else 0.0) for status in probs}
+
+    if live_status in UNCERTAIN_STATUSES:
+        adjusted = dict(probs)
+        for status in (3, 5):
+            if status in adjusted:
+                adjusted[status] *= multiplier
+        adjusted[1] = adjusted.get(1, 0.0) + (1.0 - sum(adjusted.values()))
+        return adjusted
+
+    return dict(probs)
 
 
 def fit_availability(

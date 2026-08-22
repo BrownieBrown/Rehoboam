@@ -296,3 +296,59 @@ class TestNonTopFlightUsesPositionPrior:
         assert scored_unknown.expected_points == scored_with.expected_points
         assert scored_unknown.data_quality.grade == "A"
         assert not any("position prior" in n for n in scored_unknown.notes)
+
+
+class TestLiveInjuryStatusReachesTheScore:
+    """The serving-time override must actually reach EP, not just exist.
+
+    On 2026-08-22 Hoeler carried status 256 (long-term injury), scored 47.2 EP,
+    and was named in the bot's starting eleven. Nothing in scoring/v2 read the
+    flag. These pin that it is now read.
+    """
+
+    @staticmethod
+    def _data(status_code):
+        from rehoboam.scoring.models import PlayerData
+
+        matches = [{"day": d, "st": 5, "p": 90, "md": "2026-05-16T13:30:00Z"} for d in range(1, 35)]
+        return PlayerData(
+            player=_player("1856"),
+            performance=_perf(matches),
+            player_details={"ap": 83, "tp": 2000, "st": status_code},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+
+    def test_long_term_injury_collapses_expected_points(self):
+        healthy = score_player_v2(self._data(0))
+        injured = score_player_v2(self._data(256))
+
+        assert healthy.expected_points > 10.0, "baseline must be non-trivial"
+        assert (
+            injured.expected_points < 1.0
+        ), f"a long-term-injured player must not score {injured.expected_points}"
+
+    def test_short_term_injury_collapses_expected_points(self):
+        assert score_player_v2(self._data(4)).expected_points < 1.0
+
+    def test_uncertain_reduces_but_does_not_erase(self):
+        """Fuehrich's case: status 2 is a haircut, not a verdict."""
+        healthy = score_player_v2(self._data(0))
+        uncertain = score_player_v2(self._data(2))
+
+        assert 0.0 < uncertain.expected_points < healthy.expected_points
+
+    def test_missing_status_scores_as_healthy(self):
+        from rehoboam.scoring.models import PlayerData
+
+        healthy = score_player_v2(self._data(0))
+        no_details = PlayerData(
+            player=_player("1856"),
+            performance=self._data(0).performance,
+            player_details=None,
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        assert score_player_v2(no_details).expected_points == pytest.approx(healthy.expected_points)

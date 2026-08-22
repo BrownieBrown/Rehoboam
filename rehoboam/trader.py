@@ -457,7 +457,13 @@ class Trader:
                     team_profiles=team_profiles,
                 )
                 market_scores.append(
-                    score_player_v2(data, max_status_age_days=self.settings.max_status_age_days)
+                    score_player_v2(
+                        data,
+                        max_status_age_days=self.settings.max_status_age_days,
+                        uncertain_start_multiplier=getattr(
+                            self.settings, "uncertain_start_multiplier", 0.5
+                        ),
+                    )
                 )
                 market_player_map[player.id] = player
 
@@ -496,7 +502,13 @@ class Trader:
                     team_profiles=team_profiles,
                 )
                 squad_scores.append(
-                    score_player_v2(data, max_status_age_days=self.settings.max_status_age_days)
+                    score_player_v2(
+                        data,
+                        max_status_age_days=self.settings.max_status_age_days,
+                        uncertain_start_multiplier=getattr(
+                            self.settings, "uncertain_start_multiplier", 0.5
+                        ),
+                    )
                 )
                 squad_player_map[player.id] = player
 
