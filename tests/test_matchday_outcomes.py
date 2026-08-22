@@ -468,6 +468,28 @@ class TestWonPlayerOutcomeQuality:
             assert 0.5 <= quality < 1.0
 
 
+def _seed_recent_auctions(learner, n=10, won=False):
+    """Give the learner enough recent evidence to be allowed an opinion.
+
+    Since REH-89 `get_ep_recommended_overbid` returns 0.0 when there are fewer
+    than MIN_AUCTIONS_FOR_LEARNED_OVERBID outcomes inside its window, so that
+    an unmeasured EP floor cannot override the bid stack. Without this seeding
+    the tests below would pass vacuously on 0.0 and stop testing anything.
+    """
+    import sqlite3
+    import time
+
+    ts = time.time() - 24 * 3600
+    with sqlite3.connect(learner.db_path) as conn:
+        for i in range(n):
+            conn.execute(
+                "INSERT INTO auction_outcomes "
+                "(player_id, player_name, our_bid, asking_price, our_overbid_pct, "
+                " won, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (f"seed{i}", f"Seed{i}", 1_100_000, 1_000_000, 10.0, 1 if won else 0, ts),
+            )
+
+
 class TestEPRecommendedOverbid:
     def test_returns_dict_with_required_keys(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -487,6 +509,7 @@ class TestEPRecommendedOverbid:
         """High marginal EP gain should produce higher overbid than low EP gain."""
         with tempfile.TemporaryDirectory() as tmpdir:
             learner = BidLearner(db_path=Path(tmpdir) / "test.db")
+            _seed_recent_auctions(learner)
             low_ep = learner.get_ep_recommended_overbid(
                 asking_price=10_000_000,
                 marginal_ep_gain=5.0,
@@ -505,6 +528,7 @@ class TestEPRecommendedOverbid:
         """Budget ceiling must constrain the overbid so we don't exceed budget."""
         with tempfile.TemporaryDirectory() as tmpdir:
             learner = BidLearner(db_path=Path(tmpdir) / "test.db")
+            _seed_recent_auctions(learner)
             # Tight budget ceiling: only 1M above asking price on a 10M player = 10% max
             result = learner.get_ep_recommended_overbid(
                 asking_price=10_000_000,
@@ -517,6 +541,7 @@ class TestEPRecommendedOverbid:
     def test_overbid_pct_is_non_negative(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             learner = BidLearner(db_path=Path(tmpdir) / "test.db")
+            _seed_recent_auctions(learner)
             result = learner.get_ep_recommended_overbid(
                 asking_price=10_000_000,
                 marginal_ep_gain=0.0,
