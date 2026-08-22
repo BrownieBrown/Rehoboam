@@ -14,6 +14,7 @@ for every scorer bug ever shipped.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
 from rehoboam.enrichment.corpus import TrainingCorpus
 from rehoboam.replay.driver import SEASON, _make_score_fn
@@ -25,14 +26,21 @@ UNFITTED = "no-such-player-in-coefficients"
 DAY0 = 1_700_000_000.0
 
 
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _corpus(tmp_path) -> TrainingCorpus:
     corpus = TrainingCorpus(tmp_path / "corpus.db")
+    # match_date must be within `max_status_age_days` of the decision instant
+    # (kickoffs[3]) or REH-85's recency bound discards these rows as stale.
+    kickoffs = {1: DAY0, 2: DAY0 + 7 * 86400, 3: DAY0 + 14 * 86400}
     with sqlite3.connect(corpus.db_path) as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO player_match_history "
-            "(player_id, season, day_number, points, minutes, is_home, status) "
-            "VALUES (?, ?, ?, ?, 90, 1, ?)",
-            [(UNFITTED, SEASON, day, 60, 5) for day in (1, 2)],
+            "(player_id, season, day_number, match_date, points, minutes, is_home, status) "
+            "VALUES (?, ?, ?, ?, ?, 90, 1, ?)",
+            [(UNFITTED, SEASON, day, _iso(kickoffs[day]), 60, 5) for day in (1, 2)],
         )
         conn.commit()
     return corpus
@@ -62,16 +70,16 @@ def test_the_replay_scores_a_fitted_player_exactly_as_the_live_bot_does(tmp_path
     fitted = next(iter(rate.quality))
 
     corpus = TrainingCorpus(tmp_path / "corpus.db")
+    kickoffs = {1: DAY0, 2: DAY0 + 7 * 86400, 3: DAY0 + 14 * 86400}
     with sqlite3.connect(corpus.db_path) as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO player_match_history "
-            "(player_id, season, day_number, points, minutes, is_home, status) "
-            "VALUES (?, ?, ?, ?, 90, 1, ?)",
-            [(fitted, SEASON, day, 60, 5) for day in (1, 2)],
+            "(player_id, season, day_number, match_date, points, minutes, is_home, status) "
+            "VALUES (?, ?, ?, ?, ?, 90, 1, ?)",
+            [(fitted, SEASON, day, _iso(kickoffs[day]), 60, 5) for day in (1, 2)],
         )
         conn.commit()
 
-    kickoffs = {1: DAY0, 2: DAY0 + 7 * 86400, 3: DAY0 + 14 * 86400}
     score = _make_score_fn(corpus, SEASON, kickoffs)
 
     position = corpus.positions_for([fitted]).get(fitted)

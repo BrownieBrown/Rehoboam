@@ -147,7 +147,9 @@ def _make_score_fn(
         # deriving "most recent played status" here separately is a second
         # implementation that would drift from the live scorer.
         prev_status = prev_status_from_history(
-            [(m.get("match_date"), m.get("status")) for m in history]
+            [(m.get("match_date"), m.get("status")) for m in history],
+            now=datetime.fromtimestamp(at, tz=timezone.utc),
+            max_age_days=_shipped_default("max_status_age_days"),
         )
         if player_id not in positions:
             positions.update(corpus.positions_for([player_id]))

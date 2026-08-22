@@ -28,6 +28,7 @@ ticket notes before adding overrides.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from functools import lru_cache
 
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
@@ -47,6 +48,9 @@ def _models() -> tuple[AvailabilityModel, RateModel, dict]:
 
 def prev_status_from_history(
     history: Sequence[tuple[str | None, int | None]],
+    *,
+    now: datetime | None = None,
+    max_age_days: float | None = None,
 ) -> int | None:
     """Most recent *played* status from ``(match_date, status)`` pairs.
 
@@ -54,18 +58,51 @@ def prev_status_from_history(
     describe a match that has not happened, not a state the player was in, so
     they are skipped.
 
+    When ``max_age_days`` is set, a status older than that is discarded and
+    None is returned instead. The availability model treats None as "no
+    evidence" and falls back to its marginal prior, which is a weaker claim
+    than a stale transition rather than a stronger one.
+
+    Why this matters: without a bound, the last matchday of the previous season
+    drives availability for the whole of the next one. End-of-season status is
+    a bad prior -- squads rotate through dead rubbers -- and it persists for the
+    entire off-season.
+
+    A date that is missing or unparseable is treated as stale. This guard
+    exists for the case we cannot see, so it fails closed.
+
     This is the single implementation of that rule. The live scorer and the
-    season replay both call it. They previously derived it separately, which is
-    the drift `scoring/v2/thresholds.py` forbids and REH-84 records the cost of.
+    season replay both call it.
     """
     latest: int | None = None
-    for _match_date, status in history:
-        if status in PLAYED_STATUSES:
-            latest = int(status)
+    for match_date, status in history:
+        if status not in PLAYED_STATUSES:
+            continue
+        if max_age_days is not None:
+            parsed = _parse_iso(match_date)
+            reference = now or datetime.now(tz=timezone.utc)
+            if parsed is None or (reference - parsed).total_seconds() > max_age_days * 86400:
+                continue
+        latest = int(status)
     return latest
 
 
-def last_played_status(performance: dict | None) -> int | None:
+def _parse_iso(value: str | None) -> datetime | None:
+    """Parse a Kickbase ISO match date, or None if it cannot be read."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def last_played_status(
+    performance: dict | None,
+    *,
+    now: datetime | None = None,
+    max_age_days: float | None = None,
+) -> int | None:
     """The player's status in his most recent *played* match.
 
     Returns None when there is no played history, which the availability model
@@ -83,7 +120,9 @@ def last_played_status(performance: dict | None) -> int | None:
                 continue
             ordered.append(((title, int(day)), match.get("md"), match.get("st")))
     ordered.sort(key=lambda row: row[0])
-    return prev_status_from_history([(md, st) for _key, md, st in ordered])
+    return prev_status_from_history(
+        [(md, st) for _key, md, st in ordered], now=now, max_age_days=max_age_days
+    )
 
 
 def compose_ep(
@@ -98,13 +137,13 @@ def compose_ep(
     return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
 
-def score_player_v2(data: PlayerData) -> PlayerScore:
+def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = None) -> PlayerScore:
     """Score a player with the fitted v2 models. Pure — no I/O beyond cached load."""
     availability, rate, _meta = _models()
     player = data.player
     position = player.position or None
 
-    prev_status = last_played_status(data.performance)
+    prev_status = last_played_status(data.performance, max_age_days=max_status_age_days)
     ep = compose_ep(player.id, prev_status, position, availability, rate)
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0

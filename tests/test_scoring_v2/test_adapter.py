@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from rehoboam.kickbase_client import MarketPlayer
@@ -177,3 +179,34 @@ def test_dgw_multiplies_the_composed_score():
     doubled = score_player_v2(dgw_data)
     assert doubled.expected_points > single.expected_points
     assert doubled.is_dgw is True
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TestPrevStatusRecency:
+    def test_stale_status_is_discarded(self):
+        """The live Pavlovic case: an unused-sub appearance from 3 months ago."""
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        history = [("2026-05-16T13:30:00Z", 4)]
+        assert prev_status_from_history(history, now=now, max_age_days=60.0) is None
+
+    def test_recent_status_is_kept(self):
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        history = [(_iso(now - timedelta(days=7)), 4)]
+        assert prev_status_from_history(history, now=now, max_age_days=60.0) == 4
+
+    def test_no_bound_keeps_current_behaviour(self):
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        history = [("2026-05-16T13:30:00Z", 4)]
+        assert prev_status_from_history(history, now=now) == 4
+
+    def test_unparseable_date_is_treated_as_stale(self):
+        """Fail closed: an unknown date cannot be shown to be recent."""
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        assert prev_status_from_history([("not-a-date", 5)], now=now, max_age_days=60.0) is None
+
+    def test_missing_date_is_treated_as_stale(self):
+        now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        assert prev_status_from_history([(None, 5)], now=now, max_age_days=60.0) is None

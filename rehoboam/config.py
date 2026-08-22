@@ -195,6 +195,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    max_status_age_days: float = Field(
+        default=60.0,
+        description=(
+            "Discard a player's last-played availability status when it is older "
+            "than this many days, falling back to the availability model's "
+            "marginal prior. Must exceed the longest in-season gap (the winter "
+            "break, roughly 30 days) and fall below the off-season gap (roughly "
+            "90). Without it, the final matchday of the previous season drives "
+            "availability for the whole of the next: on 2026-08-22 Pavlovic was "
+            "scored P(start)=17% off an unused-sub appearance played 2026-05-16."
+        ),
+    )
+
     min_days_to_match_for_starter_swap: int = Field(
         default=3,
         description=(

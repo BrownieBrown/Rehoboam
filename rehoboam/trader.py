@@ -456,7 +456,9 @@ class Trader:
                     player_details=details,
                     team_profiles=team_profiles,
                 )
-                market_scores.append(score_player_v2(data))
+                market_scores.append(
+                    score_player_v2(data, max_status_age_days=self.settings.max_status_age_days)
+                )
                 market_player_map[player.id] = player
 
                 try:
@@ -493,7 +495,9 @@ class Trader:
                     player_details=details,
                     team_profiles=team_profiles,
                 )
-                squad_scores.append(score_player_v2(data))
+                squad_scores.append(
+                    score_player_v2(data, max_status_age_days=self.settings.max_status_age_days)
+                )
                 squad_player_map[player.id] = player
 
                 try:
