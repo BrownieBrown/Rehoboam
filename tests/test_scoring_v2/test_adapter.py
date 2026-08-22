@@ -10,6 +10,7 @@ from rehoboam.kickbase_client import MarketPlayer
 from rehoboam.scoring.models import PlayerData
 from rehoboam.scoring.v2.adapter import (
     compose_ep,
+    has_top_flight_history,
     last_played_status,
     prev_status_from_history,
     score_player_v2,
@@ -210,3 +211,52 @@ class TestPrevStatusRecency:
     def test_missing_date_is_treated_as_stale(self):
         now = datetime(2026, 8, 22, tzinfo=timezone.utc)
         assert prev_status_from_history([(None, 5)], now=now, max_age_days=60.0) is None
+
+
+class TestTopFlightHistory:
+    def test_player_with_average_points_has_top_flight_history(self):
+        assert has_top_flight_history({"ap": 119, "tp": 2844}) is True
+
+    def test_missing_ap_means_no_top_flight_history(self):
+        """The live Elversberg case: full 2. Bundesliga record, no `ap` field."""
+        assert has_top_flight_history({"fn": "Maximilian", "ln": "Rohr"}) is False
+
+    def test_zero_ap_means_no_top_flight_history(self):
+        assert has_top_flight_history({"ap": 0, "tp": 0}) is False
+
+    def test_missing_details_is_not_a_claim_of_history(self):
+        assert has_top_flight_history(None) is False
+
+
+class TestNonTopFlightUsesPositionPrior:
+    def test_fitted_quality_is_withheld_without_top_flight_history(self):
+        """A 2. Bundesliga record must not buy a confident Bundesliga rate."""
+        from rehoboam.scoring.models import PlayerData
+
+        player = _player("3284")  # Rohr, present in the fitted quality table
+        matches = [
+            {"day": d, "st": 5, "p": 100, "md": "2026-05-16T13:30:00Z"} for d in range(1, 35)
+        ]
+        with_history = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details={"ap": 74, "tp": 1251},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+        without_history = PlayerData(
+            player=player,
+            performance=_perf(matches),
+            player_details={"fn": "Maximilian", "ln": "Rohr"},
+            team_strength=None,
+            opponent_strength=None,
+            is_dgw=False,
+        )
+
+        scored_with = score_player_v2(with_history)
+        scored_without = score_player_v2(without_history)
+
+        assert scored_without.expected_points < scored_with.expected_points
+        assert scored_without.data_quality.grade != "A"
+        assert any("position prior" in n for n in scored_without.notes)

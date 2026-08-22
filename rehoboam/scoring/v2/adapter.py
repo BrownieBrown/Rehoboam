@@ -125,8 +125,23 @@ def last_played_status(
     )
 
 
+def has_top_flight_history(player_details: dict | None) -> bool:
+    """Has this player ever recorded Bundesliga scoring?
+
+    Kickbase omits ``ap``/``tp`` entirely for players with no top-flight
+    appearances. On 2026-08-22 that was true of seven of 22 buyable listings —
+    six from newly promoted clubs (Elversberg, Schalke, Paderborn) and one
+    Mainz backup keeper. The keeper is why the signal is "no top-flight
+    history" rather than "promoted club": it is broader, and it needs no
+    annually-maintained list of who came up.
+    """
+    if not player_details:
+        return False
+    return bool(player_details.get("ap") or player_details.get("tp"))
+
+
 def compose_ep(
-    player_id: str,
+    player_id: str | None,
     prev_status: int | None,
     position: str | None,
     availability: AvailabilityModel,
@@ -144,7 +159,16 @@ def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = Non
     position = player.position or None
 
     prev_status = last_played_status(data.performance, max_age_days=max_status_age_days)
-    ep = compose_ep(player.id, prev_status, position, availability, rate)
+
+    # Withhold the fitted quality coefficient from players whose fitted record
+    # is not top-flight: `rate.predict` then falls back to the position prior,
+    # which is exactly the cold-start path an unfitted player already takes.
+    # This is NOT a discount multiplier — REH-80's blanket cold-start discount
+    # was reverted for costing 782 points. It declines to apply a coefficient
+    # fitted on inapplicable data.
+    quality_key = player.id if has_top_flight_history(data.player_details) else None
+
+    ep = compose_ep(quality_key, prev_status, position, availability, rate)
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
     ep *= dgw_multiplier
@@ -153,9 +177,9 @@ def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = Non
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "
         f"(prev status {prev_status if prev_status is not None else 'unknown'}), "
-        f"rate={rate.predict(player.id, 5, position):.0f} pts if started"
+        f"rate={rate.predict(quality_key, 5, position):.0f} pts if started"
     ]
-    if player.id not in rate.quality:
+    if quality_key not in rate.quality:
         notes.append("No fitted quality — using position prior (cold start)")
     if data.is_dgw:
         notes.append("DOUBLE GAMEWEEK ×1.8")
@@ -164,7 +188,7 @@ def score_player_v2(data: PlayerData, *, max_status_age_days: float | None = Non
         player_id=player.id,
         expected_points=round(ep, 2),
         data_quality=DataQuality(
-            grade="A" if player.id in rate.quality else "C",
+            grade="A" if quality_key in rate.quality else "C",
             games_played=0,
             consistency=0.0,
             has_fixture_data=False,
