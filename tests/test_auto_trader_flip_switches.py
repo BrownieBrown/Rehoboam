@@ -178,6 +178,7 @@ class TestFlipBuyBlockGate:
             marginal_ep_gain=10.0,
             reason="test upgrade",
             sell_plan=None,
+            score=SimpleNamespace(expected_points=50.0),
         )
         phase = MatchdayPhase(
             days_until_match=5,

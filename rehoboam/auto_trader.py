@@ -143,6 +143,29 @@ def _emergency_slots_short(squad: list) -> int:
     return max(FormationRequirements().starting_eleven_size - len(squad), 1)
 
 
+def _target_availability(buy_recs: list, competitor_ids: set, bar: float) -> dict:
+    """How many targets exist, and where they are.
+
+    A target is a player whose ABSOLUTE expected points clear the bar —
+    "is he worth a squad slot at all" — as distinct from marginal gain, which
+    answers "is he worth today's price and who does he displace".
+
+    Split by where they sit, because the two states call for different
+    behaviour: a target that is listed can be bid on now, while one sitting in
+    an opponent's squad is a reason to keep a slot free rather than to act.
+    """
+    listed = 0
+    owned = 0
+    for rec in buy_recs:
+        if rec.score.expected_points < bar:
+            continue
+        if rec.player.id in competitor_ids:
+            owned += 1
+        else:
+            listed += 1
+    return {"listed": listed, "owned_by_opponents": owned, "bar": bar}
+
+
 @dataclass
 class EPSessionContext:
     """Single-fetch context for the entire auto session."""
@@ -338,6 +361,18 @@ class AutoTrader:
         results: list[AutoTradeResult] = []
         buy_recs = ctx.ep_result.get("buy_recs", [])
         trade_pairs = ctx.ep_result.get("trade_pairs", [])
+
+        target_state = _target_availability(
+            buy_recs,
+            ctx.ep_result.get("competitor_player_ids") or set(),
+            self.settings.target_ep_bar,
+        )
+        logger.info(
+            "target-availability listed=%d owned_by_opponents=%d bar=%.1f",
+            target_state["listed"],
+            target_state["owned_by_opponents"],
+            target_state["bar"],
+        )
 
         effective_limit = min(
             self.max_trades_per_session,
