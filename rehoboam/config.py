@@ -288,6 +288,17 @@ class Settings(BaseSettings):
             "Pre-season estimate awaiting live-market validation."
         ),
     )
+    max_overbid_pct: float = Field(
+        default=8.0,
+        description=(
+            "Hard ceiling on how far above market value any bid may go, enforced by "
+            "services/safety_gate.check_buy. 8.0 comes from REH-64's measurement: a "
+            "3-8% overbid won 50% of auctions and an 8-15% overbid won the same 50%, "
+            "so margin beyond ~8% bought almost no win rate while the bot averaged "
+            "+12.2% and lost EUR 55.3M across 151 flips. Distinct from SmartBidding's "
+            "own internal caps — this is the outer limit nothing may cross."
+        ),
+    )
 
     # Auto Trading Limits
     auto_max_trades_normal: int = Field(
