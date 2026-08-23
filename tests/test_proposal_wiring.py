@@ -97,3 +97,33 @@ class TestSellPlanDependentBuys:
 
     def test_a_plain_buy_is_not(self):
         assert AutoTrader._needs_sell_plan(SimpleNamespace(sell_plan=None)) is False
+
+
+class TestDryRun:
+    def test_a_dry_run_records_nothing_and_sends_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.chdir(tmp_path)
+        dry = AutoTrader(api=MagicMock(), settings=Settings(), dry_run=True)
+        with patch("rehoboam.notify.telegram.send_proposal") as send:
+            assert dry._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx()) is True
+            send.assert_not_called()
+        assert dry.learner.pending_proposals() == []
+
+
+class TestStaleProposalsStopBlocking:
+    def test_a_proposal_older_than_the_window_stops_blocking(self, trader):
+        """Expiry is not implemented, so an unbounded guard blocks forever."""
+        import sqlite3
+        import time as _time
+
+        with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
+            trader._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx())
+        assert trader._has_pending_proposal("6080") is True
+
+        with sqlite3.connect(trader.learner.db_path) as conn:
+            conn.execute(
+                "UPDATE trade_proposals SET created_at = ?",
+                (_time.time() - 4 * 86400,),
+            )
+        assert trader._has_pending_proposal("6080") is False

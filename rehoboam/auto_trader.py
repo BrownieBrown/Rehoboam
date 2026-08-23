@@ -399,6 +399,13 @@ class AutoTrader:
             risks=risks,
         )
 
+        if self.dry_run:
+            console.print(
+                f"[yellow]DRY RUN - would propose {player.last_name} "
+                f"for EUR {int(rec.recommended_bid):,}[/yellow]"
+            )
+            return True
+
         try:
             self.learner.record_proposal(
                 proposal_id=proposal_id,
@@ -426,15 +433,20 @@ class AutoTrader:
         )
         return True
 
-    def _has_pending_proposal(self, player_id: str) -> bool:
-        """True if this player already has a proposal awaiting a decision.
+    def _has_pending_proposal(self, player_id: str, *, max_age_days: float = 3.0) -> bool:
+        """True if this player already has a RECENT proposal awaiting a decision.
 
         The bot runs twice a day; without this guard it would re-send the same
-        proposal every run until it was actioned.
+        proposal every run until it was actioned. The age bound matters just as
+        much: proposal expiry is not implemented, so an unbounded guard would let
+        one ignored proposal block that player forever.
         """
+        cutoff = time.time() - max_age_days * 86400.0
         try:
             return any(
-                str(p.get("player_id")) == str(player_id) for p in self.learner.pending_proposals()
+                str(p.get("player_id")) == str(player_id)
+                and float(p.get("created_at") or 0.0) >= cutoff
+                for p in self.learner.pending_proposals()
             )
         except Exception:
             logger.warning("proposal: could not read pending proposals", exc_info=True)

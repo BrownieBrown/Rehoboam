@@ -243,19 +243,28 @@ class TestFlipBuyBlockGate:
         EP-driven buy/trade-pair loop it lives inside — pinning the failure
         mode of a gate that accidentally disables more than the flip block.
 
-        Post-approval-gate (REH-89-ish): the EP buy path no longer executes a
-        purchase, it records a proposal via `_propose_buy`. `results` stays
-        empty because no trade actually happened.
+        Post-approval-gate: the EP buy path no longer executes a purchase, it
+        routes to `_propose_buy`. `results` stays empty because no trade
+        actually happened.
+
+        This asserts on `_propose_buy` rather than on `record_proposal`
+        because this fixture is dry_run=True, and a dry run deliberately
+        records nothing. What belongs here is that the buy path is REACHED;
+        that reaching it persists a proposal is pinned in test_proposal_wiring.
         """
         trader.settings.enable_flip_buys = False
         self._configure_trader(trader)
         ctx = self._ctx()
 
-        with patch("rehoboam.trader.Trader.find_profit_opportunities") as mock_find:
+        with (
+            patch("rehoboam.trader.Trader.find_profit_opportunities") as mock_find,
+            patch.object(AutoTrader, "_propose_buy", return_value=True) as mock_propose,
+        ):
             results = trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
 
         mock_find.assert_not_called()
         assert results == []
-        trader.learner.record_proposal.assert_called_once()
-        assert trader.learner.record_proposal.call_args.kwargs["player_id"] == "p1"
-        assert trader.learner.record_proposal.call_args.kwargs["bid"] == 1_000_000
+        trader.api.buy_player.assert_not_called()
+        mock_propose.assert_called_once()
+        assert mock_propose.call_args[0][1].player.id == "p1"
+        assert mock_propose.call_args[0][1].recommended_bid == 1_000_000
