@@ -23,7 +23,7 @@ def render_proposal(
     risks: list[str],
 ) -> str:
     """The three questions Marco asked for, each as its own section."""
-    overbid = ((bid / market_value - 1.0) * 100.0) if market_value > 0 else 0.0
+    overbid_str = f"+{(bid / market_value - 1.0) * 100.0:.1f}%" if market_value > 0 else "unknown"
     trend = f"{trend_7d_pct:+.1f}%/7d" if trend_7d_pct is not None else "unknown"
     budget_after = budget_before - bid
 
@@ -38,7 +38,7 @@ def render_proposal(
         f"  Net gain {marginal_gain:+.1f} points per matchday.",
         "",
         "WHY THIS PRICE",
-        f"  Market value EUR {market_value:,}; bid +{overbid:.1f}%. Trend {trend}.",
+        f"  Market value EUR {market_value:,}; bid {overbid_str}. Trend {trend}.",
         f"  Budget EUR {budget_before:,} -> EUR {budget_after:,}.",
     ]
     if risks:

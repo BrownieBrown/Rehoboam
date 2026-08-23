@@ -61,3 +61,8 @@ class TestNoCrashOnEdges:
     def test_zero_market_value_does_not_divide_by_zero(self):
         out = _render(market_value=0)
         assert isinstance(out, str) and out
+
+    def test_zero_market_value_does_not_fabricate_a_premium(self):
+        out = _render(market_value=0)
+        assert "+0.0%" not in out
+        assert "EUR 0" in out
