@@ -1,5 +1,6 @@
 """The daily summary email."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from rehoboam.notify.email import send_email
@@ -117,3 +118,82 @@ class TestSessionCarriesTheLineup:
             net_change=0,
         )
         assert s.lineup == []
+
+
+class TestFallbackPathCarriesTheLineup:
+    """The EP-pipeline-failure fallback in run_full_session still sets a real
+    lineup on Kickbase — it must not report an empty one in the daily email.
+    """
+
+    def test_the_ep_pipeline_failure_fallback_returns_the_lineup(self, monkeypatch, tmp_path):
+        from rehoboam.auto_trader import AutoTrader
+        from rehoboam.config import Settings
+
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.chdir(tmp_path)
+        trader = AutoTrader(api=MagicMock(), settings=Settings(), dry_run=False)
+
+        sentinel = [("Flekken", 52.0, None)]
+        league = SimpleNamespace(id="L", name="L")
+        with (
+            patch.object(AutoTrader, "_build_session_context", side_effect=RuntimeError("boom")),
+            patch.object(AutoTrader, "_set_optimal_lineup", return_value=sentinel),
+        ):
+            session = trader.run_full_session(league)
+
+        assert session.lineup == sentinel
+
+
+class TestLockedPathCarriesTheLineup:
+    """The matchday-locked early return also sets a real lineup on Kickbase —
+    on the days closest to a match, which is the normal daily state rather
+    than an edge case — so it must not report an empty one either.
+    """
+
+    def test_the_locked_phase_early_return_returns_the_lineup(self, monkeypatch, tmp_path):
+        from rehoboam.auto_trader import AutoTrader, EPSessionContext, MatchdayPhase
+        from rehoboam.config import Settings
+
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.chdir(tmp_path)
+        trader = AutoTrader(api=MagicMock(), settings=Settings(), dry_run=False)
+
+        # A minimal fieldable squad (1 GK, 4 DEF, 4 MID, 2 FWD) so
+        # `_emergency_slots_short` reports 0 and the locked-phase branch takes
+        # the ordinary "no emergency" path, not the emergency-fill path.
+        squad = (
+            [SimpleNamespace(id="gk0", position="Goalkeeper")]
+            + [SimpleNamespace(id=f"def{i}", position="Defender") for i in range(4)]
+            + [SimpleNamespace(id=f"mid{i}", position="Midfielder") for i in range(4)]
+            + [SimpleNamespace(id=f"fwd{i}", position="Forward") for i in range(2)]
+        )
+        trader.api.get_squad.return_value = squad
+
+        ctx = EPSessionContext(
+            ep_result={},
+            matchday_phase=MatchdayPhase(
+                days_until_match=1,
+                phase="locked",
+                max_trades=0,
+                allow_flips=False,
+                reason="test-locked",
+            ),
+            my_bids=[],
+            my_bid_amounts={},
+            squad=squad,
+            current_budget=1_000_000,
+            team_value=10_000_000,
+            flip_budget=0,
+        )
+
+        sentinel = [("Flekken", 52.0, None)]
+        league = SimpleNamespace(id="L", name="L")
+        with (
+            patch.object(AutoTrader, "_build_session_context", return_value=ctx),
+            patch.object(AutoTrader, "_set_optimal_lineup", return_value=sentinel),
+        ):
+            session = trader.run_full_session(league)
+
+        assert session.lineup == sentinel

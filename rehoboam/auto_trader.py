@@ -1372,7 +1372,7 @@ class AutoTrader:
             errors.append(error_msg)
             logger.exception("EP pipeline failed — falling back to lineup-only")
             # Fall back to just setting lineup
-            self._set_optimal_lineup(league, errors)
+            lineup = self._set_optimal_lineup(league, errors) or []
             return AutoTradeSession(
                 start_time=start_time,
                 end_time=time.time(),
@@ -1382,6 +1382,7 @@ class AutoTrader:
                 total_spent=0,
                 total_earned=0,
                 net_change=0,
+                lineup=lineup,
             )
 
         # Step 2a: Matchday self-calibration (REH-20).
@@ -1458,7 +1459,12 @@ class AutoTrader:
                     f"— setting lineup only, no trading[/yellow]"
                 )
 
-            self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+            lineup = (
+                self._set_optimal_lineup(
+                    league, errors, squad_scores=ctx.ep_result.get("squad_scores")
+                )
+                or []
+            )
             total_spent = sum(r.price for r in trade_results if r.action == "BUY" and r.success)
             total_earned = sum(r.price for r in trade_results if r.action == "SELL" and r.success)
             return AutoTradeSession(
@@ -1470,6 +1476,7 @@ class AutoTrader:
                 total_spent=total_spent,
                 total_earned=total_earned,
                 net_change=total_earned - total_spent,
+                lineup=lineup,
             )
 
         # Step 4: Trend-aware profit selling
