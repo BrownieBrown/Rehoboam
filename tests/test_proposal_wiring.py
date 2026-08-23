@@ -127,3 +127,116 @@ class TestStaleProposalsStopBlocking:
                 (_time.time() - 4 * 86400,),
             )
         assert trader._has_pending_proposal("6080") is False
+
+
+class TestRejectionSuppressesReproposal:
+    """Rejecting is an answer, not silence.
+
+    Before this, `rejected` was written and never read: rejecting a player
+    removed the only thing suppressing him, so the identical proposal came
+    back twelve hours later, forever — the exact daily nagging the approval
+    gate exists to end.
+    """
+
+    def test_a_rejected_player_is_not_immediately_reproposed(self, trader):
+        with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
+            trader._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx())
+        pid = trader.learner.pending_proposals()[0]["proposal_id"]
+        trader.learner.mark_proposal(pid, "rejected")
+
+        assert trader.learner.pending_proposals() == []
+        assert trader._has_pending_proposal("6080") is True
+
+    def test_a_rejection_stops_suppressing_once_it_is_old(self, trader):
+        """Not forever: the price and the player's form both move."""
+        import sqlite3
+        import time as _time
+
+        with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
+            trader._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx())
+        pid = trader.learner.pending_proposals()[0]["proposal_id"]
+        trader.learner.mark_proposal(pid, "rejected")
+
+        with sqlite3.connect(trader.learner.db_path) as conn:
+            conn.execute("UPDATE trade_proposals SET created_at = ?", (_time.time() - 20 * 86400,))
+        assert trader._has_pending_proposal("6080") is False
+
+    def test_an_executed_proposal_does_not_suppress(self, trader):
+        """The buy happened; a fresh situation deserves a fresh proposal."""
+        with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
+            trader._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx())
+        pid = trader.learner.pending_proposals()[0]["proposal_id"]
+        trader.learner.mark_proposal(pid, "approved")
+        trader.learner.set_proposal_status(pid, "executed")
+
+        assert trader._has_pending_proposal("6080") is False
+
+
+class TestAProposalDoesNotSwitchOnAutonomousPairs:
+    """A proposal is not a commitment.
+
+    The pair branch sells a squad player to fund a buy, and skips itself while
+    a free slot exists. Because proposing decremented `available_slots`, merely
+    PROPOSING a buy was what switched that autonomous selling on — off the back
+    of a decision Marco had not made yet.
+    """
+
+    def test_proposing_a_buy_does_not_trigger_the_pair_sell(self, trader):
+        from rehoboam.auto_trader import EPSessionContext, MatchdayPhase
+
+        buy_rec = SimpleNamespace(
+            player=SimpleNamespace(
+                id="p1", first_name="T", last_name="Buyer", market_value=1_000_000
+            ),
+            recommended_bid=1_000_000,
+            marginal_ep_gain=10.0,
+            reason="upgrade",
+            sell_plan=None,
+            score=SimpleNamespace(expected_points=50.0),
+        )
+        pair = SimpleNamespace(
+            buy_player=SimpleNamespace(
+                id="p2", first_name="T", last_name="PairBuy", market_value=1_000_000
+            ),
+            sell_player=SimpleNamespace(
+                id="s1", first_name="T", last_name="PairSell", market_value=2_000_000
+            ),
+            recommended_bid=1_000_000,
+            marginal_ep_gain=9.0,
+            ep_gain=9.0,
+            sell_is_starter=False,
+            reason="swap",
+            sell_plan=None,
+            score=SimpleNamespace(expected_points=49.0),
+        )
+        ctx = EPSessionContext(
+            ep_result={"buy_recs": [buy_rec], "trade_pairs": [pair]},
+            matchday_phase=MatchdayPhase(
+                days_until_match=5,
+                phase="aggressive",
+                max_trades=5,
+                allow_flips=False,
+                reason="test",
+            ),
+            my_bids=[],
+            my_bid_amounts={},
+            squad=[SimpleNamespace(id=f"s{i}") for i in range(14)],
+            current_budget=5_000_000,
+            team_value=20_000_000,
+            flip_budget=5_000_000,
+            executed_trade_count=0,
+        )
+        # Exactly one free slot: the proposal takes it, and pre-fix that is
+        # what let the pair branch through.
+        trader.api.get_squad.return_value = [SimpleNamespace(id=f"s{i}") for i in range(14)]
+        trader.api.get_my_bids.return_value = []
+        trader.api.get_team_info.return_value = {
+            "budget": 5_000_000,
+            "team_value": 20_000_000,
+        }
+
+        with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
+            trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
+
+        assert len(trader.learner.pending_proposals()) == 1
+        trader.api.sell_player_instant.assert_not_called()

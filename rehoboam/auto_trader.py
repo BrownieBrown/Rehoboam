@@ -434,23 +434,45 @@ class AutoTrader:
         )
         return True
 
-    def _has_pending_proposal(self, player_id: str, *, max_age_days: float = 3.0) -> bool:
-        """True if this player already has a RECENT proposal awaiting a decision.
+    def _has_pending_proposal(
+        self,
+        player_id: str,
+        *,
+        max_age_days: float = 3.0,
+        rejected_age_days: float = 14.0,
+    ) -> bool:
+        """True if this player was recently proposed and should not be re-sent.
 
         The bot runs twice a day; without this guard it would re-send the same
-        proposal every run until it was actioned. The age bound matters just as
-        much: proposal expiry is not implemented, so an unbounded guard would let
-        one ignored proposal block that player forever.
+        proposal every run until it was actioned. Two windows, because the two
+        states mean different things:
+
+        - ``pending`` — Marco has not answered. Suppress for ``max_age_days``,
+          then let it through again: proposal expiry is not implemented, so an
+          unbounded guard would let one ignored proposal block a player forever.
+        - ``rejected`` — Marco said no. That is an answer, and re-asking twelve
+          hours later is exactly the daily-nagging this whole branch exists to
+          stop. Suppress for much longer, but still not forever, because the
+          price and the player's form both move.
+
+        Any other status (``approved``/``executed``/``failed``) does not
+        suppress: the buy either happened or definitively did not, and a fresh
+        proposal is the right response to a fresh situation.
         """
-        cutoff = time.time() - max_age_days * 86400.0
+        now = time.time()
+        pending_cutoff = now - max_age_days * 86400.0
+        rejected_cutoff = now - rejected_age_days * 86400.0
         try:
-            return any(
-                str(p.get("player_id")) == str(player_id)
-                and float(p.get("created_at") or 0.0) >= cutoff
-                for p in self.learner.pending_proposals()
-            )
+            for p in self.learner.proposals_for_player(str(player_id)):
+                created = float(p.get("created_at") or 0.0)
+                status = p.get("status")
+                if status == "pending" and created >= pending_cutoff:
+                    return True
+                if status == "rejected" and created >= rejected_cutoff:
+                    return True
+            return False
         except Exception:
-            logger.warning("proposal: could not read pending proposals", exc_info=True)
+            logger.warning("proposal: could not read proposals", exc_info=True)
             return False
 
     @staticmethod
@@ -568,6 +590,7 @@ class AutoTrader:
         current_squad_size = len(fresh_squad)
         active_bid_count = len(fresh_bids)
         available_slots = _available_squad_slots(current_squad_size, active_bid_count)
+        proposed_slots = 0  # slots reserved by proposals nobody has approved yet
         ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
         ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
@@ -700,13 +723,21 @@ class AutoTrader:
                         f"[cyan]Proposed {obj.player.last_name} — awaiting approval[/cyan]"
                     )
                     available_slots -= 1
+                    proposed_slots += 1
                     ctx.flip_budget -= obj.recommended_bid
                 continue
 
             elif kind == "pair":
                 # Don't sell a player unnecessarily if there are open slots —
                 # the same target should appear as a plain buy candidate instead.
-                if available_slots > 0:
+                #
+                # `proposed_slots` is added back deliberately. A proposal is not
+                # a commitment: nobody has approved it and no money has moved.
+                # Counting it as a filled slot would mean that merely PROPOSING
+                # a buy is what switches on the autonomous sell-then-buy pair
+                # path — the bot would start selling squad players off the back
+                # of a decision Marco has not made yet.
+                if available_slots + proposed_slots > 0:
                     continue
                 if ctx.my_bid_amounts.get(obj.buy_player.id, 0) > 0:
                     console.print(

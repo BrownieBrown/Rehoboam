@@ -1696,6 +1696,31 @@ class BidLearner:
                 (status, proposal_id),
             )
 
+    def proposals_for_player(self, player_id: str) -> list[dict]:
+        """Every proposal ever made for this player, newest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trade_proposals WHERE player_id = ? ORDER BY created_at DESC",
+                (str(player_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def proposals_since(self, since_ts: float) -> list[dict]:
+        """Every proposal created at or after ``since_ts``, oldest first.
+
+        The daily summary uses this to report what happened to proposals —
+        without it an approved purchase and a gate-refused one both vanish,
+        since the session's own results only cover autonomous trades.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trade_proposals WHERE created_at >= ? ORDER BY created_at",
+                (float(since_ts),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def pending_proposals(self) -> list[dict]:
         """All proposals still awaiting a decision, oldest first."""
         with sqlite3.connect(self.db_path) as conn:

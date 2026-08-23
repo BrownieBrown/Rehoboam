@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import time
 from collections.abc import Collection
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,12 +98,31 @@ def _send_daily_summary(api, league, settings, session):
         reverse=True,
     )[:10]
 
-    pending = [(p["player_name"], int(p["bid"])) for p in BidLearner().pending_proposals()]
+    learner = BidLearner()
+    pending = [(p["player_name"], int(p["bid"])) for p in learner.pending_proposals()]
 
     executed = [
         f"{r.action} {r.player_name} for EUR {r.price:,}"
         for r in (session.profit_trades + session.lineup_trades)
         if r.success
+    ]
+
+    # A proposal Marco approved is executed by the webhook, in a different
+    # invocation entirely — it appears in no session's results. Without this
+    # the email would never mention a EUR 32M purchase he authorised, nor a
+    # proposal the safety gate refused after he tapped approve.
+    resolved = [
+        p for p in learner.proposals_since(time.time() - 48 * 3600) if p["status"] != "pending"
+    ]
+    executed += [
+        f"APPROVED {p['player_name']} for EUR {int(p['bid']):,}"
+        for p in resolved
+        if p["status"] == "executed"
+    ]
+    blocked = list(session.errors) + [
+        f"proposal for {p['player_name']} ended as {p['status']}"
+        for p in resolved
+        if p["status"] in {"failed", "rejected"}
     ]
 
     body = render_daily_summary(
@@ -115,7 +135,7 @@ def _send_daily_summary(api, league, settings, session):
         ],
         pending=pending,
         executed=executed,
-        rejections=session.errors,
+        rejections=blocked,
     )
     send_email(
         host=settings.smtp_host,
