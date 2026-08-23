@@ -42,13 +42,18 @@ def check_buy(
     if player_id not in set(known_player_ids):
         reasons.append(f"unknown player id {player_id!r} — not in the current market data")
 
+    if bid <= 0:
+        reasons.append(f"invalid bid: EUR {bid:,} (must be positive)")
+
     if current_budget - bid < 0:
         reasons.append(
             f"budget would go negative: EUR {current_budget:,} - EUR {bid:,} "
             f"= EUR {current_budget - bid:,} (zero points for the matchday)"
         )
 
-    if market_value > 0:
+    if market_value <= 0:
+        reasons.append(f"invalid market value: EUR {market_value:,} (must be positive)")
+    else:
         cap = market_value * (1.0 + max_overbid_pct / 100.0)
         if bid > cap:
             over = (bid / market_value - 1.0) * 100.0

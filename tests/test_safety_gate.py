@@ -73,3 +73,35 @@ class TestMultipleFailures:
         r = check_buy(**_ok_kwargs(player_id="99999", free_slots=0, current_budget=1))
         assert r.ok is False
         assert len(r.reasons) >= 3
+
+
+class TestInvalidMarketValue:
+    """A delisted listing, malformed payload, or missing field can hand us a
+    market value of 0. That must fail closed, not silently disable the
+    overbid cap and let a bid of any size through."""
+
+    def test_a_zero_market_value_is_refused(self):
+        r = check_buy(**_ok_kwargs(market_value=0))
+        assert r.ok is False
+        assert any("market value" in x.lower() for x in r.reasons)
+
+    def test_a_negative_market_value_is_refused(self):
+        r = check_buy(**_ok_kwargs(market_value=-1))
+        assert r.ok is False
+        assert any("market value" in x.lower() for x in r.reasons)
+
+
+class TestInvalidBid:
+    """A forged webhook callback could send a non-positive bid. Every other
+    check (budget, overbid cap) passes trivially for such a bid, so it needs
+    its own explicit reason."""
+
+    def test_a_negative_bid_is_refused(self):
+        r = check_buy(**_ok_kwargs(bid=-1_000))
+        assert r.ok is False
+        assert any("bid" in x.lower() for x in r.reasons)
+
+    def test_a_zero_bid_is_refused(self):
+        r = check_buy(**_ok_kwargs(bid=0))
+        assert r.ok is False
+        assert any("bid" in x.lower() for x in r.reasons)
