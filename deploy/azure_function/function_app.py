@@ -160,3 +160,54 @@ def trading_session(timer: func.TimerRequest):
 
     except Exception as e:
         logging.error(f"Trading session failed: {e}", exc_info=True)
+
+
+@app.route(route="telegram", auth_level=func.AuthLevel.FUNCTION)
+def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
+    """Telegram approval callbacks. Public endpoint — see notify/approval.py."""
+    import json
+
+    from rehoboam.api import KickbaseAPI
+    from rehoboam.bid_learner import BidLearner
+    from rehoboam.config import get_settings
+    from rehoboam.notify.approval import build_callback_response, handle_callback
+
+    os.chdir(TEMP_DIR)
+    os.makedirs(f"{TEMP_DIR}/logs", exist_ok=True)
+    download_databases()
+
+    body = req.get_json()
+
+    try:
+        settings = get_settings()
+        api = KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
+        api.login()
+
+        league_index = int(os.getenv("LEAGUE_INDEX", "0"))
+        leagues = api.get_leagues()
+        if not leagues:
+            logging.error("telegram approval: no leagues found")
+            return func.HttpResponse(
+                json.dumps(build_callback_response(body, "No leagues found.")),
+                mimetype="application/json",
+            )
+        league = leagues[league_index]
+
+        reply = handle_callback(
+            body,
+            req.headers.get("X-Telegram-Bot-Api-Secret-Token"),
+            settings=settings,
+            learner=BidLearner(),
+            api=api,
+            league=league,
+        )
+    except Exception:
+        logging.exception("telegram approval: handler raised")
+        reply = "Something went wrong — check the logs."
+    finally:
+        upload_databases()
+
+    logging.info("telegram approval: %s", reply)
+    return func.HttpResponse(
+        json.dumps(build_callback_response(body, reply)), mimetype="application/json"
+    )
