@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -126,6 +127,7 @@ def fetch_state(
     *,
     backup: bool = True,
     dry_run: bool = False,
+    only: Collection[str] | None = None,
 ) -> list[FetchResult]:
     """Download each DB blob into ``dest_dir``.
 
@@ -138,13 +140,16 @@ def fetch_state(
     On a successful (non-dry-run) fetch, also writes a ``.fetch_state.json``
     sidecar capturing each blob's ``last_modified`` so a later
     ``push_state`` can detect drift.
+
+    ``only`` restricts the sync to a subset of ``DB_FILES`` (default: all of
+    them) — a caller that only reads/writes one DB shouldn't pay for the rest.
     """
     container = _get_container(connection_string, container_name)
     dest_dir.mkdir(parents=True, exist_ok=True)
     results: list[FetchResult] = []
     sidecar_updates: dict[str, str] = {}
 
-    for name in DB_FILES:
+    for name in [n for n in DB_FILES if only is None or n in only]:
         blob = _probe_blob(container, name)
         local_path = dest_dir / name
 
@@ -223,6 +228,8 @@ def check_freshness(
     connection_string: str | None,
     container_name: str,
     source_dir: Path,
+    *,
+    only: Collection[str] | None = None,
 ) -> list[StaleBlob]:
     """Compare each blob's current ``last_modified`` against the sidecar
     written by the last ``fetch_state``. Returns the list of stale blobs
@@ -244,7 +251,7 @@ def check_freshness(
     container = _get_container(connection_string, container_name)
     stale: list[StaleBlob] = []
 
-    for name in DB_FILES:
+    for name in [n for n in DB_FILES if only is None or n in only]:
         recorded_iso = recorded.get(name)
         if not recorded_iso:
             continue
@@ -274,6 +281,7 @@ def push_state(
     *,
     dry_run: bool = False,
     force: bool = False,
+    only: Collection[str] | None = None,
 ) -> list[PushResult]:
     """Upload each local DB to the corresponding blob (overwrite).
 
@@ -284,16 +292,19 @@ def push_state(
     last fetch. This protects against clobbering writes from a concurrent
     Azure Function run. ``dry_run`` still performs the freshness check so
     the caller can preview the same outcome.
+
+    ``only`` restricts the sync to a subset of ``DB_FILES`` (default: all of
+    them) — a caller that only reads/writes one DB shouldn't pay for the rest.
     """
     if not force:
-        stale = check_freshness(connection_string, container_name, source_dir)
+        stale = check_freshness(connection_string, container_name, source_dir, only=only)
         if stale:
             raise BlobChangedSinceFetch(stale)
 
     container = _get_container(connection_string, container_name)
     results: list[PushResult] = []
 
-    for name in DB_FILES:
+    for name in [n for n in DB_FILES if only is None or n in only]:
         local_path = source_dir / name
 
         if not local_path.exists():

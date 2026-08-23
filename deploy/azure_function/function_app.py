@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+from collections.abc import Collection
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,8 +26,15 @@ def _blob_settings() -> tuple[str | None, str]:
     )
 
 
-def download_databases():
-    """Download learning databases from Azure Blob Storage."""
+def download_databases(only: Collection[str] | None = None):
+    """Download learning databases from Azure Blob Storage.
+
+    ``only`` restricts the sync to a subset of the DB files (default: all of
+    them, matching prior behaviour — ``trading_session`` relies on this).
+    The telegram approval trigger passes ``only={"bid_learning.db"}``: that's
+    the only file it reads or writes, and pulling the rest (player_history.db
+    alone is 20MB+) on every callback risks a Telegram webhook timeout.
+    """
     from rehoboam.azure_blob import fetch_state
 
     conn_str, container = _blob_settings()
@@ -34,7 +42,7 @@ def download_databases():
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB download")
         return
 
-    results = fetch_state(conn_str, container, LOGS_DIR, backup=False, dry_run=False)
+    results = fetch_state(conn_str, container, LOGS_DIR, backup=False, dry_run=False, only=only)
     for r in results:
         if r.status == "downloaded":
             logging.info(f"Downloaded {r.db_file} ({r.blob.size} bytes)")
@@ -44,8 +52,13 @@ def download_databases():
             logging.warning(f"Could not download {r.db_file}: {r.error}")
 
 
-def upload_databases() -> bool:
+def upload_databases(only: Collection[str] | None = None) -> bool:
     """Upload learning databases to Azure Blob Storage.
+
+    ``only`` restricts the sync to a subset of the DB files (default: all of
+    them, matching prior behaviour — ``trading_session`` relies on this). See
+    ``download_databases`` for why the telegram approval trigger passes
+    ``only={"bid_learning.db"}``.
 
     Returns whether ``bid_learning.db`` specifically reached the blob. The
     timer trigger ignores this return value (backward compatible); the
@@ -61,7 +74,7 @@ def upload_databases() -> bool:
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB upload")
         return True
 
-    results = push_state(conn_str, container, LOGS_DIR, dry_run=False)
+    results = push_state(conn_str, container, LOGS_DIR, dry_run=False, only=only)
     for r in results:
         if r.status == "uploaded":
             logging.info(f"Uploaded {r.db_file} ({r.local_size} bytes)")
@@ -226,6 +239,9 @@ def trading_session(timer: func.TimerRequest):
         logging.error(f"Trading session failed: {e}", exc_info=True)
 
 
+_APPROVAL_DB_FILES = {"bid_learning.db"}  # the only DB the approval path reads or writes
+
+
 @app.route(route="telegram", auth_level=func.AuthLevel.FUNCTION)
 def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
     """Telegram approval callbacks. Public endpoint — see notify/approval.py."""
@@ -234,7 +250,7 @@ def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
     from rehoboam.api import KickbaseAPI
     from rehoboam.bid_learner import BidLearner
     from rehoboam.config import get_settings
-    from rehoboam.notify.approval import build_callback_response, handle_callback
+    from rehoboam.notify.approval import authorize, build_callback_response, handle_callback
 
     os.chdir(TEMP_DIR)
     os.makedirs(f"{TEMP_DIR}/logs", exist_ok=True)
@@ -245,13 +261,37 @@ def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
         logging.warning("telegram approval: unparseable request body")
         body = {}
 
+    def _respond(text: str) -> func.HttpResponse:
+        logging.info("telegram approval: %s", text)
+        return func.HttpResponse(
+            json.dumps(build_callback_response(body, text)), mimetype="application/json"
+        )
+
+    # Authenticate before spending anything: a forged/unauthenticated caller
+    # must not cost a blob round trip or a Kickbase login. get_settings() is
+    # local/cheap; download_databases() and api.login() are not. This must
+    # still return 200 (Telegram retries on anything else) even if
+    # get_settings() itself blows up.
+    try:
+        settings = get_settings()
+    except Exception:
+        logging.exception("telegram approval: could not load settings")
+        return _respond("Something went wrong — check the logs.")
+
+    secret_header = req.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if not authorize(secret_header, settings.telegram_webhook_secret):
+        logging.warning("telegram approval: unauthorized callback rejected before any work")
+        return _respond("Unauthorized.")
+
     reply = "Something went wrong — check the logs."
     downloaded = False
     try:
-        download_databases()
+        # Only bid_learning.db is read/written by this path — syncing the
+        # rest (player_history.db alone is 20MB+) on every callback risks
+        # exceeding Telegram's webhook timeout and triggering a retry.
+        download_databases(only=_APPROVAL_DB_FILES)
         downloaded = True
 
-        settings = get_settings()
         api = KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
         api.login()
 
@@ -264,7 +304,7 @@ def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
             league = leagues[league_index]
             reply = handle_callback(
                 body,
-                req.headers.get("X-Telegram-Bot-Api-Secret-Token"),
+                secret_header,
                 settings=settings,
                 learner=BidLearner(),
                 api=api,
@@ -279,13 +319,10 @@ def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
             logging.error("telegram approval: skipping upload, download failed")
         else:
             try:
-                if not upload_databases():
+                if not upload_databases(only=_APPROVAL_DB_FILES):
                     reply = "NOT SAVED - do not tap again. " + reply
             except Exception:
                 logging.exception("telegram approval: upload failed after handling")
                 reply = "NOT SAVED - do not tap again. " + reply
 
-    logging.info("telegram approval: %s", reply)
-    return func.HttpResponse(
-        json.dumps(build_callback_response(body, reply)), mimetype="application/json"
-    )
+    return _respond(reply)

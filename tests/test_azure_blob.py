@@ -430,3 +430,93 @@ def test_learning_db_synced_true_when_bid_learning_absent_from_results():
     """No matching row at all (e.g. an empty results list) can't prove the
     claim was lost, so this must not be treated as a failure."""
     assert learning_db_synced([]) is True
+
+
+def test_fetch_state_only_restricts_to_the_named_files(monkeypatch, tmp_path):
+    """The approval webhook syncs just bid_learning.db.
+
+    Pulling the rest on every Telegram tap (player_history.db alone is 20MB+)
+    risks exceeding the webhook timeout, and a retried callback can buy twice.
+    """
+    ts = datetime(2026, 5, 8, 8, 1, 32, tzinfo=timezone.utc)
+    container = _make_container(
+        {name: {"props": _props(ts, 1024), "data": b"x"} for name in DB_FILES}
+    )
+    _patch_container(monkeypatch, container)
+
+    results = fetch_state("conn", "rehoboam-data", tmp_path, only={"bid_learning.db"})
+
+    assert [r.db_file for r in results] == ["bid_learning.db"]
+    assert (tmp_path / "bid_learning.db").exists()
+    for other in (n for n in DB_FILES if n != "bid_learning.db"):
+        assert not (tmp_path / other).exists()
+
+
+def test_fetch_state_only_none_is_unchanged(monkeypatch, tmp_path):
+    ts = datetime(2026, 5, 8, 8, 1, 32, tzinfo=timezone.utc)
+    container = _make_container(
+        {name: {"props": _props(ts, 1024), "data": b"x"} for name in DB_FILES}
+    )
+    _patch_container(monkeypatch, container)
+
+    results = fetch_state("conn", "rehoboam-data", tmp_path, only=None)
+
+    assert [r.db_file for r in results] == list(DB_FILES)
+
+
+def test_push_state_only_restricts_to_the_named_files(monkeypatch, tmp_path):
+    for n in DB_FILES:
+        (tmp_path / n).write_bytes(b"local-" + n.encode())
+    container = _make_container({n: {} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    results = push_state("conn", "rehoboam-data", tmp_path, only={"bid_learning.db"})
+
+    assert [r.db_file for r in results] == ["bid_learning.db"]
+    assert container.get_blob_client.call_count == 1
+
+
+def test_push_state_only_none_is_unchanged(monkeypatch, tmp_path):
+    for n in DB_FILES:
+        (tmp_path / n).write_bytes(b"local-" + n.encode())
+    container = _make_container({n: {} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    results = push_state("conn", "rehoboam-data", tmp_path, only=None)
+
+    assert [r.db_file for r in results] == list(DB_FILES)
+    assert container.get_blob_client.call_count == len(DB_FILES)
+
+
+def test_push_state_only_ignores_drift_in_files_it_is_not_pushing(monkeypatch, tmp_path):
+    """A stale sidecar entry for a file we aren't pushing must not block us.
+
+    The approval webhook syncs only bid_learning.db, but on a warm Azure
+    instance the sidecar still carries entries the timer wrote for the other
+    files. Without scoping the freshness check, an unrelated blob moving would
+    raise and the owner would be told "NOT SAVED - do not tap again" after a
+    purchase that saved perfectly well.
+    """
+    old = datetime(2026, 5, 8, 8, 0, 0, tzinfo=timezone.utc)
+    new = datetime(2026, 5, 8, 9, 0, 0, tzinfo=timezone.utc)
+    # Sidecar says every file was fetched at `old`; every blob has since moved.
+    (tmp_path / FETCH_SIDECAR).write_text(json.dumps({n: old.isoformat() for n in DB_FILES}))
+    for n in DB_FILES:
+        (tmp_path / n).write_bytes(b"x")
+    container = _make_container({n: {"props": _props(new, 10)} for n in DB_FILES})
+    _patch_container(monkeypatch, container)
+
+    # Unscoped: the drift is detected and the push is refused.
+    with pytest.raises(BlobChangedSinceFetch):
+        push_state("conn", "rehoboam-data", tmp_path)
+
+    # Scoped to a file whose blob also moved: still refused (drift is real).
+    with pytest.raises(BlobChangedSinceFetch):
+        push_state("conn", "rehoboam-data", tmp_path, only={"bid_learning.db"})
+
+    # Scoped to a file with no drift: the other files' drift is irrelevant.
+    (tmp_path / FETCH_SIDECAR).write_text(
+        json.dumps({**{n: old.isoformat() for n in DB_FILES}, "bid_learning.db": new.isoformat()})
+    )
+    results = push_state("conn", "rehoboam-data", tmp_path, only={"bid_learning.db"})
+    assert [r.db_file for r in results] == ["bid_learning.db"]

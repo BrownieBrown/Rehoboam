@@ -4,13 +4,13 @@ These are adversarial tests, not happy-path ones: forged callbacks, replayed
 callbacks, and stale proposals are the failure modes that cost real money.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from rehoboam.bid_learner import BidLearner
 from rehoboam.config import Settings
-from rehoboam.notify.approval import build_callback_response, handle_callback
+from rehoboam.notify.approval import authorize, build_callback_response, handle_callback
 
 
 @pytest.fixture
@@ -211,3 +211,97 @@ class TestCallbackResponse:
     def test_it_truncates_to_telegrams_limit(self):
         out = build_callback_response(_cb(), "x" * 500)
         assert len(out["text"]) == 200
+
+
+class TestAuthorize:
+    """`authorize` is called by the HTTP trigger before any expensive work."""
+
+    def test_the_right_secret_passes(self):
+        assert authorize("s3cret", "s3cret") is True
+
+    def test_a_wrong_secret_fails(self):
+        assert authorize("nope", "s3cret") is False
+
+    def test_a_missing_header_fails(self):
+        assert authorize(None, "s3cret") is False
+
+    def test_an_unconfigured_secret_rejects_everything(self):
+        """Fail closed: no configured secret must not mean 'let anyone in'."""
+        assert authorize("anything", "") is False
+        assert authorize(None, "") is False
+
+
+class TestOpenOffersAreDeductedFromBudget:
+    """Kickbase reports a budget that ignores open offers.
+
+    `buy_player` places an OFFER. Until the auction resolves the money is
+    still shown as available, so approving two proposals in one sitting can
+    commit more than exists — and a negative budget at kickoff is zero points
+    for the whole matchday.
+    """
+
+    def test_a_second_approval_cannot_spend_money_the_first_already_committed(
+        self, tmp_path, settings, api
+    ):
+        learner = BidLearner(db_path=tmp_path / "bids.db")
+        for pid, player_id, bid in (("p1", "1", 30_000_000), ("p2", "2", 35_000_000)):
+            learner.record_proposal(
+                proposal_id=pid,
+                player_id=player_id,
+                player_name=f"Player {player_id}",
+                bid=bid,
+                market_value=bid,
+                message="BUY",
+            )
+
+        api.get_market.return_value = [
+            MagicMock(id="1", market_value=30_000_000, last_name="One"),
+            MagicMock(id="2", market_value=35_000_000, last_name="Two"),
+        ]
+        api.get_team_info.return_value = {"budget": 40_000_000}
+
+        first = handle_callback(
+            _cb(pid="p1"),
+            "s3cret",
+            settings=settings,
+            learner=learner,
+            api=api,
+            league=MagicMock(),
+        )
+        assert "bought" in first.lower()
+
+        # Kickbase now shows an open offer, but the SAME budget as before.
+        api.get_my_bids.return_value = [MagicMock(id="1", user_offer_price=30_000_000)]
+
+        second = handle_callback(
+            _cb(pid="p2"),
+            "s3cret",
+            settings=settings,
+            learner=learner,
+            api=api,
+            league=MagicMock(),
+        )
+
+        assert api.buy_player.call_count == 1
+        assert "not executed" in second.lower()
+        assert learner.get_proposal("p2")["status"] == "failed"
+
+
+class TestApprovedBuysReachTheLearningLoop:
+    def test_an_approved_buy_records_a_pending_bid(self, learner, settings, api):
+        """Otherwise resolve_auctions never writes an auction_outcomes row for
+        it, and the learned-overbid calibration goes blind for approved buys.
+        """
+        with patch("rehoboam.learning.tracker.LearningTracker") as tracker_cls:
+            handle_callback(
+                _cb(),
+                "s3cret",
+                settings=settings,
+                learner=learner,
+                api=api,
+                league=MagicMock(),
+            )
+        tracker_cls.return_value.record_bid_placed.assert_called_once()
+        args = tracker_cls.return_value.record_bid_placed.call_args[0]
+        assert args[0].id == "6080"
+        assert args[1] == 32_608_485
