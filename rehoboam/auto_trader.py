@@ -352,6 +352,105 @@ class AutoTrader:
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("record_buy_decision failed: %s", e)
 
+    def _propose_buy(self, league, rec, ctx) -> bool:
+        """Record and send a proposal instead of buying. True if recorded.
+
+        The proposal is recorded FIRST and sent second, so a Telegram outage
+        loses the notification but not the decision — it still surfaces in the
+        daily email.
+        """
+        import uuid
+
+        from .notify.render import render_proposal
+        from .notify.telegram import send_proposal
+
+        proposal_id = uuid.uuid4().hex[:12]
+        player = rec.player
+        trend = None
+        try:
+            from .trader import Trader
+
+            trend = (
+                Trader(self.api, self.settings)
+                .trend_service.get_trend(player.id, player.market_value, league.id)
+                .trend_7d_pct
+            )
+        except Exception:
+            logger.debug("proposal: no trend for %s", player.id, exc_info=True)
+
+        risks: list[str] = []
+        if getattr(rec.score, "data_quality", None) and rec.score.data_quality.grade != "A":
+            risks.append(
+                f"Data quality {rec.score.data_quality.grade} — no fitted history, "
+                "scored on the position prior."
+            )
+
+        message = render_proposal(
+            player_name=f"{player.first_name} {player.last_name}".strip(),
+            club=getattr(player, "team_name", "") or "unknown club",
+            bid=int(rec.recommended_bid),
+            market_value=int(player.market_value),
+            ep=float(rec.score.expected_points),
+            displaced_name=getattr(rec, "replaces_player_name", None) or "the weakest starter",
+            displaced_ep=float(getattr(rec, "replaces_player_ep", 0.0) or 0.0),
+            marginal_gain=float(rec.marginal_ep_gain),
+            budget_before=int(ctx.current_budget),
+            trend_7d_pct=trend,
+            risks=risks,
+        )
+
+        try:
+            self.learner.record_proposal(
+                proposal_id=proposal_id,
+                player_id=player.id,
+                player_name=player.last_name,
+                bid=int(rec.recommended_bid),
+                market_value=int(player.market_value),
+                message=message,
+            )
+        except Exception:
+            logger.exception("proposal: could not record %s", proposal_id)
+            return False
+
+        send_proposal(
+            self.settings.telegram_bot_token,
+            self.settings.telegram_chat_id,
+            proposal_id,
+            message,
+        )
+        logger.info(
+            "proposal recorded id=%s player=%s bid=%d",
+            proposal_id,
+            player.id,
+            int(rec.recommended_bid),
+        )
+        return True
+
+    def _has_pending_proposal(self, player_id: str) -> bool:
+        """True if this player already has a proposal awaiting a decision.
+
+        The bot runs twice a day; without this guard it would re-send the same
+        proposal every run until it was actioned.
+        """
+        try:
+            return any(
+                str(p.get("player_id")) == str(player_id) for p in self.learner.pending_proposals()
+            )
+        except Exception:
+            logger.warning("proposal: could not read pending proposals", exc_info=True)
+            return False
+
+    @staticmethod
+    def _needs_sell_plan(obj) -> bool:
+        """True if this buy only works by selling someone first.
+
+        Proposals carry no sell plan, so such a buy would be refused by the safety
+        gate after approval. Skip it rather than send a proposal that cannot be
+        honoured.
+        """
+        sell_plan = getattr(obj, "sell_plan", None)
+        return bool(sell_plan and getattr(sell_plan, "players_to_sell", None))
+
     def run_unified_trade_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Execute all qualifying trades from a single ranked candidate list.
 
@@ -569,30 +668,27 @@ class AutoTrader:
                     )
                     continue
 
-                # If buy exceeds current budget but has a sell plan, persist
-                # the sell plan IDs alongside the bid. Once the auction resolves
-                # (we won), the sells will be executed to recover the budget.
-                # This is buy-first-sell-after: never sell before securing the player.
-                sp_ids = None
-                if hasattr(obj, "sell_plan") and obj.sell_plan and obj.sell_plan.players_to_sell:
-                    sp_ids = [e.player_id for e in obj.sell_plan.players_to_sell]
+                if self._has_pending_proposal(obj.player.id):
+                    console.print(
+                        f"[dim]Skip {obj.player.last_name} — proposal already awaiting approval[/dim]"
+                    )
+                    continue
 
-                result = self.execution.buy(
-                    league,
-                    obj.player,
-                    obj.recommended_bid,
-                    obj.reason,
-                    sell_plan_player_ids=sp_ids,
-                    current_budget=ctx.current_budget,
-                    days_until_match=ctx.matchday_phase.days_until_match,
-                )
-                results.append(result)
-                if result.success:
-                    ctx.executed_trade_count += 1
-                    self.daily_spend += obj.recommended_bid
-                    ctx.flip_budget -= obj.recommended_bid
-                    ctx.current_budget -= obj.recommended_bid
+                if self._needs_sell_plan(obj):
+                    console.print(
+                        f"[dim]Skip {obj.player.last_name} — needs a sell plan, "
+                        f"cannot be proposed[/dim]"
+                    )
+                    logger.info("proposal-skip: %s needs a sell plan", obj.player.last_name)
+                    continue
+
+                if self._propose_buy(league, obj, ctx):
+                    console.print(
+                        f"[cyan]Proposed {obj.player.last_name} — awaiting approval[/cyan]"
+                    )
                     available_slots -= 1
+                    ctx.flip_budget -= obj.recommended_bid
+                continue
 
             elif kind == "pair":
                 # Don't sell a player unnecessarily if there are open slots —

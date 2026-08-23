@@ -173,7 +173,9 @@ class TestFlipBuyBlockGate:
         checks alongside its own switch.
         """
         buy_rec = SimpleNamespace(
-            player=SimpleNamespace(id="p1", first_name="Test", last_name="Buyer"),
+            player=SimpleNamespace(
+                id="p1", first_name="Test", last_name="Buyer", market_value=1_000_000
+            ),
             recommended_bid=1_000_000,
             marginal_ep_gain=10.0,
             reason="test upgrade",
@@ -236,10 +238,14 @@ class TestFlipBuyBlockGate:
 
         mock_find.assert_called_once()
 
-    def test_ep_buy_path_still_executes_when_flip_buys_disabled(self, trader):
+    def test_ep_buy_path_still_reaches_proposal_when_flip_buys_disabled(self, trader):
         """The gate must disable only the flip block, not the surrounding
         EP-driven buy/trade-pair loop it lives inside — pinning the failure
         mode of a gate that accidentally disables more than the flip block.
+
+        Post-approval-gate (REH-89-ish): the EP buy path no longer executes a
+        purchase, it records a proposal via `_propose_buy`. `results` stays
+        empty because no trade actually happened.
         """
         trader.settings.enable_flip_buys = False
         self._configure_trader(trader)
@@ -249,6 +255,7 @@ class TestFlipBuyBlockGate:
             results = trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
 
         mock_find.assert_not_called()
-        assert len(results) == 1
-        assert results[0].success is True
-        assert results[0].action == "BUY"
+        assert results == []
+        trader.learner.record_proposal.assert_called_once()
+        assert trader.learner.record_proposal.call_args.kwargs["player_id"] == "p1"
+        assert trader.learner.record_proposal.call_args.kwargs["bid"] == 1_000_000
