@@ -326,6 +326,26 @@ class Settings(BaseSettings):
         description="If True, simulate trades without executing them",
     )
 
+    # Telegram approval gate
+    telegram_bot_token: str = Field(
+        default="",
+        repr=False,
+        description="Telegram bot token. Empty disables Telegram entirely.",
+    )
+    telegram_chat_id: str = Field(
+        default="",
+        description="Telegram chat to send trade proposals to.",
+    )
+    telegram_webhook_secret: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Shared secret Telegram echoes in X-Telegram-Bot-Api-Secret-Token. The "
+            "approval webhook is a public endpoint that spends money, so a callback "
+            "without this header is rejected before anything is read from it."
+        ),
+    )
+
 
 def get_settings() -> Settings:
     """Get application settings"""
