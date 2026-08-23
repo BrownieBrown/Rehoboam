@@ -346,6 +346,13 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Daily summary email
+    smtp_host: str = Field(default="", description="SMTP host. Empty disables email.")
+    smtp_port: int = Field(default=587, description="SMTP port; 587 for STARTTLS.")
+    smtp_user: str = Field(default="", repr=False, description="SMTP username.")
+    smtp_password: str = Field(default="", repr=False, description="SMTP password or app password.")
+    alert_email_to: str = Field(default="", description="Recipient of the daily summary.")
+
 
 def get_settings() -> Settings:
     """Get application settings"""

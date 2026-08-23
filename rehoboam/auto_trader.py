@@ -2,7 +2,7 @@
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from rich.console import Console
@@ -26,6 +26,7 @@ class AutoTradeSession:
     total_spent: int
     total_earned: int
     net_change: int
+    lineup: list[tuple[str, float, str | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -1548,7 +1549,10 @@ class AutoTrader:
         # Step 8: Set optimal lineup using EP pipeline scores from the session.
         # Players acquired mid-session (if any) are scored by the v2 fallback
         # inside _set_optimal_lineup.
-        self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+        lineup = (
+            self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+            or []
+        )
 
         # Calculate totals
         all_results = sell_results + trade_results
@@ -1603,6 +1607,7 @@ class AutoTrader:
             total_spent=total_spent,
             total_earned=total_earned,
             net_change=net_change,
+            lineup=lineup,
         )
 
     def _set_optimal_lineup(
@@ -1610,7 +1615,7 @@ class AutoTrader:
         league,
         errors: list[str],
         squad_scores: list | None = None,
-    ):
+    ) -> list[tuple[str, float, str | None]]:
         """Calculate and set the optimal starting 11 via API.
 
         Prefers the new EP scoring pipeline (via *squad_scores* when the caller
@@ -1618,6 +1623,10 @@ class AutoTrader:
         injury penalties, 5-fixture SOS, and position-weighted scoring. Falls
         back to a per-player v2 score only when scores are missing (e.g. EP
         pipeline failed, or a player was just bought mid-session).
+
+        Returns the (name, ep, flag) triples for the eleven it selected — or
+        an empty list on any early-exit or failure path, so callers never see
+        ``None``.
         """
         from .formation import get_formation_string, order_for_lineup, select_best_eleven
 
@@ -1627,7 +1636,7 @@ class AutoTrader:
             squad = self.api.get_squad(league)
             if not squad or len(squad) < 11:
                 console.print("[yellow]Not enough players to set lineup[/yellow]")
-                return
+                return []
 
             # Build ep_scores from the pipeline when available; fall back to a
             # per-player v2 score only for uncovered squad members or when the
@@ -1657,17 +1666,28 @@ class AutoTrader:
             ]
             console.print(f"[dim]Formation: {formation} | {', '.join(names)}[/dim]")
 
+            lineup_summary: list[tuple[str, float, str | None]] = [
+                (
+                    f"{p.first_name[0]}. {p.last_name}" if p.first_name else p.last_name,
+                    float(ep_scores.get(p.id, 0.0)),
+                    None,
+                )
+                for p in ordered
+            ]
+
             if self.dry_run:
                 console.print("[yellow]DRY RUN - Lineup not applied[/yellow]")
-                return
+                return lineup_summary
 
             self.api.set_lineup(league, formation, player_ids)
             console.print("[green]✓ Lineup set successfully[/green]")
+            return lineup_summary
 
         except Exception as e:
             error_msg = f"Set lineup error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
+            return []
 
     def _fallback_expected_points(self, league, player) -> float:
         """Fallback per-player EP for a squad member the pipeline didn't score.

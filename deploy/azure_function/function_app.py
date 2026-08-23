@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import azure.functions as func
@@ -67,6 +68,52 @@ def upload_databases() -> bool:
         elif r.status == "error":
             logging.warning(f"Could not upload {r.db_file}: {r.error}")
     return learning_db_synced(results)
+
+
+def _send_daily_summary(api, league, settings, session):
+    """Email the once-a-day picture. Best-effort: never raises into the timer."""
+    from rehoboam.bid_learner import BidLearner
+    from rehoboam.notify.email import send_email
+    from rehoboam.notify.render import render_daily_summary
+
+    squad = api.get_squad(league)
+    budget = int(api.get_team_info(league).get("budget", 0))
+    market = sorted(
+        api.get_market(league),
+        key=lambda p: getattr(p, "average_points", 0.0) or 0.0,
+        reverse=True,
+    )[:10]
+
+    pending = [(p["player_name"], int(p["bid"])) for p in BidLearner().pending_proposals()]
+
+    executed = [
+        f"{r.action} {r.player_name} for EUR {r.price:,}"
+        for r in (session.profit_trades + session.lineup_trades)
+        if r.success
+    ]
+
+    body = render_daily_summary(
+        lineup=session.lineup,
+        squad_size=len(squad),
+        budget=budget,
+        market=[
+            (p.last_name, int(p.market_value), float(getattr(p, "average_points", 0.0) or 0.0))
+            for p in market
+        ],
+        pending=pending,
+        executed=executed,
+        rejections=session.errors,
+    )
+    send_email(
+        host=settings.smtp_host,
+        port=settings.smtp_port,
+        user=settings.smtp_user,
+        password=settings.smtp_password,
+        sender=settings.smtp_user,
+        recipient=settings.alert_email_to,
+        subject=f"Rehoboam daily — {len(pending)} awaiting approval",
+        body=body,
+    )
 
 
 # Timer trigger: runs 2x daily at 08:00 and 20:00 UTC
@@ -143,6 +190,14 @@ def trading_session(timer: func.TimerRequest):
 
         # Upload databases back to blob storage
         upload_databases()
+
+        # Once-a-day owner summary — only the morning run emails, so the
+        # inbox gets one message per day instead of two.
+        if datetime.now(tz=timezone.utc).hour < 12:
+            try:
+                _send_daily_summary(api, league, settings, session)
+            except Exception:
+                logging.warning("daily summary failed", exc_info=True)
 
         mode = "DRY RUN" if dry_run else "LIVE"
         profit_ok = len([r for r in session.profit_trades if r.success])
