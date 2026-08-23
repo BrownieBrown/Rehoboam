@@ -1,0 +1,46 @@
+"""Rendering decisions into text a human can act on.
+
+Pure functions. Every number here is one the bot computed and can show its
+working for — the point of the message is that approving takes one tap because
+the case is already complete.
+"""
+
+from __future__ import annotations
+
+
+def render_proposal(
+    *,
+    player_name: str,
+    club: str,
+    bid: int,
+    market_value: int,
+    ep: float,
+    displaced_name: str,
+    displaced_ep: float,
+    marginal_gain: float,
+    budget_before: int,
+    trend_7d_pct: float | None,
+    risks: list[str],
+) -> str:
+    """The three questions Marco asked for, each as its own section."""
+    overbid = ((bid / market_value - 1.0) * 100.0) if market_value > 0 else 0.0
+    trend = f"{trend_7d_pct:+.1f}%/7d" if trend_7d_pct is not None else "unknown"
+    budget_after = budget_before - bid
+
+    lines = [
+        f"BUY {player_name} — EUR {bid:,}",
+        "",
+        "WHY THIS PLAYER",
+        f"  EP {ep:.1f}. {club}.",
+        "",
+        "WHY IT IMPROVES THE LINEUP",
+        f"  Displaces {displaced_name} ({displaced_ep:.1f}) in the best eleven.",
+        f"  Net gain {marginal_gain:+.1f} points per matchday.",
+        "",
+        "WHY THIS PRICE",
+        f"  Market value EUR {market_value:,}; bid +{overbid:.1f}%. Trend {trend}.",
+        f"  Budget EUR {budget_before:,} -> EUR {budget_after:,}.",
+    ]
+    if risks:
+        lines += ["", "RISKS"] + [f"  {r}" for r in risks]
+    return "\n".join(lines)
