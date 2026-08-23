@@ -345,3 +345,16 @@ def push_state(
             logger.warning("Failed to upload %s: %s", name, e)
 
     return results
+
+
+def learning_db_synced(results: list[PushResult]) -> bool:
+    """Did ``bid_learning.db`` actually reach the blob?
+
+    Callers that have already spent money on the strength of a claim written
+    to that file need to know, because ``push_state`` records a per-file
+    failure and returns normally rather than raising.
+    """
+    for r in results:
+        if r.db_file == "bid_learning.db":
+            return r.status in {"uploaded", "missing_local"}
+    return True

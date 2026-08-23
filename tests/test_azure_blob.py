@@ -7,6 +7,7 @@ chain. ``MissingAzureCredentials`` is exercised separately by leaving
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,8 +18,10 @@ from rehoboam.azure_blob import (
     FETCH_SIDECAR,
     BlobChangedSinceFetch,
     MissingAzureCredentials,
+    PushResult,
     check_freshness,
     fetch_state,
+    learning_db_synced,
     list_blobs,
     push_state,
 )
@@ -389,3 +392,41 @@ def test_push_state_dry_run_still_checks_freshness(monkeypatch, tmp_path):
 
     with pytest.raises(BlobChangedSinceFetch):
         push_state("conn", "rehoboam-data", tmp_path, dry_run=True)
+
+
+# --- learning_db_synced -----------------------------------------------------
+
+
+def _push_result(db_file: str, status: str) -> PushResult:
+    return PushResult(
+        db_file=db_file, local_path=Path(f"/tmp/{db_file}"), local_size=1, status=status
+    )
+
+
+def test_learning_db_synced_true_when_uploaded():
+    results = [_push_result(n, "uploaded") for n in DB_FILES]
+    assert learning_db_synced(results) is True
+
+
+def test_learning_db_synced_false_when_bid_learning_errors():
+    results = [
+        _push_result(n, "error") if n == "bid_learning.db" else _push_result(n, "uploaded")
+        for n in DB_FILES
+    ]
+    assert learning_db_synced(results) is False
+
+
+def test_learning_db_synced_true_when_bid_learning_missing_local():
+    """No local bid_learning.db means no claim was written locally either —
+    nothing was lost by not uploading it."""
+    results = [
+        _push_result(n, "missing_local") if n == "bid_learning.db" else _push_result(n, "uploaded")
+        for n in DB_FILES
+    ]
+    assert learning_db_synced(results) is True
+
+
+def test_learning_db_synced_true_when_bid_learning_absent_from_results():
+    """No matching row at all (e.g. an empty results list) can't prove the
+    claim was lost, so this must not be treated as a failure."""
+    assert learning_db_synced([]) is True

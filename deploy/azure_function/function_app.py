@@ -43,14 +43,22 @@ def download_databases():
             logging.warning(f"Could not download {r.db_file}: {r.error}")
 
 
-def upload_databases():
-    """Upload learning databases to Azure Blob Storage."""
-    from rehoboam.azure_blob import push_state
+def upload_databases() -> bool:
+    """Upload learning databases to Azure Blob Storage.
+
+    Returns whether ``bid_learning.db`` specifically reached the blob. The
+    timer trigger ignores this return value (backward compatible); the
+    telegram approval trigger uses it because a caller that already spent
+    money on the strength of a claim written to that file needs to know a
+    per-file upload failure doesn't raise — ``push_state`` just records
+    ``status="error"`` and returns normally.
+    """
+    from rehoboam.azure_blob import learning_db_synced, push_state
 
     conn_str, container = _blob_settings()
     if not conn_str:
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB upload")
-        return
+        return True
 
     results = push_state(conn_str, container, LOGS_DIR, dry_run=False)
     for r in results:
@@ -58,6 +66,7 @@ def upload_databases():
             logging.info(f"Uploaded {r.db_file} ({r.local_size} bytes)")
         elif r.status == "error":
             logging.warning(f"Could not upload {r.db_file}: {r.error}")
+    return learning_db_synced(results)
 
 
 # Timer trigger: runs 2x daily at 08:00 and 20:00 UTC
@@ -174,11 +183,19 @@ def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
 
     os.chdir(TEMP_DIR)
     os.makedirs(f"{TEMP_DIR}/logs", exist_ok=True)
-    download_databases()
-
-    body = req.get_json()
 
     try:
+        body = req.get_json()
+    except Exception:
+        logging.warning("telegram approval: unparseable request body")
+        body = {}
+
+    reply = "Something went wrong — check the logs."
+    downloaded = False
+    try:
+        download_databases()
+        downloaded = True
+
         settings = get_settings()
         api = KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
         api.login()
@@ -187,25 +204,31 @@ def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
         leagues = api.get_leagues()
         if not leagues:
             logging.error("telegram approval: no leagues found")
-            return func.HttpResponse(
-                json.dumps(build_callback_response(body, "No leagues found.")),
-                mimetype="application/json",
+            reply = "No leagues found."
+        else:
+            league = leagues[league_index]
+            reply = handle_callback(
+                body,
+                req.headers.get("X-Telegram-Bot-Api-Secret-Token"),
+                settings=settings,
+                learner=BidLearner(),
+                api=api,
+                league=league,
             )
-        league = leagues[league_index]
-
-        reply = handle_callback(
-            body,
-            req.headers.get("X-Telegram-Bot-Api-Secret-Token"),
-            settings=settings,
-            learner=BidLearner(),
-            api=api,
-            league=league,
-        )
     except Exception:
         logging.exception("telegram approval: handler raised")
-        reply = "Something went wrong — check the logs."
     finally:
-        upload_databases()
+        if not downloaded:
+            # Never push a db we failed to pull: BidLearner would have created
+            # an empty one, and uploading it would erase the real state.
+            logging.error("telegram approval: skipping upload, download failed")
+        else:
+            try:
+                if not upload_databases():
+                    reply = "NOT SAVED - do not tap again. " + reply
+            except Exception:
+                logging.exception("telegram approval: upload failed after handling")
+                reply = "NOT SAVED - do not tap again. " + reply
 
     logging.info("telegram approval: %s", reply)
     return func.HttpResponse(
