@@ -99,9 +99,24 @@ class MarketPlayer:
         """Check if KICKBASE is the seller (not another user)"""
         return self.seller_user_id is None or self.seller_user_id == ""
 
-    def has_user_offer(self, user_id: str) -> bool:
-        """Check if specific user has made an offer on this player"""
-        return self.user_offer_id == user_id
+    def has_user_offer(self) -> bool:
+        """Do WE currently hold an offer on this player?
+
+        ``uoid`` is an OFFER id, not a user id: it is the path segment
+        ``cancel_offer`` deletes at
+        ``/market/{player_id}/offers/{offer_id}``. The previous version
+        compared it against the requesting user's id, which can never match,
+        so ``get_my_bids`` always returned an empty list. Everything that
+        depends on it silently did nothing — ``pending_bid_total`` never
+        reduced the flip budget, ``available_slots`` never counted an open
+        bid, and the "already bidding on this player" guard never fired.
+
+        Kickbase only includes the field on a listing WE have bid on, so its
+        presence is the signal. Note this errs safe in a way the old check did
+        not: over-reporting an open bid makes the bot more conservative about
+        budget and slots, while under-reporting let it overspend.
+        """
+        return self.user_offer_id is not None
 
     @staticmethod
     def _parse_position(pos: int) -> str:
@@ -242,7 +257,7 @@ class KickbaseV4Client:
             raise Exception("Not logged in. Call login() first.")
 
         all_market = self.get_market(league_id)
-        return [p for p in all_market if p.has_user_offer(self.user.id)]
+        return [p for p in all_market if p.has_user_offer()]
 
     def get_team_info(self, league_id: str) -> dict[str, Any]:
         """
