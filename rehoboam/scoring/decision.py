@@ -545,8 +545,13 @@ class DecisionEngine:
                     final_recs.append(rec)
             # else: skip — no squad data to generate sell plan
 
-        # Sort by marginal EP gain (primary), then by raw EP (secondary)
-        final_recs.sort(key=lambda r: (r.marginal_ep_gain, r.score.expected_points), reverse=True)
+        # Order for a budget, not for a single pick. See `plan_buys`.
+        final_recs = plan_buys(
+            final_recs,
+            budget=budget,
+            squad=squad_list,
+            lineup_map=lineup_map,
+        )
         top = final_recs[:top_n]
         logger.info(
             "recommend_buys: %d candidates considered, %d viable, returning top %d "
@@ -936,3 +941,99 @@ def _dummy_score(player_id: str, ep: float) -> PlayerScore:
         lineup_probability=None,
         minutes_trend=None,
     )
+
+
+def plan_buys(
+    recs: list,
+    *,
+    budget: float,
+    squad: list,
+    lineup_map: dict[str, float],
+) -> list:
+    """Order buy recommendations for a *budget*, not for a single pick.
+
+    Ranking by absolute marginal gain answers "which one player helps most",
+    which is the wrong question when several can be afforded. Measured live on
+    2026-08-24 with EUR 62.2M and four free slots: Kimmich at +88.2 for
+    EUR 59.8M was proposed first, and the EUR 1.8M left could not cover
+    Trimmel at +30.4 for EUR 4.2M — 7.3 points per EUR million against
+    Kimmich's 1.5.
+
+    Two things make this harder than sorting by points per euro.
+
+    **Marginal gains do not add up.** Each is measured against the current best
+    eleven, so once a signing joins it, the next candidate competes against a
+    better worst starter and is worth less than its headline number. Summing
+    the original figures promises a total the squad will never deliver. Every
+    remaining candidate is therefore re-measured after each pick, and the
+    recommendation carries the re-measured gain. Candidates that no longer
+    improve the eleven drop out: an upgrade on the old worst starter may be no
+    upgrade on his replacement.
+
+    **Greedy by ratio can be worse than one big signing.** On the same live
+    data it took four cheap players worth +70.0 re-measured, over Kimmich alone
+    at +88.2 — a strictly worse squad. So both orderings are built and the one
+    that actually delivers more points is returned, which is the standard
+    knapsack guarantee rather than a heuristic hoping for the best.
+
+    Returns the chosen plan first, in execution order, followed by everything
+    unaffordable ranked by raw gain so nothing is silently lost.
+    """
+    from rehoboam.formation import select_best_eleven
+
+    def _cost(rec) -> int:
+        return int(getattr(rec.player, "price", 0) or getattr(rec.player, "market_value", 0) or 0)
+
+    def _build(prefer_efficiency: bool) -> tuple[list, list[float], float]:
+        """Greedily fill the budget, re-measuring gains as the squad changes."""
+        remaining = list(recs)
+        chosen: list = []
+        gains: list[float] = []
+        working_squad = list(squad)
+        working_map = dict(lineup_map)
+        spend_left = float(budget)
+
+        while remaining and working_squad:
+            current_best = select_best_eleven(working_squad, working_map)
+            current_total = sum(working_map.get(p.id, 0.0) for p in current_best)
+
+            best_rec, best_gain, best_key = None, 0.0, 0.0
+            for rec in remaining:
+                cost = _cost(rec)
+                if cost <= 0 or cost > spend_left:
+                    continue
+                augmented = working_squad + [rec.player]
+                aug_map = dict(working_map)
+                aug_map[rec.player.id] = rec.score.expected_points
+                gain = (
+                    sum(aug_map.get(p.id, 0.0) for p in select_best_eleven(augmented, aug_map))
+                    - current_total
+                )
+                if gain <= 0:
+                    continue
+                key = gain / (cost / 1_000_000) if prefer_efficiency else gain
+                if key > best_key:
+                    best_rec, best_gain, best_key = rec, gain, key
+
+            if best_rec is None:
+                break
+
+            chosen.append(best_rec)
+            gains.append(best_gain)
+            remaining.remove(best_rec)
+            spend_left -= _cost(best_rec)
+            working_squad = working_squad + [best_rec.player]
+            working_map[best_rec.player.id] = best_rec.score.expected_points
+
+        return chosen, gains, sum(gains)
+
+    by_efficiency = _build(prefer_efficiency=True)
+    by_absolute = _build(prefer_efficiency=False)
+    chosen, gains, _total = max((by_efficiency, by_absolute), key=lambda plan: plan[2])
+
+    for rec, gain in zip(chosen, gains, strict=True):
+        rec.marginal_ep_gain = gain
+
+    leftover = [r for r in recs if r not in chosen]
+    leftover.sort(key=lambda r: (r.marginal_ep_gain, r.score.expected_points), reverse=True)
+    return chosen + leftover
