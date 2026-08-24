@@ -15,6 +15,65 @@ logger = logging.getLogger(__name__)
 
 _API = "https://api.telegram.org/bot{token}/sendMessage"
 
+# Telegram rejects anything longer than this in a single message.
+MAX_MESSAGE_CHARS = 4096
+
+
+def _post(token: str, payload: dict, what: str, timeout: float) -> bool:
+    """One sendMessage call. False on any failure — never raises."""
+    try:
+        resp = requests.post(_API.format(token=token), json=payload, timeout=timeout)
+    except Exception as exc:
+        # NEVER log the exception object or a traceback here: requests embeds the
+        # full request URL in its message, and that URL contains the bot token.
+        logger.warning("telegram: send failed for %s (%s)", what, type(exc).__name__)
+        return False
+
+    if resp.status_code != 200:
+        logger.warning("telegram: send returned %s for %s", resp.status_code, what)
+        return False
+    return True
+
+
+def _chunks(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """Split on line boundaries so a figure is never torn in half."""
+    out: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            out.append(current)
+            current = ""
+        # A single line longer than the cap has to be cut somewhere.
+        while len(line) > limit:
+            out.append(line[:limit])
+            line = line[limit:]
+        current = line
+    if current:
+        out.append(current)
+    return out
+
+
+def send_message(token: str, chat_id: str, text: str, *, timeout: float = 10.0) -> bool:
+    """Send plain text with no buttons. True only if every part was accepted.
+
+    Carries the daily summary. That started as an SMTP email, but Proton needs
+    a paid plan plus a custom domain, and Proton Bridge binds to localhost so
+    an Azure Function can never reach it — the summary reuses the channel that
+    is already configured and verified.
+    """
+    if not token or not chat_id:
+        logger.info("telegram: no token or chat id configured — not sending")
+        return False
+
+    ok = True
+    for part in _chunks(text):
+        ok = _post(token, {"chat_id": chat_id, "text": part}, "daily summary", timeout) and ok
+    return ok
+
 
 def send_proposal(
     token: str,
@@ -45,19 +104,4 @@ def send_proposal(
             ]
         },
     }
-    try:
-        resp = requests.post(_API.format(token=token), json=payload, timeout=timeout)
-    except Exception as exc:
-        # NEVER log the exception object or a traceback here: requests embeds the
-        # full request URL in its message, and that URL contains the bot token.
-        logger.warning(
-            "telegram: send failed for proposal %s (%s)",
-            proposal_id,
-            type(exc).__name__,
-        )
-        return False
-
-    if resp.status_code != 200:
-        logger.warning("telegram: send returned %s for proposal %s", resp.status_code, proposal_id)
-        return False
-    return True
+    return _post(token, payload, f"proposal {proposal_id}", timeout)
