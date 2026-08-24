@@ -30,7 +30,23 @@ BACKUP_SUFFIX = ".local-bak"
 FETCH_SIDECAR = ".fetch_state.json"
 
 FetchStatus = Literal["downloaded", "missing_in_blob", "skipped_dry_run", "error"]
-PushStatus = Literal["uploaded", "missing_local", "skipped_dry_run", "error"]
+PushStatus = Literal[
+    "uploaded",
+    "missing_local",
+    "skipped_dry_run",
+    "skipped_fetch_failed",
+    "skipped_shrunk",
+    "error",
+]
+
+# Key under which the sidecar records files whose most recent fetch failed.
+# Not a DB file name, so `check_freshness`'s per-file lookup ignores it.
+FAILED_FETCH_KEY = "_failed_fetch"
+
+# Refuse to overwrite a blob with a local file this much smaller. SQLite files
+# do not shrink by half in normal operation; an empty database replacing a real
+# one does exactly that.
+SHRINK_GUARD_RATIO = 0.5
 
 
 class MissingAzureCredentials(RuntimeError):
@@ -108,6 +124,8 @@ def _get_container(connection_string: str | None, container_name: str):
 def _probe_blob(container, name: str) -> BlobInfo:
     try:
         props = container.get_blob_client(name).get_blob_properties()
+        if props is None:
+            return BlobInfo(name=name, last_modified=None, size=None)
         return BlobInfo(name=name, last_modified=props.last_modified, size=props.size)
     except Exception as e:  # noqa: BLE001
         if "BlobNotFound" in str(e):
@@ -148,6 +166,7 @@ def fetch_state(
     dest_dir.mkdir(parents=True, exist_ok=True)
     results: list[FetchResult] = []
     sidecar_updates: dict[str, str] = {}
+    failed_fetches: list[str] = []
 
     for name in [n for n in DB_FILES if only is None or n in only]:
         blob = _probe_blob(container, name)
@@ -208,17 +227,27 @@ def fetch_state(
                     error=str(e),
                 )
             )
+            failed_fetches.append(name)
             logger.warning("Failed to download %s: %s", name, e)
 
-    if sidecar_updates:
+    if sidecar_updates or failed_fetches or not dry_run:
         sidecar_path = dest_dir / FETCH_SIDECAR
-        existing: dict[str, str] = {}
+        existing: dict = {}
         if sidecar_path.exists():
             try:
                 existing = json.loads(sidecar_path.read_text())
             except (json.JSONDecodeError, OSError):
                 existing = {}
         existing.update(sidecar_updates)
+        # A file that downloaded cleanly this time is no longer suspect; one
+        # that failed is, until a later fetch succeeds. push_state reads this
+        # to avoid uploading a database it never managed to pull.
+        previously = [f for f in existing.get(FAILED_FETCH_KEY, []) if f not in sidecar_updates]
+        still_failed = sorted(set(previously) | set(failed_fetches))
+        if still_failed:
+            existing[FAILED_FETCH_KEY] = still_failed
+        else:
+            existing.pop(FAILED_FETCH_KEY, None)
         sidecar_path.write_text(json.dumps(existing, indent=2, sort_keys=True))
 
     return results
@@ -274,6 +303,19 @@ def check_freshness(
     return stale
 
 
+def _failed_fetches(source_dir: Path) -> list[str]:
+    """DB files whose most recent download failed, per the fetch sidecar."""
+    sidecar_path = source_dir / FETCH_SIDECAR
+    if not sidecar_path.exists():
+        return []
+    try:
+        recorded = json.loads(sidecar_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    value = recorded.get(FAILED_FETCH_KEY) or []
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
 def push_state(
     connection_string: str | None,
     container_name: str,
@@ -304,8 +346,31 @@ def push_state(
     container = _get_container(connection_string, container_name)
     results: list[PushResult] = []
 
+    # Files whose most recent fetch failed. Uploading one would replace real
+    # state with whatever is on local disk — and on a cold container that is a
+    # freshly created, EMPTY database, because BidLearner's CREATE TABLE IF NOT
+    # EXISTS turns a missing file into a valid empty one. push_state would then
+    # report "uploaded", i.e. success, having destroyed the learning history.
+    unfetched = set(_failed_fetches(source_dir))
+
     for name in [n for n in DB_FILES if only is None or n in only]:
         local_path = source_dir / name
+
+        if name in unfetched and not force:
+            logger.error(
+                "Refusing to upload %s: its last download failed, so the local "
+                "copy is not known to be real state",
+                name,
+            )
+            results.append(
+                PushResult(
+                    db_file=name,
+                    local_path=local_path,
+                    local_size=None,
+                    status="skipped_fetch_failed",
+                )
+            )
+            continue
 
         if not local_path.exists():
             results.append(
@@ -330,6 +395,35 @@ def push_state(
                 )
             )
             continue
+
+        # Defence in depth against every other way a truncated file could
+        # reach here (corruption, an interrupted write, a bug upstream).
+        if not force:
+            # A probe failure means the guard has nothing to compare against.
+            # It cannot fire, and refusing every push because one metadata read
+            # failed would be a worse outage than the case it protects.
+            try:
+                blob_size = _probe_blob(container, name).size
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not size %s before upload; shrink guard skipped", name)
+                blob_size = None
+            if blob_size and size < blob_size * SHRINK_GUARD_RATIO:
+                logger.error(
+                    "Refusing to upload %s: local file is %d bytes against a "
+                    "blob of %d — a shrink this large is not normal operation",
+                    name,
+                    size,
+                    blob_size,
+                )
+                results.append(
+                    PushResult(
+                        db_file=name,
+                        local_path=local_path,
+                        local_size=size,
+                        status="skipped_shrunk",
+                    )
+                )
+                continue
 
         try:
             with open(local_path, "rb") as f:

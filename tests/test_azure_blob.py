@@ -15,6 +15,7 @@ import pytest
 from rehoboam import azure_blob
 from rehoboam.azure_blob import (
     DB_FILES,
+    FAILED_FETCH_KEY,
     FETCH_SIDECAR,
     BlobChangedSinceFetch,
     MissingAzureCredentials,
@@ -230,7 +231,7 @@ def test_push_state_uploads_existing_files(monkeypatch, tmp_path):
     results = push_state("conn", "rehoboam-data", tmp_path)
 
     assert all(r.status == "uploaded" for r in results)
-    assert container.get_blob_client.call_count == len(DB_FILES)
+    assert len([r for r in results if r.status == "uploaded"]) == len(DB_FILES)
 
 
 def test_push_state_skips_missing_local(monkeypatch, tmp_path):
@@ -473,7 +474,7 @@ def test_push_state_only_restricts_to_the_named_files(monkeypatch, tmp_path):
     results = push_state("conn", "rehoboam-data", tmp_path, only={"bid_learning.db"})
 
     assert [r.db_file for r in results] == ["bid_learning.db"]
-    assert container.get_blob_client.call_count == 1
+    assert len([r for r in results if r.status == "uploaded"]) == 1
 
 
 def test_push_state_only_none_is_unchanged(monkeypatch, tmp_path):
@@ -485,7 +486,7 @@ def test_push_state_only_none_is_unchanged(monkeypatch, tmp_path):
     results = push_state("conn", "rehoboam-data", tmp_path, only=None)
 
     assert [r.db_file for r in results] == list(DB_FILES)
-    assert container.get_blob_client.call_count == len(DB_FILES)
+    assert len([r for r in results if r.status == "uploaded"]) == len(DB_FILES)
 
 
 def test_push_state_only_ignores_drift_in_files_it_is_not_pushing(monkeypatch, tmp_path):
@@ -520,3 +521,113 @@ def test_push_state_only_ignores_drift_in_files_it_is_not_pushing(monkeypatch, t
     )
     results = push_state("conn", "rehoboam-data", tmp_path, only={"bid_learning.db"})
     assert [r.db_file for r in results] == ["bid_learning.db"]
+
+
+class TestAFailedDownloadCannotDestroyTheBlob:
+    """REH-94: the chain that silently replaced the learning DB with an empty one.
+
+    fetch_state swallows a per-file download failure. On a cold container there
+    is then no local file, and BidLearner's CREATE TABLE IF NOT EXISTS turns
+    that into a valid EMPTY database. push_state uploaded it and reported
+    "uploaded" — success — having destroyed every learning table.
+    """
+
+    def _container_where_one_download_fails(self, failing: str):
+        ts = datetime(2026, 8, 24, 8, 0, 0, tzinfo=timezone.utc)
+        payload = b"real-data" * 100
+        spec = {n: {"props": _props(ts, len(payload)), "data": payload} for n in DB_FILES}
+        container = _make_container(spec)
+        original = container.get_blob_client
+
+        def _client(name):
+            client = original(name)
+            if name == failing:
+                client.download_blob.side_effect = OSError("transient azure error")
+            return client
+
+        container.get_blob_client = MagicMock(side_effect=_client)
+        return container
+
+    def test_a_failed_download_is_recorded_in_the_sidecar(self, monkeypatch, tmp_path):
+        container = self._container_where_one_download_fails("bid_learning.db")
+        _patch_container(monkeypatch, container)
+
+        fetch_state("conn", "rehoboam-data", tmp_path, backup=False)
+
+        recorded = json.loads((tmp_path / FETCH_SIDECAR).read_text())
+        assert recorded[FAILED_FETCH_KEY] == ["bid_learning.db"]
+
+    def test_push_refuses_to_upload_a_file_it_failed_to_download(self, monkeypatch, tmp_path):
+        container = self._container_where_one_download_fails("bid_learning.db")
+        _patch_container(monkeypatch, container)
+        fetch_state("conn", "rehoboam-data", tmp_path, backup=False)
+
+        # What BidLearner does next: a missing file becomes a valid empty one.
+        (tmp_path / "bid_learning.db").write_bytes(b"empty-db")
+
+        results = push_state("conn", "rehoboam-data", tmp_path)
+        by_file = {r.db_file: r.status for r in results}
+        assert by_file["bid_learning.db"] == "skipped_fetch_failed"
+        assert by_file["value_tracking.db"] == "uploaded"
+
+    def test_a_later_successful_download_clears_the_mark(self, monkeypatch, tmp_path):
+        container = self._container_where_one_download_fails("bid_learning.db")
+        _patch_container(monkeypatch, container)
+        fetch_state("conn", "rehoboam-data", tmp_path, backup=False)
+
+        ts = datetime(2026, 8, 24, 9, 0, 0, tzinfo=timezone.utc)
+        payload = b"real-data" * 100
+        healthy = _make_container(
+            {n: {"props": _props(ts, len(payload)), "data": payload} for n in DB_FILES}
+        )
+        _patch_container(monkeypatch, healthy)
+        fetch_state("conn", "rehoboam-data", tmp_path, backup=False)
+
+        recorded = json.loads((tmp_path / FETCH_SIDECAR).read_text())
+        assert FAILED_FETCH_KEY not in recorded
+
+    def test_force_still_allows_a_deliberate_push(self, monkeypatch, tmp_path):
+        """The escape hatch stays open for an operator who means it."""
+        sidecar = {FAILED_FETCH_KEY: ["bid_learning.db"]}
+        (tmp_path / FETCH_SIDECAR).write_text(json.dumps(sidecar))
+        for n in DB_FILES:
+            (tmp_path / n).write_bytes(b"x" * 4096)
+        ts = datetime(2026, 8, 24, 8, 0, 0, tzinfo=timezone.utc)
+        _patch_container(
+            monkeypatch, _make_container({n: {"props": _props(ts, 4096)} for n in DB_FILES})
+        )
+
+        results = push_state("conn", "rehoboam-data", tmp_path, force=True)
+        assert {r.db_file: r.status for r in results}["bid_learning.db"] == "uploaded"
+
+
+class TestTheShrinkGuard:
+    """Defence in depth: every other route to uploading a truncated file."""
+
+    def _blob_of(self, size):
+        ts = datetime(2026, 8, 24, 8, 0, 0, tzinfo=timezone.utc)
+        return _make_container({n: {"props": _props(ts, size)} for n in DB_FILES})
+
+    def test_a_drastically_smaller_local_file_is_refused(self, monkeypatch, tmp_path):
+        for n in DB_FILES:
+            (tmp_path / n).write_bytes(b"x" * 100)
+        _patch_container(monkeypatch, self._blob_of(1_000_000))
+
+        results = push_state("conn", "rehoboam-data", tmp_path)
+        assert all(r.status == "skipped_shrunk" for r in results)
+
+    def test_normal_growth_and_minor_shrinkage_still_upload(self, monkeypatch, tmp_path):
+        for n in DB_FILES:
+            (tmp_path / n).write_bytes(b"x" * 900)
+        _patch_container(monkeypatch, self._blob_of(1000))
+
+        results = push_state("conn", "rehoboam-data", tmp_path)
+        assert all(r.status == "uploaded" for r in results)
+
+    def test_a_blob_that_does_not_exist_yet_is_not_a_shrink(self, monkeypatch, tmp_path):
+        for n in DB_FILES:
+            (tmp_path / n).write_bytes(b"x" * 10)
+        _patch_container(monkeypatch, _make_container({n: {} for n in DB_FILES}))
+
+        results = push_state("conn", "rehoboam-data", tmp_path)
+        assert all(r.status == "uploaded" for r in results)
