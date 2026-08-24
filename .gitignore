@@ -68,3 +68,4 @@ deploy/bicep/**/*.json
 
 # SDD workspace (scratch — git history is the record)
 .superpowers/
+deploy/bicep/main.json

@@ -42,6 +42,20 @@ source_env() {
   fi
 }
 
+# Optional notification channels. Absent means the channel stays disabled —
+# the bot keeps trading, it just cannot tell anyone about it. Passed through
+# to Bicep, which only creates a Key Vault secret when the value is non-empty.
+notify_params() {
+  echo "telegramBotToken=${TELEGRAM_BOT_TOKEN:-}" \
+       "telegramChatId=${TELEGRAM_CHAT_ID:-}" \
+       "telegramWebhookSecret=${TELEGRAM_WEBHOOK_SECRET:-}" \
+       "smtpHost=${SMTP_HOST:-}" \
+       "smtpPort=${SMTP_PORT:-587}" \
+       "smtpUser=${SMTP_USER:-}" \
+       "smtpPassword=${SMTP_PASSWORD:-}" \
+       "alertEmailTo=${ALERT_EMAIL_TO:-}"
+}
+
 deploy_infra() {
   source_env
   : "${KICKBASE_EMAIL:?must be set in .env}"
@@ -53,7 +67,8 @@ deploy_infra() {
       --resource-group "$RESOURCE_GROUP" \
       --template-file "$BICEP_TEMPLATE" \
       --parameters "$BICEP_PARAMS" \
-      --parameters kickbaseEmail="$KICKBASE_EMAIL" kickbasePassword="$KICKBASE_PASSWORD"
+      --parameters kickbaseEmail="$KICKBASE_EMAIL" kickbasePassword="$KICKBASE_PASSWORD" \
+      --parameters $(notify_params)
     return
   fi
 
@@ -66,6 +81,7 @@ deploy_infra() {
     --template-file "$BICEP_TEMPLATE" \
     --parameters "$BICEP_PARAMS" \
     --parameters kickbaseEmail="$KICKBASE_EMAIL" kickbasePassword="$KICKBASE_PASSWORD" \
+    --parameters $(notify_params) \
     --output table
 }
 
