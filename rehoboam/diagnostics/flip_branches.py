@@ -161,6 +161,10 @@ def shipped_opportunity(
         min_profit_pct=FLIP_MIN_PROFIT_PCT,
         max_hold_days=FLIP_MAX_HOLD_DAYS,
         max_risk_score=max_risk_score,
+        # Mirrors the full shipped ladder, including the mean-reversion
+        # branches the live path now skips by default — a diagnostic that
+        # silently lost branches would stop explaining past decisions.
+        require_rising_trend=False,
     )
     player = CorpusMarketPlayer(
         id="reconcile",

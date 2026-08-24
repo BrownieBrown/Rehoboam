@@ -207,6 +207,9 @@ def make_flip_buy_fn(
         min_profit_pct=FLIP_MIN_PROFIT_PCT,
         max_hold_days=FLIP_MAX_HOLD_DAYS,
         max_risk_score=FLIP_MAX_RISK_SCORE,
+        # The replay reconstructs historical behaviour, which included the
+        # mean-reversion branches. Gating them here would rewrite history.
+        require_rising_trend=False,
     )
     max_debt_pct = shipped_max_debt_pct()
 

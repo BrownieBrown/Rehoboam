@@ -42,17 +42,33 @@ class ProfitTrader:
     """Find and execute profit trading opportunities"""
 
     def __init__(
-        self, min_profit_pct: float = 10.0, max_hold_days: int = 7, max_risk_score: float = 50.0
+        self,
+        min_profit_pct: float = 10.0,
+        max_hold_days: int = 7,
+        max_risk_score: float = 50.0,
+        max_overpay_pct: float = 1.0,
+        require_rising_trend: bool = True,
     ):
         """
         Args:
             min_profit_pct: Minimum profit percentage to consider
             max_hold_days: Maximum days to hold before selling
             max_risk_score: Maximum risk score (0-100)
+            max_overpay_pct: Most a flip may pay above market value. A flip is
+                bought to be sold, so any premium at entry has to be earned
+                back before the trade breaks even.
+            require_rising_trend: Only flip a player whose value is already
+                rising, rather than betting on mean reversion.
         """
         self.min_profit_pct = min_profit_pct
         self.max_hold_days = max_hold_days
         self.max_risk_score = max_risk_score
+        self.max_overpay_pct = max_overpay_pct
+        self.require_rising_trend = require_rising_trend
+
+    def _max_flip_price(self, player) -> int:
+        """Ceiling on what a flip may pay: market value plus the allowed premium."""
+        return int(player.market_value * (1.0 + self.max_overpay_pct / 100.0))
 
     def find_profit_opportunities(
         self,
@@ -82,6 +98,7 @@ class ProfitTrader:
         healthy = 0
         affordable = 0
         has_trend_data = 0
+        not_rising_filtered = 0
         meets_threshold = 0
         small_sample_filtered = 0
 
@@ -153,6 +170,14 @@ class ProfitTrader:
                 if trend_direction == "rising" and trend_pct > 5:
                     # Expect trend to continue (cap at 20%)
                     expected_appreciation = min(trend_pct, 20)
+                elif self.require_rising_trend:
+                    # Every branch below is a bet that the market is wrong —
+                    # mean reversion on a dip, a recovery, a stable performer,
+                    # or a fallen high-scorer. Across 151 real flips those bets
+                    # lost EUR 55.3M at a 28% win rate. A rising trend is the
+                    # one case where the market is already moving our way.
+                    not_rising_filtered += 1
+                    continue
                 elif is_recovery and player.average_points >= 30:
                     # Recovery signal: short-term reversal after dip → catch the bounce
                     expected_appreciation = 12
@@ -262,7 +287,7 @@ class ProfitTrader:
             opportunities.append(
                 ProfitOpportunity(
                     player=player,
-                    buy_price=player.price,
+                    buy_price=min(player.price, self._max_flip_price(player)),
                     market_value=player.market_value,
                     value_gap=value_gap,
                     value_gap_pct=value_gap_pct,

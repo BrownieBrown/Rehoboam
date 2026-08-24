@@ -1,6 +1,11 @@
 """Tests for dip-buying logic in ProfitTrader.find_profit_opportunities()
 and the matchday hold-time cap in auto_trader._max_flip_hold_days().
-"""
+
+
+NOTE: these cover the mean-reversion branches (dip-in-uptrend, recovery,
+stable, below-peak), which are opt-in since flip buying was restricted to
+rising trends by default. They pass require_rising_trend=False to reach the
+behaviour under test; the default path deliberately skips all of it."""
 
 from rehoboam.auto_trader import _max_flip_hold_days
 from rehoboam.kickbase_client import MarketPlayer
@@ -50,7 +55,7 @@ class TestDipInUptrendBuy:
     def test_dip_in_uptrend_creates_opportunity(self):
         """A short-term dip in a longer uptrend → flip candidate."""
         player = _make_player(average_points=35.0)
-        trader = ProfitTrader()
+        trader = ProfitTrader(require_rising_trend=False)
         opps = trader.find_profit_opportunities(
             market_players=[player],
             current_budget=20_000_000,
@@ -65,7 +70,7 @@ class TestDipInUptrendBuy:
     def test_dip_in_uptrend_requires_decent_avg_points(self):
         """Sub-30 avg points → dip-in-uptrend not enough; skip."""
         player = _make_player(average_points=15.0)
-        trader = ProfitTrader()
+        trader = ProfitTrader(require_rising_trend=False)
         opps = trader.find_profit_opportunities(
             market_players=[player],
             current_budget=20_000_000,
@@ -80,7 +85,7 @@ class TestDipInUptrendBuy:
     def test_recovery_signal_triggers_buy(self):
         """Recovery (short-term up after dip) → flip candidate."""
         player = _make_player(average_points=32.0)
-        trader = ProfitTrader()
+        trader = ProfitTrader(require_rising_trend=False)
         opps = trader.find_profit_opportunities(
             market_players=[player],
             current_budget=20_000_000,
@@ -97,7 +102,7 @@ class TestSecularDeclineBlocked:
         """A falling player flagged as secular decline should NOT be a flip candidate
         even if they're far below peak."""
         player = _make_player(average_points=50.0)
-        trader = ProfitTrader()
+        trader = ProfitTrader(require_rising_trend=False)
         opps = trader.find_profit_opportunities(
             market_players=[player],
             current_budget=20_000_000,
@@ -121,7 +126,7 @@ class TestLowerDipThreshold:
         with high avg_points qualifies as a mean-reversion play. (Old code
         only triggered below -50%.)"""
         player = _make_player(price=4_000_000, market_value=4_000_000, average_points=50.0)
-        trader = ProfitTrader()
+        trader = ProfitTrader(require_rising_trend=False)
         opps = trader.find_profit_opportunities(
             market_players=[player],
             current_budget=20_000_000,
@@ -141,7 +146,7 @@ class TestLowerDipThreshold:
         """Far below peak BUT secular decline → still skipped (regression
         check that the new is_secular_decline gate fires)."""
         player = _make_player(price=4_000_000, market_value=4_000_000, average_points=50.0)
-        trader = ProfitTrader()
+        trader = ProfitTrader(require_rising_trend=False)
         opps = trader.find_profit_opportunities(
             market_players=[player],
             current_budget=20_000_000,
