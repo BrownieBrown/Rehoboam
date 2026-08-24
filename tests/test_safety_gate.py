@@ -105,3 +105,42 @@ class TestInvalidBid:
         r = check_buy(**_ok_kwargs(bid=0))
         assert r.ok is False
         assert any("bid" in x.lower() for x in r.reasons)
+
+
+class TestClubLimit:
+    """League rule 26/27: at most three players from any one Bundesliga club.
+
+    A squad that breaks it is illegal, so the gate refuses rather than warns.
+    """
+
+    def _kwargs(self, **over):
+        base = {
+            "player_id": "1",
+            "bid": 1_000_000,
+            "market_value": 1_000_000,
+            "current_budget": 50_000_000,
+            "free_slots": 4,
+            "known_player_ids": ["1"],
+            "max_overbid_pct": 8.0,
+        }
+        base.update(over)
+        return base
+
+    def test_a_fourth_player_from_one_club_is_refused(self):
+        r = check_buy(**self._kwargs(club_id="40", squad_club_counts={"40": 3}))
+        assert r.ok is False
+        assert any("club limit" in x for x in r.reasons)
+
+    def test_a_third_player_from_one_club_is_allowed(self):
+        r = check_buy(**self._kwargs(club_id="40", squad_club_counts={"40": 2}))
+        assert r.ok is True
+
+    def test_an_unknown_club_is_not_treated_as_a_violation(self):
+        """Missing data is missing data — the caller must supply it."""
+        assert check_buy(**self._kwargs(club_id=None, squad_club_counts={"40": 9})).ok is True
+        assert check_buy(**self._kwargs(club_id="40", squad_club_counts=None)).ok is True
+
+    def test_the_club_limit_reason_names_the_club_and_the_cap(self):
+        r = check_buy(**self._kwargs(club_id="40", squad_club_counts={"40": 3}))
+        reason = next(x for x in r.reasons if "club limit" in x)
+        assert "40" in reason and "3" in reason

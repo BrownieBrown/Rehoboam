@@ -22,6 +22,12 @@ MIN_UPGRADE_THRESHOLD = 10.0
 # 1 = starter, 2 = rotation, 3 = bench; 4+ = unlikely to play
 MAX_LINEUP_PROB_FOR_BUY = 3
 
+# League rule for 26/27: at most three players from any one Bundesliga club.
+# This is a HARD rule set by the league, not a tuning knob — a squad that
+# breaks it is illegal, so it is a module constant rather than a Settings
+# field that could be relaxed from .env by accident.
+MAX_PLAYERS_PER_CLUB = 3
+
 # Selling instantly to Kickbase returns the FULL market value.
 #
 # REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured in

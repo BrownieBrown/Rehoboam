@@ -8,8 +8,10 @@ Telegram should be able to say everything that is wrong at once.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+
+from rehoboam.config import MAX_PLAYERS_PER_CLUB
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,9 @@ def check_buy(
     free_slots: int,
     known_player_ids: Iterable[str],
     max_overbid_pct: float,
+    club_id: str | None = None,
+    squad_club_counts: Mapping[str, int] | None = None,
+    max_players_per_club: int = MAX_PLAYERS_PER_CLUB,
 ) -> GateResult:
     """Is this buy allowed to execute?
 
@@ -64,5 +69,17 @@ def check_buy(
 
     if free_slots <= 0:
         reasons.append("no free squad slot")
+
+    # League rule: at most three players from any one club. Breaking it makes
+    # the squad illegal, so this refuses rather than warns. Unknown club or
+    # unknown counts cannot be checked, and are not treated as a violation —
+    # the caller is responsible for supplying them.
+    if club_id is not None and squad_club_counts is not None:
+        held = int(squad_club_counts.get(str(club_id), 0))
+        if held >= max_players_per_club:
+            reasons.append(
+                f"club limit: already hold {held} player(s) from club {club_id} "
+                f"(max {max_players_per_club})"
+            )
 
     return GateResult(ok=not reasons, reasons=reasons)

@@ -48,43 +48,50 @@ def render_proposal(
 
 def render_daily_summary(
     *,
-    lineup: list[tuple[str, float, str | None]],
+    outlook=None,
     squad_size: int,
     budget: int,
-    market: list[tuple[str, int, float]],
     pending: list[tuple[str, int]],
     executed: list[str],
     rejections: list[str],
+    watch: list[str],
 ) -> str:
-    """The once-a-day picture: lineup, market, what happened, what was blocked.
+    """The once-a-day picture, trimmed to what actually needs a decision.
 
-    ``market`` is (name, market_value, average_points) — not a 7-day trend.
-    A real trend needs one `TrendService` call per market player (~30 extra
-    API calls for an email); average points is what `MarketPlayer` already
-    carries.
+    Ordered by what the reader has to do about it: the fixture first because
+    26/27 is head-to-head and one opponent is the whole target, then anything
+    waiting on a tap, then risks, then what already happened. The old version
+    led with a full market dump, which is the part nobody acts on.
 
-    Proposal volume is reported explicitly. If approvals start arriving daily
-    rather than weekly, that is the signal the approval gate has become the
-    daily loop it was meant to replace.
+    ``outlook`` is a ``h2h.MatchupOutlook`` or None when the fixture could not
+    be read; the section is omitted rather than faked.
     """
-    lines = [
-        f"SQUAD {squad_size}/15   BUDGET EUR {budget:,}",
-        "",
-        "LINEUP",
-    ]
-    for name, ep, flag in lineup:
-        note = f"  [{flag}]" if flag else ""
-        lines.append(f"  {name:<16} {ep:>6.1f}{note}")
+    lines: list[str] = []
 
-    lines += ["", "MARKET"]
-    for name, mv, avg_pts in market:
-        lines.append(f"  {name:<16} EUR {mv:>12,}  {avg_pts:>6.1f} avg pts")
+    if outlook is not None:
+        m = outlook.matchup
+        when = (m.starts_at or "")[:10]
+        lines += [
+            f"MATCHDAY {m.day} vs {m.opponent_name}   {when}",
+            f"  projected  you {outlook.us.projected_points:>5.0f}"
+            f"   {m.opponent_name} {outlook.them.projected_points:>5.0f}"
+            f"   ({outlook.margin:+.0f}, {outlook.verdict})",
+            "",
+        ]
 
-    lines += ["", f"PENDING PROPOSALS ({len(pending)})"]
-    for name, bid in pending:
-        lines.append(f"  {name:<16} EUR {bid:>12,}  awaiting approval")
+    lines += [f"SQUAD {squad_size}/15   BUDGET EUR {budget:,}", ""]
 
-    lines += ["", "EXECUTED (24h)"] + ([f"  {e}" for e in executed] or ["  nothing"])
+    lines.append(f"NEEDS YOU ({len(pending)})")
+    if pending:
+        for name, bid in pending:
+            lines.append(f"  approve {name:<14} EUR {bid:>12,}")
+    else:
+        lines.append("  nothing awaiting approval")
+
+    if watch:
+        lines += ["", "WATCH"] + [f"  {w}" for w in watch]
+
+    lines += ["", "DONE (24h)"] + ([f"  {e}" for e in executed] or ["  nothing"])
 
     if rejections:
         lines += ["", "BLOCKED OR FAILED"] + [f"  {r}" for r in rejections]
