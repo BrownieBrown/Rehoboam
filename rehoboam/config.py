@@ -22,6 +22,12 @@ MIN_UPGRADE_THRESHOLD = 10.0
 # 1 = starter, 2 = rotation, 3 = bench; 4+ = unlikely to play
 MAX_LINEUP_PROB_FOR_BUY = 3
 
+# League rule for 26/27: at most three players from any one Bundesliga club.
+# This is a HARD rule set by the league, not a tuning knob — a squad that
+# breaks it is illegal, so it is a module constant rather than a Settings
+# field that could be relaxed from .env by accident.
+MAX_PLAYERS_PER_CLUB = 3
+
 # Selling instantly to Kickbase returns the FULL market value.
 #
 # REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured in
@@ -184,12 +190,17 @@ class Settings(BaseSettings):
         ),
     )
     min_ep_upgrade_threshold: float = Field(
-        default=40.0,
+        default=25.0,
         description=(
             "Minimum MARGINAL EP gain (real points) for a market player to count as "
-            "an upgrade at all. Rounded from the p50 of 43.1 measured 2026-07-31 "
-            "over the 473-player universe against a mid-table squad. Pre-season "
-            "estimate awaiting live-market validation. Note marginal gain is "
+            "an upgrade at all. Re-derived 2026-08-24 against the live market with "
+            "the refitted scorer: p50 21.5, p70 23.9, p85 26.1, p95 88.2 over 16 "
+            "positive candidates. 25.0 sits just under p85, so roughly the top "
+            "fifth of what the market actually offers can qualify. The previous "
+            "40.0 was a pre-season estimate taken against a synthetic squad when "
+            "no purchasable listings existed; it sat ABOVE p85, so it rejected 14 "
+            "of 19 real candidates and left the squad at 11/15 with EUR 62M idle. "
+            "Note marginal gain is "
             "relative to YOUR squad: a strong squad finds fewer improvements, so "
             "this gets harder to clear as the season goes well."
         ),
@@ -252,7 +263,7 @@ class Settings(BaseSettings):
     # Fields rather than module constants so they can be re-tuned from `.env`
     # mid-season without shipping a build.
     bid_tier_must_have: float = Field(
-        default=70.0,
+        default=62.5,
         description=(
             "Marginal EP gain (real points) at or above which a candidate is a "
             "'must have'. Rounded from p85 = 69.3 measured 2026-07-31. Because "
@@ -262,7 +273,7 @@ class Settings(BaseSettings):
         ),
     )
     bid_tier_strong_upgrade: float = Field(
-        default=53.0,
+        default=37.5,
         description=(
             "Marginal EP gain (real points) at or above which a candidate is a "
             "'strong upgrade'. Rounded from p70 = 52.6 measured 2026-07-31. "
@@ -281,7 +292,7 @@ class Settings(BaseSettings):
         ),
     )
     bid_tier_solid_upgrade: float = Field(
-        default=43.0,
+        default=25.0,
         description=(
             "Marginal EP gain (real points) at or above which a candidate is a "
             "'solid upgrade'. Rounded from p50 = 43.1 measured 2026-07-31. "

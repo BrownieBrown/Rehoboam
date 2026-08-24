@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 # without a new build — see `trader.py` for the live wiring. The old inline
 # values were 20 / 10 / 5, which on the real-points scale sit *below* the
 # median gain and so classified almost every candidate as a must-have.
-TIER_MUST_HAVE = 70.0
-TIER_STRONG_UPGRADE = 53.0
-TIER_SOLID_UPGRADE = 43.0
+TIER_MUST_HAVE = 62.5
+TIER_STRONG_UPGRADE = 37.5
+TIER_SOLID_UPGRADE = 25.0
 
 # How much of the budget a signing may consume, as a function of marginal gain.
 #

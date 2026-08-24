@@ -86,18 +86,39 @@ def upload_databases(only: Collection[str] | None = None) -> bool:
 
 def _send_daily_summary(api, league, settings, session):
     """Email the once-a-day picture. Best-effort: never raises into the timer."""
+    from collections import Counter
+
     from rehoboam.bid_learner import BidLearner
+    from rehoboam.config import MAX_PLAYERS_PER_CLUB
+    from rehoboam.h2h import matchup_outlook
     from rehoboam.notify.email import send_email
     from rehoboam.notify.render import render_daily_summary
     from rehoboam.notify.telegram import send_message
 
     squad = api.get_squad(league)
     budget = int(api.get_team_info(league).get("budget", 0))
-    market = sorted(
-        api.get_market(league),
-        key=lambda p: getattr(p, "average_points", 0.0) or 0.0,
-        reverse=True,
-    )[:10]
+
+    try:
+        outlook = matchup_outlook(api, league)
+    except Exception:
+        logging.warning("daily summary: matchup outlook failed", exc_info=True)
+        outlook = None
+
+    # Risks worth a line each. Everything here is something Marco can act on;
+    # anything he cannot act on belongs in the logs, not the summary.
+    watch: list[str] = []
+    free_slots = 15 - len(squad)
+    if len(squad) <= 11:
+        watch.append(
+            f"squad {len(squad)}/15 — no bench, so every player must start "
+            f"and one unavailability is an unfillable slot"
+        )
+    if free_slots > 0 and budget > 20_000_000:
+        watch.append(f"{free_slots} free slot(s) and EUR {budget:,} unspent")
+    per_club = Counter(str(p.team_id) for p in squad)
+    at_limit = [c for c, n in per_club.items() if n >= MAX_PLAYERS_PER_CLUB]
+    if at_limit:
+        watch.append(f"{len(at_limit)} club(s) at the {MAX_PLAYERS_PER_CLUB}-player limit")
 
     learner = BidLearner()
     pending = [(p["player_name"], int(p["bid"])) for p in learner.pending_proposals()]
@@ -127,18 +148,21 @@ def _send_daily_summary(api, league, settings, session):
     ]
 
     body = render_daily_summary(
-        lineup=session.lineup,
+        outlook=outlook,
         squad_size=len(squad),
         budget=budget,
-        market=[
-            (p.last_name, int(p.market_value), float(getattr(p, "average_points", 0.0) or 0.0))
-            for p in market
-        ],
         pending=pending,
         executed=executed,
         rejections=blocked,
+        watch=watch,
     )
-    header = f"REHOBOAM DAILY — {len(pending)} awaiting approval\n\n"
+    if outlook is not None:
+        header = (
+            f"MD{outlook.matchup.day} vs {outlook.matchup.opponent_name} "
+            f"({outlook.margin:+.0f}) — {len(pending)} awaiting approval\n\n"
+        )
+    else:
+        header = f"REHOBOAM DAILY — {len(pending)} awaiting approval\n\n"
 
     # Telegram is the primary channel: it is already configured for approvals,
     # costs nothing, and needs no mail provider. Proton — the alternative that

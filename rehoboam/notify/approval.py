@@ -113,6 +113,14 @@ def handle_callback(
         budget = int(api.get_team_info(league).get("budget", 0)) - pending_bid_total
         free_slots = 15 - len(squad) - len(bids)
 
+        # League rule: max three players per club. Counted from the live squad
+        # plus open offers, because a pending bid will occupy a slot too.
+        club_counts: dict[str, int] = {}
+        for held in list(squad) + list(bids):
+            cid = str(getattr(held, "team_id", "") or "")
+            if cid:
+                club_counts[cid] = club_counts.get(cid, 0) + 1
+
         result = check_buy(
             player_id=proposal["player_id"],
             bid=int(proposal["bid"]),
@@ -121,6 +129,8 @@ def handle_callback(
             free_slots=free_slots,
             known_player_ids=market.keys(),
             max_overbid_pct=settings.max_overbid_pct,
+            club_id=str(getattr(live, "team_id", "") or "") or None,
+            squad_club_counts=club_counts,
         )
         if not result.ok:
             learner.set_proposal_status(proposal_id, "failed")

@@ -747,6 +747,19 @@ def replay_season(
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
+    from rehoboam.scoring.v2.dataset import TRAIN_MAX_SEASON
+
+    # The replay covers 2025/26. Once that season is inside the training set,
+    # the scorer has already seen every result being replayed and the number
+    # comes back flattering. Say so loudly rather than let it be quoted as a
+    # gate for a scorer change.
+    if TRAIN_MAX_SEASON >= "2025/2026":
+        console.print(
+            "[yellow]LEAKY: the scorer is fitted through "
+            f"{TRAIN_MAX_SEASON}, which includes the replayed 2025/26 season. "
+            "This result is optimistic and is NOT a valid gate for scoring "
+            "changes — compare scorers on a held-out season instead.[/yellow]"
+        )
 
     if not corpus.exists():
         console.print(f"[red]Corpus not found: {corpus}[/red]")
@@ -945,7 +958,7 @@ def derive_thresholds(
         )
         gains.append(mep.marginal_ep_gain)
 
-    report = build_report(gains)
+    report = build_report(gains, min_gain=settings.min_ep_upgrade_threshold)
 
     table = Table(title=f"v2 marginal-gain distribution (n={report.n_candidates} positive)")
     table.add_column("percentile")
@@ -954,16 +967,25 @@ def derive_thresholds(
         table.add_row(name, f"{value:.1f}")
     console.print(table)
 
-    proposed = Table(title="Proposed tier thresholds (by rarity)")
+    console.print(
+        f"[cyan]{report.n_qualifying} of {report.n_candidates} candidates clear the "
+        f"{settings.min_ep_upgrade_threshold:.1f} buy threshold · tiers by "
+        f"{report.method}[/cyan]"
+    )
+    proposed = Table(title="Proposed tier thresholds")
     proposed.add_column("tier")
-    proposed.add_column("rarity")
+    by_rarity = report.method == "rarity"
+    proposed.add_column("basis")
     proposed.add_column("threshold", justify="right")
-    for name, rarity in (
-        ("must_have", "top 15%"),
-        ("strong_upgrade", "top 30%"),
-        ("solid_upgrade", "top 50%"),
+    for name, rarity, multiple in (
+        ("must_have", "top 15%", "2.5x"),
+        ("strong_upgrade", "top 30%", "1.5x"),
+        ("solid_upgrade", "top 50%", "1.0x"),
     ):
-        proposed.add_row(name, rarity, f"{report.proposed[name]:.1f}")
+        # Labelling a fallback tier "top 15%" would claim a rarity that was
+        # never measured.
+        basis = rarity if by_rarity else f"{multiple} threshold"
+        proposed.add_row(name, basis, f"{report.proposed[name]:.1f}")
     console.print(proposed)
     console.print("[dim]Read-only. Apply these by editing config.py / bidding_strategy.py.[/dim]")
 

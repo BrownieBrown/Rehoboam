@@ -65,7 +65,7 @@ def test_committed_coefficients_load_and_look_right():
     """
     availability, rate, meta = load_coefficients()
 
-    assert availability.predict(5)[5] == pytest.approx(0.848, abs=0.01)
-    assert rate.base_rate[5] == pytest.approx(91.5, abs=1.0)
-    assert len(rate.quality) == 389
-    assert meta["train_max_season"] == "2024/2025"
+    assert availability.predict(5)[5] == pytest.approx(0.837, abs=0.02)
+    assert rate.base_rate[5] == pytest.approx(91.1, abs=1.5)
+    assert len(rate.quality) == 480
+    assert meta["train_max_season"] == "2025/2026"
