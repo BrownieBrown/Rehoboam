@@ -434,6 +434,66 @@ class AutoTrader:
         )
         return True
 
+    def _settle_top5_obligation(self, league, ctx) -> None:
+        """Discharge the league's Top-5 forced sale for the last finished matchday.
+
+        The pool is chosen by what players scored THAT matchday; which of them
+        to give up is chosen by expected points from here on. A one-off big
+        score is the cheapest thing to lose, and first place has no choice at
+        all — see `rehoboam.top5`.
+        """
+        from . import top5
+
+        last_finished = self._last_finished_matchday(league)
+        if last_finished is None:
+            return
+
+        forward_ep = {
+            str(s.player_id): float(s.expected_points)
+            for s in (ctx.ep_result.get("squad_scores") or [])
+        }
+        sale = top5.settle(
+            api=self.api,
+            league=league,
+            learner=self.learner,
+            squad=list(ctx.squad or []),
+            forward_ep=forward_ep,
+            matchday=last_finished,
+            dry_run=self.dry_run,
+        )
+        if sale is None:
+            return
+        verb = "would sell" if self.dry_run else "sold"
+        console.print(
+            f"[yellow]Top-5 rule: finished {sale.place} on matchday "
+            f"{last_finished} — {verb} {sale.chosen_name} ({sale.reason})[/yellow]"
+        )
+
+    def _last_finished_matchday(self, league) -> int | None:
+        """The most recent matchday whose window has closed, or None.
+
+        Read from the H2H fixture list, which carries each matchday's end time.
+        """
+        from datetime import datetime, timezone
+
+        from .h2h import _parse_iso
+
+        try:
+            payload = self.api.client.session.get(
+                f"{self.api.client.BASE_URL}/v4/leagues/{league.id}/matchups"
+            ).json()
+        except Exception:
+            logger.warning("top5: could not read the fixture list", exc_info=True)
+            return None
+
+        now = datetime.now(timezone.utc)
+        finished = [
+            int(md.get("day") or 0)
+            for md in payload.get("mds") or []
+            if (ends := _parse_iso(md.get("ed"))) is not None and ends < now
+        ]
+        return max(finished) if finished else None
+
     def _has_pending_proposal(
         self,
         player_id: str,
@@ -1432,6 +1492,17 @@ class AutoTrader:
             self.tracker.reconcile_finished_matchdays(ctx.squad, squad_perf)
         except Exception:
             logger.exception("reconcile_finished_matchdays failed (non-fatal)")
+
+        # League Top-5 rule: finishing in the top five of a matchday obliges us
+        # to give up one of our best performers from it. Settled here, right
+        # after the matchday is reconciled, because the obligation only exists
+        # once a matchday has actually finished — and settled at most once per
+        # matchday, which `record_forced_sale` enforces on the database rather
+        # than on this call site.
+        try:
+            self._settle_top5_obligation(league, ctx)
+        except Exception:
+            logger.exception("top5 settlement failed (non-fatal)")
         try:
             squad_scores = ctx.ep_result.get("squad_scores") or []
             lineup_map = ctx.ep_result.get("lineup_map") or {}

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -518,6 +519,21 @@ class BidLearner:
                 ON manager_transfers(manager_id, transfer_dt)
             """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS forced_sales (
+                    matchday INTEGER PRIMARY KEY,
+                    place INTEGER NOT NULL,
+                    player_id TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    pool TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    executed INTEGER NOT NULL,
+                    settled_at REAL NOT NULL
+                )
+                """
+            )
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_proposals (
@@ -1695,6 +1711,50 @@ class BidLearner:
                 "UPDATE trade_proposals SET status = ? WHERE proposal_id = ?",
                 (status, proposal_id),
             )
+
+    def record_forced_sale(
+        self,
+        *,
+        matchday: int,
+        place: int,
+        player_id: str,
+        player_name: str,
+        pool: str,
+        reason: str,
+        executed: bool,
+    ) -> bool:
+        """Log a Top-5 forced sale. False if this matchday was already settled.
+
+        The matchday is the primary key, so a second call for the same one is
+        refused rather than selling a second player — the rule takes exactly
+        one player per matchday, and a re-run of the session must not compound
+        it.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO forced_sales "
+                "(matchday, place, player_id, player_name, pool, reason, executed, settled_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(matchday),
+                    int(place),
+                    str(player_id),
+                    player_name,
+                    pool,
+                    reason,
+                    1 if executed else 0,
+                    time.time(),
+                ),
+            )
+            return cur.rowcount > 0
+
+    def forced_sale_settled(self, matchday: int) -> bool:
+        """Has the Top-5 obligation for this matchday already been discharged?"""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM forced_sales WHERE matchday = ?", (int(matchday),)
+            ).fetchone()
+        return row is not None
 
     def proposals_for_player(self, player_id: str) -> list[dict]:
         """Every proposal ever made for this player, newest first."""
