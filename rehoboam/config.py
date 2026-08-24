@@ -263,7 +263,7 @@ class Settings(BaseSettings):
     # Fields rather than module constants so they can be re-tuned from `.env`
     # mid-season without shipping a build.
     bid_tier_must_have: float = Field(
-        default=70.0,
+        default=62.5,
         description=(
             "Marginal EP gain (real points) at or above which a candidate is a "
             "'must have'. Rounded from p85 = 69.3 measured 2026-07-31. Because "
@@ -273,7 +273,7 @@ class Settings(BaseSettings):
         ),
     )
     bid_tier_strong_upgrade: float = Field(
-        default=53.0,
+        default=37.5,
         description=(
             "Marginal EP gain (real points) at or above which a candidate is a "
             "'strong upgrade'. Rounded from p70 = 52.6 measured 2026-07-31. "
@@ -292,7 +292,7 @@ class Settings(BaseSettings):
         ),
     )
     bid_tier_solid_upgrade: float = Field(
-        default=43.0,
+        default=25.0,
         description=(
             "Marginal EP gain (real points) at or above which a candidate is a "
             "'solid upgrade'. Rounded from p50 = 43.1 measured 2026-07-31. "
