@@ -2,7 +2,7 @@
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from rich.console import Console
@@ -26,6 +26,7 @@ class AutoTradeSession:
     total_spent: int
     total_earned: int
     net_change: int
+    lineup: list[tuple[str, float, str | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -352,6 +353,139 @@ class AutoTrader:
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("record_buy_decision failed: %s", e)
 
+    def _propose_buy(self, league, rec, ctx) -> bool:
+        """Record and send a proposal instead of buying. True if recorded.
+
+        The proposal is recorded FIRST and sent second, so a Telegram outage
+        loses the notification but not the decision — it still surfaces in the
+        daily email.
+        """
+        import uuid
+
+        from .notify.render import render_proposal
+        from .notify.telegram import send_proposal
+
+        proposal_id = uuid.uuid4().hex[:12]
+        player = rec.player
+        trend = None
+        try:
+            from .trader import Trader
+
+            trend = (
+                Trader(self.api, self.settings)
+                .trend_service.get_trend(player.id, player.market_value, league.id)
+                .trend_7d_pct
+            )
+        except Exception:
+            logger.debug("proposal: no trend for %s", player.id, exc_info=True)
+
+        risks: list[str] = []
+        if getattr(rec.score, "data_quality", None) and rec.score.data_quality.grade != "A":
+            risks.append(
+                f"Data quality {rec.score.data_quality.grade} — no fitted history, "
+                "scored on the position prior."
+            )
+
+        message = render_proposal(
+            player_name=f"{player.first_name} {player.last_name}".strip(),
+            club=getattr(player, "team_name", "") or "unknown club",
+            bid=int(rec.recommended_bid),
+            market_value=int(player.market_value),
+            ep=float(rec.score.expected_points),
+            displaced_name=getattr(rec, "replaces_player_name", None) or "the weakest starter",
+            displaced_ep=float(getattr(rec, "replaces_player_ep", 0.0) or 0.0),
+            marginal_gain=float(rec.marginal_ep_gain),
+            budget_before=int(ctx.current_budget),
+            trend_7d_pct=trend,
+            risks=risks,
+        )
+
+        if self.dry_run:
+            console.print(
+                f"[yellow]DRY RUN - would propose {player.last_name} "
+                f"for EUR {int(rec.recommended_bid):,}[/yellow]"
+            )
+            return True
+
+        try:
+            self.learner.record_proposal(
+                proposal_id=proposal_id,
+                player_id=player.id,
+                player_name=player.last_name,
+                bid=int(rec.recommended_bid),
+                market_value=int(player.market_value),
+                message=message,
+            )
+        except Exception:
+            logger.exception("proposal: could not record %s", proposal_id)
+            return False
+
+        send_proposal(
+            self.settings.telegram_bot_token,
+            self.settings.telegram_chat_id,
+            proposal_id,
+            message,
+        )
+        logger.info(
+            "proposal recorded id=%s player=%s bid=%d",
+            proposal_id,
+            player.id,
+            int(rec.recommended_bid),
+        )
+        return True
+
+    def _has_pending_proposal(
+        self,
+        player_id: str,
+        *,
+        max_age_days: float = 3.0,
+        rejected_age_days: float = 14.0,
+    ) -> bool:
+        """True if this player was recently proposed and should not be re-sent.
+
+        The bot runs twice a day; without this guard it would re-send the same
+        proposal every run until it was actioned. Two windows, because the two
+        states mean different things:
+
+        - ``pending`` — Marco has not answered. Suppress for ``max_age_days``,
+          then let it through again: proposal expiry is not implemented, so an
+          unbounded guard would let one ignored proposal block a player forever.
+        - ``rejected`` — Marco said no. That is an answer, and re-asking twelve
+          hours later is exactly the daily-nagging this whole branch exists to
+          stop. Suppress for much longer, but still not forever, because the
+          price and the player's form both move.
+
+        Any other status (``approved``/``executed``/``failed``) does not
+        suppress: the buy either happened or definitively did not, and a fresh
+        proposal is the right response to a fresh situation.
+        """
+        now = time.time()
+        pending_cutoff = now - max_age_days * 86400.0
+        rejected_cutoff = now - rejected_age_days * 86400.0
+        try:
+            for p in self.learner.proposals_for_player(str(player_id)):
+                created = float(p.get("created_at") or 0.0)
+                status = p.get("status")
+                if status == "pending" and created >= pending_cutoff:
+                    return True
+                if status == "rejected" and created >= rejected_cutoff:
+                    return True
+            return False
+        except Exception:
+            logger.warning("proposal: could not read proposals", exc_info=True)
+            return False
+
+    @staticmethod
+    def _needs_sell_plan(obj) -> bool:
+        """True if this buy only works by selling someone first.
+
+        Proposals carry no sell plan, so such a buy would be refused by the safety
+        gate after approval. Skip it rather than send a proposal that cannot be
+        honoured.
+        """
+        sell_plan = getattr(obj, "sell_plan", None)
+        return bool(sell_plan and getattr(sell_plan, "players_to_sell", None))
+
     def run_unified_trade_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Execute all qualifying trades from a single ranked candidate list.
 
@@ -456,6 +590,7 @@ class AutoTrader:
         current_squad_size = len(fresh_squad)
         active_bid_count = len(fresh_bids)
         available_slots = _available_squad_slots(current_squad_size, active_bid_count)
+        proposed_slots = 0  # slots reserved by proposals nobody has approved yet
         ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
         ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
@@ -569,35 +704,40 @@ class AutoTrader:
                     )
                     continue
 
-                # If buy exceeds current budget but has a sell plan, persist
-                # the sell plan IDs alongside the bid. Once the auction resolves
-                # (we won), the sells will be executed to recover the budget.
-                # This is buy-first-sell-after: never sell before securing the player.
-                sp_ids = None
-                if hasattr(obj, "sell_plan") and obj.sell_plan and obj.sell_plan.players_to_sell:
-                    sp_ids = [e.player_id for e in obj.sell_plan.players_to_sell]
+                if self._has_pending_proposal(obj.player.id):
+                    console.print(
+                        f"[dim]Skip {obj.player.last_name} — proposal already awaiting approval[/dim]"
+                    )
+                    continue
 
-                result = self.execution.buy(
-                    league,
-                    obj.player,
-                    obj.recommended_bid,
-                    obj.reason,
-                    sell_plan_player_ids=sp_ids,
-                    current_budget=ctx.current_budget,
-                    days_until_match=ctx.matchday_phase.days_until_match,
-                )
-                results.append(result)
-                if result.success:
-                    ctx.executed_trade_count += 1
-                    self.daily_spend += obj.recommended_bid
-                    ctx.flip_budget -= obj.recommended_bid
-                    ctx.current_budget -= obj.recommended_bid
+                if self._needs_sell_plan(obj):
+                    console.print(
+                        f"[dim]Skip {obj.player.last_name} — needs a sell plan, "
+                        f"cannot be proposed[/dim]"
+                    )
+                    logger.info("proposal-skip: %s needs a sell plan", obj.player.last_name)
+                    continue
+
+                if self._propose_buy(league, obj, ctx):
+                    console.print(
+                        f"[cyan]Proposed {obj.player.last_name} — awaiting approval[/cyan]"
+                    )
                     available_slots -= 1
+                    proposed_slots += 1
+                    ctx.flip_budget -= obj.recommended_bid
+                continue
 
             elif kind == "pair":
                 # Don't sell a player unnecessarily if there are open slots —
                 # the same target should appear as a plain buy candidate instead.
-                if available_slots > 0:
+                #
+                # `proposed_slots` is added back deliberately. A proposal is not
+                # a commitment: nobody has approved it and no money has moved.
+                # Counting it as a filled slot would mean that merely PROPOSING
+                # a buy is what switches on the autonomous sell-then-buy pair
+                # path — the bot would start selling squad players off the back
+                # of a decision Marco has not made yet.
+                if available_slots + proposed_slots > 0:
                     continue
                 if ctx.my_bid_amounts.get(obj.buy_player.id, 0) > 0:
                     console.print(
@@ -1263,7 +1403,7 @@ class AutoTrader:
             errors.append(error_msg)
             logger.exception("EP pipeline failed — falling back to lineup-only")
             # Fall back to just setting lineup
-            self._set_optimal_lineup(league, errors)
+            lineup = self._set_optimal_lineup(league, errors) or []
             return AutoTradeSession(
                 start_time=start_time,
                 end_time=time.time(),
@@ -1273,6 +1413,7 @@ class AutoTrader:
                 total_spent=0,
                 total_earned=0,
                 net_change=0,
+                lineup=lineup,
             )
 
         # Step 2a: Matchday self-calibration (REH-20).
@@ -1349,7 +1490,12 @@ class AutoTrader:
                     f"— setting lineup only, no trading[/yellow]"
                 )
 
-            self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+            lineup = (
+                self._set_optimal_lineup(
+                    league, errors, squad_scores=ctx.ep_result.get("squad_scores")
+                )
+                or []
+            )
             total_spent = sum(r.price for r in trade_results if r.action == "BUY" and r.success)
             total_earned = sum(r.price for r in trade_results if r.action == "SELL" and r.success)
             return AutoTradeSession(
@@ -1361,6 +1507,7 @@ class AutoTrader:
                 total_spent=total_spent,
                 total_earned=total_earned,
                 net_change=total_earned - total_spent,
+                lineup=lineup,
             )
 
         # Step 4: Trend-aware profit selling
@@ -1440,7 +1587,10 @@ class AutoTrader:
         # Step 8: Set optimal lineup using EP pipeline scores from the session.
         # Players acquired mid-session (if any) are scored by the v2 fallback
         # inside _set_optimal_lineup.
-        self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+        lineup = (
+            self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+            or []
+        )
 
         # Calculate totals
         all_results = sell_results + trade_results
@@ -1495,6 +1645,7 @@ class AutoTrader:
             total_spent=total_spent,
             total_earned=total_earned,
             net_change=net_change,
+            lineup=lineup,
         )
 
     def _set_optimal_lineup(
@@ -1502,7 +1653,7 @@ class AutoTrader:
         league,
         errors: list[str],
         squad_scores: list | None = None,
-    ):
+    ) -> list[tuple[str, float, str | None]]:
         """Calculate and set the optimal starting 11 via API.
 
         Prefers the new EP scoring pipeline (via *squad_scores* when the caller
@@ -1510,6 +1661,10 @@ class AutoTrader:
         injury penalties, 5-fixture SOS, and position-weighted scoring. Falls
         back to a per-player v2 score only when scores are missing (e.g. EP
         pipeline failed, or a player was just bought mid-session).
+
+        Returns the (name, ep, flag) triples for the eleven it selected — or
+        an empty list on any early-exit or failure path, so callers never see
+        ``None``.
         """
         from .formation import get_formation_string, order_for_lineup, select_best_eleven
 
@@ -1519,7 +1674,7 @@ class AutoTrader:
             squad = self.api.get_squad(league)
             if not squad or len(squad) < 11:
                 console.print("[yellow]Not enough players to set lineup[/yellow]")
-                return
+                return []
 
             # Build ep_scores from the pipeline when available; fall back to a
             # per-player v2 score only for uncovered squad members or when the
@@ -1549,17 +1704,28 @@ class AutoTrader:
             ]
             console.print(f"[dim]Formation: {formation} | {', '.join(names)}[/dim]")
 
+            lineup_summary: list[tuple[str, float, str | None]] = [
+                (
+                    f"{p.first_name[0]}. {p.last_name}" if p.first_name else p.last_name,
+                    float(ep_scores.get(p.id, 0.0)),
+                    None,
+                )
+                for p in ordered
+            ]
+
             if self.dry_run:
                 console.print("[yellow]DRY RUN - Lineup not applied[/yellow]")
-                return
+                return lineup_summary
 
             self.api.set_lineup(league, formation, player_ids)
             console.print("[green]✓ Lineup set successfully[/green]")
+            return lineup_summary
 
         except Exception as e:
             error_msg = f"Set lineup error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
+            return []
 
     def _fallback_expected_points(self, league, player) -> float:
         """Fallback per-player EP for a squad member the pipeline didn't score.

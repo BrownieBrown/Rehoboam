@@ -288,6 +288,17 @@ class Settings(BaseSettings):
             "Pre-season estimate awaiting live-market validation."
         ),
     )
+    max_overbid_pct: float = Field(
+        default=8.0,
+        description=(
+            "Hard ceiling on how far above market value any bid may go, enforced by "
+            "services/safety_gate.check_buy. 8.0 comes from REH-64's measurement: a "
+            "3-8% overbid won 50% of auctions and an 8-15% overbid won the same 50%, "
+            "so margin beyond ~8% bought almost no win rate while the bot averaged "
+            "+12.2% and lost EUR 55.3M across 151 flips. Distinct from SmartBidding's "
+            "own internal caps — this is the outer limit nothing may cross."
+        ),
+    )
 
     # Auto Trading Limits
     auto_max_trades_normal: int = Field(
@@ -314,6 +325,33 @@ class Settings(BaseSettings):
         default=True,
         description="If True, simulate trades without executing them",
     )
+
+    # Telegram approval gate
+    telegram_bot_token: str = Field(
+        default="",
+        repr=False,
+        description="Telegram bot token. Empty disables Telegram entirely.",
+    )
+    telegram_chat_id: str = Field(
+        default="",
+        description="Telegram chat to send trade proposals to.",
+    )
+    telegram_webhook_secret: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Shared secret Telegram echoes in X-Telegram-Bot-Api-Secret-Token. The "
+            "approval webhook is a public endpoint that spends money, so a callback "
+            "without this header is rejected before anything is read from it."
+        ),
+    )
+
+    # Daily summary email
+    smtp_host: str = Field(default="", description="SMTP host. Empty disables email.")
+    smtp_port: int = Field(default=587, description="SMTP port; 587 for STARTTLS.")
+    smtp_user: str = Field(default="", repr=False, description="SMTP username.")
+    smtp_password: str = Field(default="", repr=False, description="SMTP password or app password.")
+    alert_email_to: str = Field(default="", description="Recipient of the daily summary.")
 
 
 def get_settings() -> Settings:

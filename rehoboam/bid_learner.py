@@ -518,6 +518,20 @@ class BidLearner:
                 ON manager_transfers(manager_id, transfer_dt)
             """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    player_id TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    bid INTEGER NOT NULL,
+                    market_value INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
 
             # REH-22: drop legacy tables that no live code references.
             # `position_bidding_stats` was orphaned by REH-27 (writer + reader
@@ -1617,3 +1631,101 @@ class BidLearner:
             "recommended_overbid_pct": round(recommended, 1),
             "reason": reason,
         }
+
+    def record_proposal(
+        self,
+        *,
+        proposal_id: str,
+        player_id: str,
+        player_name: str,
+        bid: int,
+        market_value: int,
+        message: str,
+    ) -> None:
+        """Persist a proposal awaiting approval."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO trade_proposals "
+                "(proposal_id, player_id, player_name, bid, market_value, message, "
+                " status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    proposal_id,
+                    player_id,
+                    player_name,
+                    int(bid),
+                    int(market_value),
+                    message,
+                    datetime.now().timestamp(),
+                ),
+            )
+
+    def get_proposal(self, proposal_id: str) -> dict | None:
+        """One proposal by id, or None."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM trade_proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_proposal(self, proposal_id: str, status: str) -> bool:
+        """Move a proposal out of 'pending'. Returns False if it already left.
+
+        The WHERE clause is the idempotency guarantee: Telegram retries
+        callbacks, and a second tap must not buy the player twice.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE trade_proposals SET status = ? "
+                "WHERE proposal_id = ? AND status = 'pending'",
+                (status, proposal_id),
+            )
+            return cur.rowcount > 0
+
+    def set_proposal_status(self, proposal_id: str, status: str) -> None:
+        """Set a status unconditionally.
+
+        Distinct from ``mark_proposal``, which only moves a row OUT of
+        'pending' and is the replay lock. Once a callback has claimed a
+        proposal it owns it, and the follow-up transitions to 'executed' or
+        'failed' must not be blocked by that guard.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE trade_proposals SET status = ? WHERE proposal_id = ?",
+                (status, proposal_id),
+            )
+
+    def proposals_for_player(self, player_id: str) -> list[dict]:
+        """Every proposal ever made for this player, newest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trade_proposals WHERE player_id = ? ORDER BY created_at DESC",
+                (str(player_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def proposals_since(self, since_ts: float) -> list[dict]:
+        """Every proposal created at or after ``since_ts``, oldest first.
+
+        The daily summary uses this to report what happened to proposals —
+        without it an approved purchase and a gate-refused one both vanish,
+        since the session's own results only cover autonomous trades.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trade_proposals WHERE created_at >= ? ORDER BY created_at",
+                (float(since_ts),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def pending_proposals(self) -> list[dict]:
+        """All proposals still awaiting a decision, oldest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trade_proposals WHERE status = 'pending' " "ORDER BY created_at"
+            ).fetchall()
+        return [dict(r) for r in rows]

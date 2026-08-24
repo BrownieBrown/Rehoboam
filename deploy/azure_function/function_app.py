@@ -3,6 +3,9 @@
 import logging
 import os
 import sys
+import time
+from collections.abc import Collection
+from datetime import datetime, timezone
 from pathlib import Path
 
 import azure.functions as func
@@ -24,8 +27,15 @@ def _blob_settings() -> tuple[str | None, str]:
     )
 
 
-def download_databases():
-    """Download learning databases from Azure Blob Storage."""
+def download_databases(only: Collection[str] | None = None):
+    """Download learning databases from Azure Blob Storage.
+
+    ``only`` restricts the sync to a subset of the DB files (default: all of
+    them, matching prior behaviour — ``trading_session`` relies on this).
+    The telegram approval trigger passes ``only={"bid_learning.db"}``: that's
+    the only file it reads or writes, and pulling the rest (player_history.db
+    alone is 20MB+) on every callback risks a Telegram webhook timeout.
+    """
     from rehoboam.azure_blob import fetch_state
 
     conn_str, container = _blob_settings()
@@ -33,7 +43,7 @@ def download_databases():
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB download")
         return
 
-    results = fetch_state(conn_str, container, LOGS_DIR, backup=False, dry_run=False)
+    results = fetch_state(conn_str, container, LOGS_DIR, backup=False, dry_run=False, only=only)
     for r in results:
         if r.status == "downloaded":
             logging.info(f"Downloaded {r.db_file} ({r.blob.size} bytes)")
@@ -43,21 +53,100 @@ def download_databases():
             logging.warning(f"Could not download {r.db_file}: {r.error}")
 
 
-def upload_databases():
-    """Upload learning databases to Azure Blob Storage."""
-    from rehoboam.azure_blob import push_state
+def upload_databases(only: Collection[str] | None = None) -> bool:
+    """Upload learning databases to Azure Blob Storage.
+
+    ``only`` restricts the sync to a subset of the DB files (default: all of
+    them, matching prior behaviour — ``trading_session`` relies on this). See
+    ``download_databases`` for why the telegram approval trigger passes
+    ``only={"bid_learning.db"}``.
+
+    Returns whether ``bid_learning.db`` specifically reached the blob. The
+    timer trigger ignores this return value (backward compatible); the
+    telegram approval trigger uses it because a caller that already spent
+    money on the strength of a claim written to that file needs to know a
+    per-file upload failure doesn't raise — ``push_state`` just records
+    ``status="error"`` and returns normally.
+    """
+    from rehoboam.azure_blob import learning_db_synced, push_state
 
     conn_str, container = _blob_settings()
     if not conn_str:
         logging.info("No AZURE_STORAGE_CONNECTION_STRING - skipping DB upload")
-        return
+        return True
 
-    results = push_state(conn_str, container, LOGS_DIR, dry_run=False)
+    results = push_state(conn_str, container, LOGS_DIR, dry_run=False, only=only)
     for r in results:
         if r.status == "uploaded":
             logging.info(f"Uploaded {r.db_file} ({r.local_size} bytes)")
         elif r.status == "error":
             logging.warning(f"Could not upload {r.db_file}: {r.error}")
+    return learning_db_synced(results)
+
+
+def _send_daily_summary(api, league, settings, session):
+    """Email the once-a-day picture. Best-effort: never raises into the timer."""
+    from rehoboam.bid_learner import BidLearner
+    from rehoboam.notify.email import send_email
+    from rehoboam.notify.render import render_daily_summary
+
+    squad = api.get_squad(league)
+    budget = int(api.get_team_info(league).get("budget", 0))
+    market = sorted(
+        api.get_market(league),
+        key=lambda p: getattr(p, "average_points", 0.0) or 0.0,
+        reverse=True,
+    )[:10]
+
+    learner = BidLearner()
+    pending = [(p["player_name"], int(p["bid"])) for p in learner.pending_proposals()]
+
+    executed = [
+        f"{r.action} {r.player_name} for EUR {r.price:,}"
+        for r in (session.profit_trades + session.lineup_trades)
+        if r.success
+    ]
+
+    # A proposal Marco approved is executed by the webhook, in a different
+    # invocation entirely — it appears in no session's results. Without this
+    # the email would never mention a EUR 32M purchase he authorised, nor a
+    # proposal the safety gate refused after he tapped approve.
+    resolved = [
+        p for p in learner.proposals_since(time.time() - 48 * 3600) if p["status"] != "pending"
+    ]
+    executed += [
+        f"APPROVED {p['player_name']} for EUR {int(p['bid']):,}"
+        for p in resolved
+        if p["status"] == "executed"
+    ]
+    blocked = list(session.errors) + [
+        f"proposal for {p['player_name']} ended as {p['status']}"
+        for p in resolved
+        if p["status"] in {"failed", "rejected"}
+    ]
+
+    body = render_daily_summary(
+        lineup=session.lineup,
+        squad_size=len(squad),
+        budget=budget,
+        market=[
+            (p.last_name, int(p.market_value), float(getattr(p, "average_points", 0.0) or 0.0))
+            for p in market
+        ],
+        pending=pending,
+        executed=executed,
+        rejections=blocked,
+    )
+    send_email(
+        host=settings.smtp_host,
+        port=settings.smtp_port,
+        user=settings.smtp_user,
+        password=settings.smtp_password,
+        sender=settings.smtp_user,
+        recipient=settings.alert_email_to,
+        subject=f"Rehoboam daily — {len(pending)} awaiting approval",
+        body=body,
+    )
 
 
 # Timer trigger: runs 2x daily at 08:00 and 20:00 UTC
@@ -135,6 +224,14 @@ def trading_session(timer: func.TimerRequest):
         # Upload databases back to blob storage
         upload_databases()
 
+        # Once-a-day owner summary — only the morning run emails, so the
+        # inbox gets one message per day instead of two.
+        if datetime.now(tz=timezone.utc).hour < 12:
+            try:
+                _send_daily_summary(api, league, settings, session)
+            except Exception:
+                logging.warning("daily summary failed", exc_info=True)
+
         mode = "DRY RUN" if dry_run else "LIVE"
         profit_ok = len([r for r in session.profit_trades if r.success])
         lineup_ok = len([r for r in session.lineup_trades if r.success])
@@ -160,3 +257,92 @@ def trading_session(timer: func.TimerRequest):
 
     except Exception as e:
         logging.error(f"Trading session failed: {e}", exc_info=True)
+
+
+_APPROVAL_DB_FILES = {"bid_learning.db"}  # the only DB the approval path reads or writes
+
+
+@app.route(route="telegram", auth_level=func.AuthLevel.FUNCTION)
+def telegram_approval(req: func.HttpRequest) -> func.HttpResponse:
+    """Telegram approval callbacks. Public endpoint — see notify/approval.py."""
+    import json
+
+    from rehoboam.api import KickbaseAPI
+    from rehoboam.bid_learner import BidLearner
+    from rehoboam.config import get_settings
+    from rehoboam.notify.approval import authorize, build_callback_response, handle_callback
+
+    os.chdir(TEMP_DIR)
+    os.makedirs(f"{TEMP_DIR}/logs", exist_ok=True)
+
+    try:
+        body = req.get_json()
+    except Exception:
+        logging.warning("telegram approval: unparseable request body")
+        body = {}
+
+    def _respond(text: str) -> func.HttpResponse:
+        logging.info("telegram approval: %s", text)
+        return func.HttpResponse(
+            json.dumps(build_callback_response(body, text)), mimetype="application/json"
+        )
+
+    # Authenticate before spending anything: a forged/unauthenticated caller
+    # must not cost a blob round trip or a Kickbase login. get_settings() is
+    # local/cheap; download_databases() and api.login() are not. This must
+    # still return 200 (Telegram retries on anything else) even if
+    # get_settings() itself blows up.
+    try:
+        settings = get_settings()
+    except Exception:
+        logging.exception("telegram approval: could not load settings")
+        return _respond("Something went wrong — check the logs.")
+
+    secret_header = req.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if not authorize(secret_header, settings.telegram_webhook_secret):
+        logging.warning("telegram approval: unauthorized callback rejected before any work")
+        return _respond("Unauthorized.")
+
+    reply = "Something went wrong — check the logs."
+    downloaded = False
+    try:
+        # Only bid_learning.db is read/written by this path — syncing the
+        # rest (player_history.db alone is 20MB+) on every callback risks
+        # exceeding Telegram's webhook timeout and triggering a retry.
+        download_databases(only=_APPROVAL_DB_FILES)
+        downloaded = True
+
+        api = KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
+        api.login()
+
+        league_index = int(os.getenv("LEAGUE_INDEX", "0"))
+        leagues = api.get_leagues()
+        if not leagues:
+            logging.error("telegram approval: no leagues found")
+            reply = "No leagues found."
+        else:
+            league = leagues[league_index]
+            reply = handle_callback(
+                body,
+                secret_header,
+                settings=settings,
+                learner=BidLearner(),
+                api=api,
+                league=league,
+            )
+    except Exception:
+        logging.exception("telegram approval: handler raised")
+    finally:
+        if not downloaded:
+            # Never push a db we failed to pull: BidLearner would have created
+            # an empty one, and uploading it would erase the real state.
+            logging.error("telegram approval: skipping upload, download failed")
+        else:
+            try:
+                if not upload_databases(only=_APPROVAL_DB_FILES):
+                    reply = "NOT SAVED - do not tap again. " + reply
+            except Exception:
+                logging.exception("telegram approval: upload failed after handling")
+                reply = "NOT SAVED - do not tap again. " + reply
+
+    return _respond(reply)
