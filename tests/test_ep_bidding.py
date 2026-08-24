@@ -431,3 +431,49 @@ class TestAggressiveCompetitorsHelper:
             conn.commit()
 
         assert learner.has_aggressive_competitors() is True
+
+
+class TestAnExpensivePlayerStillGetsHisPremium:
+    """The EP-proportional cap must not strip the overbid off a must-have.
+
+    Kimmich, 2026-08-24: gain +88.2 cleared BID_FULL_COMMIT_GAIN so the ramp
+    returned its maximum 0.8 — but 0.8 x EUR 62.2M is EUR 49.8M, BELOW his
+    EUR 59.8M asking price. Flooring the ceiling at the asking price alone left
+    no room for a premium, so the only thing lifting the bid was the
+    market-value floor: a 1% bid on our single most-wanted player, which any
+    rival beats with 2%.
+    """
+
+    def _bid(self, asking, budget, gain=88.2):
+        from rehoboam.bidding_strategy import SmartBidding
+
+        return (
+            SmartBidding()
+            .calculate_ep_bid(
+                asking_price=asking,
+                market_value=asking,
+                expected_points=120.0,
+                marginal_ep_gain=gain,
+                confidence=0.70,
+                current_budget=budget,
+                player_id="1685",
+            )
+            .recommended_bid
+        )
+
+    def test_a_must_have_priced_above_the_ep_cap_still_bids_a_premium(self):
+        bid = self._bid(asking=59_833_537, budget=62_217_522)
+        assert bid > int(59_833_537 * 1.01), "stuck on the market-value floor"
+
+    def test_the_premium_is_still_capped_by_the_budget(self):
+        budget = 62_217_522
+        assert self._bid(asking=59_833_537, budget=budget) <= budget
+
+    def test_a_cheap_player_is_unaffected(self):
+        """Only players expensive relative to the budget were being squeezed."""
+        cheap = self._bid(asking=4_177_182, budget=62_217_522, gain=30.4)
+        assert cheap > int(4_177_182 * 1.05)
+
+    def test_an_unaffordable_player_is_still_refused(self):
+        """The budget ceiling remains a hard limit, not a suggestion."""
+        assert self._bid(asking=90_000_000, budget=62_217_522) == 0

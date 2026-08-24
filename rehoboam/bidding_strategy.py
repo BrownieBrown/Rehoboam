@@ -413,8 +413,22 @@ class SmartBidding:
         recommended_bid = asking_price + overbid_amount
 
         # EP-proportional max: floor at asking_price so we never refuse an
-        # affordable player just because their price exceeds the fraction threshold.
-        ep_max_bid = max(ep_max_bid, asking_price)
+        # affordable player just because their price exceeds the fraction
+        # threshold — and include the premium, or the floor silently strips it.
+        #
+        # Kimmich, 2026-08-24: gain +88.2 cleared BID_FULL_COMMIT_GAIN so the
+        # ramp returned its maximum 0.8, but 0.8 x EUR 62.2M = EUR 49.8M sits
+        # BELOW his EUR 59.8M asking price. Flooring at the asking price alone
+        # left no overbid room at all, so the only thing lifting the bid was the
+        # market-value floor: our single most-wanted player, tier must_have, got
+        # a 1% bid that any rival beats with 2%. The more a player is worth to
+        # us relative to the budget, the weaker the bid became — the reverse of
+        # what the tiers exist to express.
+        #
+        # The fraction decides how much of the war chest a gain justifies, and
+        # `budget_ceiling` below still caps the total. It should not also decide
+        # whether we may pay a premium on a player we have already committed to.
+        ep_max_bid = max(ep_max_bid, asking_price + overbid_amount)
 
         # Hard cap at EP-proportional max and hard budget ceiling
         recommended_bid = min(recommended_bid, ep_max_bid, budget_ceiling)
