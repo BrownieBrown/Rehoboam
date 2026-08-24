@@ -42,10 +42,22 @@ source_env() {
   fi
 }
 
-# Optional notification channels. Absent means the channel stays disabled —
-# the bot keeps trading, it just cannot tell anyone about it. Passed through
-# to Bicep, which only creates a Key Vault secret when the value is non-empty.
-notify_params() {
+# Everything the Bicep template needs beyond the Kickbase credentials.
+#
+# The notification channels are optional: absent means the channel stays
+# disabled — the bot keeps trading, it just cannot tell anyone about it. Bicep
+# only creates a Key Vault secret when the value is non-empty.
+#
+# DEPLOY_DRY_RUN and DEPLOY_AGGRESSIVE are NOT optional and have no default. App
+# settings are a declarative resource, so every infra deploy replaces the whole
+# collection; a default would silently overwrite whatever production is running.
+#
+# They are deliberately NOT the plain DRY_RUN/AGGRESSIVE that the CLI reads.
+# Those two mean the opposite thing locally: DRY_RUN=true is the safe default
+# for running `rehoboam auto` by hand, and is exactly the value that must NOT
+# reach the deployed bot. Sharing one variable would make a safe local setting
+# silently disable production.
+deploy_params() {
   echo "telegramBotToken=${TELEGRAM_BOT_TOKEN:-}" \
        "telegramChatId=${TELEGRAM_CHAT_ID:-}" \
        "telegramWebhookSecret=${TELEGRAM_WEBHOOK_SECRET:-}" \
@@ -53,13 +65,22 @@ notify_params() {
        "smtpPort=${SMTP_PORT:-587}" \
        "smtpUser=${SMTP_USER:-}" \
        "smtpPassword=${SMTP_PASSWORD:-}" \
-       "alertEmailTo=${ALERT_EMAIL_TO:-}"
+       "alertEmailTo=${ALERT_EMAIL_TO:-}" \
+       "dryRun=${DEPLOY_DRY_RUN}" \
+       "aggressiveMode=${DEPLOY_AGGRESSIVE}"
 }
 
 deploy_infra() {
   source_env
   : "${KICKBASE_EMAIL:?must be set in .env}"
   : "${KICKBASE_PASSWORD:?must be set in .env}"
+  # Required, with no default. An infra deploy rewrites the whole app-settings
+  # collection, so an unset value would silently reset the live bot to
+  # simulation — it keeps running and reporting success while placing no bids.
+  : "${DEPLOY_DRY_RUN:?must be set in .env — an infra deploy overwrites the live value}"
+  : "${DEPLOY_AGGRESSIVE:?must be set in .env — an infra deploy overwrites the live value}"
+
+  echo "==> Deploying with DRY_RUN=$DEPLOY_DRY_RUN AGGRESSIVE=$DEPLOY_AGGRESSIVE"
 
   if [[ "$SUBACTION" == "--what-if" ]]; then
     echo "==> Running Bicep what-if (preview only)..."
@@ -68,7 +89,7 @@ deploy_infra() {
       --template-file "$BICEP_TEMPLATE" \
       --parameters "$BICEP_PARAMS" \
       --parameters kickbaseEmail="$KICKBASE_EMAIL" kickbasePassword="$KICKBASE_PASSWORD" \
-      --parameters $(notify_params)
+      --parameters $(deploy_params)
     return
   fi
 
@@ -81,7 +102,7 @@ deploy_infra() {
     --template-file "$BICEP_TEMPLATE" \
     --parameters "$BICEP_PARAMS" \
     --parameters kickbaseEmail="$KICKBASE_EMAIL" kickbasePassword="$KICKBASE_PASSWORD" \
-    --parameters $(notify_params) \
+    --parameters $(deploy_params) \
     --output table
 }
 
