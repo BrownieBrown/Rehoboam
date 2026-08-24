@@ -801,6 +801,8 @@ class Trader:
             min_profit_pct=8.0,
             max_hold_days=7,
             max_risk_score=60.0,
+            max_overpay_pct=self.settings.max_flip_overpay_pct,
+            require_rising_trend=self.settings.flip_buys_require_rising_trend,
         )
 
         max_opps = 5 if flip_budget < current_budget else 10

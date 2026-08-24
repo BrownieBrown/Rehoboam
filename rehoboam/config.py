@@ -189,6 +189,33 @@ class Settings(BaseSettings):
             "least mid-table'. Pre-season estimate awaiting live-market validation."
         ),
     )
+    max_flip_overpay_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Most a flip buy may pay above the player's market value, as a "
+            "percentage. A flip is bought to be sold, so anything paid over "
+            "market value has to be earned back before the trade breaks even. "
+            "Measured over 151 real flips the strategy lost EUR 55.3M at a 28% "
+            "win rate, and the losses concentrated in the larger trades "
+            "(EUR -67.1M over the 84 flips of EUR 5M or more). Buying at or "
+            "near market value removes the part of that loss which was simply "
+            "overpaying at entry."
+        ),
+    )
+    flip_buys_require_rising_trend: bool = Field(
+        default=True,
+        description=(
+            "Only flip-buy a player whose market value is already rising. The "
+            "alternative branches were all bets on mean reversion — a stable "
+            "performer, a dip inside an uptrend, a recovery signal, or a "
+            "high-quality player more than 25% below peak. Each is a "
+            "prediction that the market is wrong, and across 151 flips those "
+            "predictions lost money. A rising trend is the one case where the "
+            "market is already moving our way and the trade needs no "
+            "contrarian call to work."
+        ),
+    )
     min_ep_upgrade_threshold: float = Field(
         default=25.0,
         description=(
