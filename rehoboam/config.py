@@ -184,12 +184,17 @@ class Settings(BaseSettings):
         ),
     )
     min_ep_upgrade_threshold: float = Field(
-        default=40.0,
+        default=25.0,
         description=(
             "Minimum MARGINAL EP gain (real points) for a market player to count as "
-            "an upgrade at all. Rounded from the p50 of 43.1 measured 2026-07-31 "
-            "over the 473-player universe against a mid-table squad. Pre-season "
-            "estimate awaiting live-market validation. Note marginal gain is "
+            "an upgrade at all. Re-derived 2026-08-24 against the live market with "
+            "the refitted scorer: p50 21.5, p70 23.9, p85 26.1, p95 88.2 over 16 "
+            "positive candidates. 25.0 sits just under p85, so roughly the top "
+            "fifth of what the market actually offers can qualify. The previous "
+            "40.0 was a pre-season estimate taken against a synthetic squad when "
+            "no purchasable listings existed; it sat ABOVE p85, so it rejected 14 "
+            "of 19 real candidates and left the squad at 11/15 with EUR 62M idle. "
+            "Note marginal gain is "
             "relative to YOUR squad: a strong squad finds fewer improvements, so "
             "this gets harder to clear as the season goes well."
         ),
