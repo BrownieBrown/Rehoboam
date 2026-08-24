@@ -89,6 +89,7 @@ def _send_daily_summary(api, league, settings, session):
     from rehoboam.bid_learner import BidLearner
     from rehoboam.notify.email import send_email
     from rehoboam.notify.render import render_daily_summary
+    from rehoboam.notify.telegram import send_message
 
     squad = api.get_squad(league)
     budget = int(api.get_team_info(league).get("budget", 0))
@@ -137,6 +138,17 @@ def _send_daily_summary(api, league, settings, session):
         executed=executed,
         rejections=blocked,
     )
+    header = f"REHOBOAM DAILY — {len(pending)} awaiting approval\n\n"
+
+    # Telegram is the primary channel: it is already configured for approvals,
+    # costs nothing, and needs no mail provider. Proton — the alternative that
+    # was considered — requires a paid plan plus a custom domain, and Proton
+    # Bridge binds to localhost, which an Azure Function can never reach.
+    if not send_message(settings.telegram_bot_token, settings.telegram_chat_id, header + body):
+        logging.warning("daily summary: telegram delivery failed or not configured")
+
+    # Email stays available for anyone who configures SMTP; absent config makes
+    # this a no-op rather than an error.
     send_email(
         host=settings.smtp_host,
         port=settings.smtp_port,

@@ -34,6 +34,35 @@ param kickbaseEmail string
 @secure()
 param kickbasePassword string
 
+@description('Telegram bot token for trade-approval messages. Empty disables Telegram entirely.')
+@secure()
+param telegramBotToken string = ''
+
+@description('Telegram chat to send trade proposals to.')
+@secure()
+param telegramChatId string = ''
+
+@description('Shared secret Telegram echoes in X-Telegram-Bot-Api-Secret-Token. The approval webhook is a public endpoint that spends money, so a callback without this header is rejected before anything is read from it.')
+@secure()
+param telegramWebhookSecret string = ''
+
+@description('SMTP host for the daily summary email. Empty disables email.')
+param smtpHost string = ''
+
+@description('SMTP port; 587 for STARTTLS.')
+param smtpPort string = '587'
+
+@description('SMTP username. Also used as the From address.')
+@secure()
+param smtpUser string = ''
+
+@description('SMTP password or app password.')
+@secure()
+param smtpPassword string = ''
+
+@description('Recipient of the daily summary email.')
+param alertEmailTo string = ''
+
 @description('League index in the Kickbase leagues list.')
 param leagueIndex string = '0'
 
@@ -143,6 +172,58 @@ resource secretKickbasePassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' =
   properties: { value: kickbasePassword }
 }
 
+// Optional secrets: created only when supplied, because Key Vault rejects an
+// empty secret value. The matching app settings are added by the same
+// condition below, so an unconfigured channel is genuinely absent rather than
+// present-but-blank.
+resource secretTelegramBotToken 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(telegramBotToken)) {
+  parent: keyVault
+  name: 'telegram-bot-token'
+  properties: { value: telegramBotToken }
+}
+
+resource secretTelegramChatId 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(telegramChatId)) {
+  parent: keyVault
+  name: 'telegram-chat-id'
+  properties: { value: telegramChatId }
+}
+
+resource secretTelegramWebhookSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(telegramWebhookSecret)) {
+  parent: keyVault
+  name: 'telegram-webhook-secret'
+  properties: { value: telegramWebhookSecret }
+}
+
+resource secretSmtpUser 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(smtpUser)) {
+  parent: keyVault
+  name: 'smtp-user'
+  properties: { value: smtpUser }
+}
+
+resource secretSmtpPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(smtpPassword)) {
+  parent: keyVault
+  name: 'smtp-password'
+  properties: { value: smtpPassword }
+}
+
+// Built from the vault URI rather than from the conditional resources above,
+// so referencing them is never evaluated when they were not created.
+var kvSecretPrefix = '${keyVault.properties.vaultUri}secrets/'
+
+var telegramSettings = empty(telegramBotToken) ? {} : {
+  TELEGRAM_BOT_TOKEN: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}telegram-bot-token)'
+  TELEGRAM_CHAT_ID: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}telegram-chat-id)'
+  TELEGRAM_WEBHOOK_SECRET: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}telegram-webhook-secret)'
+}
+
+var smtpSettings = empty(smtpHost) ? {} : {
+  SMTP_HOST: smtpHost
+  SMTP_PORT: smtpPort
+  SMTP_USER: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}smtp-user)'
+  SMTP_PASSWORD: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}smtp-password)'
+  ALERT_EMAIL_TO: alertEmailTo
+}
+
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${storageAccount.listKeys().keys[0].value}'
 
 resource secretStorageConn 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
@@ -202,7 +283,7 @@ resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
   dependsOn: [
     tradingKvAccess
   ]
-  properties: {
+  properties: union({
     AzureWebJobsStorage: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
     AZURE_STORAGE_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
     APPLICATIONINSIGHTS_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretAppInsightsConn.properties.secretUri})'
@@ -214,7 +295,7 @@ resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
     DRY_RUN: dryRun
     AGGRESSIVE: aggressiveMode
     BLOB_CONTAINER: blobContainerName
-  }
+  }, telegramSettings, smtpSettings)
 }
 
 resource externalAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
