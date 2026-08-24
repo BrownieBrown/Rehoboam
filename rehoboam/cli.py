@@ -747,6 +747,19 @@ def replay_season(
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
+    from rehoboam.scoring.v2.dataset import TRAIN_MAX_SEASON
+
+    # The replay covers 2025/26. Once that season is inside the training set,
+    # the scorer has already seen every result being replayed and the number
+    # comes back flattering. Say so loudly rather than let it be quoted as a
+    # gate for a scorer change.
+    if TRAIN_MAX_SEASON >= "2025/2026":
+        console.print(
+            "[yellow]LEAKY: the scorer is fitted through "
+            f"{TRAIN_MAX_SEASON}, which includes the replayed 2025/26 season. "
+            "This result is optimistic and is NOT a valid gate for scoring "
+            "changes — compare scorers on a held-out season instead.[/yellow]"
+        )
 
     if not corpus.exists():
         console.print(f"[red]Corpus not found: {corpus}[/red]")

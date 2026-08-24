@@ -78,22 +78,34 @@ def test_load_positions(tmp_path):
     assert load_positions(_corpus(tmp_path)) == {"1": "Midfielder"}
 
 
-def test_split_puts_2025_26_in_holdout_and_earlier_in_train():
+def test_split_trains_through_2025_26_and_holds_out_the_current_season():
+    """2025/26 validated the rebuild, then had to be folded back in.
+
+    Serving a model fitted only to 2024/25 meant every player whose record
+    began in 2025/26 had no fitted quality and fell back to a position prior.
+    """
     train, holdout = split_rows([_fr("2023/2024"), _fr("2024/2025"), _fr("2025/2026")])
-    assert [r.season for r in train] == ["2023/2024", "2024/2025"]
-    assert [r.season for r in holdout] == ["2025/2026"]
+    assert [r.season for r in train] == ["2023/2024", "2024/2025", "2025/2026"]
+    assert holdout == []
 
 
 def test_split_excludes_seasons_after_the_holdout():
-    """2026/2027 fixtures are unplayed — they belong in neither set."""
-    train, holdout = split_rows([_fr("2024/2025"), _fr("2026/2027")])
+    """Anything past the holdout belongs in neither set."""
+    train, holdout = split_rows([_fr("2024/2025"), _fr("2027/2028")])
     assert [r.season for r in train] == ["2024/2025"]
     assert holdout == []
 
 
+def test_the_current_season_is_the_holdout_not_training_data():
+    """The in-progress season must never be trained on, even once results land."""
+    train, holdout = split_rows([_fr("2025/2026"), _fr("2026/2027")])
+    assert [r.season for r in train] == ["2025/2026"]
+    assert [r.season for r in holdout] == ["2026/2027"]
+
+
 def test_split_constants_are_what_the_spec_requires():
-    assert TRAIN_MAX_SEASON == "2024/2025"
-    assert HOLDOUT_SEASON == "2025/2026"
+    assert TRAIN_MAX_SEASON == "2025/2026"
+    assert HOLDOUT_SEASON == "2026/2027"
 
 
 def test_split_never_leaks_holdout_into_train():
