@@ -1,7 +1,14 @@
-"""REH-95: `uoid` is an offer id, so it can never equal a user id.
+"""Detecting the listings we have an open bid on.
 
-`has_user_offer` compared the two, so `get_my_bids()` always returned an empty
-list and every guard built on it silently did nothing.
+`uoid` is a USER id — the manager holding the offer — confirmed against a live
+listing on 2026-08-25 while our own bid was open. REH-95 claimed it was an
+OFFER id and that the previous equality check therefore never matched; that was
+wrong, and `get_my_bids()` was working the whole time.
+
+Presence is used rather than equality because Kickbase only returns the field
+on a listing we have bid on, so the two agree, and presence survives the value
+changing shape. It also errs safe: reporting a bid we do not hold makes the bot
+more conservative, missing one would let it overspend.
 """
 
 from unittest.mock import MagicMock
@@ -34,13 +41,14 @@ class TestHasUserOffer:
     def test_a_listing_with_no_offer_id_is_not(self):
         assert _listing().has_user_offer() is False
 
-    def test_an_offer_id_that_looks_nothing_like_a_user_id_still_counts(self):
-        """The old check required uoid == user id, which never held.
+    def test_it_does_not_depend_on_the_value_matching_our_user_id(self):
+        """Presence is the signal, whatever shape the value takes.
 
-        Kickbase only returns `uoid` on a listing we have bid on, and it is
-        the value `cancel_offer` deletes at /market/{pid}/offers/{offer_id}.
+        Today `uoid` holds our user id. Testing presence rather than equality
+        means this keeps working if that ever changes, without pretending to
+        know which it is.
         """
-        assert _listing(uoid="9f3c-not-a-user-id").has_user_offer() is True
+        assert _listing(uoid="9f3c-some-other-shape").has_user_offer() is True
 
 
 class TestGetMyBids:

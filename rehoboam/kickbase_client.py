@@ -65,7 +65,9 @@ class MarketPlayer:
     seller_user_id: str | None = None  # None if KICKBASE is selling
     offer_count: int = 0  # Number of offers on player
     user_offer_price: int | None = None  # Your bid amount if you made one
-    user_offer_id: str | None = None  # Your offer ID (needed to cancel bid)
+    user_offer_id: str | None = None  # `uoid`: USER id of the offer holder,
+    # present only on listings we have bid on. Not an offer id, despite
+    # cancel_offer passing it as {offer_id} — see has_user_offer (REH-95).
     listed_at: str | None = None  # When player was listed (ISO datetime)
     offers: list = None  # List of all offers
 
@@ -102,19 +104,26 @@ class MarketPlayer:
     def has_user_offer(self) -> bool:
         """Do WE currently hold an offer on this player?
 
-        ``uoid`` is an OFFER id, not a user id: it is the path segment
-        ``cancel_offer`` deletes at
-        ``/market/{player_id}/offers/{offer_id}``. The previous version
-        compared it against the requesting user's id, which can never match,
-        so ``get_my_bids`` always returned an empty list. Everything that
-        depends on it silently did nothing — ``pending_bid_total`` never
-        reduced the flip budget, ``available_slots`` never counted an open
-        bid, and the "already bidding on this player" guard never fired.
+        ``uoid`` is a USER id — the id of the manager holding the offer.
+        Observed on a real listing 2026-08-25, with our own bid live::
 
-        Kickbase only includes the field on a listing WE have bid on, so its
-        presence is the signal. Note this errs safe in a way the old check did
-        not: over-reporting an open bid makes the bot more conservative about
-        budget and slots, while under-reporting let it overspend.
+            "uoid": "3616202",                        # our user id
+            "ofs": [{"u": "3616202", "uoid": "3616202", "uop": 60447397}]
+
+        REH-95 claimed the opposite: that ``uoid`` was an OFFER id, inferred
+        from ``cancel_offer`` passing it as ``{offer_id}`` in the delete path
+        and from a stale comment on this dataclass. That inference was wrong.
+        The equality check it replaced worked correctly, ``get_my_bids`` was
+        never returning an empty list, and the guards built on it —
+        ``pending_bid_total``, ``available_slots``, the already-bidding check —
+        were all functioning. Cancellation also works passing this value, so
+        that path was never broken either.
+
+        Presence is kept over equality because Kickbase only includes the field
+        on a listing we have bid on, so the two agree, and presence keeps
+        working if the value ever changes shape. It also errs safe: reporting
+        an open bid we do not have makes the bot more conservative about budget
+        and slots, whereas missing one would let it overspend.
         """
         return self.user_offer_id is not None
 
