@@ -25,6 +25,7 @@ from rehoboam.replay.market import ReplayMarket
 from rehoboam.replay.state import initial_state
 from rehoboam.scoring.v2.adapter import compose_ep, prev_status_from_history
 from rehoboam.scoring.v2.coefficients import load_coefficients
+from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier
 
 SEASON = "2025/2026"
 LEAGUE_ID = "1933872"
@@ -421,11 +422,25 @@ def make_ep_bid_fn(
     def _default(name: str) -> float:
         return float(Settings.model_fields[name].default)
 
+    # REH-99: the same ceiling the live bidder and the safety gate use. Built
+    # from the shipped defaults, like the tiers above — if the replay bid
+    # differently from live it would stop measuring the bot that actually runs.
+    ceiling_policy = BidCeilingPolicy(
+        floor_eur=int(Settings.model_fields["overbid_floor_eur"].default),
+        tier_pcts={
+            Tier.MARGINAL: _default("overbid_pct_marginal"),
+            Tier.SOLID: _default("overbid_pct_solid"),
+            Tier.STRONG: _default("overbid_pct_strong"),
+            Tier.MUST_HAVE: _default("overbid_pct_must_have"),
+        },
+    )
+
     bidding = SmartBidding(
         tier_must_have=_default("bid_tier_must_have"),
         tier_strong_upgrade=_default("bid_tier_strong_upgrade"),
         tier_solid_upgrade=_default("bid_tier_solid_upgrade"),
         full_commit_gain=_default("bid_full_commit_gain"),
+        ceiling_policy=ceiling_policy,
     )
 
     def bid(player_id: str, price: int, at: float, gain: float, budget: int) -> int:

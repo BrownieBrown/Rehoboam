@@ -548,6 +548,15 @@ class BidLearner:
                 )
                 """
             )
+            # REH-99: approval recomputes the bid ceiling against the *live*
+            # market value, which needs the tier the bid was sized under. Added
+            # separately so an existing prod table gains it in place; rows
+            # written before this land with tier NULL and fall back to the
+            # tightest tier, which refuses rather than over-permits.
+            try:
+                conn.execute("ALTER TABLE trade_proposals ADD COLUMN tier TEXT")
+            except sqlite3.OperationalError:
+                pass  # already present
 
             # REH-22: drop legacy tables that no live code references.
             # `position_bidding_stats` was orphaned by REH-27 (writer + reader
@@ -1657,13 +1666,19 @@ class BidLearner:
         bid: int,
         market_value: int,
         message: str,
+        tier: str | None = None,
     ) -> None:
-        """Persist a proposal awaiting approval."""
+        """Persist a proposal awaiting approval.
+
+        ``tier`` is the marginal-EP band the bid was sized under. Approval
+        needs it to recompute the ceiling against the live market value
+        (REH-99); None falls back to the tightest tier.
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO trade_proposals "
                 "(proposal_id, player_id, player_name, bid, market_value, message, "
-                " status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+                " status, created_at, tier) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
                 (
                     proposal_id,
                     player_id,
@@ -1672,6 +1687,7 @@ class BidLearner:
                     int(market_value),
                     message,
                     datetime.now().timestamp(),
+                    tier,
                 ),
             )
 

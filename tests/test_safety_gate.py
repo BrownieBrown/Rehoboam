@@ -4,7 +4,16 @@ A public webhook will call this before spending money, so it is written and
 tested before anything can reach it.
 """
 
+from rehoboam.config import Settings
+from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier
 from rehoboam.services.safety_gate import check_buy
+
+
+def _policy() -> BidCeilingPolicy:
+    """The shipped default policy. REH-99 replaced the flat 8% with a
+    tier table plus an absolute floor, so the marginal tier keeps 8% but a
+    cheap player also gets `overbid_floor_eur` of headroom."""
+    return Settings(kickbase_email="test@example.com", kickbase_password="x").bid_ceiling_policy()
 
 
 def _ok_kwargs(**over):
@@ -15,7 +24,8 @@ def _ok_kwargs(**over):
         "current_budget": 95_317_114,
         "free_slots": 2,
         "known_player_ids": {"6080", "859"},
-        "max_overbid_pct": 8.0,
+        "tier": Tier.MARGINAL,
+        "ceiling_policy": _policy(),
     }
     base.update(over)
     return base
@@ -42,8 +52,11 @@ class TestBudgetSafety:
 
 
 class TestOverbidCap:
+    """At this market value the marginal tier's 8% dominates `overbid_floor_eur`,
+    so the ceiling is unchanged by REH-99: 32,285,629 * 1.08 = 34,868,479."""
+
     def test_a_bid_above_the_cap_is_refused(self):
-        """32,285,629 * 1.08 = 34,868,479. A 38.3M bid is 18.7% over."""
+        """A 38.3M bid is 18.7% over."""
         r = check_buy(**_ok_kwargs(bid=38_336_318))
         assert r.ok is False
         assert any("overbid" in x.lower() for x in r.reasons)
@@ -121,7 +134,8 @@ class TestClubLimit:
             "current_budget": 50_000_000,
             "free_slots": 4,
             "known_player_ids": ["1"],
-            "max_overbid_pct": 8.0,
+            "tier": Tier.MARGINAL,
+            "ceiling_policy": _policy(),
         }
         base.update(over)
         return base

@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from rehoboam.config import MAX_PLAYERS_PER_CLUB
+from rehoboam.services.bid_ceiling import FALLBACK_TIER, BidCeilingPolicy, Tier
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,8 @@ def check_buy(
     current_budget: int,
     free_slots: int,
     known_player_ids: Iterable[str],
-    max_overbid_pct: float,
+    tier: Tier | str | None,
+    ceiling_policy: BidCeilingPolicy,
     club_id: str | None = None,
     squad_club_counts: Mapping[str, int] | None = None,
     max_players_per_club: int = MAX_PLAYERS_PER_CLUB,
@@ -59,12 +61,18 @@ def check_buy(
     if market_value <= 0:
         reasons.append(f"invalid market value: EUR {market_value:,} (must be positive)")
     else:
-        cap = market_value * (1.0 + max_overbid_pct / 100.0)
+        # The ceiling is computed here rather than accepted as a number, so the
+        # last check before real money never trusts a caller's arithmetic. It
+        # is the same `max_allowed_bid` the bidder sized against, which is what
+        # stops a proposal being offered and then refused (REH-99).
+        cap = ceiling_policy.max_bid(market_value, tier)
         if bid > cap:
             over = (bid / market_value - 1.0) * 100.0
+            allowed = (cap / market_value - 1.0) * 100.0
             reasons.append(
-                f"overbid {over:.1f}% exceeds the {max_overbid_pct:.1f}% cap "
-                f"(bid EUR {bid:,} vs market value EUR {market_value:,})"
+                f"overbid {over:.1f}% exceeds the {allowed:.1f}% ceiling for tier "
+                f"{Tier(tier).value if tier else FALLBACK_TIER.value} "
+                f"(bid EUR {bid:,} vs max EUR {cap:,} on market value EUR {market_value:,})"
             )
 
     if free_slots <= 0:
