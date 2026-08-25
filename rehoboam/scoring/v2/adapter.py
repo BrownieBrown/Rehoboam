@@ -33,17 +33,28 @@ from functools import lru_cache
 
 from rehoboam.scoring.models import DataQuality, PlayerData, PlayerScore
 from rehoboam.scoring.v2.availability import (
+    DEFAULT_STALE_SHRINKAGE_K,
     DEFAULT_UNCERTAIN_START_MULTIPLIER,
     OUT_STATUSES,
     UNCERTAIN_STATUSES,
     AvailabilityModel,
     apply_availability_override,
+    apply_stale_history_prior,
 )
 from rehoboam.scoring.v2.coefficients import load_coefficients
 from rehoboam.scoring.v2.features import PLAYED_STATUSES
 from rehoboam.scoring.v2.rate import RateModel
 
 DGW_MULTIPLIER = 1.8
+
+# Statuses that describe a match the player was actually assessed for. Status 0
+# means the fixture has not been played, so it is not evidence either way.
+PLAYED_OR_ABSENT_STATUSES: frozenset[int] = frozenset({1, 3, 4, 5})
+# Of those, the ones where he was on the pitch.
+PLAYED_STATUSES_ON_PITCH: frozenset[int] = frozenset({3, 5})
+
+# Fewest recorded matchdays for a season to count as availability evidence.
+MIN_SEASON_MATCHDAYS = 5
 
 
 @lru_cache(maxsize=1)
@@ -131,6 +142,48 @@ def last_played_status(
     )
 
 
+def recent_played_share(performance: dict | None) -> tuple[int, int] | None:
+    """``(matchdays on the pitch, matchdays recorded)`` from the latest season.
+
+    Feeds ``apply_stale_history_prior`` when the last-played status is too old
+    to use (REH-98). Reads the ``performance`` dict the scorer has already
+    fetched, so it costs no extra HTTP traffic.
+
+    The denominator is matchdays *recorded*, not appearances: a matchday spent
+    as an unused sub (status 4) or out of the squad (status 1) is exactly the
+    evidence this exists to capture. Fixtures not yet played carry status 0 and
+    are excluded — they describe a match that has not happened, not a state the
+    player was in, the same rule ``prev_status_from_history`` applies. That
+    exclusion is what lets a not-yet-started season fall through to the last
+    real one during the pre-season.
+
+    **Most recent qualifying season only.** A blend of the last two smears the
+    signal this exists to read: a player whose role is changing. Uzun finished
+    2025/26 with four consecutive starts after half a season out of the squad.
+
+    **2. Bundesliga counts.** REH-90 establishes that 2.BL scoring *rate* must
+    not be read as Bundesliga rate, but availability is a different quantity —
+    a secure role travels across divisions in a way points-per-match does not.
+
+    Returns None when no season qualifies, which the caller treats as "no
+    evidence" and leaves the marginal prior untouched.
+    """
+    if not performance:
+        return None
+
+    for season in reversed(performance.get("it") or []):
+        recorded = [
+            match.get("st")
+            for match in season.get("ph") or []
+            if match.get("st") in PLAYED_OR_ABSENT_STATUSES
+        ]
+        if len(recorded) < MIN_SEASON_MATCHDAYS:
+            continue
+        return sum(1 for st in recorded if st in PLAYED_STATUSES_ON_PITCH), len(recorded)
+
+    return None
+
+
 def has_top_flight_history(player_details: dict | None) -> bool:
     """Has this player ever recorded Bundesliga scoring?
 
@@ -161,13 +214,37 @@ def availability_probs(
     *,
     live_status: int | None = None,
     uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
+    played_history: tuple[int, int] | None = None,
+    stale_shrinkage_k: float = DEFAULT_STALE_SHRINKAGE_K,
 ) -> dict[int, float]:
     """Fitted transition probabilities with any serving-time override applied.
 
     One implementation, so the composed EP and the note reporting P(start) can
     never disagree about what the model believes.
+
+    ``played_history`` is the player's own ``(played, matchdays)`` record and is
+    consulted **only when ``prev_status`` is None** (REH-98). A fresh in-season
+    status is real per-player evidence and outranks a season-long average; this
+    path exists for the window where that evidence has aged out and every
+    player would otherwise share the league marginal.
+
+    Order is deliberate: the stale prior runs first, the live injury override
+    second, so a player flagged out is out whatever last season says.
     """
     probs = availability.predict(prev_status)
+
+    if prev_status is None and played_history is not None:
+        played, matchdays = played_history
+        probs = apply_stale_history_prior(
+            probs,
+            played=played,
+            matchdays=matchdays,
+            prior_played_share=sum(
+                availability.prior.get(s, 0.0) for s in PLAYED_STATUSES_ON_PITCH
+            ),
+            shrinkage_k=stale_shrinkage_k,
+        )
+
     return apply_availability_override(
         probs, live_status, uncertain_start_multiplier=uncertain_start_multiplier
     )
@@ -182,6 +259,8 @@ def compose_ep(
     *,
     live_status: int | None = None,
     uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
+    played_history: tuple[int, int] | None = None,
+    stale_shrinkage_k: float = DEFAULT_STALE_SHRINKAGE_K,
 ) -> float:
     """Probability-weighted expected points, in real Kickbase points.
 
@@ -195,6 +274,8 @@ def compose_ep(
         availability,
         live_status=live_status,
         uncertain_start_multiplier=uncertain_start_multiplier,
+        played_history=played_history,
+        stale_shrinkage_k=stale_shrinkage_k,
     )
     return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
@@ -204,13 +285,20 @@ def score_player_v2(
     *,
     max_status_age_days: float | None = None,
     uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
+    stale_shrinkage_k: float = DEFAULT_STALE_SHRINKAGE_K,
+    now: datetime | None = None,
 ) -> PlayerScore:
     """Score a player with the fitted v2 models. Pure — no I/O beyond cached load."""
     availability, rate, _meta = _models()
     player = data.player
     position = player.position or None
 
-    prev_status = last_played_status(data.performance, max_age_days=max_status_age_days)
+    prev_status = last_played_status(data.performance, now=now, max_age_days=max_status_age_days)
+
+    # REH-98: with no usable status the fitted model returns the league
+    # marginal, which pre-season is identical for every player in the game.
+    # The player's own record is the only availability signal left.
+    played_history = recent_played_share(data.performance) if prev_status is None else None
 
     # Withhold the fitted quality coefficient from players whose fitted record
     # is not top-flight: `rate.predict` then falls back to the position prior,
@@ -232,6 +320,8 @@ def score_player_v2(
         rate,
         live_status=live_status,
         uncertain_start_multiplier=uncertain_start_multiplier,
+        played_history=played_history,
+        stale_shrinkage_k=stale_shrinkage_k,
     )
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
@@ -242,6 +332,8 @@ def score_player_v2(
         availability,
         live_status=live_status,
         uncertain_start_multiplier=uncertain_start_multiplier,
+        played_history=played_history,
+        stale_shrinkage_k=stale_shrinkage_k,
     )
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "

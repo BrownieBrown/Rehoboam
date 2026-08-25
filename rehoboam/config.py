@@ -272,6 +272,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    stale_availability_shrinkage_k: float = Field(
+        default=20.0,
+        description=(
+            "Pseudo-count pulling a player's own played share toward the league "
+            "prior when his last-played status is too old to use (REH-98). Once "
+            "`max_status_age_days` discards the status, the fitted model returns "
+            "the marginal prior — pre-season that is P(start)=56% for every "
+            "player in the game, so EP carries no availability signal at all. "
+            "This reweights it by the player's own share of matchdays on the "
+            "pitch, downward only. Mirrors the fitted `availability_k`; raise it "
+            "to weaken the correction, set it very high to disable."
+        ),
+    )
+
     min_days_to_match_for_starter_swap: int = Field(
         default=3,
         description=(
