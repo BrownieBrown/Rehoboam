@@ -177,7 +177,9 @@ class SmartBidding:
         tier_strong_upgrade: float = TIER_STRONG_UPGRADE,
         tier_solid_upgrade: float = TIER_SOLID_UPGRADE,
         full_commit_gain: float = BID_FULL_COMMIT_GAIN,  # gain earning max budget share
+        ceiling_policy=None,  # REH-99: the ceiling the safety gate enforces
     ):
+        self.ceiling_policy = ceiling_policy
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
         self.high_value_threshold = high_value_threshold
@@ -438,6 +440,14 @@ class SmartBidding:
         market_value_floor = int(market_value * 1.01)
         if recommended_bid < market_value_floor:
             recommended_bid = min(market_value_floor, budget_ceiling)
+
+        # REH-99: the ceiling the safety gate will enforce. Applied last so
+        # nothing downstream can lift the bid back over it — this is what makes
+        # a proposal shown in Telegram a proposal that can actually execute.
+        if self.ceiling_policy is not None and market_value > 0:
+            recommended_bid = min(
+                recommended_bid, self.ceiling_policy.max_bid(market_value, ep_tier)
+            )
 
         # If we still can't afford the asking price (truly out of budget), signal no-bid
         if recommended_bid < asking_price:

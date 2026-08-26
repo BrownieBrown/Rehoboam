@@ -364,6 +364,7 @@ class AutoTrader:
 
         from .notify.render import render_proposal
         from .notify.telegram import send_proposal
+        from .services.bid_ceiling import tier_for_marginal_gain
 
         proposal_id = uuid.uuid4().hex[:12]
         player = rec.player
@@ -407,6 +408,17 @@ class AutoTrader:
             )
             return True
 
+        # REH-99: record the tier the bid was sized under. Approval recomputes
+        # the ceiling from it against the *live* market value, so a proposal is
+        # re-checked as the world is at approval time rather than waved through
+        # on the stale number it was priced at.
+        tier = tier_for_marginal_gain(
+            float(rec.marginal_ep_gain),
+            must_have=self.settings.bid_tier_must_have,
+            strong=self.settings.bid_tier_strong_upgrade,
+            solid=self.settings.bid_tier_solid_upgrade,
+        )
+
         try:
             self.learner.record_proposal(
                 proposal_id=proposal_id,
@@ -415,6 +427,7 @@ class AutoTrader:
                 bid=int(rec.recommended_bid),
                 market_value=int(player.market_value),
                 message=message,
+                tier=tier.value,
             )
         except Exception:
             logger.exception("proposal: could not record %s", proposal_id)

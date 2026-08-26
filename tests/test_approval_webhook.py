@@ -33,7 +33,8 @@ def settings(monkeypatch):
     monkeypatch.setenv("KICKBASE_PASSWORD", "t")
     s = Settings()
     s.telegram_webhook_secret = "s3cret"
-    s.max_overbid_pct = 8.0
+    # REH-99 replaced the flat `max_overbid_pct` with the tier table; the
+    # shipped defaults are what approval enforces, so nothing to override.
     return s
 
 

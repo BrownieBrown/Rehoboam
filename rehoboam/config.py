@@ -340,15 +340,51 @@ class Settings(BaseSettings):
             "Pre-season estimate awaiting live-market validation."
         ),
     )
-    max_overbid_pct: float = Field(
+    # Bid ceiling (REH-99). Replaces the flat `max_overbid_pct = 8.0`, which was
+    # enforced only in safety_gate while SmartBidding sized bids against its own
+    # 20%/30% caps — so Telegram offered buys the gate then refused.
+    #
+    # 8.0 came from REH-64's read that margin beyond ~8% bought no win rate. Two
+    # things undermine it. The band table behind it is confounded: the bot bids
+    # higher precisely when a player is contested, and contested players are
+    # harder to win by construction. And the 12.2% round-trip toll it rests on is
+    # flip economics — it only bites if you sell, while a held player amortises
+    # the premium over 30+ matchdays. Measured against the 12 lost auctions
+    # carrying `winning_overbid_pct`, a flat 8% would have won none of them.
+    overbid_floor_eur: int = Field(
+        default=250_000,
+        description=(
+            "Absolute euro headroom allowed above market value regardless of "
+            "percentage, because a percentage is the wrong unit at the cheap end. "
+            "Chiarodia (market value EUR 591,389) was lost to a winner paying "
+            "EUR 156,085 over while an 8% cap held the bot to EUR 47,311 — a "
+            "EUR 109k gap against a EUR 62M budget."
+        ),
+    )
+    overbid_pct_marginal: float = Field(
         default=8.0,
         description=(
-            "Hard ceiling on how far above market value any bid may go, enforced by "
-            "services/safety_gate.check_buy. 8.0 comes from REH-64's measurement: a "
-            "3-8% overbid won 50% of auctions and an 8-15% overbid won the same 50%, "
-            "so margin beyond ~8% bought almost no win rate while the bot averaged "
-            "+12.2% and lost EUR 55.3M across 151 flips. Distinct from SmartBidding's "
-            "own internal caps — this is the outer limit nothing may cross."
+            "Overbid ceiling for a marginal candidate. Stays at REH-64's figure: "
+            "these are churn candidates that genuinely pay the 12.2% round-trip toll."
+        ),
+    )
+    overbid_pct_solid: float = Field(
+        default=15.0,
+        description="Overbid ceiling for a solid upgrade. Covers the observed Suzuki loss (+10.2%).",
+    )
+    overbid_pct_strong: float = Field(
+        default=25.0,
+        description="Overbid ceiling for a strong upgrade.",
+    )
+    overbid_pct_must_have: float = Field(
+        default=35.0,
+        description=(
+            "Overbid ceiling for a must-have. Covers the contested band actually "
+            "observed on lost auctions (Bitshiabu +32.1%, Vandevoordt +27.5%, "
+            "Honorat +33.9%, Lemperle +33.2%). Deliberately below the runaway "
+            "cheap-end winners (+102% to +385%) — that is the league overpaying, "
+            "not the bot being outbid. Rests on 12 rows: re-tune as "
+            "`auction_outcomes` fills."
         ),
     )
 
@@ -404,6 +440,25 @@ class Settings(BaseSettings):
     smtp_user: str = Field(default="", repr=False, description="SMTP username.")
     smtp_password: str = Field(default="", repr=False, description="SMTP password or app password.")
     alert_email_to: str = Field(default="", description="Recipient of the daily summary.")
+
+    def bid_ceiling_policy(self):
+        """The configured bid ceiling, as one value (REH-99).
+
+        Built here so `SmartBidding` and `safety_gate.check_buy` receive the
+        same policy object rather than each assembling their own from loose
+        fields — which is how the 8%/20% split arose in the first place.
+        """
+        from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier
+
+        return BidCeilingPolicy(
+            floor_eur=self.overbid_floor_eur,
+            tier_pcts={
+                Tier.MARGINAL: self.overbid_pct_marginal,
+                Tier.SOLID: self.overbid_pct_solid,
+                Tier.STRONG: self.overbid_pct_strong,
+                Tier.MUST_HAVE: self.overbid_pct_must_have,
+            },
+        )
 
 
 def get_settings() -> Settings:

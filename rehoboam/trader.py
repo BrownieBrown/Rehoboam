@@ -118,6 +118,10 @@ class Trader:
             tier_strong_upgrade=getattr(settings, "bid_tier_strong_upgrade", TIER_STRONG_UPGRADE),
             tier_solid_upgrade=getattr(settings, "bid_tier_solid_upgrade", TIER_SOLID_UPGRADE),
             full_commit_gain=getattr(settings, "bid_full_commit_gain", BID_FULL_COMMIT_GAIN),
+            # REH-99: the same ceiling `safety_gate.check_buy` enforces. Passing
+            # it here is the fix for the bug where the bidder used its own 20%/30%
+            # caps and Telegram offered buys the gate would then refuse.
+            ceiling_policy=settings.bid_ceiling_policy(),
         )
 
     # ------------------------------------------------------------------

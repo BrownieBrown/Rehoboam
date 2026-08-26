@@ -128,7 +128,10 @@ def handle_callback(
             current_budget=budget,
             free_slots=free_slots,
             known_player_ids=market.keys(),
-            max_overbid_pct=settings.max_overbid_pct,
+            # None for rows written before REH-99 added the column; the ceiling
+            # falls back to the tightest tier, refusing rather than over-permitting.
+            tier=proposal.get("tier"),
+            ceiling_policy=settings.bid_ceiling_policy(),
             club_id=str(getattr(live, "team_id", "") or "") or None,
             squad_club_counts=club_counts,
         )
