@@ -463,6 +463,9 @@ class Trader:
                         uncertain_start_multiplier=getattr(
                             self.settings, "uncertain_start_multiplier", 0.5
                         ),
+                        stale_shrinkage_k=getattr(
+                            self.settings, "stale_availability_shrinkage_k", 20.0
+                        ),
                     )
                 )
                 market_player_map[player.id] = player
@@ -507,6 +510,9 @@ class Trader:
                         max_status_age_days=self.settings.max_status_age_days,
                         uncertain_start_multiplier=getattr(
                             self.settings, "uncertain_start_multiplier", 0.5
+                        ),
+                        stale_shrinkage_k=getattr(
+                            self.settings, "stale_availability_shrinkage_k", 20.0
                         ),
                     )
                 )

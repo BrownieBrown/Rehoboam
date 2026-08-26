@@ -46,6 +46,15 @@ OUT_STATUSES: frozenset[int] = frozenset({4, 256})
 UNCERTAIN_STATUSES: frozenset[int] = frozenset({2})
 DEFAULT_UNCERTAIN_START_MULTIPLIER = 0.5
 
+# --- Stale-history availability prior (REH-98) -----------------------------
+#
+# `max_status_age_days` discards an end-of-season status and falls back to the
+# marginal prior. Correct in itself, but the fallback is league-wide: during
+# the pre-season every player is scored P(start)=56% at once, so EP carries no
+# availability signal in the window where the largest signings are made.
+DEFAULT_STALE_SHRINKAGE_K = 20.0
+DEFAULT_STALE_MIN_MATCHDAYS = 5
+
 
 @dataclass(frozen=True)
 class AvailabilityModel:
@@ -125,6 +134,58 @@ def apply_availability_override(
         return adjusted
 
     return dict(probs)
+
+
+def apply_stale_history_prior(
+    probs: dict[int, float],
+    *,
+    played: int,
+    matchdays: int,
+    prior_played_share: float,
+    shrinkage_k: float = DEFAULT_STALE_SHRINKAGE_K,
+    min_matchdays: int = DEFAULT_STALE_MIN_MATCHDAYS,
+) -> dict[int, float]:
+    """Reweight a marginal prior by the player's own share of matchdays played.
+
+    Applies only when the fitted model had no usable ``prev_status`` -- that is,
+    when ``predict`` returned the league marginal. In-season this path is
+    inert; pre-season it is the only availability signal available.
+
+    **Downward only, by construction**, for the reason
+    ``apply_availability_override`` documents: quality is pooled across
+    statuses, so ``rate(5)`` overstates a true starter's mean by ~24% and stays
+    calibrated only because ``P(5)`` is the fitted ~82%. A player who played
+    *more* than the league average is therefore returned unchanged -- he is
+    under-rated, and correcting that needs the within-status quality refit
+    (REH-53), not a bigger probability.
+
+    **The quantity is played share, not start share.** ``rate.py`` records that
+    quality normalises against a reference pooled over statuses 3 and 5, so the
+    start-versus-substitute mix is already inside the quality coefficient. The
+    split it does not encode is played-versus-not. Scaling 3 and 5 by a common
+    factor corrects the second and leaves the first alone; scaling by start
+    share would count the same evidence twice.
+
+    Status 4 (unused sub) is deliberately untouched. The freed mass goes to
+    status 1, whose base rate is 0.0, so the correction can only reduce EP.
+
+    A record shorter than ``min_matchdays`` is left alone: no history is not
+    evidence of unavailability, which is REH-41's problem rather than this one.
+    """
+    if matchdays <= 0 or matchdays < min_matchdays or prior_played_share <= 0.0:
+        return dict(probs)
+
+    shrunk_share = (played + shrinkage_k * prior_played_share) / (matchdays + shrinkage_k)
+    ratio = min(1.0, shrunk_share / prior_played_share)
+    if ratio >= 1.0:
+        return dict(probs)
+
+    adjusted = dict(probs)
+    for status in (3, 5):
+        if status in adjusted:
+            adjusted[status] *= ratio
+    adjusted[1] = adjusted.get(1, 0.0) + (1.0 - sum(adjusted.values()))
+    return adjusted
 
 
 def fit_availability(
