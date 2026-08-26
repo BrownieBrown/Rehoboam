@@ -66,18 +66,16 @@ def capital_reserve(*, slots_to_fill: int, in_season_min_moves: int, median_move
     completes, and `in_season_min_moves` is what remains at 15/15 so a full
     squad can still replace a player.
 
-    Critical boundary: `in_season_min_moves` is NOT a floor while slots remain.
-    When 0 < slots_to_fill < in_season_min_moves, the reserve falls below
-    the in-season minimum by design, allowing unwinding. `in_season_min_moves`
-    only becomes the floor at slots_to_fill <= 0 (full squad or over-committed).
-    Using max() instead would freeze the reserve once below in_season_min_moves,
-    preventing the reserve from unwinding as the squad fills — that is the bug
-    the brief accidentally encoded.
+    Critical: the reserve funds moves remaining *after* this buy fills one slot.
+    At slots_to_fill=3, the reserve is 2 moves (not 3), because this bid will
+    fill one of the three. At 1 slot, the reserve is 0 — completing the squad
+    takes priority over holding replacement money. Only at slots_to_fill <= 0
+    (full squad or over-committed) does `in_season_min_moves` become the floor.
     """
-    # Use slots_to_fill when positive (unwinding), fall back to in_season_min_moves
-    # at 0 or negative (full squad, never go below minimum). Not max(), which would
-    # freeze the reserve and prevent unwinding.
-    moves = slots_to_fill if slots_to_fill > 0 else in_season_min_moves
+    # Account for this buy filling one slot: reserve is for moves remaining
+    # after it lands. Full squad (slots <= 0) falls back to in_season_min_moves.
+    moves_after_this_buy = max(slots_to_fill - 1, 0)
+    moves = moves_after_this_buy if slots_to_fill > 0 else in_season_min_moves
     return max(0, moves) * max(0, median_move)
 
 

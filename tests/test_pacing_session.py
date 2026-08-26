@@ -30,10 +30,11 @@ def _bid(amount):
 
 
 def test_reserve_covers_every_unfilled_slot(trader):
-    """11 players + 1 open bid = 12/15, so 3 slots at EUR 10.8m each."""
+    """11 players + 1 open bid = 12/15, so 3 slots remain. Reserve is for
+    2 moves after this buy fills one slot, at EUR 10.8m each."""
     ctx = trader._build_pacing_context(squad_size=11, my_bids=[_bid(40_717_295)])
     assert ctx is not None
-    assert ctx.reserve == 32_400_000
+    assert ctx.reserve == 21_600_000
 
 
 def test_open_offers_are_carried_into_the_context(trader):

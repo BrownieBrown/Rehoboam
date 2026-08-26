@@ -45,10 +45,13 @@ class TestAvailableSquadSlots:
 
 
 class TestCapitalReserve:
-    def test_reserves_one_median_move_per_unfilled_slot(self):
+    def test_reserve_accounts_for_this_buy_filling_one_slot(self):
+        # Off-by-one pin: at slots=3, reserve accounts for 2 moves remaining
+        # after this buy, not 3 unfilled slots before. Using 3*median (32_400_000)
+        # would incorrectly prohibit large signings.
         assert (
             capital_reserve(slots_to_fill=3, in_season_min_moves=2, median_move=10_800_000)
-            == 32_400_000
+            == 21_600_000
         )
 
     def test_full_squad_falls_back_to_the_in_season_minimum(self):
@@ -66,13 +69,10 @@ class TestCapitalReserve:
         )
 
     def test_reserve_unwinds_below_in_season_minimum_while_slots_remain(self):
-        # Discriminator: 0 < slots < in_season_min_moves must use slots, not max().
-        # Using max(1, 2) would incorrectly yield 21_600_000; correct is 10_800_000.
-        # This is the only case where slots-conditional and max() diverge.
-        assert (
-            capital_reserve(slots_to_fill=1, in_season_min_moves=2, median_move=10_800_000)
-            == 10_800_000
-        )
+        # At slots=1, the last slot may be filled freely (reserve=0).
+        # Completing the squad outranks holding replacement money.
+        # Old formula (1*median) would incorrectly give 10_800_000.
+        assert capital_reserve(slots_to_fill=1, in_season_min_moves=2, median_move=10_800_000) == 0
 
 
 class TestPacingContext:
@@ -108,7 +108,7 @@ class TestPacingContext:
             cap = PacingContext(reserve=reserve, open_offers=0).max_bid(budget)
             caps.append(cap)
             budget -= cap  # spend the whole cap, the worst case for the next step
-        assert caps[0] == 29_907_522
+        assert caps[0] == 40_707_522
         assert all(c > 0 for c in caps), "the reserve must never freeze the next buy"
 
 
