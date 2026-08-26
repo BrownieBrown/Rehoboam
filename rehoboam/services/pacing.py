@@ -91,7 +91,7 @@ class PacingContext:
     reserve: int
     open_offers: int
 
-    def max_bid(self, budget_ceiling: int) -> int:
+    def max_bid(self, budget_ceiling: int, current_budget: int) -> int:
         """The largest bid that still leaves the reserve intact.
 
         `budget_ceiling` already includes any sell-plan recovery, which is why
@@ -101,5 +101,18 @@ class PacingContext:
         recycles capital rather than consuming it, and pacing it on the gross
         bid would freeze pair trading at 15/15 — the one mechanism a full squad
         has to improve itself.
+
+        `current_budget` is the cash actually on hand before this trade — it
+        deliberately excludes any sell-plan recovery, unlike `budget_ceiling`.
+        The reserve is clamped to never exceed what is currently spendable
+        (`current_budget - open_offers`): reserving more than exists refuses
+        EVERY trade once the budget has already fallen below the reserve,
+        including a net-positive trade pair that would recover money. The
+        rule this enforces is "don't leave the bot worse off than today", not
+        "always hold the full reserve regardless of where the budget already
+        is" — the latter freezes a full squad's only improvement mechanism
+        the moment the budget dips below the reserve, at exactly the point a
+        recycling trade is most needed.
         """
-        return max(0, int(budget_ceiling) - int(self.open_offers) - int(self.reserve))
+        effective_reserve = min(self.reserve, max(0, int(current_budget) - int(self.open_offers)))
+        return max(0, int(budget_ceiling) - int(self.open_offers) - effective_reserve)

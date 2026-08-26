@@ -371,6 +371,7 @@ class Settings(BaseSettings):
     )
     pacing_in_season_min_moves: int = Field(
         default=2,
+        ge=0,
         description=(
             "Moves the reserve protects once the squad is full at 15/15, where "
             "there are no slots left to fill. A guess until the replay sweep "
@@ -379,6 +380,7 @@ class Settings(BaseSettings):
     )
     pacing_window_days: int = Field(
         default=90,
+        ge=0,
         description=(
             "Trailing window over manager_transfers used to measure what one "
             "further move costs. A move cost EUR 6.03m league-wide but EUR 10.8m "
@@ -387,6 +389,7 @@ class Settings(BaseSettings):
     )
     pacing_median_floor_eur: int = Field(
         default=3_000_000,
+        ge=0,
         description=(
             "Floor under the measured median move price. A thin window would "
             "otherwise yield a near-zero reserve, silently disabling pacing "

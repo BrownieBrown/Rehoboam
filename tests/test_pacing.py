@@ -6,6 +6,9 @@ one EUR 60-65m signing AND roughly 25 more purchases. The difference is not
 the size of a bid; it is what the bid leaves behind.
 """
 
+import pytest
+from pydantic import ValidationError
+
 from rehoboam.services.pacing import (
     PacingContext,
     available_squad_slots,
@@ -40,7 +43,10 @@ class TestAvailableSquadSlots:
     def test_full_squad_has_no_slots(self):
         assert available_squad_slots(squad_size=15, open_bid_count=0) == 0
 
-    def test_over_committed_squad_does_not_report_negative_room(self):
+    def test_over_committed_squad_reports_negative_room_intentionally(self):
+        # The negative return is load-bearing: `capital_reserve` branches on
+        # `slots_to_fill > 0`, and a negative value routes to the
+        # `in_season_min_moves` floor rather than being clamped to zero here.
         assert available_squad_slots(squad_size=15, open_bid_count=2) == -2
 
 
@@ -78,17 +84,43 @@ class TestCapitalReserve:
 class TestPacingContext:
     def test_max_bid_is_the_ceiling_less_open_offers_and_reserve(self):
         ctx = PacingContext(reserve=32_400_000, open_offers=0)
-        assert ctx.max_bid(budget_ceiling=62_307_522) == 29_907_522
+        assert ctx.max_bid(budget_ceiling=62_307_522, current_budget=62_307_522) == 29_907_522
 
     def test_open_offers_are_already_spent(self):
         # Kickbase's reported budget does not deduct pending offers, so two
         # bids sized against the same nominal budget can both land.
         ctx = PacingContext(reserve=10_000_000, open_offers=5_000_000)
-        assert ctx.max_bid(budget_ceiling=50_000_000) == 35_000_000
+        assert ctx.max_bid(budget_ceiling=50_000_000, current_budget=50_000_000) == 35_000_000
 
     def test_max_bid_never_goes_negative(self):
         ctx = PacingContext(reserve=50_000_000, open_offers=0)
-        assert ctx.max_bid(budget_ceiling=10_000_000) == 0
+        assert ctx.max_bid(budget_ceiling=10_000_000, current_budget=10_000_000) == 0
+
+    def test_reserve_never_exceeds_what_currently_exists(self):
+        """A 15/15 squad at EUR 2.0m budget with a EUR 21.6m reserve must not
+        refuse a trade that RECOVERS money. Unclamped, the reserve alone
+        (21.6m) swamps a budget_ceiling built from a EUR 12.0m sell recovery
+        (2.0m + 12.0m = 14.0m), zeroing every trade — including this one,
+        which nets +3.14m into the budget. The clamp caps the reserve at
+        what is actually spendable right now (current_budget - open_offers),
+        so a trade is refused only when it would leave the bot worse off
+        than today, never merely because today is already tight.
+        """
+        ctx = PacingContext(reserve=21_600_000, open_offers=0)
+        # budget_ceiling includes the 12.0m sell recovery; current_budget does not.
+        cap = ctx.max_bid(budget_ceiling=14_000_000, current_budget=2_000_000)
+        assert cap == 12_000_000
+        assert cap >= 8_860_000, "the 8.86m buy this reserve was blocking must now fit"
+
+    def test_the_clamp_does_not_loosen_an_already_binding_reserve(self):
+        """When current_budget comfortably clears the reserve, the clamp must
+        be a no-op — this is the same arithmetic the pre-clamp code always
+        did, and asserts the fix does not loosen the cap in the ordinary case
+        where the reserve is genuinely affordable."""
+        ctx = PacingContext(reserve=32_400_000, open_offers=0)
+        clamped = ctx.max_bid(budget_ceiling=62_307_522, current_budget=62_307_522)
+        unclamped_formula = 62_307_522 - 0 - 32_400_000
+        assert clamped == unclamped_formula == 29_907_522
 
     def test_the_unwind_sequence_from_the_spec(self):
         """Section 2 of the design doc, as executable arithmetic.
@@ -105,7 +137,9 @@ class TestPacingContext:
             reserve = capital_reserve(
                 slots_to_fill=slots, in_season_min_moves=2, median_move=median
             )
-            cap = PacingContext(reserve=reserve, open_offers=0).max_bid(budget)
+            cap = PacingContext(reserve=reserve, open_offers=0).max_bid(
+                budget, current_budget=budget
+            )
             caps.append(cap)
             budget -= cap  # spend the whole cap, the worst case for the next step
         assert caps[0] == 40_707_522
@@ -161,3 +195,22 @@ class TestPacingSettings:
         assert s.pacing_in_season_min_moves == 4
         assert s.pacing_window_days == 30
         assert s.pacing_median_floor_eur == 1_000_000
+
+    @pytest.mark.parametrize(
+        "env_var",
+        ["PACING_IN_SEASON_MIN_MOVES", "PACING_WINDOW_DAYS", "PACING_MEDIAN_FLOOR_EUR"],
+    )
+    def test_negative_values_are_rejected(self, monkeypatch, env_var):
+        """A better guard than the untested `max(0, ...)` clamps inside
+        `capital_reserve` — those silently absorb a bad value instead of
+        surfacing it. A negative window/floor/move-count is nonsensical
+        (there's no such thing as a negative trailing window or a negative
+        euro floor), so Settings should refuse to start with one rather than
+        let it flow into arithmetic that quietly floors it to zero."""
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.setenv(env_var, "-1")
+        from rehoboam.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings()

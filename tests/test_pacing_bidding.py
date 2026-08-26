@@ -208,3 +208,39 @@ def test_a_trade_pair_is_paced_on_its_net_cost(bidding):
     ).recommended_bid
     assert gross_only == 0
     assert with_pair >= 25_000_000
+
+
+def test_a_net_positive_pair_is_not_frozen_by_an_unaffordable_reserve(bidding):
+    """Finding 1: at 15/15 the reserve must not freeze a trade that RECOVERS
+    money. Squad 15/15 (in_season_min_moves=2, median 10.8m -> reserve
+    21.6m), budget already down to EUR 2.0m, selling a 12.0m player to buy an
+    8.86m one -- a trade that nets +3.14m into the budget.
+
+    Before the clamp: budget_ceiling = 2.0m + 12.0m recovery = 14.0m, and the
+    21.6m reserve alone exceeds that, so pace_cap = 0 and the bid is refused
+    even though the squad ends up with MORE money than it has today. The
+    clamp caps the reserve at what is actually spendable right now
+    (current_budget - open_offers = 2.0m), so the cap becomes 12.0m and the
+    trade proceeds.
+    """
+    from rehoboam.scoring.models import SellPlan
+
+    plan = SellPlan(
+        players_to_sell=[],
+        total_recovery=12_000_000,
+        net_budget_after=2_000_000 + 12_000_000 - 8_860_000,
+        is_viable=True,
+        ep_impact=0.0,
+        reasoning="test",
+    )
+    paced = bidding.calculate_ep_bid(
+        asking_price=8_860_000,
+        market_value=8_860_000,
+        expected_points=80.0,
+        marginal_ep_gain=90.0,
+        confidence=0.8,
+        current_budget=2_000_000,
+        sell_plan=plan,
+        pacing=PacingContext(reserve=21_600_000, open_offers=0),
+    ).recommended_bid
+    assert paced >= 8_860_000

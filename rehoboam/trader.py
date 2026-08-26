@@ -284,12 +284,24 @@ class Trader:
 
         # Open bids are needed twice over for REH-85: they are euros already
         # committed, and Kickbase counts them toward the 15-player cap.
+        #
+        # The whole block — the API call AND _build_pacing_context — shares
+        # one try/except. _build_pacing_context's docstring promises it fails
+        # open (returns None instead of raising), but that promise only
+        # covers its own body; the call to it was outside any try, so a
+        # malformed bid payload (e.g. a non-numeric user_offer_price) could
+        # abort the whole EP pipeline instead of merely disabling pacing.
+        # Best-effort learning: a learning-side failure must never block it.
         try:
             my_bids = self.api.get_my_bids(league)
+            # An empty lineup slot is -100 pts at kickoff, which outranks
+            # the pacing reserve — never cap spending during a formation
+            # emergency (see _determine_emergency above).
+            pacing = None if is_emergency else self._build_pacing_context(squad_size, my_bids)
         except Exception:
             logger.exception("pacing: could not read open bids — pacing disabled this run")
             my_bids = None
-        pacing = None if my_bids is None else self._build_pacing_context(squad_size, my_bids)
+            pacing = None
 
         # --- 2. Collect performance + details + team profiles ---
         team_profiles: dict[str, dict] = {}

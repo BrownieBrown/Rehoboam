@@ -465,7 +465,7 @@ class SmartBidding:
         # price the block below turns it into recommended_bid = 0, so pacing
         # needs no refusal path competing with the ceiling and the safety gate.
         if pacing is not None:
-            pace_cap = pacing.max_bid(budget_ceiling)
+            pace_cap = pacing.max_bid(budget_ceiling, current_budget)
             if recommended_bid > pace_cap:
                 logger.info(
                     "ep-bid paced player=%s bid=%d -> %d (reserve=%d open_offers=%d)",

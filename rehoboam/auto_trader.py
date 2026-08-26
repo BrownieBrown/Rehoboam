@@ -1002,6 +1002,20 @@ class AutoTrader:
                     continue
                 if opp.buy_price > ctx.flip_budget:
                     continue
+                # REH-85 Finding 2: a flip is discretionary spend, and design
+                # §3 says pacing applies to it same as a plain buy -- capital
+                # parked in a flip is capital the reserve exists to protect.
+                # `pacing` is None when pacing is off entirely, which must
+                # not skip anything.
+                pacing_ctx = ctx.ep_result.get("pacing")
+                if pacing_ctx is not None:
+                    pace_cap = pacing_ctx.max_bid(ctx.flip_budget, ctx.current_budget)
+                    if opp.buy_price > pace_cap:
+                        console.print(
+                            f"[yellow]Cannot afford flip {opp.player.last_name} — "
+                            f"pacing reserve (€{opp.buy_price:,} > €{pace_cap:,})[/yellow]"
+                        )
+                        continue
 
                 result = self.execution.buy(
                     league,
