@@ -233,6 +233,53 @@ outstanding offer consuming spendable budget), confirming the live wiring
 behaves the way the design and the replay both predict, without needing
 today's exact reserve number to match a prior run's.
 
+## Addendum: the final whole-branch review (2026-08-26, after this document was first written)
+
+A whole-branch review found **three Important defects, every one of them invisible
+to the measurements above**. All three were of the same kind — the bot stops
+trading when it should not — and none could cause overspending. Fixed in
+`ebfe5bb`; the sweep numbers were re-measured afterwards and are **unchanged**,
+which is itself the point: the replay could not see any of them.
+
+1. **At 15/15 the reserve froze every trade pair, including budget-positive
+   ones.** `max_bid` demanded "budget after this trade >= reserve"; when the
+   budget was already below the reserve, nothing satisfied it — so a trade
+   selling a EUR 12m player to buy an EUR 8.86m one, netting **+EUR 3.14m into
+   the budget**, was refused. Design section 3 explicitly claimed net-cost pacing
+   prevented this. It did not: at 15/15 the budget is small *by construction*
+   (section 2's own unwind table ends at "15/15, budget EUR 0"), and at 15/15
+   plain buys and flips are already blocked by `available_slots <= 0`, so pairs
+   are the only improvement mechanism left.
+   The replay never reached 15/15 (peak 8 buys) and the live smoke ran at 12/15.
+   **The feature spends a season driving the bot toward the one state nothing
+   measured.**
+   Fixed by clamping the effective reserve at the pre-trade spendable budget:
+   `min(reserve, max(0, current_budget - open_offers))`. The rule changes from
+   "refuse unless you can hold the full reserve" to "refuse only if this leaves
+   things worse than now". Verified: the 15/15 pair now yields a cap of
+   EUR 12,000,000, while a healthy EUR 62,307,522 budget still yields
+   EUR 40,707,522 — the clamp does not loosen a reserve that already binds.
+
+1. **Profit flips were never paced**, despite section 3's table saying they were.
+   Flips are sized by `ProfitTrader` and never reach `calculate_ep_bid`. Since
+   `enable_flip_buys` defaults to True, this ran in production: a flip could
+   consume the exact capital the reserve was protecting, in the same session
+   where pacing refused a squad-improvement buy for lack of it. The sweep could
+   not see it either — it ran without `--with-flip-buys`.
+
+1. **An under-strength squad froze buying** exactly when empty slots cost -100
+   points, because the reserve scales with empty slots (8/15 reserves EUR 75.6m).
+   The emergency-fill exemption did not cover it: that path runs only in the
+   locked phase, so two to five days before kickoff such a squad got no
+   autonomous buy *and no proposal*. `is_emergency` was already computed two
+   lines above where the pacing context was built, and was never consulted.
+
+**What this says about the measurement in this document.** The sweep is sound for
+what it covers, and it covers a squad-building regime only. Three separate
+"the bot goes quiet" defects lived entirely outside it. Read the +859 as an
+allocation result from one regime, not as evidence the feature is safe across
+the season — the fixes above, not the sweep, are what make it so.
+
 ## Caveats
 
 - **The replay's buy side is an upper bound**, per the design's own Risks
