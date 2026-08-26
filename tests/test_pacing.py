@@ -130,3 +130,28 @@ def test_auto_trader_slot_helper_delegates_to_the_pacing_module():
         assert auto_trader._available_squad_slots(squad, bids) == pacing.available_squad_slots(
             squad, bids
         )
+
+
+class TestPacingSettings:
+    def test_defaults_match_the_design(self, monkeypatch):
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        from rehoboam.config import Settings
+
+        s = Settings()
+        assert s.pacing_enabled is True
+        assert s.pacing_in_season_min_moves == 2
+        assert s.pacing_window_days == 90
+        assert s.pacing_median_floor_eur == 3_000_000
+
+    def test_every_knob_is_overridable_from_the_environment(self, monkeypatch):
+        """Re-tunable mid-season without a deploy — the REH-99 requirement."""
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.setenv("PACING_ENABLED", "false")
+        monkeypatch.setenv("PACING_IN_SEASON_MIN_MOVES", "4")
+        from rehoboam.config import Settings
+
+        s = Settings()
+        assert s.pacing_enabled is False
+        assert s.pacing_in_season_min_moves == 4
