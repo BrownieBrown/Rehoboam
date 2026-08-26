@@ -107,7 +107,7 @@ def test_the_ep_bid_fn_bids_more_for_a_must_have_than_for_a_marginal_gain():
     bid_fn = make_ep_bid_fn(
         mv_fn=lambda pid, at: 10_000_000,
         score_fn=lambda pid, at: 100.0,
-        median_move=10_000_000,
+        median_move_fn=lambda at: 10_000_000,
         in_season_min_moves=2,
     )
 
@@ -126,7 +126,7 @@ def test_the_ep_bid_fn_never_bids_beyond_the_budget():
     bid_fn = make_ep_bid_fn(
         mv_fn=lambda pid, at: 10_000_000,
         score_fn=lambda pid, at: 100.0,
-        median_move=10_000_000,
+        median_move_fn=lambda at: 10_000_000,
         in_season_min_moves=2,
     )
 
