@@ -145,13 +145,19 @@ class TestPacingSettings:
         assert s.pacing_median_floor_eur == 3_000_000
 
     def test_every_knob_is_overridable_from_the_environment(self, monkeypatch):
-        """Re-tunable mid-season without a deploy — the REH-99 requirement."""
+        """REH-85 requires all pacing knobs to be re-tunable mid-season from .env
+        without a deploy. This follows the convention established by REH-99: every
+        tunable is a Settings field, populated from the environment."""
         monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
         monkeypatch.setenv("KICKBASE_PASSWORD", "test")
         monkeypatch.setenv("PACING_ENABLED", "false")
         monkeypatch.setenv("PACING_IN_SEASON_MIN_MOVES", "4")
+        monkeypatch.setenv("PACING_WINDOW_DAYS", "30")
+        monkeypatch.setenv("PACING_MEDIAN_FLOOR_EUR", "1000000")
         from rehoboam.config import Settings
 
         s = Settings()
         assert s.pacing_enabled is False
         assert s.pacing_in_season_min_moves == 4
+        assert s.pacing_window_days == 30
+        assert s.pacing_median_floor_eur == 1_000_000
