@@ -310,7 +310,11 @@ def test_auto_trader_slot_helper_delegates_to_the_pacing_module():
     from rehoboam import auto_trader
     from rehoboam.services import pacing
 
-    assert auto_trader.SQUAD_CAP is pacing.SQUAD_CAP
+    # Identity on the FUNCTION, not on SQUAD_CAP: CPython interns small
+    # integers, so `15 is 15` is True even for two separate definitions and
+    # would pass before this task did anything.
+    assert auto_trader.available_squad_slots is pacing.available_squad_slots
+    assert auto_trader.SQUAD_CAP == pacing.SQUAD_CAP
     for squad, bids in ((11, 1), (15, 0), (13, 2), (15, 2)):
         assert auto_trader._available_squad_slots(
             squad, bids
@@ -320,7 +324,7 @@ def test_auto_trader_slot_helper_delegates_to_the_pacing_module():
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_pacing.py::test_auto_trader_slot_helper_delegates_to_the_pacing_module -q`
-Expected: FAIL with `AssertionError` on `auto_trader.SQUAD_CAP is pacing.SQUAD_CAP` (two separate int objects with the same value are not guaranteed identical, and here they are separate definitions).
+Expected: FAIL with `AttributeError: module 'rehoboam.auto_trader' has no attribute 'available_squad_slots'` — the name does not exist there until Step 3 imports it.
 
 - [ ] **Step 3: Replace the duplicate with a delegation**
 
