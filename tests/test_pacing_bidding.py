@@ -43,8 +43,65 @@ def _bid(bidding, *, asking, mv, gain, budget, pacing=None):
 
 
 def test_without_pacing_the_bid_is_unchanged(bidding):
-    """None must be a true no-op, or every existing caller changes behaviour."""
-    assert _bid(bidding, asking=10_000_000, mv=10_000_000, gain=90.0, budget=62_307_522) > 0
+    """`pacing=None` must be a true no-op, or every existing caller changes
+    behaviour — `trader.py` and `replay/driver.py` never pass the argument at
+    all, which defaults to `None`.
+
+    Asserting `> 0` (the old assertion) only proves *some* bid came back; it
+    would still pass even if the default silently changed what that bid was.
+    Assert the two calls — explicit `pacing=None` and the argument omitted
+    entirely — return the exact same integer.
+    """
+    kwargs = {"asking": 10_000_000, "mv": 10_000_000, "gain": 90.0, "budget": 62_307_522}
+    explicit_none = _bid(bidding, **kwargs, pacing=None)
+    omitted = bidding.calculate_ep_bid(
+        asking_price=kwargs["asking"],
+        market_value=kwargs["mv"],
+        expected_points=80.0,
+        marginal_ep_gain=kwargs["gain"],
+        confidence=0.8,
+        current_budget=kwargs["budget"],
+        sell_plan=None,
+        # pacing intentionally omitted — this is what every real caller does today.
+    ).recommended_bid
+    assert explicit_none == omitted
+    assert explicit_none > 0
+
+
+def test_the_cap_must_sit_after_the_market_value_floor(bidding):
+    """Pins placement: pacing must be applied AFTER the market-value floor
+    (`recommended_bid = min(market_value_floor, budget_ceiling)`), or that
+    floor silently undoes the cap.
+
+    Numbers are chosen so the two placements diverge, not just so the
+    end-state assertion holds:
+
+    - asking=EUR 30.0m sits just above pace_cap=EUR 29.907m (budget EUR
+      62.307522m - reserve EUR 32.4m - open_offers 0), so a *correctly*
+      placed cap lands below asking and the existing
+      `if recommended_bid < asking_price: recommended_bid = 0` zeroes it.
+    - market_value * 1.01 = EUR 30.098m is ABOVE asking_price. If the cap
+      were applied before the market-value floor instead, the floor would
+      raise the capped bid straight back up to EUR 30.098m — above asking,
+      so it would NOT get zeroed, and this test would fail.
+
+    The previous version of this test (Tah, EUR 44.1m asking / EUR 37.0m mv)
+    passed regardless of placement: `mv * 1.01` there is *below* asking, so
+    the floor could never rescue a misplaced cap above the asking price, and
+    the assertion was `== 0` either way. Verified directly (see task-5
+    fix report): temporarily moving the pacing block to before the
+    market-value floor made this test FAIL and left the old Tah-shaped test
+    passing.
+    """
+    paced = _bid(
+        bidding,
+        asking=30_000_000,
+        mv=29_800_000,
+        gain=90.0,
+        budget=62_307_522,
+        pacing=PacingContext(reserve=32_400_000, open_offers=0),
+    )
+    assert paced == 0
 
 
 def test_a_signing_that_would_break_the_reserve_is_not_bid_on(bidding):
@@ -53,6 +110,12 @@ def test_a_signing_that_would_break_the_reserve_is_not_bid_on(bidding):
     The cap lands below the asking price, and the existing
     `if recommended_bid < asking_price: recommended_bid = 0` turns that into a
     skip. Pacing therefore needs no refusal path of its own.
+
+    Kept as a realistic scenario alongside
+    `test_the_cap_must_sit_after_the_market_value_floor` above, which is the
+    one that actually discriminates cap placement — here `market_value * 1.01`
+    (~EUR 37.4m) stays below the EUR 44.1m asking price, so this test passes
+    at `paced == 0` whether the cap is placed correctly or not.
     """
     paced = _bid(
         bidding,

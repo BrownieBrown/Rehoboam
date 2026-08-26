@@ -456,9 +456,10 @@ class SmartBidding:
             )
 
         # REH-85: leave enough behind to keep buying. Applied here, after the
-        # REH-99 ceiling, because `ep_max_bid` is deliberately floored at the
-        # asking price a few lines above (the Kimmich fix) — a cap applied
-        # before that floor would simply be lifted back off.
+        # REH-99 ceiling and the market-value floor above, because that floor
+        # unconditionally raises recommended_bid to min(market_value * 1.01,
+        # budget_ceiling) whenever it falls short — a cap applied before it
+        # would simply be lifted back off.
         #
         # This caps rather than refuses. Where the cap falls below the asking
         # price the block below turns it into recommended_bid = 0, so pacing
