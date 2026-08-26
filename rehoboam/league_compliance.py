@@ -332,6 +332,35 @@ class LeagueComplianceChecker:
                 )
                 console.print("     Action: [red]Cancel bid[/red]")
 
+    def _rebid_gate_refusal(self, league, player, issue) -> str | None:
+        """Would the safety gate refuse this compliance re-bid? Reasons, or None.
+
+        The gate's shape assumes a fresh buy — a free slot and money not yet
+        committed. A re-bid is a replacement, so it is handed the state that
+        exists once the old bid is cancelled, which is what actually happens a
+        few lines later. Feeding it the raw numbers instead would refuse every
+        legal re-bid on "no free squad slot".
+        """
+        from rehoboam.services.safety_gate import BuyGate
+
+        try:
+            budget = int(self.api.get_team_info(league).get("budget", 0))
+        except Exception:
+            # Fail closed: with no budget reading we cannot certify the spend,
+            # and cancelling an illegal bid is always a legal outcome.
+            return "could not read the budget to certify the re-bid"
+
+        gate = BuyGate(
+            market_value=int(issue.market_value),
+            spendable_budget=budget + int(issue.current_bid),
+            known_player_ids=(str(player.id),),
+            free_slots=1,
+            tier=None,
+            ceiling_policy=self.settings.bid_ceiling_policy(),
+        )
+        verdict = gate.check(player_id=str(player.id), bid=int(issue.new_required_bid))
+        return None if verdict.ok else "; ".join(verdict.reasons)
+
     def resolve_bid_compliance_issues(
         self, league, issues: list[BidComplianceIssue], dry_run: bool = False
     ) -> tuple[int, int]:
@@ -363,7 +392,26 @@ class LeagueComplianceChecker:
                 console.print(f"[red]✗ Could not find {issue.player_name} in market[/red]")
                 continue
 
-            if issue.is_still_profitable:
+            # REH-100: the re-bid spends real money with nobody in the loop, so
+            # it goes through the same gate as every other buy. It is checked
+            # against POST-cancel state, because the code below cancels the old
+            # bid first: the slot and the money that bid was holding are free by
+            # the time the new one is placed. Club counts are deliberately not
+            # passed — we already hold this bid, so replacing it changes no club
+            # count, and counting ourselves would refuse a legal re-bid.
+            #
+            # A refusal is not a dead end. The bid is illegal as it stands and
+            # has exactly two legal outcomes, raise or cancel; if the gate says
+            # we may not raise, cancel is what remains. So a refusal routes into
+            # the branch below that already implements cancelling.
+            gate_refusal = self._rebid_gate_refusal(league, player, issue)
+            if gate_refusal:
+                console.print(
+                    f"[yellow]Gate refused the re-bid on {issue.player_name}: "
+                    f"{gate_refusal}[/yellow]"
+                )
+
+            if issue.is_still_profitable and not gate_refusal:
                 # Adjust bid: cancel old, place new
                 console.print(f"\n[yellow]Adjusting bid on {issue.player_name}...[/yellow]")
                 console.print(

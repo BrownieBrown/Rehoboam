@@ -125,7 +125,13 @@ class TestGateBehaviourInTradePhase:
     @staticmethod
     def _ctx(days_until_match, sell_is_starter):
         pair = SimpleNamespace(
-            buy_player=SimpleNamespace(id="b1", first_name="New", last_name="Buyer"),
+            buy_player=SimpleNamespace(
+                id="b1",
+                first_name="New",
+                last_name="Buyer",
+                market_value=6_000_000,
+                team_id="t1",
+            ),
             sell_player=SimpleNamespace(
                 id="s1", first_name="Old", last_name="Seller", market_value=5_000_000
             ),
@@ -142,7 +148,13 @@ class TestGateBehaviourInTradePhase:
             reason="test",
         )
         return EPSessionContext(
-            ep_result={"buy_recs": [], "trade_pairs": [pair]},
+            # REH-100: the pair pre-flight gate treats an id outside the
+            # market data as unspendable, so the buy leg has to be in it.
+            ep_result={
+                "buy_recs": [],
+                "trade_pairs": [pair],
+                "market_players": {"b1": pair.buy_player},
+            },
             matchday_phase=phase,
             my_bids=[],
             my_bid_amounts={},

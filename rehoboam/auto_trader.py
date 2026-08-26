@@ -9,6 +9,7 @@ from rich.console import Console
 
 from .config import INSTANT_SELL_PCT
 from .services import AutoTradeResult, ExecutionService
+from .services.safety_gate import BuyGate, club_counts
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -38,6 +39,60 @@ class MatchdayPhase:
     max_trades: int
     allow_flips: bool  # Profit flips only make sense with enough time to sell
     reason: str
+
+
+def _build_buy_gate(
+    *,
+    settings,
+    ctx,
+    player,
+    spendable_budget: int,
+    free_slots: int,
+    marginal_ep_gain: float | None,
+    released_player_id: str | None = None,
+) -> BuyGate:
+    """The safety gate for one autonomous candidate (REH-100).
+
+    Every autonomous buy is built here rather than at each call site, so a new
+    buy path cannot quietly acquire a weaker gate than the existing ones.
+
+    ``marginal_ep_gain`` of ``None`` means "no squad-improvement measurement",
+    which is the profit-flip case. It resolves to `FALLBACK_TIER` — the
+    tightest ceiling — and that is the correct answer rather than a shrug: a
+    flip is precisely the round trip REH-64 measured the 12.2% toll on, so it
+    is the one buy that genuinely should not chase a contested price.
+
+    ``released_player_id`` is the trade-pair sell. That player is about to
+    leave the squad, so counting him toward the club limit would block the
+    legal case of selling a club-mate to buy a better one from the same club.
+    """
+    from .services.bid_ceiling import tier_for_marginal_gain
+
+    tier = None
+    if marginal_ep_gain is not None:
+        tier = tier_for_marginal_gain(
+            float(marginal_ep_gain),
+            must_have=settings.bid_tier_must_have,
+            strong=settings.bid_tier_strong_upgrade,
+            solid=settings.bid_tier_solid_upgrade,
+        )
+
+    holdings = [
+        held
+        for held in list(getattr(ctx, "squad", []) or []) + list(getattr(ctx, "my_bids", []) or [])
+        if released_player_id is None or str(getattr(held, "id", "")) != str(released_player_id)
+    ]
+
+    return BuyGate(
+        market_value=int(player.market_value),
+        spendable_budget=int(spendable_budget),
+        known_player_ids=tuple(ctx.ep_result.get("market_players", {}) or {}),
+        free_slots=free_slots,
+        tier=tier,
+        ceiling_policy=settings.bid_ceiling_policy(),
+        club_id=str(getattr(player, "team_id", "") or "") or None,
+        squad_club_counts=club_counts(holdings),
+    )
 
 
 def _max_flip_hold_days(days_until_match: int | None) -> int | None:
@@ -851,6 +906,22 @@ class AutoTrader:
                     )
                     continue
 
+                # REH-100: check the buy leg BEFORE the irreversible sell leg.
+                refusal = self._trade_pair_preflight(obj, ctx)
+                if refusal:
+                    console.print(
+                        f"[yellow]Skip pair {obj.sell_player.last_name}→"
+                        f"{obj.buy_player.last_name} — gate would refuse the buy: "
+                        f"{refusal}[/yellow]"
+                    )
+                    logger.error(
+                        "trade-pair preflight refused sell=%s buy=%s: %s",
+                        obj.sell_player.id,
+                        obj.buy_player.id,
+                        refusal,
+                    )
+                    continue
+
                 console.print(
                     f"\n[cyan]Trade: sell {obj.sell_player.first_name} {obj.sell_player.last_name}"
                     f" → buy {obj.buy_player.first_name} {obj.buy_player.last_name}"
@@ -874,6 +945,17 @@ class AutoTrader:
                     f"Trade pair: EP +{obj.ep_gain:.1f}",
                     current_budget=ctx.current_budget,
                     days_until_match=ctx.matchday_phase.days_until_match,
+                    gate=_build_buy_gate(
+                        settings=self.settings,
+                        ctx=ctx,
+                        player=obj.buy_player,
+                        # The sell has landed, so its actual proceeds — not the
+                        # estimate the pre-flight used — are what we may commit.
+                        spendable_budget=int(ctx.flip_budget) + int(sell_result.price),
+                        free_slots=1,
+                        marginal_ep_gain=obj.ep_gain,
+                        released_player_id=obj.sell_player.id,
+                    ),
                 )
                 results.append(buy_result)
                 if buy_result.success:
@@ -927,6 +1009,18 @@ class AutoTrader:
                     f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
                     current_budget=ctx.current_budget,
                     days_until_match=ctx.matchday_phase.days_until_match,
+                    # No marginal EP gain to band: a flip is bought to resell,
+                    # not to improve the eleven. That resolves to the tightest
+                    # ceiling, which is the right answer — the round-trip toll
+                    # REH-64 measured is exactly what a flip pays.
+                    gate=_build_buy_gate(
+                        settings=self.settings,
+                        ctx=ctx,
+                        player=opp.player,
+                        spendable_budget=int(ctx.flip_budget),
+                        free_slots=available_slots,
+                        marginal_ep_gain=None,
+                    ),
                 )
                 results.append(result)
                 if result.success:
@@ -940,6 +1034,33 @@ class AutoTrader:
             f"\n[green]✓ Executed {ctx.executed_trade_count} trade(s) this session[/green]"
         )
         return results
+
+    def _trade_pair_preflight(self, pair, ctx) -> str | None:
+        """Would the gate refuse this pair's buy? Returns the reasons, or None.
+
+        A pair sells before it bids — forced, because Kickbase counts open bids
+        toward the 15-player cap, so at 15/15 the sell is what frees the slot.
+        That makes the sell irreversible while the buy is still only a bid, and
+        a gate consulted inside `ExecutionService.buy` would therefore fire
+        *after* the squad was already a player lighter.
+
+        So the same gate runs first, against the world as it will be once the
+        sell lands: one free slot, and the sale proceeds added to what the
+        phase allows us to commit. The gate inside `buy` still runs afterwards
+        against the actual proceeds — this is a pre-flight, not a replacement.
+        """
+        proceeds = int(pair.sell_player.market_value * INSTANT_SELL_PCT)
+        gate = _build_buy_gate(
+            settings=self.settings,
+            ctx=ctx,
+            player=pair.buy_player,
+            spendable_budget=int(ctx.flip_budget) + proceeds,
+            free_slots=1,
+            marginal_ep_gain=pair.ep_gain,
+            released_player_id=pair.sell_player.id,
+        )
+        verdict = gate.check(player_id=pair.buy_player.id, bid=int(pair.recommended_bid))
+        return None if verdict.ok else "; ".join(verdict.reasons)
 
     def _run_emergency_squad_fill(
         self,
@@ -1013,6 +1134,12 @@ class AutoTrader:
             if rec.recommended_bid > budget_remaining:
                 continue
 
+            # A gate refusal here means "try the next candidate", not "field
+            # nobody" — the loop simply continues down the ranked list. That is
+            # the whole reason this path takes a list rather than a single pick:
+            # an empty slot is -100. What it must NOT do is relax the budget
+            # rule to fill a slot, because a negative budget at kickoff scores
+            # zero for the entire matchday — a far bigger loss than -100.
             result = self.execution.buy(
                 league,
                 rec.player,
@@ -1020,6 +1147,14 @@ class AutoTrader:
                 f"Emergency lineup fill (squad short by {slots_short})",
                 current_budget=budget_remaining,
                 days_until_match=ctx.matchday_phase.days_until_match,
+                gate=_build_buy_gate(
+                    settings=self.settings,
+                    ctx=ctx,
+                    player=rec.player,
+                    spendable_budget=budget_remaining,
+                    free_slots=slots_short - bought,
+                    marginal_ep_gain=rec.marginal_ep_gain,
+                ),
             )
             results.append(result)
             if result.success:

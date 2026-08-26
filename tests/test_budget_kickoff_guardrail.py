@@ -77,7 +77,7 @@ def dry_run_service(api, tracker):
 # ----------------------------------------------------------------------
 
 
-def test_matchday14_buy_refused_in_live_mode(live_service, player, api):
+def test_matchday14_buy_refused_in_live_mode(live_service, player, api, permissive_gate):
     """The matchday-14 scenario, live mode: a buy that would push budget
     below zero with the match imminent (days_until_match=1) must be
     refused via BudgetSafetyError, and the API must never be called."""
@@ -89,12 +89,15 @@ def test_matchday14_buy_refused_in_live_mode(live_service, player, api):
             reason="test",
             current_budget=3_000_000,
             days_until_match=1,
+            gate=permissive_gate,
         )
     assert "Test Player" in str(exc_info.value)
     assert api.buy_player.call_count == 0
 
 
-def test_matchday14_buy_refused_in_dry_run_mode(dry_run_service, player, api, caplog):
+def test_matchday14_buy_refused_in_dry_run_mode(
+    dry_run_service, player, api, caplog, permissive_gate
+):
     """The matchday-14 scenario, dry-run mode: same refusal, but surfaced
     as a failed AutoTradeResult instead of a raised exception -- dry-run
     takes a different code path through ExecutionService.buy() and must
@@ -107,6 +110,7 @@ def test_matchday14_buy_refused_in_dry_run_mode(dry_run_service, player, api, ca
             reason="test",
             current_budget=3_000_000,
             days_until_match=1,
+            gate=permissive_gate,
         )
     assert isinstance(result, AutoTradeResult)
     assert result.success is False
@@ -115,7 +119,7 @@ def test_matchday14_buy_refused_in_dry_run_mode(dry_run_service, player, api, ca
     assert any("BLOCK" in rec.message for rec in caplog.records)
 
 
-def test_buy_allowed_when_budget_covers_it_at_kickoff(live_service, player, api):
+def test_buy_allowed_when_budget_covers_it_at_kickoff(live_service, player, api, permissive_gate):
     """A buy the budget fully covers is allowed even with the match
     imminent (days_until_match=1) -- the guard only fires on insolvency."""
     result = live_service.buy(
@@ -125,12 +129,13 @@ def test_buy_allowed_when_budget_covers_it_at_kickoff(live_service, player, api)
         reason="test",
         current_budget=3_000_000,
         days_until_match=1,
+        gate=permissive_gate,
     )
     assert result.success is True
     assert api.buy_player.call_count == 1
 
 
-def test_negative_budget_allowed_far_from_kickoff(live_service, player, api):
+def test_negative_budget_allowed_far_from_kickoff(live_service, player, api, permissive_gate):
     """Going negative several days before kickoff is the intentional
     aggressive strategy (buy good players mid-week, sell to recover before
     the match) -- not a bug. Only the kickoff lockout window matters."""
@@ -141,12 +146,13 @@ def test_negative_budget_allowed_far_from_kickoff(live_service, player, api):
         reason="test",
         current_budget=3_000_000,
         days_until_match=6,
+        gate=permissive_gate,
     )
     assert result.success is True
     assert api.buy_player.call_count == 1
 
 
-def test_exactly_zero_budget_is_acceptable_at_kickoff(live_service, player, api):
+def test_exactly_zero_budget_is_acceptable_at_kickoff(live_service, player, api, permissive_gate):
     """Pin the boundary: the penalty triggers on negative budget, not
     zero. A buy that leaves exactly €0 at kickoff must be allowed."""
     result = live_service.buy(
@@ -156,6 +162,7 @@ def test_exactly_zero_budget_is_acceptable_at_kickoff(live_service, player, api)
         reason="test",
         current_budget=3_000_000,
         days_until_match=1,
+        gate=permissive_gate,
     )
     assert result.success is True
     assert api.buy_player.call_count == 1
@@ -166,7 +173,9 @@ def test_exactly_zero_budget_is_acceptable_at_kickoff(live_service, player, api)
 # ----------------------------------------------------------------------
 
 
-def test_guard_currently_fails_open_when_match_date_unknown(live_service, player, api):
+def test_guard_currently_fails_open_when_match_date_unknown(
+    live_service, player, api, permissive_gate
+):
     """DOCUMENTS A GAP -- does not endorse it.
 
     ``ExecutionService.buy()``'s guard condition short-circuits on
@@ -189,6 +198,7 @@ def test_guard_currently_fails_open_when_match_date_unknown(live_service, player
         reason="test",
         current_budget=1_000_000,
         days_until_match=None,
+        gate=permissive_gate,
     )
     assert result.success is True
     assert api.buy_player.call_count == 1
@@ -199,7 +209,9 @@ def test_guard_currently_fails_open_when_match_date_unknown(live_service, player
 # ----------------------------------------------------------------------
 
 
-def test_guard_does_not_prevent_negative_budget_persisting_from_days_out(live_service, player, api):
+def test_guard_does_not_prevent_negative_budget_persisting_from_days_out(
+    live_service, player, api, permissive_gate
+):
     """DOCUMENTS A GAP -- does not endorse it.
 
     ``LOCKOUT_DAYS = 1`` means this guard only refuses a buy that pushes
@@ -222,6 +234,7 @@ def test_guard_does_not_prevent_negative_budget_persisting_from_days_out(live_se
         reason="test",
         current_budget=3_000_000,
         days_until_match=3,
+        gate=permissive_gate,
     )
     assert result.success is True
     assert api.buy_player.call_count == 1

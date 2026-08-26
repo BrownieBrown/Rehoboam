@@ -4,6 +4,7 @@ Owns the side-effecting half of the auto trading pipeline. The goal here is
 that AutoTrader / SessionService just say "buy this player at this price"
 and "sell this player instantly", and ExecutionService takes care of:
 
+- Running `safety_gate.check_buy` before any buy reaches the API
 - Dry-run short-circuiting (no real API call)
 - Console feedback for each step
 - Wrapping the API call in try/except and turning failures into a structured
@@ -29,6 +30,7 @@ from dataclasses import dataclass
 from rich.console import Console
 
 from ..learning import LearningTracker
+from .safety_gate import BuyGate
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -80,6 +82,7 @@ class ExecutionService:
         *,
         current_budget: int,
         days_until_match: int | None,
+        gate: BuyGate,
     ) -> AutoTradeResult:
         """Place a buy offer at the given price.
 
@@ -95,6 +98,12 @@ class ExecutionService:
         ``LOCKOUT_DAYS`` of kickoff any trade that would push budget < 0 is
         refused. Live mode raises ``BudgetSafetyError``; dry-run returns a
         failure ``AutoTradeResult``. Both modes log at ERROR.
+
+        ``gate`` is required, not optional, and that is the point (REH-100).
+        The gate previously guarded only the Telegram approval path, so the
+        autonomous paths — trade pairs, profit flips, emergency squad fill —
+        spent with nothing between the decision and the money. A default would
+        let the next buy path added here inherit the same hole silently.
         """
         if (
             days_until_match is not None
@@ -118,6 +127,36 @@ class ExecutionService:
                     error=msg,
                 )
             raise BudgetSafetyError(msg)
+
+        # REH-100: the safety gate, on every buy rather than only the approved
+        # one. It refuses with a result instead of raising, unlike the kickoff
+        # guard above — that guard asserts an upstream bug and should be loud,
+        # while a gate refusal is routine (a market value moves between sizing
+        # and execution) and the callers already treat an unsuccessful buy as
+        # "try the next candidate". Runs before the dry-run short-circuit so
+        # `auto --dry-run` and `status` preview refusals rather than hiding them.
+        verdict = gate.check(player_id=player.id, bid=price)
+        if not verdict.ok:
+            msg = "; ".join(verdict.reasons)
+            logger.error(
+                "GATE REFUSED buy player=%s price=%d: %s",
+                player.id,
+                price,
+                msg,
+            )
+            console.print(
+                f"[red]Gate refused {player.first_name} {player.last_name} "
+                f"(€{price:,}): {msg}[/red]"
+            )
+            return AutoTradeResult(
+                success=False,
+                player_name=f"{player.first_name} {player.last_name}",
+                action="BUY",
+                price=price,
+                reason=reason,
+                timestamp=time.time(),
+                error=f"safety gate refused: {msg}",
+            )
 
         return self._do(
             action="BUY",

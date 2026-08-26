@@ -157,6 +157,7 @@ class _StubExecution:
         *,
         current_budget=None,
         days_until_match=None,
+        gate=None,
     ):
         self.calls.append(("buy", player.id, price, reason))
         return SimpleNamespace(
