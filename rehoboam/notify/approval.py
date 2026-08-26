@@ -24,7 +24,7 @@ from __future__ import annotations
 import hmac
 import logging
 
-from rehoboam.services.safety_gate import check_buy
+from rehoboam.services.safety_gate import check_buy, club_counts
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +114,10 @@ def handle_callback(
         free_slots = 15 - len(squad) - len(bids)
 
         # League rule: max three players per club. Counted from the live squad
-        # plus open offers, because a pending bid will occupy a slot too.
-        club_counts: dict[str, int] = {}
-        for held in list(squad) + list(bids):
-            cid = str(getattr(held, "team_id", "") or "")
-            if cid:
-                club_counts[cid] = club_counts.get(cid, 0) + 1
+        # plus open offers, because a pending bid will occupy a slot too. The
+        # counting lives in `safety_gate` so this path and the autonomous ones
+        # cannot drift into disagreeing about the limit (REH-100).
+        counts = club_counts(list(squad) + list(bids))
 
         result = check_buy(
             player_id=proposal["player_id"],
@@ -133,7 +131,7 @@ def handle_callback(
             tier=proposal.get("tier"),
             ceiling_policy=settings.bid_ceiling_policy(),
             club_id=str(getattr(live, "team_id", "") or "") or None,
-            squad_club_counts=club_counts,
+            squad_club_counts=counts,
         )
         if not result.ok:
             learner.set_proposal_status(proposal_id, "failed")
