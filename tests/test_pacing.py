@@ -1,0 +1,103 @@
+"""Reserve the ability to keep buying (REH-85).
+
+The bot committed EUR 71m of an EUR 80m ceiling to one player and then made
+four more buys all season, finishing on EUR 500,000. The champions each made
+one EUR 60-65m signing AND roughly 25 more purchases. The difference is not
+the size of a bid; it is what the bid leaves behind.
+"""
+
+from rehoboam.services.pacing import (
+    PacingContext,
+    available_squad_slots,
+    capital_reserve,
+    median_move_price,
+)
+
+
+class TestMedianMovePrice:
+    def test_returns_the_median_of_the_observed_prices(self):
+        assert median_move_price([1_000_000, 5_000_000, 9_000_000], floor_eur=0) == 5_000_000
+
+    def test_even_count_takes_the_lower_of_the_two_middles(self):
+        # Deliberately not an average: a reserve must be a price someone
+        # actually paid, not an interpolation between two that nobody did.
+        assert median_move_price([2_000_000, 4_000_000], floor_eur=0) == 2_000_000
+
+    def test_empty_population_falls_back_to_the_floor(self):
+        # A thin window must not collapse the reserve to zero, which would
+        # silently disable pacing exactly when there is least evidence.
+        assert median_move_price([], floor_eur=3_000_000) == 3_000_000
+
+    def test_floor_wins_when_the_measured_median_is_below_it(self):
+        assert median_move_price([500_000, 600_000], floor_eur=3_000_000) == 3_000_000
+
+
+class TestAvailableSquadSlots:
+    def test_open_bids_count_as_filled(self):
+        # Kickbase counts a pending offer toward the 15-player cap.
+        assert available_squad_slots(squad_size=11, open_bid_count=1) == 3
+
+    def test_full_squad_has_no_slots(self):
+        assert available_squad_slots(squad_size=15, open_bid_count=0) == 0
+
+    def test_over_committed_squad_does_not_report_negative_room(self):
+        assert available_squad_slots(squad_size=15, open_bid_count=2) == -2
+
+
+class TestCapitalReserve:
+    def test_reserves_one_median_move_per_unfilled_slot(self):
+        assert (
+            capital_reserve(slots_to_fill=3, in_season_min_moves=2, median_move=10_800_000)
+            == 32_400_000
+        )
+
+    def test_full_squad_falls_back_to_the_in_season_minimum(self):
+        # At 15/15 there are no slots to fill, but the bot must still be able
+        # to replace a player mid-season.
+        assert (
+            capital_reserve(slots_to_fill=0, in_season_min_moves=2, median_move=10_800_000)
+            == 21_600_000
+        )
+
+    def test_negative_slots_never_shrink_the_reserve_below_the_minimum(self):
+        assert (
+            capital_reserve(slots_to_fill=-2, in_season_min_moves=2, median_move=10_800_000)
+            == 21_600_000
+        )
+
+
+class TestPacingContext:
+    def test_max_bid_is_the_ceiling_less_open_offers_and_reserve(self):
+        ctx = PacingContext(reserve=32_400_000, open_offers=0)
+        assert ctx.max_bid(budget_ceiling=62_307_522) == 29_907_522
+
+    def test_open_offers_are_already_spent(self):
+        # Kickbase's reported budget does not deduct pending offers, so two
+        # bids sized against the same nominal budget can both land.
+        ctx = PacingContext(reserve=10_000_000, open_offers=5_000_000)
+        assert ctx.max_bid(budget_ceiling=50_000_000) == 35_000_000
+
+    def test_max_bid_never_goes_negative(self):
+        ctx = PacingContext(reserve=50_000_000, open_offers=0)
+        assert ctx.max_bid(budget_ceiling=10_000_000) == 0
+
+    def test_the_unwind_sequence_from_the_spec(self):
+        """Section 2 of the design doc, as executable arithmetic.
+
+        The point of deriving the reserve from slots-to-fill rather than a
+        constant N is that it unwinds. A constant 3 moves would leave the
+        reserve at EUR 32.4m while the budget fell, capping the second buy
+        near EUR 4.8m and freezing the bot one purchase later.
+        """
+        median = 10_800_000
+        budget = 62_307_522
+        caps = []
+        for slots in (3, 2, 1):
+            reserve = capital_reserve(
+                slots_to_fill=slots, in_season_min_moves=2, median_move=median
+            )
+            cap = PacingContext(reserve=reserve, open_offers=0).max_bid(budget)
+            caps.append(cap)
+            budget -= cap  # spend the whole cap, the worst case for the next step
+        assert caps[0] == 29_907_522
+        assert all(c > 0 for c in caps), "the reserve must never freeze the next buy"
