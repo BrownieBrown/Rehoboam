@@ -109,7 +109,8 @@ caps already there:
 
 ```
 median_move  = median(league buy prices over a trailing window)
-moves_wanted = squad_slots_to_fill if squad_slots_to_fill > 0 else in_season_min_moves
+moves_after   = max(squad_slots_to_fill - 1, 0)
+moves_wanted  = moves_after if squad_slots_to_fill > 0 else in_season_min_moves
 reserve      = moves_wanted * median_move
 pace_max_bid = (budget - open_offers) - reserve
 
@@ -137,18 +138,38 @@ but has no cover, which is the position we are in today.
 
 ### 2. How it unwinds
 
-Live state on 2026-08-26 — budget EUR 62,307,522, squad 11 players + 1 open
-offer, `median_move` EUR 10.8m:
+**Corrected 2026-08-26 after a live dry-run.** The rule originally reserved
+`slots_to_fill` moves. That over-counts by one: **the buy being evaluated
+fills one of the slots being reserved for**, so the money that must survive
+it funds `slots_to_fill - 1` further moves. Every row of the table below was
+wrong by one move, and the effect is not cosmetic — at 12/15 it capped a
+signing at EUR 29.9m where the corrected rule permits EUR 40.3m, the
+difference between blocking and allowing exactly the one-big-signing shape
+the champions' data shows.
 
-| step                | squad | budget    | reserve              | max spend |
-| ------------------- | ----- | --------- | -------------------- | --------: |
-| now                 | 12/15 | EUR 62.3m | 3 x 10.8 = EUR 32.4m | EUR 29.9m |
-| after a EUR 25m buy | 13/15 | EUR 37.2m | EUR 21.6m            | EUR 15.6m |
-| after a EUR 15m buy | 14/15 | EUR 21.6m | EUR 10.8m            | EUR 10.8m |
-| after a EUR 10m buy | 15/15 | EUR 10.8m | in-season floor      |         — |
+Live state on 2026-08-26 — budget EUR 62,307,522, squad 11 players,
+`median_move` EUR 10,996,594 as measured from `manager_transfers`. Open
+offers excluded here to isolate the reserve; see below for their effect:
 
-Several mid-sized buys instead of one that ends the season — the champions'
-observed shape.
+| step                  | squad | budget    | slots | reserve (moves after)    | max spend |
+| --------------------- | ----- | --------- | ----: | ------------------------ | --------: |
+| now                   | 12/15 | EUR 62.3m |     3 | 2 x 11.0 = EUR 22.0m     | EUR 40.3m |
+| after a EUR 40.3m buy | 13/15 | EUR 22.0m |     2 | 1 x 11.0 = EUR 11.0m     | EUR 11.0m |
+| after a EUR 11.0m buy | 14/15 | EUR 11.0m |     1 | 0 — fill the last slot   | EUR 11.0m |
+| after a EUR 11.0m buy | 15/15 | EUR 0     |     0 | in-season floor, 2 moves |     EUR 0 |
+
+One large signing followed by smaller ones, then a stop — the champions'
+observed shape, rather than the uniformly mid-sized buys the off-by-one forced.
+
+**The last slot reserves nothing deliberately.** Completing the squad outranks
+holding replacement money; the same judgement settled the earlier boundary
+question. Once the squad is full, `in_season_min_moves` becomes the floor.
+
+**Open offers bite hard, and that is intended.** With the live EUR 40,717,295
+offer on Raum outstanding, spendable budget is EUR 21,590,227 against a
+EUR 22.0m reserve, so the permitted bid is **zero** — the bot buys nothing until
+that offer resolves. That is the rule reporting that one unresolved offer has
+consumed the capacity three empty squad slots still need.
 
 ### 3. Where it does and does not apply
 

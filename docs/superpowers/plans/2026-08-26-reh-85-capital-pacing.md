@@ -238,7 +238,8 @@ def capital_reserve(
     completes, and `in_season_min_moves` is what remains at 15/15 so a full
     squad can still replace a player.
     """
-    moves = slots_to_fill if slots_to_fill > 0 else in_season_min_moves
+    moves_after_this_buy = max(slots_to_fill - 1, 0)
+    moves = moves_after_this_buy if slots_to_fill > 0 else in_season_min_moves
     return max(0, moves) * max(0, median_move)
 
 
