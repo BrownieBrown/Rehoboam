@@ -141,3 +141,132 @@ def test_the_trend_recompute_does_not_discard_pacing(trader):
     # not None (dropped) and not a freshly rebuilt one.
     assert len(recorded_pacing) == 2
     assert all(p is pacing_ctx for p in recorded_pacing)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: emergency squad fill must be exempt from the pacing reserve.
+#
+# An empty lineup slot is -100 pts at kickoff -- that outranks the spending
+# discipline pacing exists to enforce. Emergency fill does not size its own
+# bids; it reads `rec.recommended_bid` off recommendations that
+# `get_ep_recommendations` already paced. The real risk is upstream: if
+# pacing legitimately zeroes a candidate's bid (its reserve rule consumed the
+# whole spendable budget -- confirmed live in a production dry-run where
+# EVERY plain-buy candidate paced to 0), the fill loop's
+# `if not rec.recommended_bid or rec.recommended_bid <= 0: continue` skips
+# it, and the slot is left empty. It fails hardest exactly when it matters
+# most: emergency fill only runs when the squad is short, which means a
+# large `slots_to_fill`, which means a large reserve, which means more
+# zeroed bids.
+# ---------------------------------------------------------------------------
+
+
+def _emergency_fill_ctx(recommended_bid: int):
+    """A short squad (11/15, one gap slot) plus one candidate to fill it."""
+    squad = [
+        SimpleNamespace(
+            id=f"s{i}",
+            first_name="X",
+            last_name=f"P{i}",
+            position="Defender",
+            price=1_000_000,
+            market_value=1_000_000,
+            team_id=f"club{i}",
+        )
+        for i in range(9)
+    ]
+    target = SimpleNamespace(
+        id="fill",
+        first_name="Fill",
+        last_name="Target",
+        position="Forward",
+        price=4_000_000,
+        market_value=4_000_000,
+        team_id="club99",
+    )
+    ctx = SimpleNamespace(
+        ep_result={
+            "buy_recs": [
+                SimpleNamespace(
+                    player=target,
+                    recommended_bid=recommended_bid,
+                    marginal_ep_gain=10.0,
+                    sell_plan=None,
+                )
+            ],
+            "trade_pairs": [],
+            "squad_scores": [],
+            "market_players": {"fill": target},
+        },
+        my_bid_amounts={},
+        my_bids=[],
+        squad=squad,
+        current_budget=50_000_000,
+        flip_budget=50_000_000,
+        executed_trade_count=0,
+        matchday_phase=SimpleNamespace(days_until_match=None),
+    )
+    return squad, target, ctx
+
+
+def _autotrader_with_mock_api(tmp_path, monkeypatch):
+    from rehoboam.auto_trader import AutoTrader
+
+    monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+    monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+    monkeypatch.chdir(tmp_path)
+
+    api = MagicMock()
+    api.buy_player = MagicMock(return_value=None)
+    trader = AutoTrader(api=api, settings=Settings(), dry_run=False)
+    trader.learner = MagicMock()
+    trader.learner.was_recently_sold.return_value = False
+    return api, trader
+
+
+def test_emergency_fill_buys_when_bid_is_already_sized(tmp_path, monkeypatch):
+    """Baseline from the task brief: with a normally-sized (non-zero)
+    recommended_bid, the fill loop buys the candidate as sized.
+
+    This is NOT the exemption test -- it passes whether or not pacing ever
+    reaches this path, because the bid it is given is already usable. Kept
+    because it pins the ordinary (non-paced-to-zero) behaviour of the loop;
+    see `test_emergency_fill_is_not_starved_by_a_paced_zero_bid` below for
+    the test that actually exercises the pacing risk.
+    """
+    api, trader = _autotrader_with_mock_api(tmp_path, monkeypatch)
+    squad, target, ctx = _emergency_fill_ctx(recommended_bid=4_000_000)
+
+    results = trader._run_emergency_squad_fill(
+        league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
+    )
+    assert any(r.success for r in results), "the slot must be filled"
+    assert api.buy_player.call_count == 1
+    assert api.buy_player.call_args[0][2] == 4_000_000
+
+
+def test_emergency_fill_is_not_starved_by_a_paced_zero_bid(tmp_path, monkeypatch):
+    """The real risk: pacing can legitimately size recommended_bid to 0.
+
+    Drives `_run_emergency_squad_fill` with a candidate whose
+    `recommended_bid` is 0 -- exactly what pacing produces once its reserve
+    rule consumes the whole spendable budget -- and asserts the slot still
+    gets filled. Uses the real `ExecutionService` against a mock API and
+    asserts on `api.buy_player`, so this is a behavioural check, not a stub's
+    bookkeeping.
+    """
+    api, trader = _autotrader_with_mock_api(tmp_path, monkeypatch)
+    squad, target, ctx = _emergency_fill_ctx(recommended_bid=0)
+
+    results = trader._run_emergency_squad_fill(
+        league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
+    )
+    assert any(
+        r.success for r in results
+    ), "the slot must be filled despite the paced bid being zero"
+    assert api.buy_player.call_count == 1
+    # The fallback must actually place an offer -- at the asking price, not 0.
+    assert api.buy_player.call_args[0][2] == target.price
+    # The fallback must still respect the budget the emergency path is
+    # working with, not spend blindly past it.
+    assert api.buy_player.call_args[0][2] <= ctx.current_budget

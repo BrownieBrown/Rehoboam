@@ -1106,7 +1106,18 @@ class AutoTrader:
         # Tuple sort: (-fills_gap, -marginal_ep_gain) so gap fills sort to front.
         scored = []
         for rec in buy_recs:
-            if not rec.recommended_bid or rec.recommended_bid <= 0:
+            # REH-85 pacing can legitimately size recommended_bid to 0 (its
+            # reserve rule consumed the whole spendable budget). An empty
+            # lineup slot costs -100 pts at kickoff, which outranks the
+            # pacing reserve, so this path is deliberately exempt from it:
+            # fall back to the asking price, which is what the plan
+            # anticipated paying, whenever the paced bid is zero or missing.
+            bid = (
+                rec.recommended_bid
+                if rec.recommended_bid and rec.recommended_bid > 0
+                else rec.player.price
+            )
+            if not bid or bid <= 0:
                 continue
             if rec.player.id in active_bid_ids:
                 continue
@@ -1114,11 +1125,13 @@ class AutoTrader:
                 console.print(f"[dim]Skip {rec.player.last_name} — wash-trade block[/dim]")
                 continue
             # Only plain in-budget candidates — sell plans add execution risk
-            # at kickoff that the emergency path explicitly avoids.
-            if rec.recommended_bid > budget_remaining:
+            # at kickoff that the emergency path explicitly avoids. The
+            # affordability check still applies to the fallback bid — the
+            # exemption is from pacing, not from the budget guard.
+            if bid > budget_remaining:
                 continue
             fills_gap = 1 if rec.player.position in gap_positions else 0
-            scored.append((fills_gap, rec.marginal_ep_gain or 0.0, rec))
+            scored.append((fills_gap, rec.marginal_ep_gain or 0.0, bid, rec))
 
         scored.sort(key=lambda t: (-t[0], -t[1]))
 
@@ -1129,10 +1142,10 @@ class AutoTrader:
             return results
 
         bought = 0
-        for _gap, _ep, rec in scored:
+        for _gap, _ep, bid, rec in scored:
             if bought >= slots_short:
                 break
-            if rec.recommended_bid > budget_remaining:
+            if bid > budget_remaining:
                 continue
 
             # A gate refusal here means "try the next candidate", not "field
@@ -1144,7 +1157,7 @@ class AutoTrader:
             result = self.execution.buy(
                 league,
                 rec.player,
-                rec.recommended_bid,
+                bid,
                 f"Emergency lineup fill (squad short by {slots_short})",
                 current_budget=budget_remaining,
                 days_until_match=ctx.matchday_phase.days_until_match,
@@ -1160,8 +1173,8 @@ class AutoTrader:
             results.append(result)
             if result.success:
                 bought += 1
-                budget_remaining -= rec.recommended_bid
-                self.daily_spend += rec.recommended_bid
+                budget_remaining -= bid
+                self.daily_spend += bid
                 # Track the position so subsequent picks deprioritize the gap.
                 gap_positions.discard(rec.player.position)
 
