@@ -16,6 +16,7 @@ from rehoboam.backtest.snapshot import matches_before
 from rehoboam.enrichment.corpus import TrainingCorpus
 from rehoboam.replay.attribution import LeagueStanding, format_report
 from rehoboam.replay.engine import (
+    DECISION_LEAD_SECONDS,
     Matchday,
     SeasonResult,
     run_season,
@@ -26,6 +27,12 @@ from rehoboam.replay.state import initial_state
 from rehoboam.scoring.v2.adapter import compose_ep, prev_status_from_history
 from rehoboam.scoring.v2.coefficients import load_coefficients
 from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier
+from rehoboam.services.pacing import (
+    PacingContext,
+    available_squad_slots,
+    capital_reserve,
+    median_move_price,
+)
 
 SEASON = "2025/2026"
 LEAGUE_ID = "1933872"
@@ -260,7 +267,20 @@ def run_replay(
         buy_rank_fn=buy_rank_fn,
         buy_quota=buy_quota,
         bid_fn=(
-            make_ep_bid_fn(mv_fn=corpus.market_value_at, score_fn=score_fn)
+            make_ep_bid_fn(
+                mv_fn=corpus.market_value_at,
+                score_fn=score_fn,
+                median_move=median_move_price(
+                    [
+                        int(row["price"])
+                        for row in corpus.transfers_between(
+                            0.0, matchdays[0].kickoff - DECISION_LEAD_SECONDS
+                        )
+                    ],
+                    floor_eur=int(_shipped_default("pacing_median_floor_eur")),
+                ),
+                in_season_min_moves=int(_shipped_default("pacing_in_season_min_moves")),
+            )
             if with_competition
             else None
         ),
@@ -395,7 +415,9 @@ def make_ep_bid_fn(
     *,
     mv_fn: Callable[[str, float], int | None],
     score_fn: Callable[[str, float], float],
-) -> Callable[[str, int, float, float, int], int]:
+    median_move: int,
+    in_season_min_moves: int,
+) -> Callable[[str, int, float, float, int, int], int]:
     """Bid with the bot's own bidding strategy (REH-68).
 
     Until now the replay bought at the listed price and never called
@@ -443,7 +465,17 @@ def make_ep_bid_fn(
         ceiling_policy=ceiling_policy,
     )
 
-    def bid(player_id: str, price: int, at: float, gain: float, budget: int) -> int:
+    def bid(
+        player_id: str, price: int, at: float, gain: float, budget: int, squad_size: int
+    ) -> int:
+        # REH-85: the reserve the live bot applies. Without it the harness
+        # measures a bidder nobody deploys — the same reason the tiers and the
+        # REH-99 ceiling are read from the shipped defaults above.
+        reserve = capital_reserve(
+            slots_to_fill=available_squad_slots(squad_size, 0),
+            in_season_min_moves=in_season_min_moves,
+            median_move=median_move,
+        )
         rec = bidding.calculate_ep_bid(
             asking_price=price,
             market_value=mv_fn(player_id, at) or price,
@@ -453,6 +485,7 @@ def make_ep_bid_fn(
             current_budget=budget,
             sell_plan=None,
             trend_change_pct=0.0,
+            pacing=PacingContext(reserve=reserve, open_offers=0),
         )
         return int(rec.recommended_bid)
 
