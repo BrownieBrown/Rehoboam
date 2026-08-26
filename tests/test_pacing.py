@@ -65,6 +65,15 @@ class TestCapitalReserve:
             == 21_600_000
         )
 
+    def test_reserve_unwinds_below_in_season_minimum_while_slots_remain(self):
+        # Discriminator: 0 < slots < in_season_min_moves must use slots, not max().
+        # Using max(1, 2) would incorrectly yield 21_600_000; correct is 10_800_000.
+        # This is the only case where slots-conditional and max() diverge.
+        assert (
+            capital_reserve(slots_to_fill=1, in_season_min_moves=2, median_move=10_800_000)
+            == 10_800_000
+        )
+
 
 class TestPacingContext:
     def test_max_bid_is_the_ceiling_less_open_offers_and_reserve(self):

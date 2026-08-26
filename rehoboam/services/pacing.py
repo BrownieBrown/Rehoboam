@@ -65,7 +65,18 @@ def capital_reserve(*, slots_to_fill: int, in_season_min_moves: int, median_move
     Deriving it from unfilled slots makes the reserve unwind as the squad
     completes, and `in_season_min_moves` is what remains at 15/15 so a full
     squad can still replace a player.
+
+    Critical boundary: `in_season_min_moves` is NOT a floor while slots remain.
+    When 0 < slots_to_fill < in_season_min_moves, the reserve falls below
+    the in-season minimum by design, allowing unwinding. `in_season_min_moves`
+    only becomes the floor at slots_to_fill <= 0 (full squad or over-committed).
+    Using max() instead would freeze the reserve once below in_season_min_moves,
+    preventing the reserve from unwinding as the squad fills — that is the bug
+    the brief accidentally encoded.
     """
+    # Use slots_to_fill when positive (unwinding), fall back to in_season_min_moves
+    # at 0 or negative (full squad, never go below minimum). Not max(), which would
+    # freeze the reserve and prevent unwinding.
     moves = slots_to_fill if slots_to_fill > 0 else in_season_min_moves
     return max(0, moves) * max(0, median_move)
 
