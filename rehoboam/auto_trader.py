@@ -9,6 +9,8 @@ from rich.console import Console
 
 from .config import INSTANT_SELL_PCT
 from .services import AutoTradeResult, ExecutionService
+from .services.pacing import SQUAD_CAP as pacing_squad_cap
+from .services.pacing import available_squad_slots
 from .services.safety_gate import BuyGate, club_counts
 
 console = Console()
@@ -127,7 +129,10 @@ def _compute_flip_budget(
     return current_budget + max_debt - pending_bid_total
 
 
-SQUAD_CAP = 15  # Kickbase's hard squad-size limit, including open (unresolved) bids
+# One definition of the squad cap, in `services/pacing`. Two copies of one
+# safety-relevant number in different modules is how REH-99's 8%/20% split
+# happened; the name is kept here because callers and tests already use it.
+SQUAD_CAP = pacing_squad_cap
 
 
 def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUAD_CAP) -> int:
@@ -135,14 +140,10 @@ def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUA
 
     Kickbase counts pending offers toward the 15-player cap before they even
     resolve — a squad at 13 with 2 open bids has zero room for a further
-    bid, not two (``len(squad)`` alone would wrongly say two). Positive
-    means room for another bid; zero or negative means none.
-
-    Shared by session-context logging and the trade-phase buy gate so both
-    agree on the same number — a duplicated ad-hoc ``15 - size - bids``
-    calculation in two places is exactly how this kind of drift happens.
+    bid, not two. Positive means room for another bid; zero or negative
+    means none.
     """
-    return cap - squad_size - open_bid_count
+    return available_squad_slots(squad_size, open_bid_count, cap)
 
 
 def _starter_swap_has_recovery_time(days_until_match: int | None, min_days: int) -> bool:

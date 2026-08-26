@@ -110,3 +110,23 @@ class TestPacingContext:
             budget -= cap  # spend the whole cap, the worst case for the next step
         assert caps[0] == 29_907_522
         assert all(c > 0 for c in caps), "the reserve must never freeze the next buy"
+
+
+def test_auto_trader_slot_helper_delegates_to_the_pacing_module():
+    """One definition of the squad cap, not two.
+
+    REH-99 was caused by two constants for one concept living in different
+    modules and drifting apart. This asserts the copies cannot.
+    """
+    from rehoboam import auto_trader
+    from rehoboam.services import pacing
+
+    # Identity on the FUNCTION, not on SQUAD_CAP: CPython interns small
+    # integers, so `15 is 15` is True even for two separate definitions and
+    # would pass before this task did anything.
+    assert auto_trader.available_squad_slots is pacing.available_squad_slots
+    assert auto_trader.SQUAD_CAP == pacing.SQUAD_CAP
+    for squad, bids in ((11, 1), (15, 0), (13, 2), (15, 2)):
+        assert auto_trader._available_squad_slots(squad, bids) == pacing.available_squad_slots(
+            squad, bids
+        )
