@@ -804,9 +804,11 @@ Expected: FAIL — `TypeError: calculate_ep_bid() got an unexpected keyword argu
 
 In `rehoboam/bidding_strategy.py`, add to the end of the `calculate_ep_bid` parameter list (after `is_dgw: bool = False`):
 
-```python
-pacing: "PacingContext | None" = (None,)
+```text
+pacing: PacingContext | None = None,
 ```
+
+(Fenced as `text`, not `python`, deliberately: the repo's mdformat pre-commit hook runs black over python blocks, and black parses a bare `name: T = None,` fragment as a statement and rewrites it to `= (None,)` — a tuple default. That corruption is what the Task 5 implementer hit and correctly worked around. No quotes are needed on the annotation: `bidding_strategy.py` already has `from __future__ import annotations`, and ruff's UP037 removes them.)
 
 Add the import at the top of the file:
 
