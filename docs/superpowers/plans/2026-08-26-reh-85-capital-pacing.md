@@ -632,7 +632,13 @@ ______________________________________________________________________
 - Consumes: `PacingContext` from Task 1.
 - Produces: `calculate_ep_bid(..., pacing: PacingContext | None = None)`. `None` means pacing is off, and every existing caller keeps working unchanged.
 
-Placement matters and is not arbitrary. `bidding_strategy.py:434` reads `ep_max_bid = max(ep_max_bid, asking_price + overbid_amount)` — the Kimmich fix of 2026-08-24, which deliberately floors the EP cap at the asking price so a wanted player is not priced out of his own auction. A pacing cap applied *before* that line would be floored straight back off. Apply it immediately after the REH-99 ceiling, which is the last thing that lowers a bid.
+Placement matters and is not arbitrary — **corrected 2026-08-26 during Task 5's review.** The mechanism is the **market-value floor**, not the Kimmich line.
+
+`bidding_strategy.py:442` is `recommended_bid = min(recommended_bid, ep_max_bid, budget_ceiling)` — a `min`, so the Kimmich line above it (which only raises `ep_max_bid`) cannot lift an already-reduced `recommended_bid`. What *can* is the market-value floor at lines 446-448, which unconditionally raises `recommended_bid` to `min(market_value * 1.01, budget_ceiling)` whenever it falls below that.
+
+So a pacing cap applied before the market-value floor is silently undone. Apply it immediately after the REH-99 ceiling, which is the last thing that lowers a bid.
+
+**A test for this must be built deliberately.** The obvious numbers do not discriminate: when `market_value * 1.01` is below the asking price, a misplaced cap gets rescued to a value still under asking, and the pre-existing `recommended_bid < asking_price -> 0` net zeroes it anyway — so the test passes either way. Choose `market_value` close enough to `asking_price` that the floor's rescue lands *above* asking, and verify by moving the block, watching the test fail, and moving it back.
 
 - [ ] **Step 1: Write the failing tests**
 
