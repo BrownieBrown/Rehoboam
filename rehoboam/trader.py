@@ -727,6 +727,11 @@ class Trader:
             "market_players": market_player_map,
             "market_scores": {s.player_id: s for s in market_scores},
             "competitor_player_ids": competitor_player_ids,
+            # REH-85: surfaced so get_ep_recommendations_with_trends can reuse
+            # this session's context instead of rebuilding it — a rebuild
+            # would mean a second get_my_bids call and could yield a
+            # different reserve within one session.
+            "pacing": pacing,
             # Surfaced for matchday reconciliation (REH-20). Reconciliation
             # needs raw performance dicts to read past actual points (`p`,
             # `mdst`, `md`); piggybacking on the EP pipeline's existing
@@ -743,6 +748,10 @@ class Trader:
         """
         result = self.get_ep_recommendations(league)
         current_budget = int(result.get("budget", 0))
+        # REH-85: reuse the context built inside get_ep_recommendations rather
+        # than rebuilding it here — a rebuild would be a second get_my_bids
+        # call and could produce a different reserve within one session.
+        pacing = result.get("pacing")
 
         # League-level competitor context: checked once per session so all bids
         # in this run share the same "is the league aggressive today?" signal.
@@ -781,6 +790,7 @@ class Trader:
                     offer_count=rec.player.offer_count,
                     has_aggressive_competitors=has_whales,
                     is_dgw=rec.score.is_dgw,
+                    pacing=pacing,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -819,6 +829,7 @@ class Trader:
                     offer_count=pair.buy_player.offer_count,
                     has_aggressive_competitors=has_whales,
                     is_dgw=pair.buy_score.is_dgw,
+                    pacing=pacing,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
