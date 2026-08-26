@@ -109,7 +109,7 @@ caps already there:
 
 ```
 median_move  = median(league buy prices over a trailing window)
-moves_wanted = max(squad_slots_to_fill, in_season_min_moves)
+moves_wanted = squad_slots_to_fill if squad_slots_to_fill > 0 else in_season_min_moves
 reserve      = moves_wanted * median_move
 pace_max_bid = (budget - open_offers) - reserve
 
@@ -121,6 +121,13 @@ obvious formulation and it is wrong: with a fixed 3 moves at EUR 10.8m the
 reserve stays EUR 32.4m while the budget falls, so the second buy is capped near
 EUR 4.8m and the bot freezes one purchase later than before. Deriving it from
 unfilled slots makes the reserve unwind as the squad completes.
+
+**Corrected 2026-08-26 during implementation.** This line originally read
+`max(squad_slots_to_fill, in_season_min_moves)`, which contradicts the table in
+§2 below and freezes the last slot: at 14/15 `max(1, 2)` reserves two moves, the
+budget by then *is* two moves, and the permitted bid is exactly zero. While
+slots remain, the slots govern; `in_season_min_moves` is the floor only once
+there are none. The table was right and the formula was wrong.
 
 `squad_slots_to_fill` is measured **to the 15-player cap, counting open offers as
 filled** — the same quantity `_available_squad_slots` already computes, and for
