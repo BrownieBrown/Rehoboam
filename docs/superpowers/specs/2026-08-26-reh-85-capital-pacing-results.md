@@ -4,7 +4,7 @@ Date: 2026-08-26
 Status: measured, recommendation below, not yet merged
 Ticket: https://linear.app/jovily/issue/REH-85
 Design: `docs/superpowers/specs/2026-08-26-reh-85-capital-pacing-design.md`
-Branch: `marcobraun2013/reh-85-capital-pacing`, HEAD `ef05f46`
+Branch: `marcobraun2013/reh-85-capital-pacing`, HEAD `6b17311` (smoke re-run post-fix; sweep measured at `ef05f46`)
 
 ## Verdict up front
 
@@ -233,6 +233,10 @@ outstanding offer consuming spendable budget), confirming the live wiring
 behaves the way the design and the replay both predict, without needing
 today's exact reserve number to match a prior run's.
 
+**Superseded as the pre-merge smoke run** — the review fixes in `ebfe5bb`
+changed production code after this run. See "Live smoke test, re-run after
+the review fixes" below for the numbers this branch actually merges on.
+
 ## Addendum: the final whole-branch review (2026-08-26, after this document was first written)
 
 A whole-branch review found **three Important defects, every one of them invisible
@@ -280,6 +284,57 @@ what it covers, and it covers a squad-building regime only. Three separate
 allocation result from one regime, not as evidence the feature is safe across
 the season — the fixes above, not the sweep, are what make it so.
 
+## Live smoke test, re-run after the review fixes — 2026-08-27, HEAD `6b17311`
+
+The smoke test above ran at HEAD `ef05f46`. The review fixes in `ebfe5bb`
+changed four production files (`auto_trader.py`, `trader.py`,
+`bidding_strategy.py`, `services/pacing.py`), so it was re-run before merge:
+
+```
+2026-08-27 09:22:22 INFO rehoboam.trader | pacing session median_move=10800000 slots_to_fill=3 reserve=21600000 open_offers=0 n_prices=50
+2026-08-27 09:22:31 INFO rehoboam.auto_trader | session-context phase=locked days_to_match=1 squad=12/15 budget=21650227 team_value=145278078 flip_budget=0 pending_bids=0
+```
+
+**The EUR 40.7m Raum offer has resolved**, so this run exercises the
+`open_offers=0` path the earlier one could not — a materially different
+branch of `max_bid`, and the reason re-running mattered rather than reusing
+the recorded numbers.
+
+- `median_move` is unchanged at EUR 10,800,000 (`n_prices` 48 → 50, so the
+  rolling window did move; the median simply did not).
+- `slots_to_fill=3`, `reserve=21,600,000` — `2 x 10,800,000`, the same
+  `slots_to_fill - 1` arithmetic as before.
+- Spendable budget is now the full `21,650,227`, leaving headroom of
+  **EUR 50,227** over the reserve.
+
+Every paced line reconciles exactly against `max_bid`:
+
+| candidate                  |    ceiling | sell-plan recovery | paced cap |
+| -------------------------- | ---------: | -----------------: | --------: |
+| plain buy (no sell plan)   | 21,650,227 |                  0 |    50,227 |
+| with a mid sell plan       | 23,808,825 |         +2,158,598 | 2,208,825 |
+| with the largest sell plan | 26,151,720 |         +4,501,493 | 4,551,720 |
+
+22 `ep-bid paced` lines, all reporting the same `reserve=21600000 open_offers=0`, confirming the context is built **once per session** and
+reused rather than recomputed per candidate.
+
+**What this changes about the verdict: nothing, and that is the point.**
+Plain buys are capped at EUR 50,227 instead of the earlier run's 0 — still
+far below any real ask, so the buy-side lockout documented above persists
+under the fixes. The clamp added in `ebfe5bb` does not loosen it here
+(`min(21,600,000, 21,650,227 - 0) = 21,600,000`, unbound), which is the
+intended behaviour: the clamp exists to stop the reserve exceeding what
+exists, not to shrink a reserve the budget can still cover. The session was
+in `phase=locked` (1 day to kickoff) and traded nothing regardless, so this
+confirms wiring and arithmetic, not trading outcomes.
+
+One property worth stating plainly for the fast-follow ticket, visible in
+these numbers: because the reserve scales with **empty slots**, selling a
+player below the median move price makes the next buy *harder*, not easier
+— it adds one slot (+EUR 10.8m of reserve) while adding less than that to
+the budget. That is the same "calibrated for topping up, not building"
+mechanism diagnosed above, in its live form.
+
 ## Caveats
 
 - **The replay's buy side is an upper bound**, per the design's own Risks
@@ -305,10 +360,23 @@ the season — the fixes above, not the sweep, are what make it so.
 
 ## Test suite
 
+At `ef05f46`, when the sweep above was measured:
+
 ```
 $ uv run pytest -q
 1272 passed, 1 skipped in 16.68s
 ```
 
-No production code or tuning defaults were changed by this task. HEAD is
-still `ef05f46` (Task 8's final commit); this document is the only change.
+At `6b17311`, the merge candidate, after the review fixes in `ebfe5bb` added
+12 tests:
+
+```
+$ uv run pytest -q
+1284 passed, 1 skipped in 5.55s
+```
+
+No tuning defaults were changed by the measurement task itself; the sweep
+numbers above are read at `ef05f46`, and `ebfe5bb`'s production changes were
+re-verified by the smoke re-run rather than by re-sweeping (the replay's
+squad-building regime is structurally blind to all three defects it fixed,
+as the addendum explains).
