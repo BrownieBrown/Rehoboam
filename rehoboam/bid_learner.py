@@ -1364,6 +1364,87 @@ class BidLearner:
             conn.commit()
         return len(rows)
 
+    def get_last_purchase(self, manager_id: str, player_id: str) -> dict[str, Any] | None:
+        """Our most recent purchase of a player, if we still hold that purchase.
+
+        REH-103. `manager_transfers` mirrors the league activity feed, so it
+        records purchases the bidding path never saw — which is the only reason
+        Raum's EUR 40.7m cost basis is recoverable at all.
+
+        A buy followed by a SELL is deliberately reported as no basis rather
+        than as the old price. Da Costa was bought 2026-05-03 and sold
+        2026-05-11; the player of that name in the squad today is a different,
+        untracked holding, and attaching the May figure to it would drive
+        profit-and-loss decisions off a basis that belongs to a position we no
+        longer own. Returns None in that case so the caller reports a gap
+        instead of acting on a stale number.
+
+        `transfer_dt` is stored as an ISO-8601 string, so the ordering and the
+        after-the-sale comparison are both plain lexicographic.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            buy = conn.execute(
+                """
+                SELECT transfer_price, transfer_dt
+                FROM manager_transfers
+                WHERE manager_id = ? AND player_id = ? AND transfer_type = 1
+                  AND transfer_price IS NOT NULL
+                ORDER BY transfer_dt DESC
+                LIMIT 1
+                """,
+                (str(manager_id), str(player_id)),
+            ).fetchone()
+            if buy is None:
+                return None
+
+            sold_since = conn.execute(
+                """
+                SELECT 1
+                FROM manager_transfers
+                WHERE manager_id = ? AND player_id = ? AND transfer_type = 2
+                  AND transfer_dt > ?
+                LIMIT 1
+                """,
+                (str(manager_id), str(player_id), buy["transfer_dt"]),
+            ).fetchone()
+
+        if sold_since is not None:
+            return None
+        return {"price": int(buy["transfer_price"]), "transfer_dt": buy["transfer_dt"]}
+
+    def get_last_purchase_price(self, manager_id: str, player_id: str) -> int | None:
+        """Price of the purchase we still hold, or None if there is no basis."""
+        purchase = self.get_last_purchase(manager_id, player_id)
+        return purchase["price"] if purchase else None
+
+    def recent_buy_prices(self, window_days: int) -> list[int]:
+        """Purchase prices across the league in the trailing window, in euros.
+
+        The population behind REH-85's reserve: what one further move actually
+        costs here. `transfer_type = 1` is a buy and `2` is a sale — verified
+        against manager 3616202, whose type-1 total of EUR 69,831,333 and
+        type-2 total of EUR 139,638,056 match REH-72 §5.
+
+        Prices are returned as magnitudes because the transfer feed signs a
+        purchase negative in some payloads and a reserve is a size, not a
+        direction. `transfer_dt` is ISO-8601, so the cutoff compares
+        lexicographically without parsing.
+        """
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - window_days * 86400))
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT ABS(transfer_price)
+                FROM manager_transfers
+                WHERE transfer_type = 1
+                  AND transfer_price IS NOT NULL
+                  AND transfer_dt >= ?
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def has_matchday_outcome(self, player_id: str, matchday_date: str) -> bool:
         """True if ``matchday_outcomes`` already has a row for this player+date."""
         with sqlite3.connect(self.db_path) as conn:

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .scoring.models import SellPlan
 
+from .services.pacing import PacingContext
+
 try:
     from .activity_feed_learner import ActivityFeedLearner
     from .bid_learner import BidLearner
@@ -209,6 +211,7 @@ class SmartBidding:
         offer_count: int = 0,
         has_aggressive_competitors: bool = False,
         is_dgw: bool = False,
+        pacing: PacingContext | None = None,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -234,6 +237,9 @@ class SmartBidding:
                 matchday). Averaging across two matches reduces outcome variance,
                 so we have higher confidence in the EP prediction — the bid
                 confidence is floored at 0.9 to reflect that certainty.
+            pacing: REH-85 capital pacing. When given, caps the bid so the
+                reserve survives it — the budget needed to make the moves the
+                squad still requires. None disables pacing entirely.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -448,6 +454,28 @@ class SmartBidding:
             recommended_bid = min(
                 recommended_bid, self.ceiling_policy.max_bid(market_value, ep_tier)
             )
+
+        # REH-85: leave enough behind to keep buying. Applied here, after the
+        # REH-99 ceiling and the market-value floor above, because that floor
+        # unconditionally raises recommended_bid to min(market_value * 1.01,
+        # budget_ceiling) whenever it falls short — a cap applied before it
+        # would simply be lifted back off.
+        #
+        # This caps rather than refuses. Where the cap falls below the asking
+        # price the block below turns it into recommended_bid = 0, so pacing
+        # needs no refusal path competing with the ceiling and the safety gate.
+        if pacing is not None:
+            pace_cap = pacing.max_bid(budget_ceiling, current_budget)
+            if recommended_bid > pace_cap:
+                logger.info(
+                    "ep-bid paced player=%s bid=%d -> %d (reserve=%d open_offers=%d)",
+                    player_id,
+                    recommended_bid,
+                    pace_cap,
+                    pacing.reserve,
+                    pacing.open_offers,
+                )
+                recommended_bid = pace_cap
 
         # If we still can't afford the asking price (truly out of budget), signal no-bid
         if recommended_bid < asking_price:

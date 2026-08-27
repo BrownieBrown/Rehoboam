@@ -51,13 +51,13 @@ def _run(bid_fn):
 
 def test_a_bid_below_the_real_price_loses_the_auction():
     """The rival paid 10,000,000. Bidding under that must not win."""
-    _result, state = _run(lambda pid, price, at, gain, budget: 9_999_999)
+    _result, state = _run(lambda pid, price, at, gain, budget, squad_size: 9_999_999)
 
     assert "target" not in state.squad
 
 
 def test_a_bid_above_the_real_price_wins():
-    _result, state = _run(lambda pid, price, at, gain, budget: 11_000_000)
+    _result, state = _run(lambda pid, price, at, gain, budget, squad_size: 11_000_000)
 
     assert "target" in state.squad
 
@@ -65,7 +65,7 @@ def test_a_bid_above_the_real_price_wins():
 def test_the_winner_pays_its_own_bid_not_the_rivals_price():
     """Outbidding costs more than the rival paid. Charging the rival's price
     would give us the upside of competition with none of its cost."""
-    _result, state = _run(lambda pid, price, at, gain, budget: 11_000_000)
+    _result, state = _run(lambda pid, price, at, gain, budget, squad_size: 11_000_000)
 
     assert state.budget == 100_000_000 - 11_000_000
 
@@ -84,8 +84,8 @@ def test_bid_fn_receives_the_marginal_gain_and_the_current_budget():
     hook can only express a flat willingness to pay, which is not the bot."""
     seen: dict = {}
 
-    def bid(pid, price, at, gain, budget):
-        seen.update(pid=pid, price=price, gain=gain, budget=budget)
+    def bid(pid, price, at, gain, budget, squad_size):
+        seen.update(pid=pid, price=price, gain=gain, budget=budget, squad_size=squad_size)
         return 0  # lose, so the run is unaffected
 
     _run(bid)
@@ -94,6 +94,7 @@ def test_bid_fn_receives_the_marginal_gain_and_the_current_budget():
     assert seen["price"] == 10_000_000
     assert seen["gain"] > 0.0, "target scores 200 against a squad of 10s"
     assert seen["budget"] == 100_000_000
+    assert seen["squad_size"] == 11
 
 
 def test_the_ep_bid_fn_bids_more_for_a_must_have_than_for_a_marginal_gain():
@@ -106,10 +107,16 @@ def test_the_ep_bid_fn_bids_more_for_a_must_have_than_for_a_marginal_gain():
     bid_fn = make_ep_bid_fn(
         mv_fn=lambda pid, at: 10_000_000,
         score_fn=lambda pid, at: 100.0,
+        median_move_fn=lambda at: 10_000_000,
+        in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
 
-    must_have = bid_fn("p", 10_000_000, 0.0, 80.0, 50_000_000)
-    marginal = bid_fn("p", 10_000_000, 0.0, 5.0, 50_000_000)
+    # squad_size=14 -> 1 slot left -> capital_reserve's last-slot case (0
+    # reserve): this test is about tiers, not pacing, so the reserve must not
+    # confound it.
+    must_have = bid_fn("p", 10_000_000, 0.0, 80.0, 50_000_000, 14)
+    marginal = bid_fn("p", 10_000_000, 0.0, 5.0, 50_000_000, 14)
 
     assert must_have > marginal
 
@@ -120,6 +127,11 @@ def test_the_ep_bid_fn_never_bids_beyond_the_budget():
     bid_fn = make_ep_bid_fn(
         mv_fn=lambda pid, at: 10_000_000,
         score_fn=lambda pid, at: 100.0,
+        median_move_fn=lambda at: 10_000_000,
+        in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
 
-    assert bid_fn("p", 10_000_000, 0.0, 80.0, 3_000_000) <= 3_000_000
+    # squad_size=14 -> 0 reserve (see above) -> this exercises the budget cap
+    # alone, not the pacing cap.
+    assert bid_fn("p", 10_000_000, 0.0, 80.0, 3_000_000, 14) <= 3_000_000

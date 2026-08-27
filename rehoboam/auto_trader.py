@@ -9,6 +9,8 @@ from rich.console import Console
 
 from .config import INSTANT_SELL_PCT
 from .services import AutoTradeResult, ExecutionService
+from .services.pacing import SQUAD_CAP as pacing_squad_cap
+from .services.pacing import available_squad_slots
 from .services.safety_gate import BuyGate, club_counts
 
 console = Console()
@@ -127,7 +129,10 @@ def _compute_flip_budget(
     return current_budget + max_debt - pending_bid_total
 
 
-SQUAD_CAP = 15  # Kickbase's hard squad-size limit, including open (unresolved) bids
+# One definition of the squad cap, in `services/pacing`. Two copies of one
+# safety-relevant number in different modules is how REH-99's 8%/20% split
+# happened; the name is kept here because callers and tests already use it.
+SQUAD_CAP = pacing_squad_cap
 
 
 def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUAD_CAP) -> int:
@@ -135,14 +140,10 @@ def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUA
 
     Kickbase counts pending offers toward the 15-player cap before they even
     resolve — a squad at 13 with 2 open bids has zero room for a further
-    bid, not two (``len(squad)`` alone would wrongly say two). Positive
-    means room for another bid; zero or negative means none.
-
-    Shared by session-context logging and the trade-phase buy gate so both
-    agree on the same number — a duplicated ad-hoc ``15 - size - bids``
-    calculation in two places is exactly how this kind of drift happens.
+    bid, not two. Positive means room for another bid; zero or negative
+    means none.
     """
-    return cap - squad_size - open_bid_count
+    return available_squad_slots(squad_size, open_bid_count, cap)
 
 
 def _starter_swap_has_recovery_time(days_until_match: int | None, min_days: int) -> bool:
@@ -1001,6 +1002,20 @@ class AutoTrader:
                     continue
                 if opp.buy_price > ctx.flip_budget:
                     continue
+                # REH-85 Finding 2: a flip is discretionary spend, and design
+                # §3 says pacing applies to it same as a plain buy -- capital
+                # parked in a flip is capital the reserve exists to protect.
+                # `pacing` is None when pacing is off entirely, which must
+                # not skip anything.
+                pacing_ctx = ctx.ep_result.get("pacing")
+                if pacing_ctx is not None:
+                    pace_cap = pacing_ctx.max_bid(ctx.flip_budget, ctx.current_budget)
+                    if opp.buy_price > pace_cap:
+                        console.print(
+                            f"[yellow]Cannot afford flip {opp.player.last_name} — "
+                            f"pacing reserve (€{opp.buy_price:,} > €{pace_cap:,})[/yellow]"
+                        )
+                        continue
 
                 result = self.execution.buy(
                     league,
@@ -1105,7 +1120,18 @@ class AutoTrader:
         # Tuple sort: (-fills_gap, -marginal_ep_gain) so gap fills sort to front.
         scored = []
         for rec in buy_recs:
-            if not rec.recommended_bid or rec.recommended_bid <= 0:
+            # REH-85 pacing can legitimately size recommended_bid to 0 (its
+            # reserve rule consumed the whole spendable budget). An empty
+            # lineup slot costs -100 pts at kickoff, which outranks the
+            # pacing reserve, so this path is deliberately exempt from it:
+            # fall back to the asking price, which is what the plan
+            # anticipated paying, whenever the paced bid is zero or missing.
+            bid = (
+                rec.recommended_bid
+                if rec.recommended_bid and rec.recommended_bid > 0
+                else rec.player.price
+            )
+            if not bid or bid <= 0:
                 continue
             if rec.player.id in active_bid_ids:
                 continue
@@ -1113,11 +1139,13 @@ class AutoTrader:
                 console.print(f"[dim]Skip {rec.player.last_name} — wash-trade block[/dim]")
                 continue
             # Only plain in-budget candidates — sell plans add execution risk
-            # at kickoff that the emergency path explicitly avoids.
-            if rec.recommended_bid > budget_remaining:
+            # at kickoff that the emergency path explicitly avoids. The
+            # affordability check still applies to the fallback bid — the
+            # exemption is from pacing, not from the budget guard.
+            if bid > budget_remaining:
                 continue
             fills_gap = 1 if rec.player.position in gap_positions else 0
-            scored.append((fills_gap, rec.marginal_ep_gain or 0.0, rec))
+            scored.append((fills_gap, rec.marginal_ep_gain or 0.0, bid, rec))
 
         scored.sort(key=lambda t: (-t[0], -t[1]))
 
@@ -1128,10 +1156,10 @@ class AutoTrader:
             return results
 
         bought = 0
-        for _gap, _ep, rec in scored:
+        for _gap, _ep, bid, rec in scored:
             if bought >= slots_short:
                 break
-            if rec.recommended_bid > budget_remaining:
+            if bid > budget_remaining:
                 continue
 
             # A gate refusal here means "try the next candidate", not "field
@@ -1143,7 +1171,7 @@ class AutoTrader:
             result = self.execution.buy(
                 league,
                 rec.player,
-                rec.recommended_bid,
+                bid,
                 f"Emergency lineup fill (squad short by {slots_short})",
                 current_budget=budget_remaining,
                 days_until_match=ctx.matchday_phase.days_until_match,
@@ -1159,8 +1187,8 @@ class AutoTrader:
             results.append(result)
             if result.success:
                 bought += 1
-                budget_remaining -= rec.recommended_bid
-                self.daily_spend += rec.recommended_bid
+                budget_remaining -= bid
+                self.daily_spend += bid
                 # Track the position so subsequent picks deprioritize the gap.
                 gap_positions.discard(rec.player.position)
 
@@ -1580,6 +1608,21 @@ class AutoTrader:
                 squad_ids={p.id for p in squad},
                 active_bid_ids={p.id for p in bids},
             )
+
+            # REH-103: resolve_auctions can only record a purchase it can match
+            # to a pending bid, so a player who joined the squad any other way
+            # is tracked nowhere — and with no cost basis, `enable_profit_sells`
+            # can never evaluate them. Raum (EUR 40.7m) arrived that way and
+            # left 10 of 12 squad players unsellable-on-profit, silently.
+            # Reconciling against squad membership closes the gap regardless of
+            # how the player arrived. Never raises; reports what it could not
+            # recover rather than inventing a price.
+            try:
+                my_id = getattr(getattr(self.api, "user", None), "id", None)
+                if my_id:
+                    self.tracker.reconcile_squad_cost_basis(squad, manager_id=str(my_id))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("cost-basis reconciliation failed (non-fatal)")
             # Execute any deferred sell plans from bids we won (buy-first-sell-after).
             if deferred_sell_ids:
                 console.print(

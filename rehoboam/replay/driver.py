@@ -26,6 +26,12 @@ from rehoboam.replay.state import initial_state
 from rehoboam.scoring.v2.adapter import compose_ep, prev_status_from_history
 from rehoboam.scoring.v2.coefficients import load_coefficients
 from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier
+from rehoboam.services.pacing import (
+    PacingContext,
+    available_squad_slots,
+    capital_reserve,
+    median_move_price,
+)
 
 SEASON = "2025/2026"
 LEAGUE_ID = "1933872"
@@ -181,6 +187,44 @@ def _shipped_default(name: str) -> float:
     return float(Settings.model_fields[name].default)
 
 
+def _make_median_move_fn(
+    corpus: TrainingCorpus, *, window_days: int, floor_eur: int
+) -> Callable[[float], int]:
+    """Trailing-window median buy price, recomputed per decision instant (REH-85).
+
+    Production (`Trader._build_pacing_context`) recomputes this once per
+    session from a trailing `pacing_window_days` window over recent buys, so
+    the reserve tracks in-season price drift. A single pre-season constant
+    frozen for all 34 matchdays would silently stop reflecting the season's
+    real price level — this is what the replay must NOT do, or a "does this
+    knob matter" sweep over `pacing_window_days` would report an identical
+    number regardless of the window, when in truth the window was never
+    wired to move anything.
+
+    The replay's analogue of "one session" is one matchday's worth of
+    decisions: every listing considered for the same matchday shares the same
+    `at` (`decide_at` from `run_season`), so memoising by `at` reproduces
+    production's cadence — one query per matchday, not one per bid.
+
+    `at` is already the leak boundary (`decide_at = kickoff -
+    DECISION_LEAD_SECONDS`, applied upstream in `engine.py`), so bounding the
+    trailing window at `at` costs nothing extra here: nothing later than the
+    decision instant can enter the window.
+    """
+    window_seconds = window_days * 86400.0
+    cache: dict[float, int] = {}
+
+    def median_move_at(at: float) -> int:
+        if at not in cache:
+            prices = [
+                int(row["price"]) for row in corpus.transfers_between(at - window_seconds, at)
+            ]
+            cache[at] = median_move_price(prices, floor_eur=floor_eur)
+        return cache[at]
+
+    return median_move_at
+
+
 def buy_quota_from(result: SeasonResult) -> dict[int, int]:
     """Per-matchday buy counts, for holding a control's trading tempo fixed.
 
@@ -201,6 +245,10 @@ def run_replay(
     with_competition: bool = False,
     with_flips: bool = False,
     with_flip_buys: bool = False,
+    pacing_enabled: bool = True,
+    pacing_min_moves: int | None = None,
+    pacing_window_days: int | None = None,
+    pacing_max_reserve_fraction: float | None = None,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -208,6 +256,13 @@ def run_replay(
     describes the bot on main rather than an agent nobody deployed. Pass it
     explicitly only to answer a "what if the floor were X" question — and label
     any such run as a sensitivity check, not a counterfactual result.
+
+    ``pacing_enabled``/``pacing_min_moves``/``pacing_window_days`` (REH-85) are
+    only meaningful together with ``with_competition`` — pacing caps a bid,
+    and without bid competition every listing is bought at the real price
+    regardless. ``pacing_min_moves``/``pacing_window_days`` default to the
+    shipped ``Settings`` values when left ``None``, so a sweep that overrides
+    them explicitly is comparing against the same bot main ships.
     """
     corpus = TrainingCorpus(corpus_path)
     kickoffs = load_calendar(learning_db_path, league_id=LEAGUE_ID)
@@ -260,7 +315,30 @@ def run_replay(
         buy_rank_fn=buy_rank_fn,
         buy_quota=buy_quota,
         bid_fn=(
-            make_ep_bid_fn(mv_fn=corpus.market_value_at, score_fn=score_fn)
+            make_ep_bid_fn(
+                mv_fn=corpus.market_value_at,
+                score_fn=score_fn,
+                median_move_fn=_make_median_move_fn(
+                    corpus,
+                    window_days=(
+                        pacing_window_days
+                        if pacing_window_days is not None
+                        else int(_shipped_default("pacing_window_days"))
+                    ),
+                    floor_eur=int(_shipped_default("pacing_median_floor_eur")),
+                ),
+                in_season_min_moves=(
+                    pacing_min_moves
+                    if pacing_min_moves is not None
+                    else int(_shipped_default("pacing_in_season_min_moves"))
+                ),
+                max_reserve_fraction=(
+                    pacing_max_reserve_fraction
+                    if pacing_max_reserve_fraction is not None
+                    else float(_shipped_default("pacing_max_reserve_fraction"))
+                ),
+                pacing_enabled=pacing_enabled,
+            )
             if with_competition
             else None
         ),
@@ -395,7 +473,11 @@ def make_ep_bid_fn(
     *,
     mv_fn: Callable[[str, float], int | None],
     score_fn: Callable[[str, float], float],
-) -> Callable[[str, int, float, float, int], int]:
+    median_move_fn: Callable[[float], int],
+    in_season_min_moves: int,
+    max_reserve_fraction: float,
+    pacing_enabled: bool = True,
+) -> Callable[[str, int, float, float, int, int], int]:
     """Bid with the bot's own bidding strategy (REH-68).
 
     Until now the replay bought at the listed price and never called
@@ -415,6 +497,16 @@ def make_ep_bid_fn(
     ``offer_count=0`` (we cannot know how many rivals bid on a given listing)
     and ``trend_change_pct=0.0`` (no market-value trend is fed in). Confidence
     is fixed at 0.8 rather than derived from data quality grading.
+
+    ``median_move_fn`` is called with the decision instant on every bid rather
+    than closed over as a constant, so the reserve tracks a trailing window
+    the way production does instead of freezing a pre-season number for the
+    whole replayed season (REH-85). ``pacing_enabled=False`` passes
+    ``pacing=None`` into ``calculate_ep_bid`` rather than a ``PacingContext``
+    pinned to ``reserve=0`` — mirroring how production actually represents
+    "pacing off" (`Trader._build_pacing_context` returns ``None`` when
+    ``settings.pacing_enabled`` is ``False``), and skipping the median-price
+    query entirely rather than computing an answer only to zero it out.
     """
     from rehoboam.bidding_strategy import SmartBidding
     from rehoboam.config import Settings
@@ -443,7 +535,22 @@ def make_ep_bid_fn(
         ceiling_policy=ceiling_policy,
     )
 
-    def bid(player_id: str, price: int, at: float, gain: float, budget: int) -> int:
+    def bid(
+        player_id: str, price: int, at: float, gain: float, budget: int, squad_size: int
+    ) -> int:
+        # REH-85: the reserve the live bot applies. Without it the harness
+        # measures a bidder nobody deploys — the same reason the tiers and the
+        # REH-99 ceiling are read from the shipped defaults above.
+        pacing_ctx = None
+        if pacing_enabled:
+            reserve = capital_reserve(
+                slots_to_fill=available_squad_slots(squad_size, 0),
+                in_season_min_moves=in_season_min_moves,
+                median_move=median_move_fn(at),
+                budget=budget,
+                max_reserve_fraction=max_reserve_fraction,
+            )
+            pacing_ctx = PacingContext(reserve=reserve, open_offers=0)
         rec = bidding.calculate_ep_bid(
             asking_price=price,
             market_value=mv_fn(player_id, at) or price,
@@ -453,6 +560,7 @@ def make_ep_bid_fn(
             current_budget=budget,
             sell_plan=None,
             trend_change_pct=0.0,
+            pacing=pacing_ctx,
         )
         return int(rec.recommended_bid)
 

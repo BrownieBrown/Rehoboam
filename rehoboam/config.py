@@ -361,6 +361,53 @@ class Settings(BaseSettings):
             "EUR 109k gap against a EUR 62M budget."
         ),
     )
+    pacing_enabled: bool = Field(
+        default=True,
+        description=(
+            "REH-85: reserve enough budget after each buy to make the moves still "
+            "needed. One switch, so the whole behaviour can be reverted from .env "
+            "without a deploy."
+        ),
+    )
+    pacing_in_season_min_moves: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Moves the reserve protects once the squad is full at 15/15, where "
+            "there are no slots left to fill. A guess until the replay sweep "
+            "settles it — see the REH-85 design doc."
+        ),
+    )
+    pacing_window_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Trailing window over manager_transfers used to measure what one "
+            "further move costs. A move cost EUR 6.03m league-wide but EUR 10.8m "
+            "in the 2026/27 pre-season, so this is measured, not hardcoded."
+        ),
+    )
+    pacing_max_reserve_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        description=(
+            "REH-101: hard ceiling on the reserve, as a fraction of current "
+            "budget. REH-85 sized the reserve purely as moves x median move "
+            "with nothing bounding it by money that exists, so it could demand "
+            "more than the bot owns — and a constraint nothing can satisfy "
+            "refuses every buy instead of degrading. 1.0 reproduces the "
+            "unbounded REH-85 behaviour; 0.0 disables the reserve entirely."
+        ),
+    )
+    pacing_median_floor_eur: int = Field(
+        default=3_000_000,
+        ge=0,
+        description=(
+            "Floor under the measured median move price. A thin window would "
+            "otherwise yield a near-zero reserve, silently disabling pacing "
+            "exactly when there is least evidence."
+        ),
+    )
     overbid_pct_marginal: float = Field(
         default=8.0,
         description=(

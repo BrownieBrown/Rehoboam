@@ -203,6 +203,63 @@ class Trader:
     # EP pipeline
     # ------------------------------------------------------------------
 
+    def _build_pacing_context(self, squad_size: int, my_bids: list, current_budget: int):
+        """The REH-85 reserve for this session, or None when pacing is off.
+
+        Built once per run rather than per candidate: the median move price is
+        a league-level measurement, and recomputing it inside the candidate
+        loop would hit the DB once per listing for an identical answer.
+
+        Returns None — pacing disabled — rather than raising when the learning
+        DB cannot be read. Pacing is a spending restraint, and the established
+        rule in this codebase is that a learning-side failure never blocks the
+        EP pipeline. A restraint that cannot be measured is not applied.
+        """
+        from .services.pacing import (
+            PacingContext,
+            available_squad_slots,
+            capital_reserve,
+            median_move_price,
+        )
+
+        if not getattr(self.settings, "pacing_enabled", True):
+            return None
+        if self.bid_learner is None:
+            return None
+        try:
+            prices = self.bid_learner.recent_buy_prices(
+                window_days=int(self.settings.pacing_window_days)
+            )
+        except Exception:
+            logger.exception("pacing: could not read recent buy prices — pacing disabled")
+            return None
+
+        median_move = median_move_price(
+            prices, floor_eur=int(self.settings.pacing_median_floor_eur)
+        )
+        open_offers = sum(int(getattr(b, "user_offer_price", 0) or 0) for b in my_bids)
+        slots_to_fill = available_squad_slots(squad_size, len(my_bids))
+        max_reserve_fraction = float(getattr(self.settings, "pacing_max_reserve_fraction", 0.5))
+        reserve = capital_reserve(
+            slots_to_fill=slots_to_fill,
+            in_season_min_moves=int(self.settings.pacing_in_season_min_moves),
+            median_move=median_move,
+            budget=int(current_budget),
+            max_reserve_fraction=max_reserve_fraction,
+        )
+        logger.info(
+            "pacing session median_move=%d slots_to_fill=%d reserve=%d open_offers=%d "
+            "n_prices=%d budget=%d max_fraction=%.2f",
+            median_move,
+            slots_to_fill,
+            reserve,
+            open_offers,
+            len(prices),
+            int(current_budget),
+            max_reserve_fraction,
+        )
+        return PacingContext(reserve=reserve, open_offers=open_offers)
+
     def get_ep_recommendations(self, league: League) -> dict:
         """Run the EP scoring pipeline and return structured recommendations.
 
@@ -230,6 +287,31 @@ class Trader:
 
         team_info = self.api.get_team_info(league)
         current_budget = team_info.get("budget", 0)
+
+        # Open bids are needed twice over for REH-85: they are euros already
+        # committed, and Kickbase counts them toward the 15-player cap.
+        #
+        # The whole block — the API call AND _build_pacing_context — shares
+        # one try/except. _build_pacing_context's docstring promises it fails
+        # open (returns None instead of raising), but that promise only
+        # covers its own body; the call to it was outside any try, so a
+        # malformed bid payload (e.g. a non-numeric user_offer_price) could
+        # abort the whole EP pipeline instead of merely disabling pacing.
+        # Best-effort learning: a learning-side failure must never block it.
+        try:
+            my_bids = self.api.get_my_bids(league)
+            # An empty lineup slot is -100 pts at kickoff, which outranks
+            # the pacing reserve — never cap spending during a formation
+            # emergency (see _determine_emergency above).
+            pacing = (
+                None
+                if is_emergency
+                else self._build_pacing_context(squad_size, my_bids, int(current_budget))
+            )
+        except Exception:
+            logger.exception("pacing: could not read open bids — pacing disabled this run")
+            my_bids = None
+            pacing = None
 
         # --- 2. Collect performance + details + team profiles ---
         team_profiles: dict[str, dict] = {}
@@ -605,6 +687,7 @@ class Trader:
                     sell_plan=rec.sell_plan,
                     player_id=rec.player.id,
                     is_dgw=rec.score.is_dgw,
+                    pacing=pacing,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -638,6 +721,7 @@ class Trader:
                     sell_plan=synthetic_sell_plan,
                     player_id=pair.buy_player.id,
                     is_dgw=pair.buy_score.is_dgw,
+                    pacing=pacing,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -665,6 +749,11 @@ class Trader:
             "market_players": market_player_map,
             "market_scores": {s.player_id: s for s in market_scores},
             "competitor_player_ids": competitor_player_ids,
+            # REH-85: surfaced so get_ep_recommendations_with_trends can reuse
+            # this session's context instead of rebuilding it — a rebuild
+            # would mean a second get_my_bids call and could yield a
+            # different reserve within one session.
+            "pacing": pacing,
             # Surfaced for matchday reconciliation (REH-20). Reconciliation
             # needs raw performance dicts to read past actual points (`p`,
             # `mdst`, `md`); piggybacking on the EP pipeline's existing
@@ -681,6 +770,10 @@ class Trader:
         """
         result = self.get_ep_recommendations(league)
         current_budget = int(result.get("budget", 0))
+        # REH-85: reuse the context built inside get_ep_recommendations rather
+        # than rebuilding it here — a rebuild would be a second get_my_bids
+        # call and could produce a different reserve within one session.
+        pacing = result.get("pacing")
 
         # League-level competitor context: checked once per session so all bids
         # in this run share the same "is the league aggressive today?" signal.
@@ -719,6 +812,7 @@ class Trader:
                     offer_count=rec.player.offer_count,
                     has_aggressive_competitors=has_whales,
                     is_dgw=rec.score.is_dgw,
+                    pacing=pacing,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -757,6 +851,7 @@ class Trader:
                     offer_count=pair.buy_player.offer_count,
                     has_aggressive_competitors=has_whales,
                     is_dgw=pair.buy_score.is_dgw,
+                    pacing=pacing,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
