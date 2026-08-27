@@ -1,12 +1,15 @@
 """Learn from auction outcomes to improve bidding strategy"""
 
 import json
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1230,12 +1233,12 @@ class BidLearner:
         with sqlite3.connect(self.db_path) as conn:
             pending = conn.execute(
                 """
-                SELECT id, player_id, timestamp, our_bid, asking_price
+                SELECT id, player_id, timestamp, our_bid, asking_price, player_name
                 FROM auction_outcomes
                 WHERE won = 0 AND winning_bid IS NULL
                 """
             ).fetchall()
-            for row_id, player_id, ts, _our_bid, asking in pending:
+            for row_id, player_id, ts, _our_bid, asking, player_name in pending:
                 if ts is None:
                     continue
                 best = None
@@ -1268,8 +1271,56 @@ class BidLearner:
                     (int(price), str(winner), overbid, row_id),
                 )
                 filled += 1
+
+                # REH-102: losing while holding the best price is not a loss,
+                # it is a missing offer. Three August 2026 auctions went that
+                # way — Rohr twice and Gyamerah, all Kickbase-listed, where the
+                # highest bid should win — and nobody noticed for a week
+                # because `won` is a boolean and cannot say "we were ahead".
+                # This is the first instant the anomaly is knowable, so it is
+                # raised here rather than left for someone to query.
+                if _our_bid is not None and int(price) < int(_our_bid):
+                    logger.warning(
+                        "auction anomaly: we were HIGH BIDDER and still lost %s — "
+                        "ours EUR %s, winner paid EUR %s (margin EUR %s). "
+                        "An offer that loses to a lower price was not present at "
+                        "resolution; see REH-102.",
+                        player_name,
+                        f"{int(_our_bid):,}",
+                        f"{int(price):,}",
+                        f"{int(_our_bid) - int(price):,}",
+                    )
             conn.commit()
         return filled
+
+    def high_bidder_losses(self) -> list[dict[str, Any]]:
+        """Auctions lost despite our bid exceeding what the winner paid.
+
+        REH-102. On a Kickbase-listed player the highest bid wins, so these
+        cannot be explained by being outbid — the offer was not there when the
+        listing resolved. Reported worst-margin-first, because the largest
+        unexplained loss is the one worth chasing.
+
+        Only rows with an attributed `winning_bid` are considered. An
+        unattributed loss is honestly unknown, and guessing would turn the one
+        signal that distinguishes this failure from ordinary competition into
+        noise.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT player_id, player_name, our_bid, winning_bid, timestamp,
+                       our_bid - winning_bid AS margin
+                FROM auction_outcomes
+                WHERE won = 0
+                  AND winning_bid IS NOT NULL
+                  AND winning_bid > 0
+                  AND our_bid > winning_bid
+                ORDER BY margin DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def record_manager_transfers(self, rows: list[dict]) -> int:
         """Bulk-upsert per-trade rows into ``manager_transfers``.
