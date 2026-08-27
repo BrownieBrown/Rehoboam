@@ -764,6 +764,16 @@ def replay_season(
             "override to sweep the knob."
         ),
     ),
+    pacing_max_reserve_fraction: float | None = typer.Option(
+        None,
+        "--pacing-max-reserve-fraction",
+        help=(
+            "REH-101: hard ceiling on the pacing reserve as a fraction of "
+            "current budget. Defaults to the shipped "
+            "pacing_max_reserve_fraction Settings value; 1.0 reproduces "
+            "REH-85's unbounded reserve, 0.0 disables the reserve."
+        ),
+    ),
     pacing_window_days: int | None = typer.Option(
         None,
         "--pacing-window-days",
@@ -807,6 +817,7 @@ def replay_season(
         pacing_enabled=pacing,
         pacing_min_moves=pacing_min_moves,
         pacing_window_days=pacing_window_days,
+        pacing_max_reserve_fraction=pacing_max_reserve_fraction,
     )
     console.print(report)
 

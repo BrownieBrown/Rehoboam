@@ -203,7 +203,7 @@ class Trader:
     # EP pipeline
     # ------------------------------------------------------------------
 
-    def _build_pacing_context(self, squad_size: int, my_bids: list):
+    def _build_pacing_context(self, squad_size: int, my_bids: list, current_budget: int):
         """The REH-85 reserve for this session, or None when pacing is off.
 
         Built once per run rather than per candidate: the median move price is
@@ -239,18 +239,24 @@ class Trader:
         )
         open_offers = sum(int(getattr(b, "user_offer_price", 0) or 0) for b in my_bids)
         slots_to_fill = available_squad_slots(squad_size, len(my_bids))
+        max_reserve_fraction = float(getattr(self.settings, "pacing_max_reserve_fraction", 0.5))
         reserve = capital_reserve(
             slots_to_fill=slots_to_fill,
             in_season_min_moves=int(self.settings.pacing_in_season_min_moves),
             median_move=median_move,
+            budget=int(current_budget),
+            max_reserve_fraction=max_reserve_fraction,
         )
         logger.info(
-            "pacing session median_move=%d slots_to_fill=%d reserve=%d open_offers=%d n_prices=%d",
+            "pacing session median_move=%d slots_to_fill=%d reserve=%d open_offers=%d "
+            "n_prices=%d budget=%d max_fraction=%.2f",
             median_move,
             slots_to_fill,
             reserve,
             open_offers,
             len(prices),
+            int(current_budget),
+            max_reserve_fraction,
         )
         return PacingContext(reserve=reserve, open_offers=open_offers)
 
@@ -297,7 +303,11 @@ class Trader:
             # An empty lineup slot is -100 pts at kickoff, which outranks
             # the pacing reserve — never cap spending during a formation
             # emergency (see _determine_emergency above).
-            pacing = None if is_emergency else self._build_pacing_context(squad_size, my_bids)
+            pacing = (
+                None
+                if is_emergency
+                else self._build_pacing_context(squad_size, my_bids, int(current_budget))
+            )
         except Exception:
             logger.exception("pacing: could not read open bids — pacing disabled this run")
             my_bids = None
