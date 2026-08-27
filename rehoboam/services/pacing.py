@@ -56,7 +56,14 @@ def median_move_price(prices: Sequence[int], *, floor_eur: int) -> int:
     return max(median, floor_eur)
 
 
-def capital_reserve(*, slots_to_fill: int, in_season_min_moves: int, median_move: int) -> int:
+def capital_reserve(
+    *,
+    slots_to_fill: int,
+    in_season_min_moves: int,
+    median_move: int,
+    budget: int,
+    max_reserve_fraction: float,
+) -> int:
     """Euros that must survive this buy, so the bot can keep operating.
 
     `slots_to_fill` rather than a constant is the load-bearing choice. A
@@ -71,12 +78,33 @@ def capital_reserve(*, slots_to_fill: int, in_season_min_moves: int, median_move
     fill one of the three. At 1 slot, the reserve is 0 — completing the squad
     takes priority over holding replacement money. Only at slots_to_fill <= 0
     (full squad or over-committed) does `in_season_min_moves` become the floor.
+
+    REH-101: the move-count figure is then bounded by `budget *
+    max_reserve_fraction`. Without that bound the reserve can demand more
+    capital than the bot owns, and a constraint nothing can satisfy refuses
+    every buy instead of degrading. Measured in REH-85: at 14 empty slots the
+    reserve wanted EUR 65-87m against an ~EUR 80m budget, and buy count came
+    out identical with pacing on and off. Live at 12/15 it wanted EUR 21.6m of
+    a EUR 21.65m budget, capping every plain buy at EUR 50,227.
+
+    `budget` is required rather than defaulted on purpose. This whole function
+    was a reserve that ignored the budget; a default would let a new call site
+    reintroduce that by omission, silently.
+
+    The bound also fixes a perverse second-order effect. The reserve scales
+    with empty slots, so selling a player below the median move price used to
+    make the next buy *harder* — one more slot costs a full median of reserve
+    while the sale raises less than that. Against a fraction of the budget,
+    raising cash raises the ceiling instead of lowering it.
     """
     # Account for this buy filling one slot: reserve is for moves remaining
     # after it lands. Full squad (slots <= 0) falls back to in_season_min_moves.
     moves_after_this_buy = max(slots_to_fill - 1, 0)
     moves = moves_after_this_buy if slots_to_fill > 0 else in_season_min_moves
-    return max(0, moves) * max(0, median_move)
+    wanted = max(0, moves) * max(0, median_move)
+
+    affordable = int(max(0, budget) * max(0.0, max_reserve_fraction))
+    return min(wanted, affordable)
 
 
 @dataclass(frozen=True)

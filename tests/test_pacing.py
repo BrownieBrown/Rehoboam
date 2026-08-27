@@ -51,12 +51,26 @@ class TestAvailableSquadSlots:
 
 
 class TestCapitalReserve:
+    """The move-count arithmetic.
+
+    These pass an ample budget at `max_reserve_fraction=1.0` so REH-101's
+    budget bound never binds — the subject here is how many moves the reserve
+    funds, which is a separate question from whether the bot can afford them.
+    The bound has its own file, `test_pacing_bounded_reserve.py`.
+    """
+
     def test_reserve_accounts_for_this_buy_filling_one_slot(self):
         # Off-by-one pin: at slots=3, reserve accounts for 2 moves remaining
         # after this buy, not 3 unfilled slots before. Using 3*median (32_400_000)
         # would incorrectly prohibit large signings.
         assert (
-            capital_reserve(slots_to_fill=3, in_season_min_moves=2, median_move=10_800_000)
+            capital_reserve(
+                slots_to_fill=3,
+                in_season_min_moves=2,
+                median_move=10_800_000,
+                budget=1_000_000_000,
+                max_reserve_fraction=1.0,
+            )
             == 21_600_000
         )
 
@@ -64,13 +78,25 @@ class TestCapitalReserve:
         # At 15/15 there are no slots to fill, but the bot must still be able
         # to replace a player mid-season.
         assert (
-            capital_reserve(slots_to_fill=0, in_season_min_moves=2, median_move=10_800_000)
+            capital_reserve(
+                slots_to_fill=0,
+                in_season_min_moves=2,
+                median_move=10_800_000,
+                budget=1_000_000_000,
+                max_reserve_fraction=1.0,
+            )
             == 21_600_000
         )
 
     def test_negative_slots_never_shrink_the_reserve_below_the_minimum(self):
         assert (
-            capital_reserve(slots_to_fill=-2, in_season_min_moves=2, median_move=10_800_000)
+            capital_reserve(
+                slots_to_fill=-2,
+                in_season_min_moves=2,
+                median_move=10_800_000,
+                budget=1_000_000_000,
+                max_reserve_fraction=1.0,
+            )
             == 21_600_000
         )
 
@@ -78,7 +104,16 @@ class TestCapitalReserve:
         # At slots=1, the last slot may be filled freely (reserve=0).
         # Completing the squad outranks holding replacement money.
         # Old formula (1*median) would incorrectly give 10_800_000.
-        assert capital_reserve(slots_to_fill=1, in_season_min_moves=2, median_move=10_800_000) == 0
+        assert (
+            capital_reserve(
+                slots_to_fill=1,
+                in_season_min_moves=2,
+                median_move=10_800_000,
+                budget=1_000_000_000,
+                max_reserve_fraction=1.0,
+            )
+            == 0
+        )
 
 
 class TestPacingContext:
@@ -135,7 +170,11 @@ class TestPacingContext:
         caps = []
         for slots in (3, 2, 1):
             reserve = capital_reserve(
-                slots_to_fill=slots, in_season_min_moves=2, median_move=median
+                slots_to_fill=slots,
+                in_season_min_moves=2,
+                median_move=median,
+                budget=budget,
+                max_reserve_fraction=0.5,
             )
             cap = PacingContext(reserve=reserve, open_offers=0).max_bid(
                 budget, current_budget=budget

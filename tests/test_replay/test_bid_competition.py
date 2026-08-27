@@ -109,6 +109,7 @@ def test_the_ep_bid_fn_bids_more_for_a_must_have_than_for_a_marginal_gain():
         score_fn=lambda pid, at: 100.0,
         median_move_fn=lambda at: 10_000_000,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
 
     # squad_size=14 -> 1 slot left -> capital_reserve's last-slot case (0
@@ -128,6 +129,7 @@ def test_the_ep_bid_fn_never_bids_beyond_the_budget():
         score_fn=lambda pid, at: 100.0,
         median_move_fn=lambda at: 10_000_000,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
 
     # squad_size=14 -> 0 reserve (see above) -> this exercises the budget cap

@@ -14,6 +14,7 @@ def test_bid_fn_takes_squad_size():
         score_fn=lambda pid, at: 80.0,
         median_move_fn=lambda at: 10_800_000,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
     assert len(inspect.signature(fn).parameters) == 6
 
@@ -27,6 +28,7 @@ def test_a_short_squad_is_capped_below_an_unaffordable_signing():
         score_fn=lambda pid, at: 80.0,
         median_move_fn=lambda at: 10_800_000,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
     assert fn("p1", 44_000_000, 0.0, 90.0, 80_000_000, 9) == 0
 
@@ -37,6 +39,7 @@ def test_an_affordable_signing_still_goes_through():
         score_fn=lambda pid, at: 80.0,
         median_move_fn=lambda at: 10_800_000,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
     assert fn("p1", 5_000_000, 0.0, 90.0, 80_000_000, 9) >= 5_000_000
 
@@ -50,6 +53,7 @@ def test_pacing_enabled_false_bypasses_the_reserve():
         score_fn=lambda pid, at: 80.0,
         median_move_fn=lambda at: 10_800_000,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
         pacing_enabled=False,
     )
     assert fn("p1", 44_000_000, 0.0, 90.0, 80_000_000, 9) >= 44_000_000
@@ -69,6 +73,7 @@ def test_median_move_fn_is_called_with_the_decision_instant():
         score_fn=lambda pid, at: 80.0,
         median_move_fn=median_move_fn,
         in_season_min_moves=2,
+        max_reserve_fraction=1.0,
     )
     fn("p1", 44_000_000, 123.0, 90.0, 80_000_000, 9)
 

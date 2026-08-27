@@ -248,6 +248,7 @@ def run_replay(
     pacing_enabled: bool = True,
     pacing_min_moves: int | None = None,
     pacing_window_days: int | None = None,
+    pacing_max_reserve_fraction: float | None = None,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -330,6 +331,11 @@ def run_replay(
                     pacing_min_moves
                     if pacing_min_moves is not None
                     else int(_shipped_default("pacing_in_season_min_moves"))
+                ),
+                max_reserve_fraction=(
+                    pacing_max_reserve_fraction
+                    if pacing_max_reserve_fraction is not None
+                    else float(_shipped_default("pacing_max_reserve_fraction"))
                 ),
                 pacing_enabled=pacing_enabled,
             )
@@ -469,6 +475,7 @@ def make_ep_bid_fn(
     score_fn: Callable[[str, float], float],
     median_move_fn: Callable[[float], int],
     in_season_min_moves: int,
+    max_reserve_fraction: float,
     pacing_enabled: bool = True,
 ) -> Callable[[str, int, float, float, int, int], int]:
     """Bid with the bot's own bidding strategy (REH-68).
@@ -540,6 +547,8 @@ def make_ep_bid_fn(
                 slots_to_fill=available_squad_slots(squad_size, 0),
                 in_season_min_moves=in_season_min_moves,
                 median_move=median_move_fn(at),
+                budget=budget,
+                max_reserve_fraction=max_reserve_fraction,
             )
             pacing_ctx = PacingContext(reserve=reserve, open_offers=0)
         rec = bidding.calculate_ep_bid(
