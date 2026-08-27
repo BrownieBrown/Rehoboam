@@ -86,7 +86,11 @@ def _run(
         # `with_competition` True inside `_flip_buys`. The EP loop never calls
         # it for real in these tests: the marginal-gain floor above always
         # sends "new" through the `continue` before bid_fn would be reached.
-        bid_fn=(lambda player_id, price, at, gain, budget: price + 1) if with_competition else None,
+        bid_fn=(
+            (lambda player_id, price, at, gain, budget, squad_size: price + 1)
+            if with_competition
+            else None
+        ),
     )
     return result, state
 

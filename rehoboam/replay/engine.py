@@ -398,17 +398,18 @@ def run_season(
     buy_rank_fn: Callable[[str, float], float] | None = None,
     buy_quota: dict[int, int] | None = None,
     # REH-68 bid competition. Given (player_id, real_price, at, marginal_gain,
-    # budget), returns our maximum bid. Gain and budget are passed because a
-    # real bid is a function of both — SmartBidding sizes its overbid from the
-    # marginal-gain tier and caps it against what we can afford — and a hook
-    # without them could only express a flat willingness to pay, which is not
-    # what the bot does.
+    # budget, squad_size), returns our maximum bid. Gain and budget are passed
+    # because a real bid is a function of both — SmartBidding sizes its overbid
+    # from the marginal-gain tier and caps it against what we can afford — and
+    # a hook without them could only express a flat willingness to pay, which
+    # is not what the bot does. squad_size (REH-85) lets the hook derive how
+    # many slots remain, which is what capital pacing reserves against.
     # We win only if the bid EXCEEDS what the real buyer actually paid,
     # and we then pay our own bid rather than theirs — outbidding a rival costs
     # more than the rival paid, and charging their price would hand us the
     # upside of competition with none of its cost. None keeps the shipped
     # behaviour, in which every wanted player is won.
-    bid_fn: Callable[[str, int, float, float, int], int] | None = None,
+    bid_fn: Callable[[str, int, float, float, int, int], int] | None = None,
     # REH-68 profit flipping. The live trade-side thresholds
     # (min_sell_profit_pct 15.0 / max_loss_pct -15.0). Both None disables the
     # pass entirely, preserving the shipped replay behaviour in which the bot
@@ -484,7 +485,14 @@ def run_season(
             # the price the real buyer paid; with one it is our own winning bid.
             cost = listing.price
             if bid_fn is not None:
-                our_bid = bid_fn(listing.player_id, listing.price, decide_at, gain, state.budget)
+                our_bid = bid_fn(
+                    listing.player_id,
+                    listing.price,
+                    decide_at,
+                    gain,
+                    state.budget,
+                    state.squad_size,
+                )
                 if our_bid <= listing.price:
                     continue  # outbid by the manager who really signed him
                 cost = our_bid
