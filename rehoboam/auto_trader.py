@@ -1580,6 +1580,21 @@ class AutoTrader:
                 squad_ids={p.id for p in squad},
                 active_bid_ids={p.id for p in bids},
             )
+
+            # REH-103: resolve_auctions can only record a purchase it can match
+            # to a pending bid, so a player who joined the squad any other way
+            # is tracked nowhere — and with no cost basis, `enable_profit_sells`
+            # can never evaluate them. Raum (EUR 40.7m) arrived that way and
+            # left 10 of 12 squad players unsellable-on-profit, silently.
+            # Reconciling against squad membership closes the gap regardless of
+            # how the player arrived. Never raises; reports what it could not
+            # recover rather than inventing a price.
+            try:
+                my_id = getattr(getattr(self.api, "user", None), "id", None)
+                if my_id:
+                    self.tracker.reconcile_squad_cost_basis(squad, manager_id=str(my_id))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("cost-basis reconciliation failed (non-fatal)")
             # Execute any deferred sell plans from bids we won (buy-first-sell-after).
             if deferred_sell_ids:
                 console.print(

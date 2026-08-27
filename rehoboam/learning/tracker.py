@@ -22,6 +22,7 @@ into the BidLearner's history tables.
 
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,29 @@ from ..bid_learner import AuctionOutcome, BidLearner, FlipOutcome
 from .migration import migrate_json_state_if_needed
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CostBasisReconciliation:
+    """What one `reconcile_squad_cost_basis` pass managed to close.
+
+    `still_missing` is the point of the return value, not `recovered`: a
+    squad player with no cost basis is one `enable_profit_sells` can never
+    act on, and until REH-103 nothing surfaced that.
+    """
+
+    recovered: int = 0
+    still_missing: list[str] = field(default_factory=list)
+
+
+def _iso_to_epoch(value: str) -> float:
+    """Parse `manager_transfers.transfer_dt` ("2026-08-26T15:28:32Z") to epoch.
+
+    `fromisoformat` only learned to accept a trailing "Z" in 3.11 and CI still
+    runs 3.10, so the offset is spelled out.
+    """
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
 
 _LOG_DIR = Path("logs")
 _PENDING_BIDS_JSON = _LOG_DIR / "pending_bids.json"
@@ -168,6 +192,72 @@ class LearningTracker:
             )
         except Exception as e:
             logger.warning("Failed to track purchase: %s", e)
+
+    def reconcile_squad_cost_basis(self, squad, *, manager_id) -> CostBasisReconciliation:
+        """Give every squad player a cost basis, however it got into the squad.
+
+        REH-103. `resolve_auctions` only records a purchase it can match to a
+        `pending_bids` row, so a player who arrives any other way is tracked
+        nowhere — and a player with no cost basis is invisible to
+        `enable_profit_sells` forever, silently. Raum (EUR 40,717,295, the
+        season's largest buy) arrived that way; on 2026-08-27 only 2 of 12
+        squad players had a basis.
+
+        This runs off squad membership instead, so it closes the gap without
+        needing to know how the player arrived. The price comes from
+        `manager_transfers`, the activity-feed mirror, which did record Raum.
+
+        A basis that cannot be recovered is reported, never invented. Writing a
+        placeholder price would feed straight into profit-sell arithmetic — a
+        zero divides, and any other figure quietly authorises a real trade
+        against a number nobody measured. An absent row keeps the player
+        untouched, which is the safe failure.
+
+        An existing row always wins: the bidding path knows the actual bid,
+        while this only knows the settled transfer price.
+        """
+        recovered = 0
+        still_missing: list[str] = []
+        try:
+            for player in squad:
+                player_id = str(player.id)
+                if self.bid_learner.get_tracked_purchase(player_id) is not None:
+                    continue
+
+                purchase = self.bid_learner.get_last_purchase(manager_id, player_id)
+                if purchase is None:
+                    still_missing.append(player_id)
+                    continue
+
+                name = f"{player.first_name} {player.last_name}".strip()
+                self.bid_learner.add_tracked_purchase(
+                    player_id=player_id,
+                    player_name=name,
+                    buy_price=purchase["price"],
+                    buy_date=_iso_to_epoch(purchase["transfer_dt"]),
+                    source="transfer_feed",
+                )
+                recovered += 1
+                logger.info(
+                    "cost-basis recovered player=%s (%s) buy_price=%d from=%s",
+                    player_id,
+                    name,
+                    purchase["price"],
+                    purchase["transfer_dt"],
+                )
+        except Exception as e:
+            logger.warning("Cost-basis reconciliation failed: %s", e, exc_info=True)
+            return CostBasisReconciliation(recovered=recovered, still_missing=still_missing)
+
+        if still_missing:
+            logger.warning(
+                "cost-basis gap: %d of %d squad players have no basis (%s) — "
+                "profit-taking and loss-cutting cannot evaluate them",
+                len(still_missing),
+                len(squad),
+                ", ".join(still_missing),
+            )
+        return CostBasisReconciliation(recovered=recovered, still_missing=still_missing)
 
     # ------------------------------------------------------------------
     # Flip outcome (bought + sold → profit recorded)
