@@ -1313,6 +1313,33 @@ class BidLearner:
             conn.commit()
         return len(rows)
 
+    def recent_buy_prices(self, window_days: int) -> list[int]:
+        """Purchase prices across the league in the trailing window, in euros.
+
+        The population behind REH-85's reserve: what one further move actually
+        costs here. `transfer_type = 1` is a buy and `2` is a sale — verified
+        against manager 3616202, whose type-1 total of EUR 69,831,333 and
+        type-2 total of EUR 139,638,056 match REH-72 §5.
+
+        Prices are returned as magnitudes because the transfer feed signs a
+        purchase negative in some payloads and a reserve is a size, not a
+        direction. `transfer_dt` is ISO-8601, so the cutoff compares
+        lexicographically without parsing.
+        """
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - window_days * 86400))
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT ABS(transfer_price)
+                FROM manager_transfers
+                WHERE transfer_type = 1
+                  AND transfer_price IS NOT NULL
+                  AND transfer_dt >= ?
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def has_matchday_outcome(self, player_id: str, matchday_date: str) -> bool:
         """True if ``matchday_outcomes`` already has a row for this player+date."""
         with sqlite3.connect(self.db_path) as conn:

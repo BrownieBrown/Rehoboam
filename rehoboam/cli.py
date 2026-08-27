@@ -744,6 +744,35 @@ def replay_season(
             "--with-flips alone only models the selling half."
         ),
     ),
+    pacing: bool = typer.Option(
+        True,
+        "--pacing/--no-pacing",
+        help=(
+            "Model capital pacing (REH-85): cap each bid so a reserve for the "
+            "moves still needed survives it. Only bites with --with-competition, "
+            "since an uncapped listing is bought at the real price regardless. "
+            "On by default, matching the shipped pacing_enabled default; "
+            "--no-pacing gives the unpaced comparison run."
+        ),
+    ),
+    pacing_min_moves: int | None = typer.Option(
+        None,
+        "--pacing-min-moves",
+        help=(
+            "Moves the pacing reserve protects once the squad is full at 15/15. "
+            "Defaults to the shipped pacing_in_season_min_moves Settings value; "
+            "override to sweep the knob."
+        ),
+    ),
+    pacing_window_days: int | None = typer.Option(
+        None,
+        "--pacing-window-days",
+        help=(
+            "Trailing window, in days, used to measure the median buy price "
+            "behind the pacing reserve. Defaults to the shipped "
+            "pacing_window_days Settings value; override to sweep the knob."
+        ),
+    ),
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
@@ -775,6 +804,9 @@ def replay_season(
         with_competition=with_competition,
         with_flips=with_flips,
         with_flip_buys=with_flip_buys,
+        pacing_enabled=pacing,
+        pacing_min_moves=pacing_min_moves,
+        pacing_window_days=pacing_window_days,
     )
     console.print(report)
 
