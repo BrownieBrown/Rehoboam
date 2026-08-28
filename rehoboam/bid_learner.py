@@ -79,6 +79,12 @@ class FlipOutcome:
     average_points: float | None = None
     position: str | None = None
     was_injured: bool = False
+    # REH-104 entry context. Reconstructed from `player_mv_history` rather than
+    # captured at buy time, so closed flips can be backfilled and the entry rule
+    # becomes measurable on history. See `learning/entry_context.py`.
+    trend_pct_at_buy: float | None = None
+    mv_at_buy: int | None = None
+    pct_below_peak_30d_at_buy: float | None = None
 
 
 # --- EP overbid recommender (REH-89) --------------------------------------
@@ -561,6 +567,20 @@ class BidLearner:
             except sqlite3.OperationalError:
                 pass  # already present
 
+            # REH-104: entry context for a flip. `trend_at_buy` has existed
+            # since this table was created and was NULL in all 151 rows —
+            # `record_flip_outcome` runs at sell time and had nothing to write.
+            # Added in place so prod rows can be backfilled rather than lost.
+            for _col, _type in (
+                ("trend_pct_at_buy", "REAL"),
+                ("mv_at_buy", "INTEGER"),
+                ("pct_below_peak_30d_at_buy", "REAL"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE flip_outcomes ADD COLUMN {_col} {_type}")
+                except sqlite3.OperationalError:
+                    pass  # already present
+
             # REH-22: drop legacy tables that no live code references.
             # `position_bidding_stats` was orphaned by REH-27 (writer + reader
             # methods deleted). The other three are stale residue from
@@ -625,9 +645,9 @@ class BidLearner:
                 INSERT OR IGNORE INTO flip_outcomes (
                     player_id, player_name, buy_price, sell_price, profit, profit_pct,
                     hold_days, buy_date, sell_date, trend_at_buy, average_points, position,
-                    was_injured
+                    was_injured, trend_pct_at_buy, mv_at_buy, pct_below_peak_30d_at_buy
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     outcome.player_id,
@@ -643,6 +663,9 @@ class BidLearner:
                     outcome.average_points,
                     outcome.position,
                     1 if outcome.was_injured else 0,
+                    outcome.trend_pct_at_buy,
+                    outcome.mv_at_buy,
+                    outcome.pct_below_peak_30d_at_buy,
                 ),
             )
             conn.commit()
@@ -957,6 +980,61 @@ class BidLearner:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def mv_history_for(self, player_id: str) -> list[tuple[float, int]]:
+        """Every recorded market value for one player, as (epoch, value).
+
+        Feeds `learning.entry_context.entry_context`. Returns a plain list of
+        tuples rather than rows so the reconstruction stays pure and testable
+        without a database.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            return [
+                (float(ts), int(mv))
+                for ts, mv in conn.execute(
+                    "SELECT snapshot_at, market_value FROM player_mv_history "
+                    "WHERE player_id = ? ORDER BY snapshot_at",
+                    (str(player_id),),
+                )
+            ]
+
+    def backfill_flip_entry_context(self) -> int:
+        """Fill entry context on closed flips that have none. Returns rows written.
+
+        Idempotent by construction: only rows where `mv_at_buy IS NULL` are
+        touched, so a rerun cannot overwrite a value captured live, and a flip
+        with no usable market-value history is left NULL rather than faked —
+        an unknown entry must stay distinguishable from a real zero reading
+        ("bought exactly at the 30-day peak").
+        """
+        from rehoboam.learning.entry_context import entry_context
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            pending = conn.execute(
+                "SELECT id, player_id, buy_date FROM flip_outcomes WHERE mv_at_buy IS NULL"
+            ).fetchall()
+
+            written = 0
+            for row in pending:
+                ctx = entry_context(self.mv_history_for(row["player_id"]), row["buy_date"])
+                if ctx.mv_at_buy is None:
+                    continue
+                conn.execute(
+                    "UPDATE flip_outcomes SET trend_at_buy = COALESCE(trend_at_buy, ?), "
+                    "trend_pct_at_buy = ?, mv_at_buy = ?, pct_below_peak_30d_at_buy = ? "
+                    "WHERE id = ?",
+                    (
+                        ctx.trend_at_buy,
+                        ctx.trend_pct_at_buy,
+                        ctx.mv_at_buy,
+                        ctx.pct_below_peak_30d_at_buy,
+                        row["id"],
+                    ),
+                )
+                written += 1
+            conn.commit()
+            return written
 
     def record_player_mv_snapshot(self, rows: list[dict]) -> int:
         """Bulk-persist one row per held player into ``player_mv_history``.

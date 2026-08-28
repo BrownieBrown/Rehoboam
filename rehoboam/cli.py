@@ -1,6 +1,7 @@
 """CLI interface for Rehoboam — minimal surface for auto + diagnostics."""
 
 import logging
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -517,6 +518,41 @@ def enrich_corpus(
         table.add_row("Historical positions unresolved", str(stats.positions_unresolved))
     console.print(table)
     console.print(f"[dim]Corpus: {corpus.db_path}[/dim]")
+
+
+@app.command("backfill-flip-entry-context")
+def backfill_flip_entry_context(
+    learning_db: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"), help="Path to the learning DB"
+    ),
+):
+    """Reconstruct what the market looked like when each closed flip was bought (REH-104).
+
+    `flip_outcomes.trend_at_buy` has existed since the table was created and was
+    NULL in every row: `record_flip_outcome` runs at sell time and the entry
+    context was never stored. This derives it from `player_mv_history`, which
+    already holds the snapshots, so historical flips become measurable without
+    waiting for a season of new ones.
+
+    Purely local — no API calls. Idempotent: rows that already have context are
+    left alone, and a flip with no usable MV history stays NULL rather than
+    being filled with a fabricated zero.
+    """
+    from rehoboam.bid_learner import BidLearner
+
+    if not learning_db.exists():
+        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
+        raise typer.Exit(1)
+
+    learner = BidLearner(db_path=learning_db)
+    written = learner.backfill_flip_entry_context()
+    console.print(f"[green]Annotated {written} flip(s) with entry context[/green]")
+
+    with sqlite3.connect(learning_db) as conn:
+        total, annotated = conn.execute(
+            "SELECT COUNT(*), COUNT(mv_at_buy) FROM flip_outcomes"
+        ).fetchone()
+    console.print(f"[dim]{annotated} of {total} flips now carry entry context[/dim]")
 
 
 @app.command("backfill-history")

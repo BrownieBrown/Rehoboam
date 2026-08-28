@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..bid_learner import AuctionOutcome, BidLearner, FlipOutcome
+from .entry_context import EntryContext, entry_context
 from .migration import migrate_json_state_if_needed
 
 logger = logging.getLogger(__name__)
@@ -443,6 +444,20 @@ class LearningTracker:
             profit_pct = (profit / buy_price * 100) if buy_price > 0 else 0
             hold_days = int((sell_date - buy_date) / (24 * 3600))
 
+            # REH-104: what the market looked like when we bought. Best-effort
+            # and separately guarded — the P&L row is the thing that must not be
+            # lost, and a player with no recorded MV history is a normal case
+            # (newly listed), not an error.
+            entry = EntryContext()
+            try:
+                entry = entry_context(self.bid_learner.mv_history_for(player.id), buy_date)
+            except Exception:
+                logger.warning(
+                    "entry context unavailable for %s — recording flip without it",
+                    player.id,
+                    exc_info=True,
+                )
+
             outcome = FlipOutcome(
                 player_id=player.id,
                 player_name=player_name,
@@ -456,6 +471,10 @@ class LearningTracker:
                 average_points=getattr(player, "average_points", None),
                 position=getattr(player, "position", None),
                 was_injured=(player.status != 0) if hasattr(player, "status") else False,
+                trend_at_buy=entry.trend_at_buy,
+                trend_pct_at_buy=entry.trend_pct_at_buy,
+                mv_at_buy=entry.mv_at_buy,
+                pct_below_peak_30d_at_buy=entry.pct_below_peak_30d_at_buy,
             )
             self.bid_learner.record_flip(outcome)
             self.bid_learner.delete_tracked_purchase(player.id)
