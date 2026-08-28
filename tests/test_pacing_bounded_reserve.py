@@ -52,13 +52,19 @@ class TestTheBoundBites:
         assert reserve == MEDIAN
 
     def test_fraction_of_one_reproduces_the_unbounded_reserve(self):
-        """The REH-85 arithmetic must remain reachable, for A/B and rollback."""
+        """The REH-85 arithmetic must remain reachable, for A/B and rollback.
+
+        REH-107 added a second bound (`min_spendable_moves`), so reaching the
+        unbounded arithmetic now means switching BOTH off. The intent is
+        unchanged — this is still the escape hatch back to REH-85.
+        """
         reserve = capital_reserve(
             slots_to_fill=LIVE_SLOTS,
             in_season_min_moves=2,
             median_move=MEDIAN,
             budget=LIVE_BUDGET,
             max_reserve_fraction=1.0,
+            min_spendable_moves=0.0,
         )
 
         assert reserve == 2 * MEDIAN
@@ -108,13 +114,14 @@ class TestRaisingCashMustNotMakeBuyingHarder:
     """
 
     @staticmethod
-    def _headroom(budget: int, slots: int, fraction: float) -> int:
+    def _headroom(budget: int, slots: int, fraction: float, spendable: float = 1.0) -> int:
         reserve = capital_reserve(
             slots_to_fill=slots,
             in_season_min_moves=2,
             median_move=MEDIAN,
             budget=budget,
             max_reserve_fraction=fraction,
+            min_spendable_moves=spendable,
         )
         return PacingContext(reserve=reserve, open_offers=0).max_bid(
             budget_ceiling=budget, current_budget=budget
@@ -131,12 +138,15 @@ class TestRaisingCashMustNotMakeBuyingHarder:
         )
 
     def test_the_unbounded_reserve_is_what_broke_this(self):
-        """Pins the regression: at fraction 1.0 the pathology is still there.
+        """Pins the regression: with BOTH bounds off the pathology is still there.
 
         Without this the suite could not tell a real fix from a coincidence.
+        REH-107's floor is a second bound, so reproducing the original
+        pathology now means switching it off too — otherwise the floor alone
+        repairs the case and this test passes for the wrong reason.
         """
-        before = self._headroom(LIVE_BUDGET, LIVE_SLOTS, 1.0)
-        after = self._headroom(LIVE_BUDGET + 5_000_000, LIVE_SLOTS + 1, 1.0)
+        before = self._headroom(LIVE_BUDGET, LIVE_SLOTS, 1.0, spendable=0.0)
+        after = self._headroom(LIVE_BUDGET + 5_000_000, LIVE_SLOTS + 1, 1.0, spendable=0.0)
 
         assert after < before
 

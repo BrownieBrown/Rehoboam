@@ -63,6 +63,7 @@ def capital_reserve(
     median_move: int,
     budget: int,
     max_reserve_fraction: float,
+    min_spendable_moves: float = 1.0,
 ) -> int:
     """Euros that must survive this buy, so the bot can keep operating.
 
@@ -96,6 +97,26 @@ def capital_reserve(
     make the next buy *harder* — one more slot costs a full median of reserve
     while the sale raises less than that. Against a fraction of the budget,
     raising cash raises the ceiling instead of lowering it.
+
+    REH-107 adds the third bound, `min_spendable_moves`. Bounding by a fraction
+    of the budget keeps the reserve affordable but stops it representing a
+    whole number of moves: live on 2026-08-28 it was EUR 10.86m held back to
+    fund "2 further moves" at a measured median of EUR 12.5m — 0.87 of one. It
+    bought nothing later while blocking every upgrade above it, and the session
+    placed no bid at all on the five best players on the board. Engelhardt,
+    +45.0 EP, missed the cap by EUR 134,301.
+
+    So the reserve is additionally capped at `budget - min_spendable_moves *
+    median_move`: whatever else it protects, it must leave one typical move
+    affordable. `0.0` reproduces REH-101 exactly, for A/B and rollback.
+
+    Deliberately continuous in `budget`, not a step function on whole moves.
+    Flooring the bounded figure to `floor(affordable / median) * median` — the
+    shape this ticket was first written around — restores the "whole number of
+    moves" meaning but makes headroom a sawtooth: crossing a move boundary
+    drops the maximum bid by a full median, so gaining budget can shrink what
+    the bot may bid. That is precisely the pathology REH-101 exists to prevent,
+    and `TestRaisingCashIsStillNeverPunished` pins it.
     """
     # Account for this buy filling one slot: reserve is for moves remaining
     # after it lands. Full squad (slots <= 0) falls back to in_season_min_moves.
@@ -104,7 +125,14 @@ def capital_reserve(
     wanted = max(0, moves) * max(0, median_move)
 
     affordable = int(max(0, budget) * max(0.0, max_reserve_fraction))
-    return min(wanted, affordable)
+
+    # REH-107: never hold back so much that a move of typical size becomes
+    # unaffordable. A reserve exists to keep FUTURE moves possible; one that
+    # blocks the PRESENT move funds nothing and costs the best upgrade going.
+    spendable_floor = int(max(0.0, min_spendable_moves) * max(0, median_move))
+    leaves_one_move = max(0, int(max(0, budget)) - spendable_floor)
+
+    return min(wanted, affordable, leaves_one_move)
 
 
 @dataclass(frozen=True)

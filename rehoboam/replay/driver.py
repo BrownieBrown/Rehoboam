@@ -249,6 +249,7 @@ def run_replay(
     pacing_min_moves: int | None = None,
     pacing_window_days: int | None = None,
     pacing_max_reserve_fraction: float | None = None,
+    pacing_min_spendable_moves: float | None = None,
 ) -> tuple[SeasonResult, str]:
     """Replay the whole season and return the result plus a formatted report.
 
@@ -336,6 +337,11 @@ def run_replay(
                     pacing_max_reserve_fraction
                     if pacing_max_reserve_fraction is not None
                     else float(_shipped_default("pacing_max_reserve_fraction"))
+                ),
+                min_spendable_moves=(
+                    pacing_min_spendable_moves
+                    if pacing_min_spendable_moves is not None
+                    else float(_shipped_default("pacing_min_spendable_moves"))
                 ),
                 pacing_enabled=pacing_enabled,
             )
@@ -476,6 +482,11 @@ def make_ep_bid_fn(
     median_move_fn: Callable[[float], int],
     in_season_min_moves: int,
     max_reserve_fraction: float,
+    # Defaulted, unlike `max_reserve_fraction` above: omitting it yields the
+    # SHIPPED behaviour, not the REH-107 bug, so the "require it so a new call
+    # site cannot reintroduce the defect by omission" rule does not apply here.
+    # `run_replay` always passes it explicitly from the shipped setting.
+    min_spendable_moves: float = 1.0,
     pacing_enabled: bool = True,
 ) -> Callable[[str, int, float, float, int, int], int]:
     """Bid with the bot's own bidding strategy (REH-68).
@@ -549,6 +560,7 @@ def make_ep_bid_fn(
                 median_move=median_move_fn(at),
                 budget=budget,
                 max_reserve_fraction=max_reserve_fraction,
+                min_spendable_moves=min_spendable_moves,
             )
             pacing_ctx = PacingContext(reserve=reserve, open_offers=0)
         rec = bidding.calculate_ep_bid(

@@ -399,6 +399,18 @@ class Settings(BaseSettings):
             "unbounded REH-85 behaviour; 0.0 disables the reserve entirely."
         ),
     )
+    pacing_min_spendable_moves: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "REH-107: moves of typical size the reserve must always leave "
+            "affordable. Bounding the reserve by a fraction of budget (REH-101) "
+            "keeps it affordable but stops it meaning a whole number of moves: "
+            "live on 2026-08-28 it held EUR 10.86m for '2 further moves' at a "
+            "EUR 12.5m median — 0.87 of one — and refused every upgrade above "
+            "it while buying nothing later. 0.0 reproduces REH-101 exactly."
+        ),
+    )
     pacing_median_floor_eur: int = Field(
         default=3_000_000,
         ge=0,
