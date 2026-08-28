@@ -783,6 +783,16 @@ def replay_season(
             "pacing_window_days Settings value; override to sweep the knob."
         ),
     ),
+    pacing_min_spendable_moves: float | None = typer.Option(
+        None,
+        "--pacing-min-spendable-moves",
+        help=(
+            "REH-107: moves of typical size the reserve must always leave "
+            "affordable. Defaults to the shipped pacing_min_spendable_moves "
+            "Settings value; 0.0 reproduces REH-101's behaviour, higher "
+            "values free up more budget per buy."
+        ),
+    ),
 ) -> None:
     """Replay the full bot across 2025/26 and report the counterfactual finish."""
     from rehoboam.replay.driver import run_replay
@@ -818,6 +828,7 @@ def replay_season(
         pacing_min_moves=pacing_min_moves,
         pacing_window_days=pacing_window_days,
         pacing_max_reserve_fraction=pacing_max_reserve_fraction,
+        pacing_min_spendable_moves=pacing_min_spendable_moves,
     )
     console.print(report)
 

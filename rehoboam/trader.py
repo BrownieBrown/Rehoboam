@@ -240,16 +240,18 @@ class Trader:
         open_offers = sum(int(getattr(b, "user_offer_price", 0) or 0) for b in my_bids)
         slots_to_fill = available_squad_slots(squad_size, len(my_bids))
         max_reserve_fraction = float(getattr(self.settings, "pacing_max_reserve_fraction", 0.5))
+        min_spendable_moves = float(getattr(self.settings, "pacing_min_spendable_moves", 1.0))
         reserve = capital_reserve(
             slots_to_fill=slots_to_fill,
             in_season_min_moves=int(self.settings.pacing_in_season_min_moves),
             median_move=median_move,
             budget=int(current_budget),
             max_reserve_fraction=max_reserve_fraction,
+            min_spendable_moves=min_spendable_moves,
         )
         logger.info(
             "pacing session median_move=%d slots_to_fill=%d reserve=%d open_offers=%d "
-            "n_prices=%d budget=%d max_fraction=%.2f",
+            "n_prices=%d budget=%d max_fraction=%.2f min_spendable_moves=%.2f",
             median_move,
             slots_to_fill,
             reserve,
@@ -257,6 +259,7 @@ class Trader:
             len(prices),
             int(current_budget),
             max_reserve_fraction,
+            min_spendable_moves,
         )
         return PacingContext(reserve=reserve, open_offers=open_offers)
 
