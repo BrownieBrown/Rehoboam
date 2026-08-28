@@ -11,7 +11,7 @@ class PlayerStatus:
     is_healthy: bool
     is_likely_starter: bool
     lineup_probability: int  # 1-5 (1=starter, 5=unlikely)
-    status_code: int  # 0=healthy, 2/4/256=injured/unavailable
+    status_code: int  # 0=healthy, 1/2/4/256=injured/unavailable
     reason: str
 
 

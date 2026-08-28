@@ -37,12 +37,31 @@ DEFAULT_SHRINKAGE_K = 20.0
 # be fitted alongside the transitions above. It is applied here at serving
 # time, explicitly unfitted, and kept separate from the fitted model.
 #
-# 0 = healthy, 2 = uncertain, 4 = short-term injury, 256 = long-term injury
-# (kickbase_client.py:488, scorer.py:424). v1 applied -30/-20/-10 point
-# penalties for these; the v2 migration dropped the signal entirely, which is
-# how a long-term-injured player came to be scored 47.2 EP and named in the
-# starting eleven on 2026-08-22.
-OUT_STATUSES: frozenset[int] = frozenset({4, 256})
+# CAREFUL -- two different integer namespaces meet in this module, and they
+# collide. `live_status` below is Kickbase's *injury* flag; the keys of the
+# probability dicts everywhere else are the fitted model's *played-status*
+# codes documented at the top of this file. Both use small ints, and they do
+# not agree: live 1 = injured, played 1 = not in squad; live 4 = injury,
+# played 4 = unused sub. Read every bare integer here as one or the other,
+# never as both.
+#
+# Kickbase live injury statuses, verified against `stxt` on the live market
+# 2026-08-28:
+#   0   = healthy
+#   1   = injured, out for weeks   ("Ankle injury - out for several weeks")
+#   2   = uncertain                ("doubtful for SGE (H) match")
+#   4   = short-term injury
+#   256 = long-term injury
+#
+# v1 applied -30/-20/-10 point penalties for these; the v2 migration dropped
+# the signal entirely, which is how a long-term-injured player came to be
+# scored 47.2 EP and named in the starting eleven on 2026-08-22.
+#
+# REH-105: status 1 was missing from both sets, so the most severely injured
+# code in the enumeration was the one scored as fully fit. It reached rank 1
+# on the live buy board on 2026-08-28. The omission is almost certainly the
+# namespace collision above -- 1 already means something else in this file.
+OUT_STATUSES: frozenset[int] = frozenset({1, 4, 256})
 UNCERTAIN_STATUSES: frozenset[int] = frozenset({2})
 DEFAULT_UNCERTAIN_START_MULTIPLIER = 0.5
 
