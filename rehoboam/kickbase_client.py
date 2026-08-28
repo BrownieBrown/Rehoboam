@@ -509,7 +509,7 @@ class KickbaseV4Client:
         Returns:
             dict with:
             - Team info: tid, tn (team name)
-            - Status: st (0=healthy, 2/4/256=injured/unavailable)
+            - Status: st (0=healthy, 1/2/4/256=injured/unavailable; 1 = out for weeks)
             - Lineup probability: prob (1=starter, 2-4=rotation, 5=unlikely)
             - Matchups: mdsum (past, current, future matches)
             - Performance: ph (recent match points)

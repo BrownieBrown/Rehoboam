@@ -12,8 +12,14 @@ starter's mean and only stays calibrated because P(5) is the fitted ~82%
 rather than 100%. Forcing probability DOWNWARD drives EP toward zero and
 cannot inflate anything, so these overrides are downward-only by construction.
 
-Status codes (kickbase_client.py:488, scorer.py:424):
-    0 = healthy, 2 = uncertain, 4 = short-term injury, 256 = long-term injury
+Kickbase live injury status codes, verified against `stxt` on the live market
+2026-08-28:
+    0 = healthy, 1 = injured (out for weeks), 2 = uncertain,
+    4 = short-term injury, 256 = long-term injury
+
+Note these are NOT the played-status codes the probability dicts are keyed by
+(1 = not in squad, 3 = came on, 4 = unused sub, 5 = started). The two
+namespaces collide on 1 and 4; see the comment in availability.py.
 
 The v1 scorer applied -30/-20/-10 point penalties for these. v2 dropped the
 signal entirely, which is how a long-term-injured player came to be scored 47.2
@@ -40,6 +46,18 @@ class TestInjuryForcesDidNotPlay:
     def test_short_term_injury_removes_it_too(self):
         out = apply_availability_override(_even_probs(), live_status=4)
         assert out[5] == pytest.approx(0.0)
+
+    def test_out_for_weeks_injury_removes_it_too(self):
+        """Gantenbein: status 1, "Ankle injury - out for several weeks".
+
+        Returned as the #1 buy recommendation in the live 2026-08-28 session,
+        priced at a EUR 1,163,017 bid with a sell plan attached, because
+        status 1 was in neither override set and so scored as fully fit
+        (REH-105).
+        """
+        out = apply_availability_override(_even_probs(), live_status=1)
+        assert out[5] == pytest.approx(0.0)
+        assert out[1] == pytest.approx(1.0)
 
 
 class TestUncertainIsReducedNotBlocked:
@@ -77,14 +95,14 @@ class TestHealthyAndUnknownAreUntouched:
 
 
 class TestInvariants:
-    @pytest.mark.parametrize("status", [None, 0, 2, 4, 256, 9999])
+    @pytest.mark.parametrize("status", [None, 0, 1, 2, 4, 256, 9999])
     def test_the_override_never_raises_the_start_probability(self, status):
         """Downward-only. Raising P(start) would expose rate.py's ~24% overshoot."""
         before = _even_probs()
         after = apply_availability_override(before, live_status=status)
         assert after[5] <= before[5] + 1e-9
 
-    @pytest.mark.parametrize("status", [None, 0, 2, 4, 256, 9999])
+    @pytest.mark.parametrize("status", [None, 0, 1, 2, 4, 256, 9999])
     def test_probabilities_still_sum_to_one(self, status):
         after = apply_availability_override(_even_probs(), live_status=status)
         assert sum(after.values()) == pytest.approx(1.0)
