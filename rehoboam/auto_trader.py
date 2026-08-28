@@ -489,17 +489,29 @@ class AutoTrader:
             logger.exception("proposal: could not record %s", proposal_id)
             return False
 
-        send_proposal(
+        # The return value is worth logging: a proposal that fails to send is
+        # recorded but invisible, and the only way to act on it is the daily
+        # summary's keyboard (REH-106). Silence here made a delivery failure
+        # look identical to a proposal nobody chose to approve.
+        delivered = send_proposal(
             self.settings.telegram_bot_token,
             self.settings.telegram_chat_id,
             proposal_id,
             message,
         )
+        if not delivered:
+            logger.warning(
+                "proposal %s for %s was recorded but NOT delivered to Telegram; "
+                "it is actionable only from the daily summary",
+                proposal_id,
+                player.id,
+            )
         logger.info(
-            "proposal recorded id=%s player=%s bid=%d",
+            "proposal recorded id=%s player=%s bid=%d delivered=%s",
             proposal_id,
             player.id,
             int(rec.recommended_bid),
+            delivered,
         )
         return True
 
