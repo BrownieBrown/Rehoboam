@@ -86,3 +86,44 @@ class TestListing:
         _record(learner, "p2")
         learner.mark_proposal("p2", "approved")
         assert [p["proposal_id"] for p in learner.pending_proposals()] == ["p1"]
+
+
+class TestTheSummaryCanBuildButtonsFromWhatIsStored:
+    """REH-106: the daily summary's keyboard is built in `function_app.py`,
+    which has no test coverage of its own. These pin the seam it depends on.
+
+    The summary reads `pending_proposals()` and turns each row into an
+    Approve/Reject button. If the columns it indexes ever move, the summary
+    breaks in production and the only symptom is proposals sitting at
+    `pending` forever — exactly the failure this ticket fixed.
+    """
+
+    def test_a_pending_row_carries_the_id_and_name_the_keyboard_needs(self, learner):
+        _record(learner)
+        (row,) = learner.pending_proposals()
+        # The exact expressions in _send_daily_summary.
+        assert (row["proposal_id"], row["player_name"]) == ("p1", "Pavlović")
+        assert (row["player_name"], int(row["bid"])) == ("Pavlović", 32_608_485)
+
+    def test_those_rows_produce_callbacks_the_webhook_parses(self, learner):
+        from rehoboam.notify.telegram import approval_keyboard
+
+        _record(learner, pid="abc123")
+        approvals = [(p["proposal_id"], p["player_name"]) for p in learner.pending_proposals()]
+        data = [
+            b["callback_data"]
+            for row in approval_keyboard(approvals)["inline_keyboard"]
+            for b in row
+        ]
+        # `handle_callback` does data.partition(":") and looks the id up.
+        assert data == ["approve:abc123", "reject:abc123"]
+        action, _, pid = data[0].partition(":")
+        assert action == "approve"
+        assert learner.get_proposal(pid) is not None
+
+    def test_a_resolved_proposal_gets_no_button(self, learner):
+        """A button for something already executed would return
+        "already executed" and read as a broken webhook."""
+        _record(learner)
+        learner.mark_proposal("p1", "approved")
+        assert learner.pending_proposals() == []

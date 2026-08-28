@@ -121,7 +121,13 @@ def _send_daily_summary(api, league, settings, session):
         watch.append(f"{len(at_limit)} club(s) at the {MAX_PLAYERS_PER_CLUB}-player limit")
 
     learner = BidLearner()
-    pending = [(p["player_name"], int(p["bid"])) for p in learner.pending_proposals()]
+    # Keep the raw rows: the rendered summary needs name+bid, but the Telegram
+    # keyboard needs the proposal_id. REH-106 — without the id the summary said
+    # "approve <name>" and offered no way to do it, so proposals sat at
+    # `pending` until a rival bought the player.
+    pending_rows = learner.pending_proposals()
+    pending = [(p["player_name"], int(p["bid"])) for p in pending_rows]
+    approvals = [(p["proposal_id"], p["player_name"]) for p in pending_rows]
 
     executed = [
         f"{r.action} {r.player_name} for EUR {r.price:,}"
@@ -168,7 +174,12 @@ def _send_daily_summary(api, league, settings, session):
     # costs nothing, and needs no mail provider. Proton — the alternative that
     # was considered — requires a paid plan plus a custom domain, and Proton
     # Bridge binds to localhost, which an Azure Function can never reach.
-    if not send_message(settings.telegram_bot_token, settings.telegram_chat_id, header + body):
+    if not send_message(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        header + body,
+        approvals=approvals,
+    ):
         logging.warning("daily summary: telegram delivery failed or not configured")
 
     # Email stays available for anyone who configures SMTP; absent config makes
