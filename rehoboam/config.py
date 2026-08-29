@@ -203,6 +203,18 @@ class Settings(BaseSettings):
             "overpaying at entry."
         ),
     )
+    flip_hold_respects_matchday: bool = Field(
+        default=False,
+        description=(
+            "REH-109: cap a flip's hold at the next kickoff. Off, because the "
+            "premise was false — Kickbase locks the eleven at kickoff and squad "
+            "changes land on the next matchday, so holding through a match "
+            "costs no points. It was also expensive: within rising-trend "
+            "entries the 1-3 day holds it forced won 13% and lost EUR 9.67m, "
+            "while 22d+ holds won 67% and made EUR 26.85m. True restores the "
+            "old behaviour without a deploy."
+        ),
+    )
     flip_buys_require_rising_trend: bool = Field(
         default=True,
         description=(
