@@ -303,8 +303,38 @@ class AutoTrader:
             self.last_reset = today
             console.print("[cyan]Daily limits reset[/cyan]")
 
-    def _get_matchday_phase(self, days_until_match: int | None) -> MatchdayPhase:
-        """Determine trading aggressiveness based on days to next match."""
+    def _get_matchday_phase(
+        self, days_until_match: int | None, *, matchday_in_progress: bool = False
+    ) -> MatchdayPhase:
+        """Determine trading aggressiveness based on days to next match.
+
+        REH-110: `matchday_in_progress` overrides the day count entirely. Once
+        the round's first fixture has kicked off, Kickbase has locked our
+        eleven and every squad change lands on the FOLLOWING matchday, so there
+        is no lineup left to protect. `days_until_match` still reads 0 all
+        weekend — it is `min()` of the fixtures still to come — which locked the
+        bot out of the Saturday and Sunday of every round for no benefit.
+
+        The budget-at-kickoff guard (REH-11) is deliberately untouched and keeps
+        reading `days_until_match`: that constraint is about cash, not slots,
+        and its conservative "earliest remaining fixture" meaning is correct.
+        """
+        # Applied ONLY where the day count would otherwise lock us out. Between
+        # rounds `days_until_match` can be large while a fixture is still inside
+        # the recent-past window, and blanket-overriding there would DEMOTE an
+        # aggressive phase to a moderate one — more information making the bot
+        # more restrictive, which the invariant test forbids.
+        if matchday_in_progress and days_until_match is not None and days_until_match <= 1:
+            return MatchdayPhase(
+                days_until_match=days_until_match,
+                phase="matchday_in_progress",
+                # The moderate allowance rather than the full one: the round in
+                # progress hides the NEXT round's kickoff, so we cannot see how
+                # much runway a purchase actually has.
+                max_trades=max(self.max_trades_per_session // 2, 2),
+                allow_flips=True,
+                reason="Matchday under way — lineup locked, trading + flips open",
+            )
         if days_until_match is not None and days_until_match <= 1:
             return MatchdayPhase(
                 days_until_match=days_until_match,
@@ -364,7 +394,10 @@ class AutoTrader:
 
         # Fetch matchday timing
         days = trader.get_days_until_match(league)
-        phase = self._get_matchday_phase(days)
+        # Set as a side effect of the call above, so the flag costs no second
+        # /myeleven fetch. Absent (None) whenever that fetch failed.
+        in_progress = bool(getattr(trader, "_last_matchday_in_progress", False))
+        phase = self._get_matchday_phase(days, matchday_in_progress=in_progress)
 
         console.print(f"[cyan]📅 {phase.reason}[/cyan]")
 

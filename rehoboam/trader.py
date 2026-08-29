@@ -16,7 +16,7 @@ has been removed.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from rich.console import Console
 
@@ -70,6 +70,40 @@ def _determine_emergency(squad: list) -> tuple[bool, str]:
     if fieldability["ok"]:
         return False, ""
     return True, fieldability["reason"]
+
+
+#: A Bundesliga round spans at most Friday to Monday. A fixture older than this
+#: belongs to a PREVIOUS round, so it must not be read as one in progress —
+#: otherwise a single un-rolled date would unlock trading permanently.
+MATCHDAY_ROUND_SPAN_DAYS = 4
+
+
+def matchday_in_progress(
+    fixtures: "list[datetime]",
+    now: "datetime",
+    *,
+    span_days: int = MATCHDAY_ROUND_SPAN_DAYS,
+) -> bool:
+    """Has the current matchday already kicked off? (REH-110)
+
+    True when any of our players' fixtures for this round is in the recent
+    past. Kickbase locks the fielded eleven at the round's first kickoff and
+    every squad change lands on the FOLLOWING matchday, so once that instant
+    passes there is no lineup left to protect and trading is free.
+
+    `get_days_until_match` cannot answer this: it takes `min()` of the fixtures
+    still to come, so on the Saturday of a round that began Friday evening it
+    reports 0 days and the bot locks itself out. Measured live 2026-08-29,
+    that cost the Saturday and Sunday of every matchday — two tradeable days a
+    week.
+
+    All fixtures in the past also returns True: that is the gap between rounds,
+    the safest moment to trade rather than the least.
+
+    Pure, so the round-boundary reasoning is testable without an API.
+    """
+    cutoff = now - timedelta(days=span_days)
+    return any(cutoff <= f < now for f in fixtures)
 
 
 def _parse_match_date(value) -> datetime | None:
@@ -177,6 +211,8 @@ class Trader:
                     parsed = _parse_match_date(entry.get("md"))
                     if parsed is not None:
                         candidates.append(parsed)
+
+        self._last_matchday_in_progress = matchday_in_progress(candidates, now)
 
         upcoming = [d for d in candidates if d >= now]
         if not upcoming:
