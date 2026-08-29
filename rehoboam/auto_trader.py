@@ -97,18 +97,34 @@ def _build_buy_gate(
     )
 
 
-def _max_flip_hold_days(days_until_match: int | None) -> int | None:
-    """Cap on a profit-flip's hold_days to fit before the next matchday.
+def _max_flip_hold_days(
+    days_until_match: int | None, *, respect_matchday: bool = False
+) -> int | None:
+    """Cap on a profit-flip's hold_days. ``None`` means unconstrained.
 
-    A flip we can't sell before kickoff risks both an unsellable position and
-    the value drop that often follows uncertain matchday outcomes. Returns
-    ``None`` when the schedule is unknown (no constraint applied — the
-    matchday-phase logic already defaults to no-flips in that case).
+    REH-109: this used to return ``days_until_match - 1`` on the premise that a
+    flip we cannot sell before kickoff risks an unsellable position. That
+    premise is false. Kickbase locks the fielded eleven at kickoff and every
+    squad change lands on the FOLLOWING matchday, so holding a flip through a
+    match costs nothing in points. The constraint that genuinely survives is
+    budget-at-kickoff (REH-11), which is about cash and is enforced elsewhere.
 
-    The "−1 day" buffer leaves a safety margin for the sell to actually clear
-    given Kickbase's auction mechanics.
+    The cap was also actively expensive. Within rising-trend entries — the only
+    class `flip_buys_require_rising_trend` now admits, and the only profitable
+    one — outcomes by hold length were:
+
+        0-2d    23 flips   -EUR  9.67m   13.0% win
+        3-7d    22 flips   -EUR  4.67m   50.0% win
+        8-21d   25 flips   -EUR  9.34m   44.0% win
+        22d+    12 flips   +EUR 26.85m   66.7% win
+
+    Deriving the cap from the matchday forced a 1-3 day exit in the moderate
+    phase, which is precisely the 13%-win bucket.
+
+    ``respect_matchday`` restores the old behaviour, so the change is
+    revertible from .env without a deploy like every other flip knob.
     """
-    if days_until_match is None:
+    if not respect_matchday or days_until_match is None:
         return None
     return max(1, days_until_match - 1)
 
@@ -298,12 +314,23 @@ class AutoTrader:
                 reason=f"Match in {days_until_match}d — lineup only, no trading",
             )
         elif days_until_match is not None and days_until_match <= 4:
+            # REH-109: flips ARE allowed here. `allow_flips` used to be True
+            # only at >= 5 days, and measured against the real calendar that
+            # window was five hours wide — MD2's last fixture 2026-08-30T13:30Z,
+            # MD3's first 2026-09-04T18:30Z — which the 08:00/20:00 timer missed
+            # entirely. Zero flips since 2026-05-15 was the code path never
+            # executing, not a selection failure.
+            #
+            # Safe because the premise for excluding them was wrong: a trade
+            # near a matchday cannot disturb the eleven, which Kickbase locks at
+            # kickoff. `max_trades` stays halved — this reopens flipping, not
+            # full-rate squad churn.
             return MatchdayPhase(
                 days_until_match=days_until_match,
                 phase="moderate",
                 max_trades=max(self.max_trades_per_session // 2, 2),
-                allow_flips=False,
-                reason=f"Match in {days_until_match}d — lineup improvements only",
+                allow_flips=True,
+                reason=f"Match in {days_until_match}d — lineup improvements + flips",
             )
         elif days_until_match is not None:
             return MatchdayPhase(
@@ -772,7 +799,10 @@ class AutoTrader:
                 # Cap flip hold time so we don't enter a position we can't exit
                 # before the next matchday — being caught at kickoff with a
                 # half-finished flip risks the lineup penalty AND market drop.
-                max_hold_days = _max_flip_hold_days(ctx.matchday_phase.days_until_match)
+                max_hold_days = _max_flip_hold_days(
+                    ctx.matchday_phase.days_until_match,
+                    respect_matchday=self.settings.flip_hold_respects_matchday,
+                )
 
                 from .formation import validate_formation
                 from .scoring.decision import _would_create_dead_weight

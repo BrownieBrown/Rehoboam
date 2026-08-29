@@ -165,16 +165,24 @@ class TestLowerDipThreshold:
 
 
 class TestMaxFlipHoldDays:
+    """REH-109 turned the matchday cap OFF by default — the eleven is locked at
+    kickoff, so holding a flip through a match costs nothing, and the 1-3 day
+    exits it forced were the 13%-win-rate bucket. The arithmetic is retained
+    behind `respect_matchday` for rollback, and is still pinned below."""
+
     def test_unknown_schedule_no_cap(self):
         assert _max_flip_hold_days(None) is None
 
+    def test_the_matchday_no_longer_caps_a_hold_by_default(self):
+        assert _max_flip_hold_days(3) is None
+
     def test_3_days_until_match_cap_is_2(self):
         """3 days until match → flip must complete in ≤2 days (1d safety buffer)."""
-        assert _max_flip_hold_days(3) == 2
+        assert _max_flip_hold_days(3, respect_matchday=True) == 2
 
     def test_1_day_until_match_floors_at_1(self):
         """Even with very tight schedule, return at least 1 (don't return 0/negative)."""
-        assert _max_flip_hold_days(1) == 1
+        assert _max_flip_hold_days(1, respect_matchday=True) == 1
 
     def test_far_match_allows_long_holds(self):
-        assert _max_flip_hold_days(10) == 9
+        assert _max_flip_hold_days(10, respect_matchday=True) == 9
