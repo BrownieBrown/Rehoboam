@@ -104,6 +104,21 @@ def _ctx(buy_recs, current_budget, *, squad=(), market=None, days_until_match=No
     )
 
 
+class _ProposalSpy:
+    """The emergency fill proposes rather than buys since REH-114."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, league, rec, ctx, *, bid=None, auto_approve_at=None):
+        self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
+        return True
+
+    @property
+    def ids(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
 class TestEmergencyFillRefusal:
     """An empty slot is -100, so a refusal means 'try the next one'."""
 
@@ -124,12 +139,17 @@ class TestEmergencyFillRefusal:
             squad=squad,
         )
 
+        trader._propose_buy = spy = _ProposalSpy()
+
         results = trader._run_emergency_squad_fill(
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        bought = [c.args[1].id for c in api.buy_player.call_args_list]
-        assert bought == ["clean"], "the refused candidate must not reach the API"
+        # REH-114: the fill proposes, so the ceiling is pre-flighted here rather
+        # than at execution — asking Marco to approve a bid the gate would then
+        # refuse is the broken Approve button REH-99 existed to fix.
+        assert spy.ids == ["clean"], "the refused candidate must not be proposed"
+        assert api.buy_player.call_count == 0, "squad buys wait for approval"
         assert any(r.success for r in results), "the slot must still be filled"
 
     def test_budget_rule_stays_hard_even_to_fill_a_slot(self, trader, api):

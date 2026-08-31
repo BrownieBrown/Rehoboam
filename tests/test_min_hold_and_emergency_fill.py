@@ -192,10 +192,22 @@ def _ctx(buy_recs, current_budget, my_bid_amounts=None, days_until_match=None):
     fill logic).
     """
     return SimpleNamespace(
-        ep_result={"buy_recs": buy_recs, "trade_pairs": [], "squad_scores": []},
+        ep_result={
+            "buy_recs": buy_recs,
+            "trade_pairs": [],
+            "squad_scores": [],
+            # REH-114: the fill now pre-flights `safety_gate` before proposing,
+            # and `known_player_ids` is a security boundary — a candidate absent
+            # from the live market is refused. The old `_StubExecution` ignored
+            # the gate it was handed, so this fixture gap stayed invisible.
+            "market_players": {r.player.id: r.player for r in buy_recs},
+        },
         my_bid_amounts=my_bid_amounts or {},
+        my_bids=[],
+        squad=[],
+        team_value=100_000_000,
         current_budget=current_budget,
-        matchday_phase=SimpleNamespace(days_until_match=days_until_match),
+        matchday_phase=SimpleNamespace(days_until_match=days_until_match, phase="moderate"),
     )
 
 
@@ -208,9 +220,30 @@ def _rec(pid, position, price, ep_gain=10.0):
     )
 
 
+class _ProposalSpy:
+    """Records what the emergency fill proposed (REH-114: it no longer buys).
+
+    The fill routes picks through `_propose_buy` so Marco approves squad
+    trades. These tests are about SELECTION — wash trades, active bids,
+    affordability, gap priority — so the sink is stubbed and the choices are
+    asserted directly.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, league, rec, ctx, *, bid=None, auto_approve_at=None):
+        self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
+        return True
+
+    @property
+    def ids(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
 class TestEmergencySquadFill:
     def test_fills_to_eleven_when_short(self, trader):
-        trader.execution = _StubExecution()
+        trader._propose_buy = spy = _ProposalSpy()
 
         # Squad has 9 players (missing 1 GK + 1 forward = formation broken)
         squad = (
@@ -233,12 +266,11 @@ class TestEmergencySquadFill:
         )
 
         assert sum(1 for r in results if r.success) == 2
-        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
-        # Both bought slots are filled with affordable, non-active-bid candidates
-        assert len(bought_ids) == 2
+        # Both slots are proposed from affordable, non-active-bid candidates
+        assert len(spy.ids) == 2
 
     def test_skips_wash_trade_blocked_candidates(self, trader):
-        trader.execution = _StubExecution()
+        trader._propose_buy = spy = _ProposalSpy()
         squad = [_player(f"p{i}", "Defender") for i in range(10)]
 
         trader.learner.record_recent_sell(
@@ -258,12 +290,11 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
-        assert bought_ids == ["forward2"]
+        assert spy.ids == ["forward2"]
         assert sum(1 for r in results if r.success) == 1
 
     def test_skips_already_bid_candidates(self, trader):
-        trader.execution = _StubExecution()
+        trader._propose_buy = spy = _ProposalSpy()
         squad = [_player(f"p{i}", "Defender") for i in range(10)]
 
         buy_recs = [
@@ -280,11 +311,10 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
-        assert bought_ids == ["forward2"]
+        assert spy.ids == ["forward2"]
 
     def test_skips_unaffordable_candidates(self, trader):
-        trader.execution = _StubExecution()
+        trader._propose_buy = spy = _ProposalSpy()
         squad = [_player(f"p{i}", "Defender") for i in range(10)]
 
         buy_recs = [
@@ -297,11 +327,10 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=2
         )
 
-        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
-        assert bought_ids == ["forward2"]
+        assert spy.ids == ["forward2"]
 
     def test_prioritises_gap_positions_over_raw_ep(self, trader):
-        trader.execution = _StubExecution()
+        trader._propose_buy = spy = _ProposalSpy()
         # 0 forwards, 5 defenders, 3 midfielders, 1 GK = 9 players, FW gap.
         squad = (
             [_player(f"def{i}", "Defender") for i in range(5)]
@@ -324,11 +353,10 @@ class TestEmergencySquadFill:
 
         # The gap-filling forward must come first, even though raw EP gain
         # would have ranked the defender above it.
-        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
-        assert bought_ids[0] == "fwd_gap"
+        assert spy.ids[0] == "fwd_gap"
 
     def test_no_buys_when_no_affordable_clean_candidates(self, trader):
-        trader.execution = _StubExecution()
+        trader._propose_buy = spy = _ProposalSpy()
         squad = [_player(f"p{i}", "Defender") for i in range(10)]
 
         buy_recs = [
@@ -341,4 +369,4 @@ class TestEmergencySquadFill:
         )
 
         assert results == []
-        assert trader.execution.calls == []
+        assert spy.ids == []

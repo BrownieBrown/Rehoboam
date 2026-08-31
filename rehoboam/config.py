@@ -432,6 +432,18 @@ class Settings(BaseSettings):
             "exactly when there is least evidence."
         ),
     )
+    emergency_auto_approve_hours: float = Field(
+        default=24.0,
+        description=(
+            "Hours an emergency squad-fill proposal waits for approval before "
+            "executing itself. The backstop is deliberately time-based rather "
+            "than tied to the matchday phase: `/myeleven` returning no upcoming "
+            "fixture is exactly the failure that produced a 7-player squad "
+            "(REH-112), so a phase trigger can wait forever on the same broken "
+            "lookup. Only emergency fills carry a deadline — an ordinary "
+            "upgrade waits for a human indefinitely."
+        ),
+    )
     overbid_pct_marginal: float = Field(
         default=8.0,
         description=(

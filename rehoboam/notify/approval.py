@@ -60,39 +60,22 @@ def _record_bid_for_learning(learner, player, bid: int, tier: str | None = None)
         logger.warning("approval: could not record approved bid for learning", exc_info=True)
 
 
-def handle_callback(
-    body: dict,
-    secret_header: str | None,
-    *,
-    settings,
-    learner,
-    api,
-    league,
-) -> str:
-    """Process one callback. Returns the text to show back in Telegram."""
-    if not authorize(secret_header, settings.telegram_webhook_secret):
-        logger.warning("approval: unauthorized callback rejected")
-        return "Unauthorized."
+def execute_proposal(proposal: dict, *, settings, learner, api, league) -> str:
+    """Re-validate a claimed proposal against the live market and buy it.
 
-    query = (body or {}).get("callback_query") or {}
-    data = query.get("data") or ""
-    action, _, proposal_id = data.partition(":")
-    if action not in {"approve", "reject"} or not proposal_id:
-        return "Unrecognised callback."
+    Split out of ``handle_callback`` so the Telegram tap and the emergency
+    auto-approve deadline (REH-114) run the SAME gate. Rehoboam has produced
+    four tickets of the shape "two components each holding a private copy of
+    one rule" (REH-99, 100, 107, 111); a second execute path would be the
+    fifth, and it is the path that spends money.
 
-    proposal = learner.get_proposal(proposal_id)
-    if proposal is None:
-        return f"Proposal {proposal_id} not found."
+    The caller is responsible for claiming the proposal out of 'pending'
+    first — that claim is the replay guard, and it must happen before any of
+    this work.
 
-    if action == "reject":
-        if not learner.mark_proposal(proposal_id, "rejected"):
-            return f"Proposal {proposal_id} was already {proposal['status']}."
-        return f"Rejected {proposal['player_name']}."
-
-    # Claim before doing anything expensive — this is the replay guard.
-    if not learner.mark_proposal(proposal_id, "approved"):
-        return f"Proposal {proposal_id} was already {proposal['status']}."
-
+    Returns the text to show whoever triggered it.
+    """
+    proposal_id = proposal["proposal_id"]
     try:
         market = {p.id: p for p in api.get_market(league)}
         live = market.get(proposal["player_id"])
@@ -146,6 +129,42 @@ def handle_callback(
     learner.set_proposal_status(proposal_id, "executed")
     _record_bid_for_learning(learner, live, int(proposal["bid"]), tier=proposal.get("tier"))
     return f"Bought {proposal['player_name']} for EUR {int(proposal['bid']):,}."
+
+
+def handle_callback(
+    body: dict,
+    secret_header: str | None,
+    *,
+    settings,
+    learner,
+    api,
+    league,
+) -> str:
+    """Process one callback. Returns the text to show back in Telegram."""
+    if not authorize(secret_header, settings.telegram_webhook_secret):
+        logger.warning("approval: unauthorized callback rejected")
+        return "Unauthorized."
+
+    query = (body or {}).get("callback_query") or {}
+    data = query.get("data") or ""
+    action, _, proposal_id = data.partition(":")
+    if action not in {"approve", "reject"} or not proposal_id:
+        return "Unrecognised callback."
+
+    proposal = learner.get_proposal(proposal_id)
+    if proposal is None:
+        return f"Proposal {proposal_id} not found."
+
+    if action == "reject":
+        if not learner.mark_proposal(proposal_id, "rejected"):
+            return f"Proposal {proposal_id} was already {proposal['status']}."
+        return f"Rejected {proposal['player_name']}."
+
+    # Claim before doing anything expensive — this is the replay guard.
+    if not learner.mark_proposal(proposal_id, "approved"):
+        return f"Proposal {proposal_id} was already {proposal['status']}."
+
+    return execute_proposal(proposal, settings=settings, learner=learner, api=api, league=league)
 
 
 def build_callback_response(body: dict, reply: str) -> dict:

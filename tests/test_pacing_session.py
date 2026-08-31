@@ -167,6 +167,21 @@ def test_the_trend_recompute_does_not_discard_pacing(trader):
 # ---------------------------------------------------------------------------
 
 
+class _ProposalSpy:
+    """The emergency fill proposes rather than buys since REH-114."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, league, rec, ctx, *, bid=None, auto_approve_at=None):
+        self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
+        return True
+
+    @property
+    def ids(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
 def _emergency_fill_ctx(recommended_bid: int):
     """A short squad (11/15, one gap slot) plus one candidate to fill it."""
     squad = [
@@ -241,14 +256,17 @@ def test_emergency_fill_buys_when_bid_is_already_sized(tmp_path, monkeypatch):
     the test that actually exercises the pacing risk.
     """
     api, trader = _autotrader_with_mock_api(tmp_path, monkeypatch)
+    trader._propose_buy = spy = _ProposalSpy()
     squad, target, ctx = _emergency_fill_ctx(recommended_bid=4_000_000)
 
     results = trader._run_emergency_squad_fill(
         league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
     )
     assert any(r.success for r in results), "the slot must be filled"
-    assert api.buy_player.call_count == 1
-    assert api.buy_player.call_args[0][2] == 4_000_000
+    # REH-114: the slot is claimed by a proposal, not a buy. The number that
+    # matters is unchanged — the bid pacing sized.
+    assert spy.calls == [("fill", 4_000_000)]
+    assert api.buy_player.call_count == 0, "squad buys wait for approval"
 
 
 def test_emergency_fill_is_not_starved_by_a_paced_zero_bid(tmp_path, monkeypatch):
@@ -262,6 +280,7 @@ def test_emergency_fill_is_not_starved_by_a_paced_zero_bid(tmp_path, monkeypatch
     bookkeeping.
     """
     api, trader = _autotrader_with_mock_api(tmp_path, monkeypatch)
+    trader._propose_buy = spy = _ProposalSpy()
     squad, target, ctx = _emergency_fill_ctx(recommended_bid=0)
 
     results = trader._run_emergency_squad_fill(
@@ -270,9 +289,7 @@ def test_emergency_fill_is_not_starved_by_a_paced_zero_bid(tmp_path, monkeypatch
     assert any(
         r.success for r in results
     ), "the slot must be filled despite the paced bid being zero"
-    assert api.buy_player.call_count == 1
-    # The fallback must actually place an offer -- at the asking price, not 0.
-    assert api.buy_player.call_args[0][2] == target.price
-    # The fallback must still respect the budget the emergency path is
-    # working with, not spend blindly past it.
-    assert api.buy_player.call_args[0][2] <= ctx.current_budget
+    # The fallback must propose at the asking price, not 0, and still respect
+    # the budget the emergency path is working with.
+    assert spy.calls == [("fill", target.price)]
+    assert spy.calls[0][1] <= ctx.current_budget
