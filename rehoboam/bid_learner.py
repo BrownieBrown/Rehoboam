@@ -264,6 +264,17 @@ class BidLearner:
                 )
             """
             )
+            # REH-111: the ceiling the bid was priced against. `bid_evaluator`
+            # re-reads every open bid each session and cancelled anything above
+            # a flat 25% — exactly the `strong` ceiling, so `must_have` was the
+            # only tier it could cancel. Without the tier here it cannot tell a
+            # squad upgrade from a flip. Added separately so an existing prod
+            # table gains it in place; rows written before this read NULL.
+            try:
+                conn.execute("ALTER TABLE pending_bids ADD COLUMN tier TEXT")
+            except sqlite3.OperationalError:
+                pass  # already present
+
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_pending_bids_timestamp
@@ -694,6 +705,7 @@ class BidLearner:
         market_value: int | None = None,
         player_value_score: float | None = None,
         sell_plan_player_ids: list[str] | None = None,
+        tier: str | None = None,
     ) -> None:
         """Record a freshly placed bid as pending (outcome TBD).
 
@@ -705,9 +717,10 @@ class BidLearner:
                 """
                 INSERT OR REPLACE INTO pending_bids (
                     player_id, player_name, our_bid, asking_price,
-                    our_overbid_pct, timestamp, market_value, player_value_score
+                    our_overbid_pct, timestamp, market_value, player_value_score,
+                    tier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     player_id,
@@ -718,6 +731,7 @@ class BidLearner:
                     timestamp,
                     market_value,
                     player_value_score,
+                    tier,
                 ),
             )
             # Replace sell-plan rows: an INSERT OR REPLACE on pending_bids
@@ -744,7 +758,8 @@ class BidLearner:
             rows = conn.execute(
                 """
                 SELECT player_id, player_name, our_bid, asking_price,
-                       our_overbid_pct, timestamp, market_value, player_value_score
+                       our_overbid_pct, timestamp, market_value, player_value_score,
+                       tier
                 FROM pending_bids
                 ORDER BY timestamp ASC
             """

@@ -23,6 +23,39 @@ class BidEvaluation:
     profit_potential: float = 0.0
 
 
+def untiered_price_ceiling(market_value: int, policy) -> int:
+    """The price ceiling for an open bid with no recorded tier.
+
+    A bid reaches here when `pending_bids` has no tier for it: rows written
+    before REH-111 added the column, a bid placed straight through
+    `ExecutionService.buy` by a path that does not carry one, or a bid the DB
+    lost track of. The choice is a real trade-off and it governs real money:
+
+      * **Tightest (`Tier.MARGINAL`, 8%)** — mirrors `bid_ceiling.FALLBACK_TIER`,
+        whose stated rule is that a proposal must not buy itself a larger
+        ceiling by losing its tier. Consistent, but it cancels *more* than the
+        old flat cap did, so every legacy bid in flight gets withdrawn on the
+        next session — the exact failure REH-111 exists to stop.
+      * **Status quo (flat 25%)** — what shipped before REH-111. Cancels only
+        the must-have band, i.e. only the bids we most wanted to keep.
+      * **Widest (`Tier.MUST_HAVE`, 35%)** — never cancels a bid the bidder
+        could legally have placed. Safe against false cancels; lets a genuinely
+        overpriced untiered flip bid ride until it resolves or expires.
+
+    TODO(marco): pick the policy and replace the body. The placeholder below
+    preserves pre-REH-111 behaviour so nothing regresses while undecided.
+
+    Args:
+        market_value: The player's current market value, in euros.
+        policy: The `BidCeilingPolicy` from `Settings.bid_ceiling_policy()`;
+            use `policy.max_bid(market_value, tier)` to price against a tier.
+
+    Returns:
+        The highest bid, in euros, that may stand without being cancelled.
+    """
+    return int(market_value * 1.25)
+
+
 class BidEvaluator:
     """Evaluates active bids and recommends actions"""
 
@@ -35,8 +68,26 @@ class BidEvaluator:
         self.api = api
         self.settings = settings
 
+    def _price_ceiling(self, market_value: int, tier: str | None) -> int:
+        """The highest this bid may stand at before it counts as too expensive.
+
+        One definition, shared with the bidder and the gate (REH-99), so a bid
+        the bidder was allowed to place cannot be cancelled here for its price.
+        A flat cap cannot do this job: it sat at 25%, exactly the `strong`
+        ceiling, which made `must_have` the only tier the evaluator could
+        cancel — the highest-EP acquisitions, and nothing else (REH-111).
+        """
+        policy = self.settings.bid_ceiling_policy()
+        if tier is not None:
+            return policy.max_bid(market_value, tier)
+        return untiered_price_ceiling(market_value, policy)
+
     def evaluate_active_bids(
-        self, league, player_trends: dict = None, for_profit: bool = True
+        self,
+        league,
+        player_trends: dict = None,
+        for_profit: bool = True,
+        bid_tiers: dict[str, str] | None = None,
     ) -> list[BidEvaluation]:
         """
         Evaluate all active bids
@@ -45,10 +96,14 @@ class BidEvaluator:
             league: League object
             player_trends: Dict mapping player_id -> trend data
             for_profit: If True, evaluate as profit flips. If False, evaluate for lineup
+            bid_tiers: Dict mapping player_id -> the tier the bid was priced
+                against, from `pending_bids`. A player absent from this map has
+                no recorded tier — see `untiered_price_ceiling`.
 
         Returns:
             List of BidEvaluation objects
         """
+        bid_tiers = bid_tiers or {}
         evaluations = []
 
         # Get active bids
@@ -85,6 +140,14 @@ class BidEvaluator:
                 ((our_bid - market_value) / market_value) * 100 if market_value > 0 else 0
             )
 
+            # A bid carries the intent it was placed with (REH-111). Flip
+            # economics — a falling market-value trend, the appreciation floor
+            # — only decide a bid taken for appreciation. A tiered bid was
+            # priced for matchday points, and a must-have that never gains a
+            # euro of market value still scores every week we hold it.
+            tier = bid_tiers.get(bid_player.id)
+            judge_as_flip = for_profit and tier is None
+
             # Decision logic
             recommendation = "KEEP"
             reason = ""
@@ -96,7 +159,7 @@ class BidEvaluator:
                 recommendation = "CANCEL"
                 reason = f"Player is injured (status: {bid_player.status})"
 
-            elif is_falling and trend_pct < -10 and for_profit:
+            elif is_falling and trend_pct < -10 and judge_as_flip:
                 # Falling trend - but check if it's a mean reversion opportunity first
                 # Mean reversion: player far below peak (>50%) with good performance
                 # peak_value and current_value already extracted above (lines 74-75)
@@ -113,14 +176,18 @@ class BidEvaluator:
                     recommendation = "CANCEL"
                     reason = f"Falling trend ({trend_pct:.1f}%) - not good for flips"
 
-            elif for_profit and bid_vs_mv_pct > 25:
-                # For profit flips, don't bid >25% over market value (relaxed from 15%)
+            elif for_profit and our_bid > self._price_ceiling(market_value, tier):
+                # Above the ceiling this bid was actually priced against.
                 recommendation = "CANCEL"
-                reason = f"Bid {bid_vs_mv_pct:.1f}% over market value - too expensive for flip"
+                reason = f"Bid {bid_vs_mv_pct:.1f}% over market value - above its ceiling"
 
             # KEEP conditions
             else:
-                if for_profit:
+                if tier is not None:
+                    # Within the ceiling it was priced against, and held for
+                    # points rather than appreciation — nothing left to fail.
+                    reason = f"Priced as {tier} — within its ceiling"
+                elif judge_as_flip:
                     # Calculate expected profit potential
                     # Accept rising trends, stable good performers, or mean reversion plays
                     expected_appreciation = 0

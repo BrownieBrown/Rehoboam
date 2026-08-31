@@ -1953,9 +1953,25 @@ class AutoTrader:
                         f"[cyan]Bid compliance: {adjusted} adjusted, {canceled} canceled[/cyan]"
                     )
 
+                # REH-111: each open bid carries the tier it was priced under,
+                # so a squad upgrade is not re-read as a flip and cancelled for
+                # exceeding a flip's ceiling. Best-effort like every other
+                # learning read — no tiers means the previous behaviour, not a
+                # dead evaluation phase.
+                bid_tiers: dict[str, str] = {}
+                if self.learner is not None:
+                    try:
+                        bid_tiers = {
+                            str(row["player_id"]): row["tier"]
+                            for row in self.learner.get_pending_bids()
+                            if row.get("tier")
+                        }
+                    except Exception:
+                        logger.warning("could not read bid tiers", exc_info=True)
+
                 bid_evaluator = BidEvaluator(self.api, self.settings)
                 bid_evaluations = bid_evaluator.evaluate_active_bids(
-                    league, player_trends=player_trends, for_profit=True
+                    league, player_trends=player_trends, for_profit=True, bid_tiers=bid_tiers
                 )
                 if bid_evaluations:
                     bid_evaluator.display_bid_evaluations(bid_evaluations)
