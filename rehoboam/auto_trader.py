@@ -1191,9 +1191,17 @@ class AutoTrader:
         active_bid_ids = set(ctx.my_bid_amounts.keys())
         budget_remaining = int(ctx.current_budget)
 
-        # Score each candidate: gap-filling positions first, then by EP.
-        # Tuple sort: (-fills_gap, -marginal_ep_gain) so gap fills sort to front.
-        scored = []
+        # REH-113: choose the BASKET that scores the most points, not the
+        # best-ranked player affordable right now. An empty slot is -100 per
+        # slot regardless of who fills it, so `select_emergency_basket`
+        # maximises `total_ep + 100 x count` on ASK price and spends the
+        # leftover as overbid afterwards. The old greedy walk ignored the
+        # penalty entirely and bought 3 of 4 on 2026-08-31, missing the fourth
+        # by 1,168,502 of overbid it had already committed elsewhere.
+        from .services.emergency_basket import EmergencyCandidate, select_emergency_basket
+
+        by_id: dict[str, object] = {}
+        candidates: list[EmergencyCandidate] = []
         for rec in buy_recs:
             # REH-85 pacing can legitimately size recommended_bid to 0 (its
             # reserve rule consumed the whole spendable budget). An empty
@@ -1217,21 +1225,54 @@ class AutoTrader:
             # at kickoff that the emergency path explicitly avoids. The
             # affordability check still applies to the fallback bid — the
             # exemption is from pacing, not from the budget guard.
-            if bid > budget_remaining:
-                continue
-            fills_gap = 1 if rec.player.position in gap_positions else 0
-            scored.append((fills_gap, rec.marginal_ep_gain or 0.0, bid, rec))
+            # The floor is the asking price — a bid below it cannot win — and
+            # the ceiling is the paced bid the gate will accept. Selection
+            # happens between the two.
+            ask = int(rec.player.price) or int(bid)
+            by_id[rec.player.id] = rec
+            candidates.append(
+                EmergencyCandidate(
+                    id=rec.player.id,
+                    name=rec.player.last_name,
+                    ask=ask,
+                    max_bid=max(int(bid), ask),
+                    ep=float(rec.marginal_ep_gain or 0.0),
+                    fills_gap=rec.player.position in gap_positions,
+                    position=rec.player.position,
+                )
+            )
 
-        scored.sort(key=lambda t: (-t[0], -t[1]))
+        picks = select_emergency_basket(candidates, slots_short, budget_remaining)
 
-        if not scored:
+        if not picks:
             console.print(
                 "[red]No affordable wash-trade-clean candidates " "to fill empty slot(s)[/red]"
             )
             return results
 
+        logger.info(
+            "emergency-basket slots_short=%d budget=%d picked=%d spend=%d | %s",
+            slots_short,
+            budget_remaining,
+            len(picks),
+            sum(p.bid for p in picks),
+            ", ".join(f"{p.candidate.name}@{p.bid:,}" for p in picks),
+        )
+
+        # The basket is the plan; the rest of the board is the reserve behind
+        # it. A gate refusal means "try the next candidate", not "field
+        # nobody", so an unchosen candidate must still be reachable when a
+        # pick is refused — otherwise the slot stays empty at -100.
+        chosen_ids = {p.candidate.id for p in picks}
+        attempts: list[tuple[object, int]] = [(by_id[p.candidate.id], p.bid) for p in picks]
+        attempts += [
+            (by_id[c.id], c.max_bid)
+            for c in sorted(candidates, key=lambda c: -c.ep)
+            if c.id not in chosen_ids
+        ]
+
         bought = 0
-        for _gap, _ep, bid, rec in scored:
+        for rec, bid in attempts:
             if bought >= slots_short:
                 break
             if bid > budget_remaining:
