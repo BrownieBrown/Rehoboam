@@ -1797,31 +1797,47 @@ class AutoTrader:
         except Exception:
             logger.exception("record_team_value_snapshot failed (non-fatal)")
 
-        # Step 3: If locked (match imminent), set lineup and exit — UNLESS the
-        # squad is short. An empty lineup slot is worth -100 pts at kickoff;
-        # the no-trade safety rule has to yield to the larger penalty.
-        if ctx.matchday_phase.phase == "locked":
-            fresh_squad = self.api.get_squad(league)
-            slots_short = _emergency_slots_short(fresh_squad)
-            if slots_short > 0:
-                from .formation import can_fill_starting_eleven
+        # Step 3: A squad that cannot field a legal eleven is an emergency in
+        # EVERY phase (REH-112). This used to sit inside the `locked` branch
+        # below, so it could only run when the phase detector had found an
+        # imminent fixture. On 2026-08-31 `/myeleven` reported no upcoming
+        # fixture between MD2 and MD3, `_get_matchday_phase` took its `else`
+        # branch to "moderate", and a squad of 7 sat four slots short — a
+        # standing -400 — with the fill unreachable. That `else` is
+        # conservative about *spending*, which is right; the -100 is not
+        # spending, and the fail-safe has to fail toward fielding an eleven.
+        fresh_squad = self.api.get_squad(league)
+        slots_short = _emergency_slots_short(fresh_squad)
+        if slots_short > 0:
+            from .formation import can_fill_starting_eleven
 
-                reason = can_fill_starting_eleven(fresh_squad)["reason"]
-                console.print(
-                    f"[bold red]⚠ LINEUP EMERGENCY — {reason} "
-                    f"(squad {len(fresh_squad)}, buying {slots_short}). "
-                    f"Locked-phase trading override.[/bold red]"
+            reason = can_fill_starting_eleven(fresh_squad)["reason"]
+            console.print(
+                f"[bold red]⚠ LINEUP EMERGENCY — {reason} "
+                f"(squad {len(fresh_squad)}, buying {slots_short}). "
+                f"Phase '{ctx.matchday_phase.phase}' overridden.[/bold red]"
+            )
+            logger.warning(
+                "lineup emergency: squad=%d slots_short=%d phase=%s — %s",
+                len(fresh_squad),
+                slots_short,
+                ctx.matchday_phase.phase,
+                reason,
+            )
+            try:
+                emergency_results = self._run_emergency_squad_fill(
+                    league, ctx, fresh_squad, slots_short
                 )
-                try:
-                    emergency_results = self._run_emergency_squad_fill(
-                        league, ctx, fresh_squad, slots_short
-                    )
-                    trade_results.extend(emergency_results)
-                except Exception as e:
-                    error_msg = f"Emergency squad fill failed: {e!s}"
-                    console.print(f"[red]{error_msg}[/red]")
-                    errors.append(error_msg)
-            else:
+                trade_results.extend(emergency_results)
+            except Exception as e:
+                error_msg = f"Emergency squad fill failed: {e!s}"
+                console.print(f"[red]{error_msg}[/red]")
+                errors.append(error_msg)
+
+        # If locked (match imminent), set the lineup and exit — the emergency
+        # above has already had its chance to make an eleven fieldable.
+        if ctx.matchday_phase.phase == "locked":
+            if slots_short == 0:
                 console.print(
                     f"[yellow]Match imminent ({ctx.matchday_phase.days_until_match}d) "
                     f"— setting lineup only, no trading[/yellow]"
