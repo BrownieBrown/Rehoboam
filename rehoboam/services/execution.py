@@ -167,7 +167,14 @@ class ExecutionService:
             success_msg=f"Buy order placed for {player.first_name} {player.last_name}",
             api_call=lambda: self.api.buy_player(league, player, price),
             on_success=lambda: self.tracker.record_bid_placed(
-                player, price, sell_plan_player_ids=sell_plan_player_ids
+                player,
+                price,
+                sell_plan_player_ids=sell_plan_player_ids,
+                # REH-111: the ceiling this bid was sized under, so the next
+                # session's `bid_evaluator` judges it by the same number rather
+                # than by a flip's. A profit flip carries `tier=None` and keeps
+                # being judged as a flip, which is correct.
+                tier=getattr(gate.tier, "value", gate.tier),
             ),
         )
 

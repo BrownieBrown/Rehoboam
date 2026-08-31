@@ -40,7 +40,7 @@ def authorize(secret_header: str | None, expected: str) -> bool:
     return bool(expected) and hmac.compare_digest(secret_header or "", expected)
 
 
-def _record_bid_for_learning(learner, player, bid: int) -> None:
+def _record_bid_for_learning(learner, player, bid: int, tier: str | None = None) -> None:
     """Feed an approved buy into the loop the autonomous path already uses.
 
     ``ExecutionService.buy`` records every autonomous bid as pending so
@@ -55,7 +55,7 @@ def _record_bid_for_learning(learner, player, bid: int) -> None:
     try:
         from rehoboam.learning.tracker import LearningTracker
 
-        LearningTracker(learner).record_bid_placed(player, bid)
+        LearningTracker(learner).record_bid_placed(player, bid, tier=tier)
     except Exception:
         logger.warning("approval: could not record approved bid for learning", exc_info=True)
 
@@ -144,7 +144,7 @@ def handle_callback(
         return f"Buy failed: {exc}"
 
     learner.set_proposal_status(proposal_id, "executed")
-    _record_bid_for_learning(learner, live, int(proposal["bid"]))
+    _record_bid_for_learning(learner, live, int(proposal["bid"]), tier=proposal.get("tier"))
     return f"Bought {proposal['player_name']} for EUR {int(proposal['bid']):,}."
 
 

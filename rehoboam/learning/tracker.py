@@ -92,6 +92,7 @@ class LearningTracker:
         player,
         our_bid: int,
         sell_plan_player_ids: list[str] | None = None,
+        tier: str | None = None,
     ) -> None:
         """Record a freshly-placed bid as pending (outcome TBD).
 
@@ -112,6 +113,7 @@ class LearningTracker:
                 timestamp=time.time(),
                 market_value=getattr(player, "market_value", 0),
                 sell_plan_player_ids=sell_plan_player_ids,
+                tier=tier,
             )
         except Exception as e:
             logger.warning("Failed to record bid placement: %s", e)
