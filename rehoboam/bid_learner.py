@@ -578,6 +578,16 @@ class BidLearner:
             except sqlite3.OperationalError:
                 pass  # already present
 
+            # REH-114: when an unapproved proposal becomes a buy anyway. Set
+            # only on emergency squad fills, where the alternative to spending
+            # is -100 per empty slot every matchday. NULL — the default, and
+            # every row written before this — means "waits for a human
+            # indefinitely", which is what an ordinary upgrade should do.
+            try:
+                conn.execute("ALTER TABLE trade_proposals ADD COLUMN auto_approve_at REAL")
+            except sqlite3.OperationalError:
+                pass  # already present
+
             # REH-104: entry context for a flip. `trend_at_buy` has existed
             # since this table was created and was NULL in all 151 rows —
             # `record_flip_outcome` runs at sell time and had nothing to write.
@@ -1892,6 +1902,7 @@ class BidLearner:
         market_value: int,
         message: str,
         tier: str | None = None,
+        auto_approve_at: float | None = None,
     ) -> None:
         """Persist a proposal awaiting approval.
 
@@ -1903,7 +1914,8 @@ class BidLearner:
             conn.execute(
                 "INSERT OR REPLACE INTO trade_proposals "
                 "(proposal_id, player_id, player_name, bid, market_value, message, "
-                " status, created_at, tier) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                " status, created_at, tier, auto_approve_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                 (
                     proposal_id,
                     player_id,
@@ -1913,8 +1925,31 @@ class BidLearner:
                     message,
                     datetime.now().timestamp(),
                     tier,
+                    auto_approve_at,
                 ),
             )
+
+    def due_auto_approvals(self, *, now: float) -> list[dict]:
+        """Pending proposals whose auto-approve deadline has passed.
+
+        Only emergency fills carry a deadline, so an ordinary upgrade never
+        appears here however long it waits. `status = 'pending'` keeps a
+        rejected or already-executed row out — the deadline is a backstop for
+        silence, not an override of a decision Marco has already made.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM trade_proposals
+                WHERE status = 'pending'
+                  AND auto_approve_at IS NOT NULL
+                  AND auto_approve_at <= ?
+                ORDER BY auto_approve_at ASC
+                """,
+                (float(now),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_proposal(self, proposal_id: str) -> dict | None:
         """One proposal by id, or None."""
