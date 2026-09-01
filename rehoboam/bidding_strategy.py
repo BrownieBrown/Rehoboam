@@ -197,6 +197,33 @@ class SmartBidding:
         self.tier_solid_upgrade = tier_solid_upgrade
         self.full_commit_gain = full_commit_gain
 
+    def _max_overbid_pct(self, ep_tier: str, market_value: int) -> float:
+        """The overbid ceiling for this tier, as a percentage of market value.
+
+        REH-116. This used to be `elite_max_overbid_pct` (30.0) for must_have
+        and `max_overbid_pct` (20.0) otherwise — private constants sitting
+        alongside the `BidCeilingPolicy` that REH-99 introduced precisely so
+        the bidder and the gate could not disagree. The private ones bound
+        first, and were lower, so the policy never governed anything.
+
+        It cost Nusa on 2026-08-31: the learned model asked for 40.8%, the
+        private cap applied 30.0%, we bid 34,033,029, and stefan_m took him for
+        34,683,029. The policy ceiling was 35,347,089.
+
+        Derived as a percentage rather than compared in euros because the
+        policy is `mv + max(floor_eur, mv x pct)` — at the cheap end the floor
+        governs and permits MORE than the percentage, which is the Chiarodia
+        case. Converting keeps that headroom instead of flattening it away.
+
+        The constructor constants survive only as the no-policy fallback:
+        production always passes one, and a bidder with no ceiling at all is a
+        worse failure than a slightly wrong one.
+        """
+        if self.ceiling_policy is None or market_value <= 0:
+            return self.elite_max_overbid_pct if ep_tier == "must_have" else self.max_overbid_pct
+        ceiling = self.ceiling_policy.max_bid(int(market_value), ep_tier)
+        return max(0.0, (ceiling - market_value) / market_value * 100.0)
+
     def calculate_ep_bid(
         self,
         asking_price: int,
@@ -376,8 +403,8 @@ class SmartBidding:
         # by a falling market value — contestedness doesn't care about trend.
         overbid_pct += _contested_overbid_bump(ep_tier=ep_tier, offer_count=offer_count)
 
-        # Cap overbid (must_have tier gets elite cap)
-        max_overbid = self.elite_max_overbid_pct if ep_tier == "must_have" else self.max_overbid_pct
+        # The ceiling comes from the ONE policy the safety gate enforces.
+        max_overbid = self._max_overbid_pct(ep_tier, market_value)
         overbid_pct = min(overbid_pct, max_overbid)
 
         # Try EP-specific learned overbid if available.

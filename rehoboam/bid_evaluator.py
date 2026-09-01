@@ -88,6 +88,7 @@ class BidEvaluator:
         player_trends: dict = None,
         for_profit: bool = True,
         bid_tiers: dict[str, str] | None = None,
+        bot_placed_ids: set[str] | None = None,
     ) -> list[BidEvaluation]:
         """
         Evaluate all active bids
@@ -99,11 +100,26 @@ class BidEvaluator:
             bid_tiers: Dict mapping player_id -> the tier the bid was priced
                 against, from `pending_bids`. A player absent from this map has
                 no recorded tier — see `untiered_price_ceiling`.
+            bot_placed_ids: Player ids the bot has an open bid on, from
+                `pending_bids`. Offers outside this set were placed by hand and
+                are never cancelled (REH-115). A recorded tier is itself proof
+                of provenance, so passing None falls back to `bid_tiers` —
+                which errs toward leaving a human's bid alone.
 
         Returns:
             List of BidEvaluation objects
         """
         bid_tiers = bid_tiers or {}
+
+        # REH-115: `get_my_bids` is `get_market` filtered by "do we hold an
+        # offer" and cannot say WHO placed it, so every offer Marco makes by
+        # hand arrives here looking like an unexplained bot bid. On 2026-09-01
+        # that cancelled his Conrad Harder offer at 34.4% over market value.
+        # A recorded tier proves the bot placed it; `pending_bids` membership
+        # proves it for rows predating the tier column.
+        bot_bids = set(bid_tiers)
+        if bot_placed_ids is not None:
+            bot_bids |= {str(pid) for pid in bot_placed_ids}
         evaluations = []
 
         # Get active bids
@@ -147,6 +163,8 @@ class BidEvaluator:
             # euro of market value still scores every week we hold it.
             tier = bid_tiers.get(bid_player.id)
             judge_as_flip = for_profit and tier is None
+            # Marco's own judgement is an input, not a candidate for review.
+            ours_to_cancel = bid_player.id in bot_bids
 
             # Decision logic
             recommendation = "KEEP"
@@ -155,7 +173,10 @@ class BidEvaluator:
             profit_potential = 0.0  # Initialize here
 
             # CANCEL conditions
-            if is_injured:
+            if not ours_to_cancel:
+                reason = "Placed manually — not the bot's bid to cancel"
+
+            elif is_injured:
                 recommendation = "CANCEL"
                 reason = f"Player is injured (status: {bid_player.status})"
 
