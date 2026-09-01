@@ -27,7 +27,12 @@ BATCH = "batch0001"
 
 
 def _settings():
-    return Settings(kickbase_email="test@example.com", kickbase_password="x")
+    """An explicit webhook secret — `authorize` rejects an empty one, and
+    reading it from the ambient environment made these pass locally off a
+    developer `.env` and fail in CI with "Unauthorized."."""
+    s = Settings(kickbase_email="test@example.com", kickbase_password="x")
+    s.telegram_webhook_secret = "s3cret"
+    return s
 
 
 def _listing(pid, price):
