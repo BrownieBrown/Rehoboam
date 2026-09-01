@@ -469,6 +469,51 @@ class AutoTrader:
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("record_buy_decision failed: %s", e)
 
+    def _evaluate_open_bids(self, league, *, player_trends: dict) -> None:
+        """Re-read every live offer and withdraw the bot's own bad ones.
+
+        Two facts about the input shape drive everything here. `get_my_bids` is
+        `get_market` filtered by "do we hold an offer", so it returns offers
+        Marco placed by hand alongside the bot's — and it cannot say which is
+        which. And a bid the bot placed carries the tier it was priced under,
+        which is both the ceiling to judge it by (REH-111) and the proof of
+        provenance (REH-115).
+
+        Both reads are best-effort: a learning-side failure must leave the
+        phase working, not silently resume cancelling Marco's bids, so the
+        provenance set falls back to the tiers rather than to None.
+        """
+        from .bid_evaluator import BidEvaluator
+
+        bid_tiers: dict[str, str] = {}
+        bot_placed_ids: set[str] = set()
+        if self.learner is not None:
+            try:
+                pending = self.learner.get_pending_bids()
+                bot_placed_ids = {str(row["player_id"]) for row in pending}
+                bid_tiers = {
+                    str(row["player_id"]): row["tier"] for row in pending if row.get("tier")
+                }
+            except Exception:
+                logger.warning("could not read open-bid provenance", exc_info=True)
+                bot_placed_ids = set(bid_tiers)
+
+        evaluator = BidEvaluator(self.api, self.settings)
+        evaluations = evaluator.evaluate_active_bids(
+            league,
+            player_trends=player_trends,
+            for_profit=True,
+            bid_tiers=bid_tiers,
+            bot_placed_ids=bot_placed_ids,
+        )
+        if not evaluations:
+            return
+
+        evaluator.display_bid_evaluations(evaluations)
+        canceled = evaluator.cancel_bad_bids(league, evaluations, dry_run=self.dry_run)
+        if canceled:
+            console.print(f"[yellow]Canceled {canceled} bid(s) that no longer make sense[/yellow]")
+
     def _process_due_auto_approvals(self, league) -> None:
         """Execute emergency proposals whose approval deadline has passed.
 
@@ -2028,7 +2073,6 @@ class AutoTrader:
         self._reset_daily_limits_if_needed()
         if self.daily_spend < self.max_daily_spend:
             try:
-                from .bid_evaluator import BidEvaluator
                 from .league_compliance import LeagueComplianceChecker
                 from .trader import Trader
 
@@ -2055,35 +2099,7 @@ class AutoTrader:
                         f"[cyan]Bid compliance: {adjusted} adjusted, {canceled} canceled[/cyan]"
                     )
 
-                # REH-111: each open bid carries the tier it was priced under,
-                # so a squad upgrade is not re-read as a flip and cancelled for
-                # exceeding a flip's ceiling. Best-effort like every other
-                # learning read — no tiers means the previous behaviour, not a
-                # dead evaluation phase.
-                bid_tiers: dict[str, str] = {}
-                if self.learner is not None:
-                    try:
-                        bid_tiers = {
-                            str(row["player_id"]): row["tier"]
-                            for row in self.learner.get_pending_bids()
-                            if row.get("tier")
-                        }
-                    except Exception:
-                        logger.warning("could not read bid tiers", exc_info=True)
-
-                bid_evaluator = BidEvaluator(self.api, self.settings)
-                bid_evaluations = bid_evaluator.evaluate_active_bids(
-                    league, player_trends=player_trends, for_profit=True, bid_tiers=bid_tiers
-                )
-                if bid_evaluations:
-                    bid_evaluator.display_bid_evaluations(bid_evaluations)
-                    canceled_count = bid_evaluator.cancel_bad_bids(
-                        league, bid_evaluations, dry_run=self.dry_run
-                    )
-                    if canceled_count > 0:
-                        console.print(
-                            f"[yellow]Canceled {canceled_count} bid(s) that no longer make sense[/yellow]"
-                        )
+                self._evaluate_open_bids(league, player_trends=player_trends)
             except Exception as e:
                 console.print(f"[yellow]Bid compliance check failed: {e}[/yellow]")
 
