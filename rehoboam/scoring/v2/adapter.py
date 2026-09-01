@@ -349,8 +349,17 @@ def score_player_v2(
     if data.is_dgw:
         notes.append("DOUBLE GAMEWEEK ×1.8")
 
+    # REH-117: `team_strength` and `player_details` both carry the club name
+    # and both were dropped here, so every Telegram proposal read
+    # "unknown club" — the market payload has `tid` and never `tn`. Left blank
+    # when genuinely unknown: a wrong club actively misleads.
+    club = getattr(data.team_strength, "team_name", "") or ""
+    if not club and isinstance(data.player_details, dict):
+        club = data.player_details.get("tn", "") or ""
+
     return PlayerScore(
         player_id=player.id,
+        club=club,
         expected_points=round(ep, 2),
         data_quality=DataQuality(
             grade="A" if quality_key in rate.quality else "C",

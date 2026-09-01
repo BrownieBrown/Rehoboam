@@ -39,6 +39,7 @@ class PlayerScore:
     market_value: int
     average_points: float = 0.0
     position: str = ""
+    club: str = ""  # REH-117: the pipeline knows it; the proposal message needs it
     lineup_probability: int | None = None  # 1=starter, 2-3=rotation, 4-5=unlikely
     minutes_trend: str | None = None  # "increasing" | "decreasing" | "stable"
 

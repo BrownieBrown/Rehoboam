@@ -588,6 +588,14 @@ class BidLearner:
             except sqlite3.OperationalError:
                 pass  # already present
 
+            # REH-117: the session that proposed this, so one tap can approve
+            # the set that was chosen to fit the budget together. NULL means a
+            # proposal that stands alone and keeps its own single button.
+            try:
+                conn.execute("ALTER TABLE trade_proposals ADD COLUMN batch_id TEXT")
+            except sqlite3.OperationalError:
+                pass  # already present
+
             # REH-104: entry context for a flip. `trend_at_buy` has existed
             # since this table was created and was NULL in all 151 rows —
             # `record_flip_outcome` runs at sell time and had nothing to write.
@@ -1903,6 +1911,7 @@ class BidLearner:
         message: str,
         tier: str | None = None,
         auto_approve_at: float | None = None,
+        batch_id: str | None = None,
     ) -> None:
         """Persist a proposal awaiting approval.
 
@@ -1914,8 +1923,8 @@ class BidLearner:
             conn.execute(
                 "INSERT OR REPLACE INTO trade_proposals "
                 "(proposal_id, player_id, player_name, bid, market_value, message, "
-                " status, created_at, tier, auto_approve_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                " status, created_at, tier, auto_approve_at, batch_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
                 (
                     proposal_id,
                     player_id,
@@ -1926,8 +1935,34 @@ class BidLearner:
                     datetime.now().timestamp(),
                     tier,
                     auto_approve_at,
+                    batch_id,
                 ),
             )
+
+    def pending_in_batch(self, batch_id: str) -> list[dict]:
+        """Still-pending proposals from one session's recommended set.
+
+        Oldest first, which is the order the overview presented them in — the
+        set was chosen to fit the budget as a whole, so executing it in a
+        different order can strand the tail on "budget would go negative".
+
+        `status = 'pending'` keeps anything already tapped, rejected or
+        auto-approved out, which is what makes a second tap on "Approve all"
+        buy nothing more.
+        """
+        if not batch_id:
+            return []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM trade_proposals
+                WHERE batch_id = ? AND status = 'pending'
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (batch_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def due_auto_approvals(self, *, now: float) -> list[dict]:
         """Pending proposals whose auto-approve deadline has passed.

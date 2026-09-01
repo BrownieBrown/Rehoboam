@@ -75,6 +75,37 @@ def _approval_row(proposal_id: str, approve_label: str, reject_label: str) -> li
     ]
 
 
+def overview_keyboard(
+    batch_id: str, recommended_count: int, alternatives: list[tuple[str, str]]
+) -> dict:
+    """One button for the recommended set, then one row per alternative.
+
+    The set was chosen to fit the budget together, so it gets a single tap —
+    approving it player by player is what let Marco spend the wallet on the
+    wrong two and strand the rest on "budget would go negative".
+
+    Alternatives keep individual buttons: they do NOT fit alongside the set,
+    so tapping one is a deliberate choice to buy it instead, usually after a
+    sell. Same tail-keeping rule as `approval_keyboard` — poach latency is
+    hours, so the newest are the ones still winnable.
+    """
+    rows: list[list[dict]] = []
+    if recommended_count > 0 and batch_id:
+        rows.append(
+            [
+                {
+                    "text": f"\u2705 Approve all {recommended_count}",
+                    "callback_data": f"approveall:{batch_id}",
+                }
+            ]
+        )
+    rows += [
+        _approval_row(pid, f"\u2705 {name}", f"\u274c {name}")
+        for pid, name in alternatives[-MAX_APPROVAL_BUTTONS:]
+    ]
+    return {"inline_keyboard": rows}
+
+
 def approval_keyboard(approvals: list[tuple[str, str]]) -> dict:
     """One Approve/Reject row per pending proposal, labelled by player."""
     return {
@@ -148,6 +179,36 @@ def send_message(
         text,
         keyboard=approval_keyboard(approvals) if approvals else None,
         what="daily summary",
+        timeout=timeout,
+    )
+
+
+def send_overview(
+    token: str,
+    chat_id: str,
+    text: str,
+    *,
+    batch_id: str,
+    recommended_count: int,
+    alternatives: list[tuple[str, str]] | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    """Send a session's whole proposal board as one message (REH-117).
+
+    Replaces one `send_proposal` per player. Six separate messages could not
+    show that they compete for one wallet, and nothing in any of them said the
+    budget would run out partway down.
+    """
+    if not token or not chat_id:
+        logger.info("telegram: no token or chat id configured — not sending")
+        return False
+
+    return _send_chunked(
+        token,
+        chat_id,
+        text,
+        keyboard=overview_keyboard(batch_id, recommended_count, alternatives or []),
+        what=f"proposal overview {batch_id}",
         timeout=timeout,
     )
 

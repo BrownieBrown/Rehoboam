@@ -2,6 +2,7 @@
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -127,6 +128,80 @@ def _max_flip_hold_days(
     if not respect_matchday or days_until_match is None:
         return None
     return max(1, days_until_match - 1)
+
+
+def _is_too_falling_to_propose(trend_7d_pct: float | None, settings) -> bool:
+    """True when a market value is sliding too steeply to ask about (REH-117).
+
+    Absence is not evidence: most market candidates have little or no MV
+    history, and `None` must not block them.
+    """
+    if trend_7d_pct is None:
+        return False
+    return float(trend_7d_pct) < float(settings.max_falling_trend_pct_to_buy)
+
+
+def _club_name(player, score=None) -> str:
+    """The player's club, or a bare team id rather than a guess.
+
+    The market payload carries `tid` and never `tn`, so `player.team_name` is
+    empty for every market listing. `PlayerScore.club` is populated from the
+    pipeline's team profile (REH-117). Falling back to "club 7" is deliberate:
+    it is at least lookupable, where "unknown club" told Marco nothing and a
+    guessed name would be worse than either.
+    """
+    club = (getattr(score, "club", "") or "").strip()
+    if club:
+        return club
+    club = (getattr(player, "team_name", "") or "").strip()
+    if club:
+        return club
+    tid = str(getattr(player, "team_id", "") or "").strip()
+    return f"club {tid}" if tid else "unknown club"
+
+
+def _proposal_line(
+    proposal_id: str, rec, bid: int, trend: float | None, risks: list[str], auto_approve_at
+):
+    """Everything the overview shows, from data the pipeline already has.
+
+    `PlayerScore` carries position, lineup probability, minutes trend, average
+    points and next opponent; `BuyRecommendation` carries the roster impact.
+    The old per-player message discarded all of it and printed "unknown club"
+    with no position, which is how a defender was proposed to a squad whose
+    actual hole was at striker (REH-117).
+    """
+    from .config import POSITION_MINIMUMS
+    from .notify.overview import ProposalLine
+
+    player = rec.player
+    score = getattr(rec, "score", None)
+    position = getattr(score, "position", "") or getattr(player, "position", "") or ""
+    impact = getattr(rec, "roster_impact", "") or ""
+    return ProposalLine(
+        proposal_id=proposal_id,
+        name=f"{player.first_name} {player.last_name}".strip() or player.last_name,
+        bid=int(bid),
+        ep=float(getattr(score, "expected_points", 0.0) or 0.0),
+        marginal_gain=float(getattr(rec, "marginal_ep_gain", 0.0) or 0.0),
+        position=position,
+        club=_club_name(player, score),
+        market_value=int(getattr(player, "market_value", 0) or 0),
+        is_emergency=auto_approve_at is not None,
+        fills_gap=impact == "fills_gap",
+        trend_7d_pct=trend,
+        season_avg=(
+            float(score.average_points)
+            if score is not None and getattr(score, "average_points", None) is not None
+            else None
+        ),
+        lineup_probability=getattr(score, "lineup_probability", None),
+        minutes_trend=getattr(score, "minutes_trend", None),
+        next_opponent=getattr(score, "next_opponent", None),
+        is_dgw=bool(getattr(score, "is_dgw", False)),
+        position_minimum=POSITION_MINIMUMS.get(position),
+        risks=tuple(risks),
+    )
 
 
 def _compute_flip_budget(
@@ -289,6 +364,10 @@ class AutoTrader:
         from .learning import LearningTracker
 
         self.learner = BidLearner()
+        # REH-117: one message per session, not one per player. Collected here
+        # and sent once by `_send_proposal_overview`.
+        self._session_proposals: list = []
+        self._session_batch_id: str = ""
         self.activity_feed_learner = ActivityFeedLearner()
         self.tracker = LearningTracker(self.learner)
 
@@ -592,7 +671,6 @@ class AutoTrader:
         import uuid
 
         from .notify.render import render_proposal
-        from .notify.telegram import send_proposal
         from .services.bid_ceiling import tier_for_marginal_gain
 
         proposal_id = uuid.uuid4().hex[:12]
@@ -608,6 +686,18 @@ class AutoTrader:
             )
         except Exception:
             logger.debug("proposal: no trend for %s", player.id, exc_info=True)
+
+        if _is_too_falling_to_propose(trend, self.settings):
+            console.print(
+                f"[dim]Skip {player.last_name} — market value falling " f"{trend:.1f}%/7d[/dim]"
+            )
+            logger.info(
+                "proposal-skip player=%s trend=%.1f%% below %.1f%% floor",
+                player.id,
+                trend,
+                float(self.settings.max_falling_trend_pct_to_buy),
+            )
+            return False
 
         risks: list[str] = []
         if getattr(rec.score, "data_quality", None) and rec.score.data_quality.grade != "A":
@@ -631,6 +721,12 @@ class AutoTrader:
         )
 
         bid_amount = int(bid if bid is not None else rec.recommended_bid)
+
+        # Collected before the dry-run exit so `status` renders the message
+        # Marco would actually receive, rather than a line saying one exists.
+        self._session_proposals.append(
+            _proposal_line(proposal_id, rec, bid_amount, trend, risks, auto_approve_at)
+        )
 
         if self.dry_run:
             console.print(
@@ -660,36 +756,81 @@ class AutoTrader:
                 message=message,
                 tier=tier.value,
                 auto_approve_at=auto_approve_at,
+                batch_id=self._session_batch_id,
             )
         except Exception:
             logger.exception("proposal: could not record %s", proposal_id)
             return False
 
-        # The return value is worth logging: a proposal that fails to send is
-        # recorded but invisible, and the only way to act on it is the daily
-        # summary's keyboard (REH-106). Silence here made a delivery failure
-        # look identical to a proposal nobody chose to approve.
-        delivered = send_proposal(
+        # REH-117: no send here. Six separate messages could not show that the
+        # proposals compete for one wallet, and on 2026-08-31 approving two of
+        # them stranded the other four on "budget would go negative". The
+        # session collects the board and sends it once, in `_send_proposal_overview`.
+        logger.info(
+            "proposal recorded id=%s player=%s bid=%d batch=%s",
+            proposal_id,
+            player.id,
+            bid_amount,
+            self._session_batch_id,
+        )
+        return True
+
+    def _send_proposal_overview(self, league, ctx) -> None:
+        """Send the session's whole proposal board as one message (REH-117).
+
+        Called once, at the end, so the message can show what the proposals do
+        to each other. Six separate messages could not: on 2026-08-31 approving
+        two of them consumed the wallet and the other four died on "budget
+        would go negative".
+
+        Best-effort — a delivery failure must not fail the session. The
+        proposals are already recorded, so the daily summary's keyboard remains
+        a way to act on them (REH-106).
+        """
+        if not self._session_proposals:
+            return
+
+        from .notify.overview import render_proposal_overview, split_by_budget
+        from .notify.telegram import send_overview
+
+        budget = int(getattr(ctx, "current_budget", 0) or 0)
+        recommended, alternatives = split_by_budget(self._session_proposals, budget)
+        text = render_proposal_overview(
+            squad_size=len(getattr(ctx, "squad", []) or []),
+            squad_cap=SQUAD_CAP,
+            budget=budget,
+            recommended=recommended,
+            alternatives=alternatives,
+        )
+        console.print(text)
+        if self.dry_run:
+            console.print("[yellow]DRY RUN - overview not sent[/yellow]")
+            return
+
+        delivered = send_overview(
             self.settings.telegram_bot_token,
             self.settings.telegram_chat_id,
-            proposal_id,
-            message,
+            text,
+            batch_id=self._session_batch_id,
+            recommended_count=len(recommended),
+            alternatives=[(line.proposal_id, line.name) for line in alternatives],
+        )
+        logger.info(
+            "proposal-overview batch=%s proposals=%d recommended=%d "
+            "spend=%d budget=%d delivered=%s",
+            self._session_batch_id,
+            len(self._session_proposals),
+            len(recommended),
+            sum(line.bid for line in recommended),
+            budget,
+            delivered,
         )
         if not delivered:
             logger.warning(
-                "proposal %s for %s was recorded but NOT delivered to Telegram; "
-                "it is actionable only from the daily summary",
-                proposal_id,
-                player.id,
+                "proposal overview %s recorded but NOT delivered; the proposals "
+                "are actionable only from the daily summary",
+                self._session_batch_id,
             )
-        logger.info(
-            "proposal recorded id=%s player=%s bid=%d delivered=%s",
-            proposal_id,
-            player.id,
-            int(rec.recommended_bid),
-            delivered,
-        )
-        return True
 
     def _settle_top5_obligation(self, league, ctx) -> None:
         """Discharge the league's Top-5 forced sale for the last finished matchday.
@@ -1821,6 +1962,11 @@ class AutoTrader:
             console.print("[yellow]DRY RUN MODE - No trades will be executed[/yellow]")
         console.print(f"{'=' * 70}")
 
+        # REH-117: one batch per session, so "Approve all" can take the set
+        # that was chosen to fit the budget together.
+        self._session_proposals = []
+        self._session_batch_id = uuid.uuid4().hex[:12]
+
         logger.info(
             "session-start league=%s dry_run=%s max_trades=%d max_spend=%d",
             getattr(league, "name", league.id),
@@ -2031,6 +2177,7 @@ class AutoTrader:
                     f"— setting lineup only, no trading[/yellow]"
                 )
 
+            self._send_proposal_overview(league, ctx)
             lineup = (
                 self._set_optimal_lineup(
                     league, errors, squad_scores=ctx.ep_result.get("squad_scores")
@@ -2115,6 +2262,8 @@ class AutoTrader:
         # Step 8: Set optimal lineup using EP pipeline scores from the session.
         # Players acquired mid-session (if any) are scored by the v2 fallback
         # inside _set_optimal_lineup.
+        self._send_proposal_overview(league, ctx)
+
         lineup = (
             self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
             or []

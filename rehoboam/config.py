@@ -432,6 +432,19 @@ class Settings(BaseSettings):
             "exactly when there is least evidence."
         ),
     )
+    max_falling_trend_pct_to_buy: float = Field(
+        default=-20.0,
+        description=(
+            "Steepest 7-day market-value fall a squad buy may still be proposed "
+            "at. Measured over 21 proposals, four went out badly falling — Itten "
+            "-27.0%, Stalmach -32.1%, Trimmel -20.1%, Ndiaye -19.5% — with the "
+            "number printed and no warning. Deliberately looser than the "
+            "overview's FALLING flag (-10%): a mild slide on a good player is a "
+            "judgement call Marco should get to make, while a value in free-fall "
+            "is usually the league pricing in an availability problem before we "
+            "have seen it. Profit flips keep their own rules."
+        ),
+    )
     emergency_auto_approve_hours: float = Field(
         default=24.0,
         description=(

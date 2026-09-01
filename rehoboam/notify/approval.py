@@ -131,6 +131,45 @@ def execute_proposal(proposal: dict, *, settings, learner, api, league) -> str:
     return f"Bought {proposal['player_name']} for EUR {int(proposal['bid']):,}."
 
 
+def _execute_batch(batch_id: str, *, settings, learner, api, league) -> str:
+    """Execute one session's recommended set, in the order it was presented.
+
+    The set was chosen to fit the budget as a whole (`overview.split_by_budget`),
+    so order is load-bearing: running it out of order can strand the tail on
+    "budget would go negative", which is exactly the failure this replaces.
+
+    A gate refusal on one line does not abandon the rest. Each proposal is
+    re-validated against live state at execution, so a market value that moved
+    since the message was sent should cost that line and nothing else.
+    """
+    pending = learner.pending_in_batch(batch_id)
+    if not pending:
+        return "Nothing left to approve in that set."
+
+    bought: list[str] = []
+    refused: list[str] = []
+    for proposal in pending:
+        pid = proposal["proposal_id"]
+        # Claim each one individually — the replay guard is per proposal, so a
+        # retried callback re-enters here and finds an empty batch.
+        if not learner.mark_proposal(pid, "approved"):
+            continue
+        reply = execute_proposal(
+            proposal, settings=settings, learner=learner, api=api, league=league
+        )
+        if reply.startswith("Bought"):
+            bought.append(proposal["player_name"])
+        else:
+            refused.append(f"{proposal['player_name']}: {reply}")
+
+    parts = []
+    if bought:
+        parts.append(f"Bought {len(bought)}: {', '.join(bought)}.")
+    if refused:
+        parts.append(f"Skipped {len(refused)} — {'; '.join(refused)}")
+    return " ".join(parts) or "Nothing executed."
+
+
 def handle_callback(
     body: dict,
     secret_header: str | None,
@@ -147,9 +186,14 @@ def handle_callback(
 
     query = (body or {}).get("callback_query") or {}
     data = query.get("data") or ""
-    action, _, proposal_id = data.partition(":")
-    if action not in {"approve", "reject"} or not proposal_id:
+    action, _, target = data.partition(":")
+    if action not in {"approve", "reject", "approveall"} or not target:
         return "Unrecognised callback."
+
+    if action == "approveall":
+        return _execute_batch(target, settings=settings, learner=learner, api=api, league=league)
+
+    proposal_id = target
 
     proposal = learner.get_proposal(proposal_id)
     if proposal is None:
