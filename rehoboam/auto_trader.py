@@ -44,6 +44,19 @@ class MatchdayPhase:
     reason: str
 
 
+def _total_worth(ctx) -> int | None:
+    """Team value plus budget — the base for Kickbase's 33% rule (REH-118).
+
+    Returns None when team value is unknown. Falling back to the budget alone
+    would shrink the cap to a third of the wallet and refuse every large buy,
+    so an unreadable input disables the check instead.
+    """
+    team_value = int(getattr(ctx, "team_value", 0) or 0)
+    if team_value <= 0:
+        return None
+    return team_value + int(getattr(ctx, "current_budget", 0) or 0)
+
+
 def _build_buy_gate(
     *,
     settings,
@@ -95,6 +108,13 @@ def _build_buy_gate(
         ceiling_policy=settings.bid_ceiling_policy(),
         club_id=str(getattr(player, "team_id", "") or "") or None,
         squad_club_counts=club_counts(holdings),
+        # REH-118: Kickbase refuses a purchase above ~33% of total worth with
+        # `err 5050 ThirtyThreePercentRuleExceeded`. Worth is team value plus
+        # budget, so the raw balance is used here rather than the phase's
+        # spendable allowance — the cap is about what we own, not what this
+        # path may commit.
+        total_worth=_total_worth(ctx),
+        max_single_buy_pct=settings.max_single_buy_pct_of_worth,
     )
 
 

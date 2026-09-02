@@ -432,6 +432,28 @@ class Settings(BaseSettings):
             "exactly when there is least evidence."
         ),
     )
+    watch_player_ids: str = Field(
+        default="",
+        description=(
+            "Comma-separated Kickbase player ids to track toward affordability, "
+            "reported in the daily summary's WATCH section (REH-119). For a "
+            "season-long target the useful moment is not the bid refusal — it is "
+            "seeing the gap close. Olise is 8329."
+        ),
+    )
+    max_single_buy_pct_of_worth: float = Field(
+        default=33.0,
+        description=(
+            "Kickbase's cap on one purchase, as a percentage of total worth "
+            "(team value + budget). Discovered on 2026-09-02 when a EUR "
+            "70,564,078 bid on Olise was refused with "
+            "err 5050 ThirtyThreePercentRuleExceeded. It is Kickbase's number, "
+            "not ours, and one rejection is not the same as knowing it — so it "
+            "is a setting, not a constant. Note the trap: selling moves money "
+            "from team value to budget, leaving worth and therefore the cap "
+            "unchanged, so you cannot sell your way into an expensive player."
+        ),
+    )
     max_falling_trend_pct_to_buy: float = Field(
         default=-20.0,
         description=(

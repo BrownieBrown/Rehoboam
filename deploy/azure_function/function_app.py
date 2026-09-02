@@ -96,7 +96,8 @@ def _send_daily_summary(api, league, settings, session):
     from rehoboam.notify.telegram import send_message
 
     squad = api.get_squad(league)
-    budget = int(api.get_team_info(league).get("budget", 0))
+    team_info = api.get_team_info(league)
+    budget = int(team_info.get("budget", 0))
 
     try:
         outlook = matchup_outlook(api, league)
@@ -119,6 +120,34 @@ def _send_daily_summary(api, league, settings, session):
     at_limit = [c for c, n in per_club.items() if n >= MAX_PLAYERS_PER_CLUB]
     if at_limit:
         watch.append(f"{len(at_limit)} club(s) at the {MAX_PLAYERS_PER_CLUB}-player limit")
+
+    # REH-119: players Marco is saving toward. Reported every day so the gap
+    # is visible while it closes, rather than discovered as a bid refusal.
+    try:
+        from rehoboam.notify.watch import WatchTarget, parse_watch_ids, render_watch_line
+
+        watch_ids = parse_watch_ids(getattr(settings, "watch_player_ids", ""))
+        if watch_ids:
+            worth = int(team_info.get("team_value", 0) or 0) + int(budget or 0)
+            listings = {str(p.id): p for p in api.get_market(league)}
+            for pid in watch_ids:
+                listed = listings.get(str(pid))
+                if listed is None:
+                    watch.append(f"player {pid} — not on the market right now")
+                    continue
+                watch.append(
+                    render_watch_line(
+                        WatchTarget(
+                            player_id=str(pid),
+                            name=listed.last_name,
+                            ask=int(listed.price or listed.market_value),
+                        ),
+                        total_worth=worth or None,
+                        max_pct=settings.max_single_buy_pct_of_worth,
+                    )
+                )
+    except Exception:
+        logging.warning("watch targets could not be evaluated", exc_info=True)
 
     learner = BidLearner()
     # Keep the raw rows: the rendered summary needs name+bid, but the Telegram
