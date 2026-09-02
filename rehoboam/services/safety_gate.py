@@ -55,6 +55,8 @@ def check_buy(
     club_id: str | None = None,
     squad_club_counts: Mapping[str, int] | None = None,
     max_players_per_club: int = MAX_PLAYERS_PER_CLUB,
+    total_worth: int | None = None,
+    max_single_buy_pct: float | None = None,
 ) -> GateResult:
     """Is this buy allowed to execute?
 
@@ -109,6 +111,27 @@ def check_buy(
                 f"(max {max_players_per_club})"
             )
 
+    # Kickbase caps a single purchase at a share of total worth — team value
+    # plus budget — and refuses the offer outright with
+    # `err 5050 ThirtyThreePercentRuleExceeded` (REH-118). Checking it here
+    # stops the bot proposing a player it cannot buy, which previously could
+    # only be discovered by tapping Approve.
+    #
+    # Selling does not help: it moves money from team value to budget and
+    # leaves worth unchanged. An expensive player is reached by GROWING worth,
+    # never by liquidating for him.
+    #
+    # Unknown worth is not a violation, matching the club-limit convention
+    # above: a caller that cannot supply the input is not blocked by it.
+    if total_worth is not None and max_single_buy_pct is not None and total_worth > 0:
+        cap = int(total_worth * float(max_single_buy_pct) / 100.0)
+        if bid > cap:
+            reasons.append(
+                f"exceeds Kickbase's {max_single_buy_pct:.0f}% rule: bid EUR {bid:,} "
+                f"vs max EUR {cap:,} ({max_single_buy_pct:.0f}% of total worth "
+                f"EUR {total_worth:,}) — grow team value, selling will not raise it"
+            )
+
     return GateResult(ok=not reasons, reasons=reasons)
 
 
@@ -145,6 +168,10 @@ class BuyGate:
     ceiling_policy: BidCeilingPolicy
     club_id: str | None = None
     squad_club_counts: Mapping[str, int] | None = None
+    #: Team value + budget, and Kickbase's cap on one purchase as a share of
+    #: it (REH-118). None disables the check rather than failing the buy.
+    total_worth: int | None = None
+    max_single_buy_pct: float | None = None
 
     def check(self, *, player_id: str, bid: int) -> GateResult:
         """Run the gate for this player at this price."""
@@ -159,4 +186,6 @@ class BuyGate:
             ceiling_policy=self.ceiling_policy,
             club_id=self.club_id,
             squad_club_counts=self.squad_club_counts,
+            total_worth=self.total_worth,
+            max_single_buy_pct=self.max_single_buy_pct,
         )

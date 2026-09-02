@@ -92,8 +92,15 @@ def execute_proposal(proposal: dict, *, settings, learner, api, league) -> str:
         # proposals approved in one sitting each see the full budget, both
         # offers land, and the budget is negative at kickoff — which under the
         # league's rules is zero points for the entire matchday.
+        team_info = api.get_team_info(league)
         pending_bid_total = sum(int(getattr(b, "user_offer_price", 0) or 0) for b in bids)
-        budget = int(api.get_team_info(league).get("budget", 0)) - pending_bid_total
+        budget = int(team_info.get("budget", 0)) - pending_bid_total
+        # REH-118: total worth is team value plus the RAW budget, not the
+        # pending-bid-adjusted one — Kickbase's cap is about what we own.
+        # An unknown team value disables the check rather than shrinking the
+        # cap to the budget alone, which would refuse every large buy.
+        team_value = int(team_info.get("team_value", 0) or 0)
+        total_worth = team_value + int(team_info.get("budget", 0) or 0) if team_value else None
         free_slots = 15 - len(squad) - len(bids)
 
         # League rule: max three players per club. Counted from the live squad
@@ -115,6 +122,8 @@ def execute_proposal(proposal: dict, *, settings, learner, api, league) -> str:
             ceiling_policy=settings.bid_ceiling_policy(),
             club_id=str(getattr(live, "team_id", "") or "") or None,
             squad_club_counts=counts,
+            total_worth=total_worth,
+            max_single_buy_pct=settings.max_single_buy_pct_of_worth,
         )
         if not result.ok:
             learner.set_proposal_status(proposal_id, "failed")
