@@ -36,6 +36,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from rehoboam.config import UNAVAILABLE_STATUSES
+
 logger = logging.getLogger(__name__)
 
 # Kickbase position codes in the manager-squad payload.
@@ -167,10 +169,11 @@ def project_squad(rows: list[dict], manager_name: str) -> Projection:
 
     Picks the best legal eleven by average points: position minimums first,
     then the highest scorers regardless of position. Injured and long-term
-    injured players (``st`` 4 and 256) are excluded — they cannot be fielded,
-    and counting them would flatter whichever side is carrying injuries.
+    injured players (``UNAVAILABLE_STATUSES``) are excluded — they cannot be
+    fielded, and counting them would flatter whichever side is carrying
+    injuries.
     """
-    OUT = {4, 256}
+    OUT = UNAVAILABLE_STATUSES
     available = []
     for row in rows:
         if row.get("st") in OUT:

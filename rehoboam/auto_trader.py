@@ -952,14 +952,14 @@ class AutoTrader:
             logger.debug("record_buy_decision failed: %s", e)
 
     def _evaluate_open_bids(self, league, *, player_trends: dict) -> None:
-        """Re-read every live offer and withdraw the bot's own bad ones.
+        """Re-read every live offer and withdraw only the ones on unfieldable players.
 
-        Two facts about the input shape drive everything here. `get_my_bids` is
-        `get_market` filtered by "do we hold an offer", so it returns offers
-        Marco placed by hand alongside the bot's — and it cannot say which is
-        which. And a bid the bot placed carries the tier it was priced under,
-        which is both the ceiling to judge it by (REH-111) and the proof of
-        provenance (REH-115).
+        `get_my_bids` is `get_market` filtered by "do we hold an offer", so it
+        returns offers Marco placed by hand alongside the bot's — and it cannot
+        say which is which. Provenance comes from `pending_bids`: a recorded
+        tier (REH-111) or plain membership (REH-115). A bid the bot placed is
+        a commitment — price never cancels it (spec §2); only a player who can
+        no longer be fielded does.
 
         Both reads are best-effort: a learning-side failure must leave the
         phase working, not silently resume cancelling Marco's bids, so the
@@ -984,7 +984,6 @@ class AutoTrader:
         evaluations = evaluator.evaluate_active_bids(
             league,
             player_trends=player_trends,
-            for_profit=True,
             bid_tiers=bid_tiers,
             bot_placed_ids=bot_placed_ids,
         )
