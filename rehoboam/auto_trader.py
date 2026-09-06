@@ -5,6 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from rich.console import Console
 
@@ -607,6 +608,11 @@ class AutoTrader:
             return
 
         evaluator.display_bid_evaluations(evaluations)
+        logger.info(
+            "bid-eval keep=%d cancel=%d",
+            sum(1 for e in evaluations if e.recommendation == "KEEP"),
+            sum(1 for e in evaluations if e.recommendation == "CANCEL"),
+        )
         canceled = evaluator.cancel_bad_bids(league, evaluations, dry_run=self.dry_run)
         if canceled:
             console.print(f"[yellow]Canceled {canceled} bid(s) that no longer make sense[/yellow]")
@@ -1398,7 +1404,21 @@ class AutoTrader:
         }
 
         active_bid_ids = set(ctx.my_bid_amounts.keys())
-        budget_remaining = int(ctx.current_budget)
+        # Open offers are money already committed — a bid that resolves
+        # after the fill has spent the wallet is the negative-budget-at-
+        # kickoff path, which zeroes the ENTIRE matchday's points. That is
+        # strictly worse than the -100 an unfilled slot costs, so the fill
+        # must net open offers out of what it treats as spendable. PR 3's
+        # squad plan replaces this with a pending-bid-aware allowance.
+        open_offers = sum(int(v or 0) for v in ctx.my_bid_amounts.values())
+        budget_remaining = int(ctx.current_budget) - open_offers
+        if open_offers > 0:
+            logger.warning(
+                "emergency-fill budget netted for open offers: wallet=%d open_offers=%d spendable=%d",
+                int(ctx.current_budget),
+                open_offers,
+                budget_remaining,
+            )
 
         # REH-113: choose the BASKET that scores the most points, not the
         # best-ranked player affordable right now. An empty slot is -100 per
@@ -1409,7 +1429,7 @@ class AutoTrader:
         # by 1,168,502 of overbid it had already committed elsewhere.
         from .services.emergency_basket import EmergencyCandidate, select_emergency_basket
 
-        by_id: dict[str, object] = {}
+        by_id: dict[str, Any] = {}
         candidates: list[EmergencyCandidate] = []
         for rec in buy_recs:
             # REH-85 pacing can legitimately size recommended_bid to 0 (its
@@ -1473,7 +1493,7 @@ class AutoTrader:
         # nobody", so an unchosen candidate must still be reachable when a
         # pick is refused — otherwise the slot stays empty at -100.
         chosen_ids = {p.candidate.id for p in picks}
-        attempts: list[tuple[object, int]] = [(by_id[p.candidate.id], p.bid) for p in picks]
+        attempts: list[tuple[Any, int]] = [(by_id[p.candidate.id], p.bid) for p in picks]
         attempts += [
             (by_id[c.id], c.max_bid)
             for c in sorted(candidates, key=lambda c: -c.ep)
@@ -2183,7 +2203,7 @@ class AutoTrader:
 
         # Step 7: Unified trade phase (EP buys + trade pairs + profit flips)
         try:
-            trade_results = self.run_unified_trade_phase(league, ctx)
+            trade_results.extend(self.run_unified_trade_phase(league, ctx))
         except Exception as e:
             error_msg = f"Trading error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
