@@ -1964,28 +1964,6 @@ class BidLearner:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def due_auto_approvals(self, *, now: float) -> list[dict]:
-        """Pending proposals whose auto-approve deadline has passed.
-
-        Only emergency fills carry a deadline, so an ordinary upgrade never
-        appears here however long it waits. `status = 'pending'` keeps a
-        rejected or already-executed row out — the deadline is a backstop for
-        silence, not an override of a decision Marco has already made.
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
-                SELECT * FROM trade_proposals
-                WHERE status = 'pending'
-                  AND auto_approve_at IS NOT NULL
-                  AND auto_approve_at <= ?
-                ORDER BY auto_approve_at ASC
-                """,
-                (float(now),),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
     def get_proposal(self, proposal_id: str) -> dict | None:
         """One proposal by id, or None."""
         with sqlite3.connect(self.db_path) as conn:

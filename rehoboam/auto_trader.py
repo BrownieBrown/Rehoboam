@@ -180,9 +180,7 @@ def _club_name(player, score=None) -> str:
     return f"club {tid}" if tid else "unknown club"
 
 
-def _proposal_line(
-    proposal_id: str, rec, bid: int, trend: float | None, risks: list[str], auto_approve_at
-):
+def _proposal_line(proposal_id: str, rec, bid: int, trend: float | None, risks: list[str]):
     """Everything the overview shows, from data the pipeline already has.
 
     `PlayerScore` carries position, lineup probability, minutes trend, average
@@ -207,7 +205,8 @@ def _proposal_line(
         position=position,
         club=_club_name(player, score),
         market_value=int(getattr(player, "market_value", 0) or 0),
-        is_emergency=auto_approve_at is not None,
+        # The emergency fill executes (spec §1); nothing proposed is an emergency.
+        is_emergency=False,
         fills_gap=impact == "fills_gap",
         trend_7d_pct=trend,
         season_avg=(
@@ -612,65 +611,7 @@ class AutoTrader:
         if canceled:
             console.print(f"[yellow]Canceled {canceled} bid(s) that no longer make sense[/yellow]")
 
-    def _process_due_auto_approvals(self, league) -> None:
-        """Execute emergency proposals whose approval deadline has passed.
-
-        Only the emergency fill stamps a deadline (REH-114). An ordinary
-        upgrade has `auto_approve_at` NULL and waits for a human forever, which
-        is the point — Marco approves squad trades. What cannot wait forever is
-        an empty lineup slot, because that is -100 every matchday whether or
-        not anyone taps.
-
-        Best-effort like the rest of the learning layer: a failure here must
-        not stop the session, and each proposal is claimed out of 'pending'
-        before execution so a retry cannot buy the same player twice.
-        """
-        if self.learner is None:
-            return
-        try:
-            due = self.learner.due_auto_approvals(now=time.time())
-        except Exception:
-            logger.warning("could not read auto-approval deadlines", exc_info=True)
-            return
-        if not due:
-            return
-
-        from .notify.approval import execute_proposal
-
-        for proposal in due:
-            pid = proposal["proposal_id"]
-            if self.dry_run:
-                console.print(
-                    f"[yellow]DRY RUN - would auto-approve {proposal['player_name']} "
-                    f"for EUR {int(proposal['bid']):,} (deadline passed)[/yellow]"
-                )
-                continue
-            # The claim is the replay guard, exactly as in the webhook.
-            if not self.learner.mark_proposal(pid, "approved"):
-                continue
-            try:
-                reply = execute_proposal(
-                    proposal,
-                    settings=self.settings,
-                    learner=self.learner,
-                    api=self.api,
-                    league=league,
-                )
-            except Exception:
-                logger.exception("auto-approval failed for %s", pid)
-                continue
-            console.print(f"[yellow]⏰ Auto-approved (deadline): {reply}[/yellow]")
-            logger.warning(
-                "auto-approval fired proposal=%s player=%s bid=%d — %s",
-                pid,
-                proposal["player_name"],
-                int(proposal["bid"]),
-                reply,
-            )
-
-    def _propose_buy(
-        self, league, rec, ctx, *, bid: int | None = None, auto_approve_at: float | None = None
-    ) -> bool:
+    def _propose_buy(self, league, rec, ctx, *, bid: int | None = None) -> bool:
         """Record and send a proposal instead of buying. True if recorded.
 
         The proposal is recorded FIRST and sent second, so a Telegram outage
@@ -681,11 +622,6 @@ class AutoTrader:
         themselves — the emergency basket lowers some picks toward the asking
         price so one more slot fits (REH-113), and the proposal must show the
         number that will actually be offered.
-
-        ``auto_approve_at`` stamps a deadline after which the proposal executes
-        unapproved. Only the emergency fill sets one: there the alternative to
-        spending is -100 per empty slot every matchday, so silence cannot mean
-        "do nothing" (REH-114). An ordinary upgrade waits indefinitely.
         """
         import uuid
 
@@ -743,9 +679,7 @@ class AutoTrader:
 
         # Collected before the dry-run exit so `status` renders the message
         # Marco would actually receive, rather than a line saying one exists.
-        self._session_proposals.append(
-            _proposal_line(proposal_id, rec, bid_amount, trend, risks, auto_approve_at)
-        )
+        self._session_proposals.append(_proposal_line(proposal_id, rec, bid_amount, trend, risks))
 
         if self.dry_run:
             console.print(
@@ -774,7 +708,6 @@ class AutoTrader:
                 market_value=int(player.market_value),
                 message=message,
                 tier=tier.value,
-                auto_approve_at=auto_approve_at,
                 batch_id=self._session_batch_id,
             )
         except Exception:
@@ -1547,69 +1480,53 @@ class AutoTrader:
             if c.id not in chosen_ids
         ]
 
-        # REH-114: propose rather than spend. Marco approves squad trades, and
-        # on the 2026-08-31 board this path would have committed EUR 55,485,928
-        # across four players unattended. Every pick carries an auto-approve
-        # deadline, because a proposal nobody taps protects nothing and the
-        # slot is still -100 every matchday. Only the reserves behind the
-        # basket are dropped — proposing the whole board would bury the ask.
-        deadline = time.time() + float(self.settings.emergency_auto_approve_hours) * 3600.0
-        proposed = 0
+        # An empty slot is -100 at kickoff whether or not anyone is watching,
+        # so the fill spends (spec §1). REH-114 made it propose with a 24h
+        # auto-approve; checked on a 12h timer that fired 24-36h later, and
+        # El-Faouzi was gone by then. The gate is the only thing between a
+        # pick and the money, and a refusal means "try the next candidate",
+        # not "field nobody". What the loop must NOT do is relax the budget
+        # rule: a negative budget at kickoff is zero points for the entire
+        # matchday, far worse than -100.
+        bought = 0
         for rec, bid in attempts:
-            if proposed >= slots_short:
+            if bought >= slots_short:
                 break
             if bid > budget_remaining:
                 continue
 
-            # Pre-flight the same gate approval will apply. Without this the
-            # bot can ask Marco to approve a bid the gate then refuses — the
-            # exact broken Approve button REH-99 existed to fix — and burn one
-            # of the slots asking. A refusal means "try the next candidate",
-            # not "field nobody", so the walk continues down the reserves.
-            gate = _build_buy_gate(
-                settings=self.settings,
-                ctx=ctx,
-                player=rec.player,
-                spendable_budget=budget_remaining,
-                free_slots=slots_short - proposed,
-                marginal_ep_gain=rec.marginal_ep_gain,
+            result = self.execution.buy(
+                league,
+                rec.player,
+                bid,
+                f"Emergency lineup fill (squad short by {slots_short})",
+                current_budget=budget_remaining,
+                days_until_match=ctx.matchday_phase.days_until_match,
+                gate=_build_buy_gate(
+                    settings=self.settings,
+                    ctx=ctx,
+                    player=rec.player,
+                    spendable_budget=budget_remaining,
+                    free_slots=slots_short - bought,
+                    marginal_ep_gain=rec.marginal_ep_gain,
+                ),
             )
-            verdict = gate.check(player_id=rec.player.id, bid=bid)
-            if not verdict.ok:
-                console.print(
-                    f"[dim]Skip {rec.player.last_name} — " f"{'; '.join(verdict.reasons)}[/dim]"
-                )
+            results.append(result)
+            if not result.success:
                 continue
+            bought += 1
+            # The next pick sees what this one spent, so a basket cannot
+            # assume the whole wallet twice.
+            budget_remaining -= bid
+            self.daily_spend += bid
+            gap_positions.discard(rec.player.position)
 
-            if self._propose_buy(league, rec, ctx, bid=bid, auto_approve_at=deadline):
-                proposed += 1
-                # Reserve the money against the rest of this basket, so four
-                # proposals cannot each assume the whole wallet.
-                budget_remaining -= bid
-                gap_positions.discard(rec.player.position)
-                results.append(
-                    AutoTradeResult(
-                        success=True,
-                        player_name=f"{rec.player.first_name} {rec.player.last_name}".strip(),
-                        # Not "BUY": no money has moved, and the session
-                        # summary sums BUY prices into `total_spent`.
-                        action="PROPOSE",
-                        price=bid,
-                        reason=f"Emergency lineup fill (squad short by {slots_short})",
-                        timestamp=time.time(),
-                    )
-                )
-
-        console.print(
-            f"[green]✓ Emergency fill: proposed {proposed}/{slots_short} player(s) "
-            f"— auto-approving in {self.settings.emergency_auto_approve_hours:.0f}h "
-            f"if not actioned[/green]"
-        )
+        console.print(f"[green]✓ Emergency fill: bought {bought}/{slots_short} player(s)[/green]")
         logger.info(
-            "emergency-proposals slots_short=%d proposed=%d auto_approve_in_h=%.1f",
+            "emergency-fill slots_short=%d bought=%d spend=%d",
             slots_short,
-            proposed,
-            float(self.settings.emergency_auto_approve_hours),
+            bought,
+            sum(r.price for r in results if r.success),
         )
         return results
 
@@ -2012,11 +1929,6 @@ class AutoTrader:
         sell_results: list[AutoTradeResult] = []
         trade_results: list[AutoTradeResult] = []
         errors: list[str] = []
-
-        # REH-114: an emergency proposal that nobody actioned becomes a buy once
-        # its deadline passes. Runs before the emergency check below so a slot
-        # already paid for is not proposed a second time.
-        self._process_due_auto_approvals(league)
 
         # Step 1: Reconcile pending bids (won/lost) + execute deferred sell plans
         try:
