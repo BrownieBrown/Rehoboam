@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from rehoboam.config import UNAVAILABLE_STATUSES
 from rehoboam.scoring.v2.features import PLAYED_STATUSES, FeatureRow
 
 DEFAULT_SHRINKAGE_K = 20.0
@@ -61,7 +62,12 @@ DEFAULT_SHRINKAGE_K = 20.0
 # code in the enumeration was the one scored as fully fit. It reached rank 1
 # on the live buy board on 2026-08-28. The omission is almost certainly the
 # namespace collision above -- 1 already means something else in this file.
-OUT_STATUSES: frozenset[int] = frozenset({1, 4, 256})
+#
+# This set is shared with the rest of the repo via `rehoboam.config` -- the
+# lineup projection (`h2h.py`) and the open-bid evaluator (`bid_evaluator.py`)
+# key on exactly the same frozenset, so a bid is never held on a player the
+# lineup would refuse, nor cancelled on a status the lineup would still field.
+OUT_STATUSES: frozenset[int] = UNAVAILABLE_STATUSES
 UNCERTAIN_STATUSES: frozenset[int] = frozenset({2})
 DEFAULT_UNCERTAIN_START_MULTIPLIER = 0.5
 

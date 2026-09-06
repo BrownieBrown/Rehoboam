@@ -127,9 +127,13 @@ class TestOnlyTheUnfieldableCancel:
         assert result.is_injured is True
         assert str(status) in result.reason
 
-    @pytest.mark.parametrize("status", [1, 2])
+    @pytest.mark.parametrize("status", [2])
     def test_a_status_the_lineup_would_still_field_does_not_cancel(self, status):
-        """`h2h.project_squad` fields these; the evaluator must agree with the lineup."""
+        """Status 2 is "uncertain"; the availability model, h2h and the
+
+        evaluator all still field it — `h2h.project_squad` agrees with the
+        evaluator's KEEP.
+        """
         offer = _offer("7224", market_value=14_411_000, our_bid=20_089_389, status=status)
 
         assert _evaluate(offer, bot_placed_ids={"7224"}).recommendation == "KEEP"
@@ -163,8 +167,14 @@ class TestTheLineupAndTheEvaluatorShareOneDefinition:
             {"pn": "knock", "pos": 2, "ap": 50.0, "st": 2},
             {"pn": "injured", "pos": 3, "ap": 99.0, "st": 4},
             {"pn": "long", "pos": 4, "ap": 99.0, "st": 256},
+            {"pn": "weeks", "pos": 2, "ap": 99.0, "st": 1},
         ]
 
         fielded = {name for name, _position, _points in project_squad(rows, "me").eleven}
 
         assert fielded == {"fit", "knock"}
+
+    def test_the_v2_availability_model_reads_the_same_set(self):
+        from rehoboam.scoring.v2.availability import OUT_STATUSES
+
+        assert OUT_STATUSES == UNAVAILABLE_STATUSES == frozenset({1, 4, 256})
