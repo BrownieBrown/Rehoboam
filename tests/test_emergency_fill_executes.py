@@ -64,7 +64,15 @@ def _rec(player, bid, ep_gain=10.0):
     )
 
 
-def _ctx(buy_recs, current_budget, *, squad=(), phase="moderate", days_until_match=None):
+def _ctx(
+    buy_recs,
+    current_budget,
+    *,
+    squad=(),
+    phase="moderate",
+    days_until_match=None,
+    my_bid_amounts=None,
+):
     return SimpleNamespace(
         ep_result={
             "buy_recs": list(buy_recs),
@@ -72,7 +80,7 @@ def _ctx(buy_recs, current_budget, *, squad=(), phase="moderate", days_until_mat
             "squad_scores": [],
             "market_players": {r.player.id: r.player for r in buy_recs},
         },
-        my_bid_amounts={},
+        my_bid_amounts=dict(my_bid_amounts) if my_bid_amounts else {},
         my_bids=[],
         squad=list(squad),
         current_budget=current_budget,
@@ -165,6 +173,40 @@ class TestTheFillBuys:
         )
 
         trader._run_emergency_squad_fill(league=LEAGUE, ctx=ctx, fresh_squad=squad, slots_short=2)
+
+        assert api.buy_player.call_count == 1
+
+    def test_money_committed_to_open_offers_is_not_spent_again(self, trader, api):
+        """Wallet reads 50m, but 40m of it is already promised to an open
+
+        offer. Spending the full 50m on the fill risks a negative budget at
+        kickoff — zero points for the whole matchday, worse than the -100 an
+        unfilled slot costs.
+        """
+        target = _player("f1", price=30_000_000)
+        squad = _short_squad()
+        ctx = _ctx(
+            [_rec(target, 30_000_000)],
+            50_000_000,
+            squad=squad,
+            my_bid_amounts={"open": 40_000_000},
+        )
+
+        trader._run_emergency_squad_fill(league=LEAGUE, ctx=ctx, fresh_squad=squad, slots_short=1)
+
+        assert api.buy_player.call_count == 0
+
+    def test_a_pick_that_fits_beside_the_open_offer_is_still_bought(self, trader, api):
+        target = _player("f1", price=8_000_000)
+        squad = _short_squad()
+        ctx = _ctx(
+            [_rec(target, 8_000_000)],
+            50_000_000,
+            squad=squad,
+            my_bid_amounts={"open": 40_000_000},
+        )
+
+        trader._run_emergency_squad_fill(league=LEAGUE, ctx=ctx, fresh_squad=squad, slots_short=1)
 
         assert api.buy_player.call_count == 1
 
