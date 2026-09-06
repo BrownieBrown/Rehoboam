@@ -13,6 +13,7 @@ KickbaseAPI mock — those would dwarf the signal we actually care about.
 
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -220,32 +221,9 @@ def _rec(pid, position, price, ep_gain=10.0):
     )
 
 
-class _ProposalSpy:
-    """Records what the emergency fill proposed (REH-114: it no longer buys).
-
-    The fill routes picks through `_propose_buy` so Marco approves squad
-    trades. These tests are about SELECTION — wash trades, active bids,
-    affordability, gap priority — so the sink is stubbed and the choices are
-    asserted directly.
-    """
-
-    def __init__(self):
-        self.calls: list[tuple[str, int]] = []
-
-    def __call__(
-        self, league, rec, ctx, *, bid=None, auto_approve_at=None, waive_trend_floor=False
-    ):
-        self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
-        return True
-
-    @property
-    def ids(self) -> list[str]:
-        return [c[0] for c in self.calls]
-
-
 class TestEmergencySquadFill:
     def test_fills_to_eleven_when_short(self, trader):
-        trader._propose_buy = spy = _ProposalSpy()
+        trader.execution = _StubExecution()
 
         # Squad has 9 players (missing 1 GK + 1 forward = formation broken)
         squad = (
@@ -268,11 +246,12 @@ class TestEmergencySquadFill:
         )
 
         assert sum(1 for r in results if r.success) == 2
-        # Both slots are proposed from affordable, non-active-bid candidates
-        assert len(spy.ids) == 2
+        # Both slots are bought from affordable, non-active-bid candidates
+        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
+        assert len(bought_ids) == 2
 
     def test_skips_wash_trade_blocked_candidates(self, trader):
-        trader._propose_buy = spy = _ProposalSpy()
+        trader.execution = _StubExecution()
         # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
         # purchases == 1, and a Forward signing closes it (4-4-2).
         squad = (
@@ -299,11 +278,12 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        assert spy.ids == ["forward2"]
+        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
+        assert bought_ids == ["forward2"]
         assert sum(1 for r in results if r.success) == 1
 
     def test_skips_already_bid_candidates(self, trader):
-        trader._propose_buy = spy = _ProposalSpy()
+        trader.execution = _StubExecution()
         # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
         # purchases == 1, and a Forward signing closes it (4-4-2).
         squad = (
@@ -327,10 +307,11 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        assert spy.ids == ["forward2"]
+        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
+        assert bought_ids == ["forward2"]
 
     def test_skips_unaffordable_candidates(self, trader):
-        trader._propose_buy = spy = _ProposalSpy()
+        trader.execution = _StubExecution()
         # Two short: GK 1, DEF 4, MID 3, FW 1 (9 players) -- fieldability
         # purchases == 2, and a single Forward signing closes one of them.
         squad = (
@@ -350,10 +331,11 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=2
         )
 
-        assert spy.ids == ["forward2"]
+        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
+        assert bought_ids == ["forward2"]
 
     def test_prioritises_gap_positions_over_raw_ep(self, trader):
-        trader._propose_buy = spy = _ProposalSpy()
+        trader.execution = _StubExecution()
         # One short with a saturated outfield: DEF 4, MID 4, FW 2, no GK
         # (10 players) -- fieldability.purchases == 1, positions ==
         # {Goalkeeper}. Only a goalkeeper closes it; a defender (any
@@ -380,12 +362,13 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        # The gap-filling goalkeeper is proposed; the saturated-position
-        # defender closes nothing and must never be proposed at all.
-        assert spy.ids == ["gk_gap"]
+        # The gap-filling goalkeeper is bought; the saturated-position
+        # defender closes nothing and must never be bought at all.
+        bought_ids = [pid for kind, pid, *_ in trader.execution.calls if kind == "buy"]
+        assert bought_ids == ["gk_gap"]
 
     def test_no_buys_when_no_affordable_clean_candidates(self, trader):
-        trader._propose_buy = spy = _ProposalSpy()
+        trader.execution = _StubExecution()
         # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
         # purchases == 1, and a Forward signing closes it (4-4-2). A squad of
         # ten defenders would be short a goalkeeper too and never describes a
@@ -407,4 +390,82 @@ class TestEmergencySquadFill:
         )
 
         assert results == []
-        assert spy.ids == []
+        assert trader.execution.calls == []
+
+
+def _ten_short_one_forward(team_ids=None):
+    """GK 1, DEF 4, MID 4, FW 1 -- ten players, one short of a legal eleven;
+    a second forward closes it (4-4-2)."""
+    squad = (
+        [_player("gk0", "Goalkeeper")]
+        + [_player(f"d{i}", "Defender") for i in range(4)]
+        + [_player(f"m{i}", "Midfielder") for i in range(4)]
+        + [_player("fwd0", "Forward")]
+    )
+    for player, team_id in zip(squad, team_ids or [f"club-{p.id}" for p in squad]):
+        player.team_id = team_id
+    return squad
+
+
+def _club_rec(pid, price, ep_gain, team_id):
+    rec = _rec(pid, "Forward", price, ep_gain=ep_gain)
+    rec.player.team_id = team_id
+    return rec
+
+
+class TestTheFillIgnoresProfitRules:
+    """On 2026-09-15 the fill picked Baack for the empty slot and then refused
+    him because his market value was down 40% in 7 days — a rule written for
+    profit buys. The slot stayed empty at -100. The same board listed Henrichs
+    first, with three Leipzig players already held, so the gate would have
+    refused him and the basket's pick was wasted.
+
+    Ported from `test_emergency_fill_approval.py`, which asserted the same
+    behaviour through the proposal flow the fill no longer uses.
+    """
+
+    def test_a_falling_player_is_still_bought_in_an_emergency(self, trader):
+        """The falling-price floor lives in `_propose_buy`. The fill buys
+        through `execution`, so no trend — however bad — can empty the slot."""
+        trader.execution = _StubExecution()
+        falling = MagicMock()
+        falling.return_value.trend_service.get_trend.return_value.trend_7d_pct = -40.3
+        with patch("rehoboam.trader.Trader", falling):
+            trader._run_emergency_squad_fill(
+                league=SimpleNamespace(id="L"),
+                ctx=_ctx([_club_rec("f1", 5_000_000, 60.0, "club-f1")], 50_000_000),
+                fresh_squad=_ten_short_one_forward(),
+                slots_short=1,
+            )
+        assert [c[1] for c in trader.execution.calls if c[0] == "buy"] == ["f1"]
+
+    def test_a_club_at_its_limit_is_skipped_for_the_next_candidate(self, trader):
+        trader.execution = _StubExecution()
+        squad = _ten_short_one_forward(["7", "7", "7", "1", "2", "3", "4", "5", "6", "9"])
+        recs = [
+            _club_rec("blocked", 4_000_000, 90.0, "7"),
+            _club_rec("ok", 5_000_000, 60.0, "8"),
+        ]
+        trader._run_emergency_squad_fill(
+            league=SimpleNamespace(id="L"),
+            ctx=_ctx(recs, 50_000_000),
+            fresh_squad=squad,
+            slots_short=1,
+        )
+        assert [c[1] for c in trader.execution.calls if c[0] == "buy"] == ["ok"]
+
+    def test_open_bids_count_toward_the_club_limit(self, trader):
+        trader.execution = _StubExecution()
+        squad = _ten_short_one_forward(["7", "7", "1", "2", "3", "4", "5", "6", "9", "10"])
+        recs = [
+            _club_rec("blocked", 4_000_000, 90.0, "7"),
+            _club_rec("ok", 5_000_000, 60.0, "8"),
+        ]
+        ctx = _ctx(recs, 50_000_000)
+        pending = _player("pending", "Forward", 1_000_000)
+        pending.team_id = "7"
+        ctx.my_bids = [pending]
+        trader._run_emergency_squad_fill(
+            league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
+        )
+        assert [c[1] for c in trader.execution.calls if c[0] == "buy"] == ["ok"]
