@@ -28,6 +28,13 @@ MAX_LINEUP_PROB_FOR_BUY = 3
 # field that could be relaxed from .env by accident.
 MAX_PLAYERS_PER_CLUB = 3
 
+# Kickbase `st` values under which a player cannot be fielded: injured (4)
+# and long-term injured (256). The lineup projection (`h2h.py`) and the
+# open-bid evaluator (`bid_evaluator.py`) both key on exactly this set — one
+# definition, so a bid is never held on a player the lineup would refuse, nor
+# cancelled on a status the lineup would still field.
+UNAVAILABLE_STATUSES: frozenset[int] = frozenset({4, 256})
+
 # Selling instantly to Kickbase returns the FULL market value.
 #
 # REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured in
