@@ -1452,19 +1452,24 @@ class BidLearner:
         tier: str | None = None,
         auto_approve_at: float | None = None,
         batch_id: str | None = None,
+        status: str = "pending",
     ) -> None:
-        """Persist a proposal awaiting approval.
+        """Persist an attempted buy and its rendered case.
 
-        ``tier`` is the marginal-EP band the bid was sized under. Approval
-        needs it to recompute the ceiling against the live market value
-        (REH-99); None falls back to the tightest tier.
+        ``status`` is 'pending' for rows the Telegram webhook still serves
+        (approve / reject). The session itself writes 'executed', 'refused'
+        or 'failed' AFTER the buy has been attempted (spec §1) — the row is
+        the record of what happened, not a request for a decision.
+
+        ``tier`` is the marginal-EP band the bid was sized under; the webhook
+        recomputes the ceiling from it against the live market value (REH-99).
         """
         with self.connection() as conn:
             conn.execute(
                 "INSERT INTO rehoboam.trade_proposals "
                 "(proposal_id, player_id, player_name, bid, market_value, message, "
                 " status, created_at, tier, auto_approve_at, batch_id) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (proposal_id) DO UPDATE SET "
                 "player_id = excluded.player_id, "
                 "player_name = excluded.player_name, "
@@ -1483,6 +1488,7 @@ class BidLearner:
                     int(bid),
                     int(market_value),
                     message,
+                    status,
                     datetime.now().timestamp(),
                     tier,
                     auto_approve_at,
