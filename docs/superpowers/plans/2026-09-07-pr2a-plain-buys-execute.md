@@ -1440,7 +1440,32 @@ ______________________________________________________________________
 
 - [ ] **Step 1: The daily summary's labels**
 
-In `deploy/azure_function/function_app.py`, `_send_daily_summary`, replace
+In `deploy/azure_function/function_app.py`, `_send_daily_summary`, first replace
+
+```python
+resolved = [
+    p
+    for p in learner.proposals_since(time.time() - 48 * 3600)
+    if p["status"] != "pending"
+]
+```
+
+with
+
+```python
+    # Rows written BEFORE this session started: this session's own offers are
+    # already in `session.profit_trades`, and listing them twice under two
+    # labels is how "APPROVED" would survive into the summary of a bot that no
+    # longer asks. 24h, not 48h — the summary is daily, and a 48h window
+    # repeated yesterday's rows every morning.
+    resolved = [
+        p
+        for p in learner.proposals_since(time.time() - 24 * 3600)
+        if p["status"] != "pending" and float(p.get("created_at") or 0.0) < session.start_time
+    ]
+```
+
+Then replace
 
 ```python
     executed += [
