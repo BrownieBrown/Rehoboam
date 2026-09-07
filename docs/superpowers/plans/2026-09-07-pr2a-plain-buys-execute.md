@@ -33,7 +33,7 @@ ______________________________________________________________________
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `rehoboam/notify/overview.py`                                                                                                                                    | `OfferLine` (was `ProposalLine`; gains `outcome`, `detail`; loses `is_emergency`) and `render_session_board`; `split_by_budget` and `render_proposal_overview` deleted                                                                                                                                                                                                                                      |
 | `rehoboam/notify/telegram.py`                                                                                                                                    | `send_overview` and `overview_keyboard` deleted; `send_message`, `approval_keyboard`, `send_proposal` untouched                                                                                                                                                                                                                                                                                             |
-| `rehoboam/bid_learner.py`                                                                                                                                        | `record_proposal(..., status="pending")`; `proposals_for_player` deleted                                                                                                                                                                                                                                                                                                                                    |
+| `rehoboam/bid_learner.py`                                                                                                                                        | `record_proposal(..., status="pending")`; `proposals_for_player` deleted in Task 2, with its caller                                                                                                                                                                                                                                                                                                         |
 | `rehoboam/auto_trader.py`                                                                                                                                        | `_execute_buy` (was `_propose_buy`), `_offer_line` (was `_proposal_line`), `_send_session_board` (was `_send_proposal_overview`), `_is_too_falling_to_buy` (was `…_to_propose`); the unified phase's buy branch executes; `proposed_slots`, `_has_pending_proposal`, `_needs_sell_plan` deleted; `EPSessionContext` and `AutoTradeSession` gain `offers_placed` / `offers_refused`; `session-end` logs them |
 | `deploy/azure_function/function_app.py`                                                                                                                          | `_send_daily_summary` labels executed rows `OFFERED` (not `APPROVED`) and lists `refused` among the blocked — the minimum so the summary stops lying until PR 2b rewrites it                                                                                                                                                                                                                                |
 | `CLAUDE.md`                                                                                                                                                      | the "Approval gate (2026-08-24)" bullet becomes the autonomous-wallet bullet; the `status` bullet names `_execute_buy`                                                                                                                                                                                                                                                                                      |
@@ -65,11 +65,11 @@ Expected: `1585 passed, 1 skipped` (or more passed if #103 gained commits). Any 
 
 ______________________________________________________________________
 
-### Task 1: `record_proposal(status=…)`; drop `proposals_for_player`
+### Task 1: `record_proposal(status=…)`
 
 **Files:**
 
-- Modify: `rehoboam/bid_learner.py` (`record_proposal`, ~line 1903; delete `proposals_for_player`, ~line 2048)
+- Modify: `rehoboam/bid_learner.py` (`record_proposal`, ~line 1903)
 - Modify: `tests/test_proposal_store.py` (two tests added)
 
 **Interfaces:**
@@ -159,7 +159,7 @@ with
 
 and in the values tuple insert `status,` immediately after `message,` (so the order is `proposal_id, player_id, player_name, int(bid), int(market_value), message, status, datetime.now().timestamp(), tier, auto_approve_at, batch_id`).
 
-Delete the method `proposals_for_player` (from `def proposals_for_player(self, player_id: str) -> list[dict]:` through its `return [dict(r) for r in rows]`). Its only caller, `_has_pending_proposal`, is deleted in Task 3.
+Leave `proposals_for_player` in place: its only caller, `_has_pending_proposal`, is deleted in Task 2, and the method goes with it there — deleting it here would leave three `tests/test_proposal_wiring.py` tests red at this commit.
 
 - [ ] **Step 4: Run the store and webhook tests**
 
@@ -196,6 +196,8 @@ ______________________________________________________________________
 - Delete: `tests/test_proposal_overview.py`
 
 - Modify: `rehoboam/notify/telegram.py` (delete `overview_keyboard` ~78–107 and `send_overview` ~186–214)
+
+- Modify: `rehoboam/bid_learner.py` (delete `proposals_for_player`, ~line 2048)
 
 - Modify: `rehoboam/auto_trader.py` — `AutoTradeSession` (~23), `EPSessionContext` (~338), `_is_too_falling_to_propose` (~154), `_proposal_line` (~184), `__init__` (~389), `_propose_buy` (~620), `_send_proposal_overview` (~736), `_has_pending_proposal` + `_needs_sell_plan` (~853–903), `run_unified_trade_phase` buy branch (~1111–1147) and pair guard (~1149–1160) and `proposed_slots` (~1009), `run_full_session` (~1923 and the session-end block ~2216–2284)
 
@@ -1257,7 +1259,7 @@ In `run_full_session`, change `self._send_proposal_overview(league, ctx)` to `se
 
 - [ ] **Step 12: Delete the proposal guards**
 
-Delete the methods `_has_pending_proposal` (from `def _has_pending_proposal(` through its `return False` after the `except Exception:`) and `_needs_sell_plan` (the `@staticmethod` and its body) entirely.
+Delete the methods `_has_pending_proposal` (from `def _has_pending_proposal(` through its `return False` after the `except Exception:`) and `_needs_sell_plan` (the `@staticmethod` and its body) entirely. In `rehoboam/bid_learner.py` delete `proposals_for_player` (from `def proposals_for_player(self, player_id: str) -> list[dict]:` through its `return [dict(r) for r in rows]`) — `_has_pending_proposal` was its only caller.
 
 - [ ] **Step 13: The unified phase buys**
 
