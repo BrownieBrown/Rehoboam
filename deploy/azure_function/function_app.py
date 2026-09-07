@@ -164,22 +164,32 @@ def _send_daily_summary(api, league, settings, session):
         if r.success
     ]
 
-    # A proposal Marco approved is executed by the webhook, in a different
-    # invocation entirely — it appears in no session's results. Without this
-    # the email would never mention a EUR 32M purchase he authorised, nor a
-    # proposal the safety gate refused after he tapped approve.
+    # Rows the session wrote after its own buys (executed / refused / failed),
+    # plus any pre-PR-2a proposal the webhook resolved. Without this the
+    # summary would never mention a EUR 32M offer the session placed.
+    #
+    # Rows written BEFORE this session started: this session's own offers are
+    # already in `session.profit_trades`, and listing them twice under two
+    # labels is how "APPROVED" would survive into the summary of a bot that no
+    # longer asks. 24h, not 48h — the summary is daily, and a 48h window
+    # repeated yesterday's rows every morning.
     resolved = [
-        p for p in learner.proposals_since(time.time() - 48 * 3600) if p["status"] != "pending"
+        p
+        for p in learner.proposals_since(time.time() - 24 * 3600)
+        if p["status"] != "pending" and float(p.get("created_at") or 0.0) < session.start_time
     ]
+    # The session places its own offers now (spec §1); a row at 'executed'
+    # means an offer went out, not that the player was won — PR 2b's ledger
+    # will say which. 'refused' is the safety gate's answer.
     executed += [
-        f"APPROVED {p['player_name']} for EUR {int(p['bid']):,}"
+        f"OFFERED {p['player_name']} at EUR {int(p['bid']):,}"
         for p in resolved
         if p["status"] == "executed"
     ]
     blocked = list(session.errors) + [
-        f"proposal for {p['player_name']} ended as {p['status']}"
+        f"offer for {p['player_name']} ended as {p['status']}"
         for p in resolved
-        if p["status"] in {"failed", "rejected"}
+        if p["status"] in {"failed", "rejected", "refused"}
     ]
 
     body = render_daily_summary(
