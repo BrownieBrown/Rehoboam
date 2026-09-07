@@ -1,4 +1,4 @@
-"""A steeply falling market value is not proposed at all (REH-117).
+"""A steeply falling market value is not bought at all (REH-117).
 
 Marco: "the players the bot recommended were mostly garbage and had a falling
 mv trend." Measured over 21 proposals, four were badly falling when sent:
@@ -10,11 +10,11 @@ The bot printed the number and proposed anyway — Itten went out at -27.0%/7d
 with a data-quality-C warning attached.
 
 Two thresholds, deliberately different. Below `FALLING_TREND_PCT` (-10%) the
-overview flags it and still asks, because a mild slide on a good player is a
-judgement call and Marco should get to make it. Below
-`max_falling_trend_pct_to_buy` (-20%) it is not proposed at all: the squad
-buys hold for points across a season, and a market value in free-fall is the
-league's verdict on availability arriving before ours does.
+session board still shows the trend on the offer line — flagged — because a
+mild slide on a good player is a judgement call worth seeing, not hiding.
+Below `Settings.max_falling_trend_pct_to_buy` (-20%) the player is not bought
+at all: the squad buys hold for points across a season, and a market value in
+free-fall is the league's verdict on availability arriving before ours does.
 """
 
 from __future__ import annotations

@@ -207,6 +207,8 @@ def _ctx(buy_recs, current_budget, my_bid_amounts=None, days_until_match=None):
         squad=[],
         team_value=100_000_000,
         current_budget=current_budget,
+        offers_placed=0,
+        offers_refused=0,
         matchday_phase=SimpleNamespace(days_until_match=days_until_match, phase="moderate"),
     )
 

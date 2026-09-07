@@ -63,8 +63,28 @@ class TestTheBoardReportsWhatHappened:
 
         assert text.splitlines()[0] == (
             f"SQUAD 11/15   BUDGET EUR {BUDGET_BEFORE:,} -> "
-            f"EUR {BUDGET_BEFORE - 41_920_990:,} (if every offer lands)"
+            f"EUR {BUDGET_BEFORE - 41_920_990:,} after this session's offers"
         )
+
+    def test_open_offers_before_the_session_get_their_own_line(self):
+        text = render_session_board(
+            squad_size=11,
+            squad_cap=15,
+            budget_before=BUDGET_BEFORE,
+            budget_after=BUDGET_BEFORE - 41_920_990,
+            open_offers_before=10_595_173,
+            placed=PLACED,
+            refused=REFUSED,
+        )
+
+        assert text.splitlines()[1] == (
+            "OPEN OFFERS BEFORE THIS SESSION EUR 10,595,173 (not deducted by Kickbase)"
+        )
+
+    def test_no_open_offers_no_line(self):
+        text = _render()
+
+        assert "OPEN OFFERS" not in text
 
     def test_it_counts_and_names_every_offer_placed(self):
         text = _render()
