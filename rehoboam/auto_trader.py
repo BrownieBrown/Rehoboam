@@ -438,6 +438,16 @@ class AutoTrader:
         # board's header reflects the wallet BEFORE anything moved rather than
         # a derivation that only accounts for plain offers.
         self._session_budget_before: int | None = None
+        # Open offers already on the wallet before this session touched
+        # anything — Kickbase counts them toward the squad cap but does not
+        # deduct them from the budget it reports, so the board's header shows
+        # them separately rather than silently folding them into "after".
+        self._session_open_offers_before: int | None = None
+        # Every player id this session has offered on, plain buy or emergency
+        # fill alike — so a later phase in the same session (or its refresh
+        # from the live API, which cannot see an offer this session just
+        # placed) does not bid on the same player twice.
+        self._session_offer_ids: set[str] = set()
         self._session_batch_id: str = ""
         # None until a session starts (`run_full_session`) or a caller drives
         # `_build_session_context` directly (tests) — every write site guards
@@ -1040,6 +1050,7 @@ class AutoTrader:
 
         from .notify.render import render_proposal
         from .services.bid_ceiling import tier_for_marginal_gain
+        from .services.execution import BudgetSafetyError
 
         offer_id = uuid.uuid4().hex[:12]
         player = rec.player
@@ -1103,29 +1114,44 @@ class AutoTrader:
             else None
         )
 
-        result = self.execution.buy(
-            league,
-            player,
-            bid_amount,
-            getattr(rec, "reason", "") or "EP upgrade",
-            sell_plan_player_ids=sp_ids,
-            current_budget=ctx.current_budget,
-            days_until_match=ctx.matchday_phase.days_until_match,
-            gate=_build_buy_gate(
-                settings=self.settings,
-                ctx=ctx,
-                player=player,
-                # The phase's allowance, not the wallet — see `BuyGate`.
-                spendable_budget=int(ctx.flip_budget),
-                free_slots=free_slots,
-                marginal_ep_gain=rec.marginal_ep_gain,
-            ),
-        )
+        try:
+            result = self.execution.buy(
+                league,
+                player,
+                bid_amount,
+                getattr(rec, "reason", "") or "EP upgrade",
+                sell_plan_player_ids=sp_ids,
+                current_budget=ctx.current_budget,
+                days_until_match=ctx.matchday_phase.days_until_match,
+                gate=_build_buy_gate(
+                    settings=self.settings,
+                    ctx=ctx,
+                    player=player,
+                    # The phase's allowance, not the wallet — see `BuyGate`.
+                    spendable_budget=int(ctx.flip_budget),
+                    free_slots=free_slots,
+                    marginal_ep_gain=rec.marginal_ep_gain,
+                ),
+            )
+        except BudgetSafetyError as exc:
+            # Live mode raises here; one unaffordable candidate must cost
+            # itself, not every offer this loop already placed (they live in
+            # `results`, not in this call).
+            result = AutoTradeResult(
+                success=False,
+                player_name=f"{player.first_name} {player.last_name}".strip(),
+                action="BUY",
+                price=bid_amount,
+                reason=getattr(rec, "reason", "") or "EP upgrade",
+                timestamp=time.time(),
+                error=str(exc),
+            )
 
         gate_prefix = "safety gate refused: "
         if result.success:
             outcome, status, detail = "placed", "executed", ""
             ctx.offers_placed += 1
+            self._session_offer_ids.add(str(player.id))
         elif (result.error or "").startswith(gate_prefix):
             outcome, status = "refused", "refused"
             detail = (result.error or "")[len(gate_prefix) :]
@@ -1194,21 +1220,24 @@ class AutoTrader:
 
         placed = [line for line in self._session_board if line.outcome == "placed"]
         refused = [line for line in self._session_board if line.outcome != "placed"]
+        spend = sum(line.bid for line in placed)
         # The opening budget is snapshotted once per session; every session
         # move (plain offers, pairs, flips) has decremented ctx.current_budget
-        # since. The fallback only serves direct callers that never built a
-        # session.
-        budget_after = int(getattr(ctx, "current_budget", 0) or 0)
+        # since, so `budget_after` is derived from the snapshot and this
+        # session's own offers rather than read back off ctx — the fallback
+        # only serves direct callers that never built a session.
         budget_before = (
             int(self._session_budget_before)
             if self._session_budget_before is not None
-            else budget_after + sum(line.bid for line in placed)
+            else int(getattr(ctx, "current_budget", 0) or 0) + spend
         )
+        open_offers_before = int(self._session_open_offers_before or 0)
         text = render_session_board(
             squad_size=len(getattr(ctx, "squad", []) or []),
             squad_cap=SQUAD_CAP,
             budget_before=budget_before,
-            budget_after=budget_after,
+            budget_after=budget_before - spend,
+            open_offers_before=open_offers_before,
             placed=placed,
             refused=refused,
         )
@@ -1221,12 +1250,14 @@ class AutoTrader:
             self.settings.telegram_bot_token, self.settings.telegram_chat_id, text
         )
         logger.info(
-            "session-board batch=%s placed=%d refused=%d spend=%d budget_after=%d delivered=%s",
+            "session-board batch=%s placed=%d refused=%d spend=%d budget_after=%d "
+            "open_offers_before=%d delivered=%s",
             self._session_batch_id,
             len(placed),
             len(refused),
-            sum(line.bid for line in placed),
-            budget_after,
+            spend,
+            budget_before - spend,
+            open_offers_before,
             delivered,
         )
         if not delivered:
@@ -1407,6 +1438,13 @@ class AutoTrader:
             ctx.matchday_phase.phase, ctx.current_budget, pending_bid_total, max_debt
         )
         ctx.my_bid_amounts = {p.id: p.user_offer_price for p in fresh_bids}
+        # An offer this session already placed (plain buy or emergency fill)
+        # may not be visible on `fresh_bids` yet — in dry-run the API never
+        # saw it at all — so the rebuild above can silently drop it. Keep it
+        # present (amount is a placeholder; only presence matters here) so
+        # the "already have active bid" skip below still fires.
+        for pid in self._session_offer_ids:
+            ctx.my_bid_amounts.setdefault(pid, 1)
         # `_build_buy_gate`'s club-limit count reads ctx.squad + ctx.my_bids;
         # without this refresh it stays the pre-session snapshot forever, so a
         # second offer on the same session's club can push past the limit
@@ -1511,6 +1549,11 @@ class AutoTrader:
                 if ctx.my_bid_amounts.get(obj.player.id, 0) > 0:
                     console.print(
                         f"[dim]Skip {obj.player.last_name} — already have active bid[/dim]"
+                    )
+                    continue
+                if str(obj.player.id) in self._session_offer_ids:
+                    console.print(
+                        f"[dim]Skip {obj.player.last_name} — offered on this session already[/dim]"
                     )
                     continue
                 if obj.recommended_bid > ctx.flip_budget:
@@ -1796,6 +1839,9 @@ class AutoTrader:
             logger.warning(msg)
             return results
 
+        # `_build_buy_gate`'s club-limit count reads `ctx.squad`; the caller
+        # re-fetched the squad into `fresh_squad` but never wrote it back.
+        ctx.squad = list(fresh_squad)
         buy_recs = ctx.ep_result.get("buy_recs", [])
         if not buy_recs:
             console.print("[red]No buy candidates available — cannot fill emergency slots[/red]")
@@ -1987,6 +2033,24 @@ class AutoTrader:
                 ),
             )
             results.append(result)
+            # The fill's offers reach the board and the session counters too
+            # — before this, an emergency pick never showed up on the board
+            # or in `offers_placed`/`offers_refused`, mirroring `_execute_buy`.
+            if result.success:
+                outcome, detail = "placed", ""
+                ctx.offers_placed += 1
+                self._session_offer_ids.add(str(rec.player.id))
+            elif (result.error or "").startswith("safety gate refused: "):
+                outcome, detail = "refused", (result.error or "")[len("safety gate refused: ") :]
+                ctx.offers_refused += 1
+            else:
+                outcome, detail = "failed", (result.error or "unknown error")
+                ctx.offers_refused += 1
+            self._session_board.append(
+                _offer_line(
+                    uuid.uuid4().hex[:12], rec, bid, None, [], outcome=outcome, detail=detail
+                )
+            )
             if not result.success:
                 continue
             bought += 1
@@ -1996,6 +2060,11 @@ class AutoTrader:
             budget_remaining -= bid
             self.daily_spend += bid
             gap_positions.discard(rec.player.position)
+            # Mirror the plain-buy branch: this offer is held for the rest of
+            # THIS session too, so the club-limit gate sees it on the very
+            # next candidate rather than only after the next refresh.
+            ctx.my_bids = list(ctx.my_bids) + [rec.player]
+            ctx.my_bid_amounts[rec.player.id] = bid
 
         console.print(f"[green]✓ Emergency fill: bought {bought}/{slots_short} player(s)[/green]")
         logger.info(
@@ -2389,6 +2458,8 @@ class AutoTrader:
         # that was chosen to fit the budget together.
         self._session_board = []
         self._session_budget_before = None
+        self._session_open_offers_before = None
+        self._session_offer_ids = set()
         self._session_batch_id = uuid.uuid4().hex[:12]
 
         # Task 5: an early row, written before anything that could fail. A
@@ -2511,6 +2582,7 @@ class AutoTrader:
             # board's header reads this rather than re-deriving it, since a
             # derivation from `placed` alone misses trade pairs and flips.
             self._session_budget_before = int(ctx.current_budget)
+            self._session_open_offers_before = sum(int(v or 0) for v in ctx.my_bid_amounts.values())
         except Exception as e:
             error_msg = f"EP pipeline failed: {e!s}"
             console.print(f"[red]{error_msg}[/red]")

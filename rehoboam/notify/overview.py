@@ -131,6 +131,7 @@ def render_session_board(
     squad_cap: int,
     budget_before: int,
     budget_after: int,
+    open_offers_before: int = 0,
     placed: list[OfferLine],
     refused: list[OfferLine],
 ) -> str:
@@ -139,12 +140,23 @@ def render_session_board(
     `placed` are live offers; `refused` are the gate's and Kickbase's refusals,
     each with its reason on its own line so a ceiling that keeps firing is
     visible without a log query.
+
+    `budget_after` is what this session's own offers leave behind, not what
+    Kickbase will report — Kickbase does not deduct open offers from the
+    budget it hands back, so `open_offers_before` (money already committed
+    before this session touched anything) gets its own line rather than
+    being folded silently into the header's arithmetic.
     """
     lines = [
         f"SQUAD {squad_size}/{squad_cap}   BUDGET EUR {budget_before:,} -> "
-        f"EUR {budget_after:,} (if every offer lands)",
-        "",
+        f"EUR {budget_after:,} after this session's offers",
     ]
+    if open_offers_before > 0:
+        lines.append(
+            f"OPEN OFFERS BEFORE THIS SESSION EUR {open_offers_before:,} "
+            "(not deducted by Kickbase)"
+        )
+    lines.append("")
 
     if placed:
         lines.append(f"OFFERS PLACED — {len(placed)}")
@@ -159,7 +171,8 @@ def render_session_board(
         lines += ["", f"REFUSED — {len(refused)}"]
         for line in refused:
             lines += _line_block(line)
-            lines.append(f"      ! {line.detail}")
+            if line.detail:
+                lines.append(f"      ! {line.detail}")
             lines.append("")
 
     return "\n".join(lines).rstrip()

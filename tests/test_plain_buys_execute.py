@@ -89,7 +89,7 @@ def _rec(player=None, bid=32_608_485, ep_gain=57.2, sell_plan=None):
     )
 
 
-def _ctx(rec, budget=95_317_114, *, squad_size=13, phase="aggressive", days=5):
+def _ctx(rec, budget=95_317_114, *, squad_size=13, phase="aggressive", days=5, flip_budget=None):
     squad = [
         SimpleNamespace(id=f"s{i}", team_id=f"club{i}", position="Defender")
         for i in range(squad_size)
@@ -113,7 +113,7 @@ def _ctx(rec, budget=95_317_114, *, squad_size=13, phase="aggressive", days=5):
         squad=squad,
         current_budget=budget,
         team_value=200_000_000,
-        flip_budget=budget,
+        flip_budget=flip_budget if flip_budget is not None else budget,
     )
 
 
@@ -202,6 +202,29 @@ class TestTheGateStillDecides:
         assert "UnderpayNotAllowed" in trader.learner.proposals_since(0)[0]["message"]
         assert (ctx.offers_placed, ctx.offers_refused) == (0, 1)
         assert trader._session_board[0].outcome == "failed"
+
+    def test_a_kickoff_lockout_is_a_failed_result_not_an_exception(self, trader, api):
+        """`matchday_in_progress` + the aggressive flip_budget allowance can
+        size a bid above the wallet with 1 day to kickoff — `ExecutionService
+        .buy` raises `BudgetSafetyError` there, and it must not escape
+        `_execute_buy` and take every offer already placed this loop with it.
+        """
+        rec = _rec()
+        ctx = _ctx(
+            rec,
+            budget=1_000_000,
+            phase="matchday_in_progress",
+            days=1,
+            flip_budget=50_000_000,
+        )
+
+        result = trader._execute_buy(LEAGUE, rec, ctx, free_slots=2)
+
+        assert result.success is False
+        assert api.buy_player.call_count == 0
+        assert [r["status"] for r in trader.learner.proposals_since(0)] == ["failed"]
+        assert ctx.offers_refused == 1
+        assert "BLOCK" in result.error
 
 
 class TestTheTrendFloorComesFirst:
@@ -307,7 +330,7 @@ class TestTheBoardIsSentOnce:
             trader._send_session_board(LEAGUE, ctx)
 
         text = send.call_args[0][2]
-        assert "BUDGET EUR 95,317,114 -> EUR 57,708,629 (if every offer lands)" in text
+        assert "BUDGET EUR 95,317,114 -> EUR 62,708,629 after this session's offers" in text
 
 
 class TestTheUnifiedPhaseBuysInstead:
@@ -388,6 +411,78 @@ class TestTheUnifiedPhaseBuysInstead:
         assert ctx.offers_refused == 1
         refused_line = next(line for line in trader._session_board if line.outcome != "placed")
         assert "club limit" in refused_line.detail
+
+    def test_a_player_offered_on_by_the_fill_is_not_offered_on_again(self, trader, api):
+        """The emergency fill can place an offer earlier in the same session;
+        the unified phase's own refresh cannot see it yet (dry-run: never;
+        live: not until the next API read), so the session's own record of
+        who it already offered on is what has to catch the duplicate."""
+        rec = _rec()
+        ctx = _ctx(rec, squad_size=14)
+        trader.api.get_squad.return_value = ctx.squad
+        trader.api.get_my_bids.return_value = []
+        trader.api.get_team_info.return_value = {
+            "budget": ctx.current_budget,
+            "team_value": ctx.team_value,
+        }
+        trader._session_offer_ids = {"6080"}
+
+        trader.run_unified_trade_phase(league=LEAGUE, ctx=ctx)
+
+        assert api.buy_player.call_count == 0
+
+    def test_two_affordable_offers_on_different_clubs_both_go_out(self, trader, api):
+        squad = [
+            SimpleNamespace(id=f"s{i}", team_id=f"club{i}", position="Defender") for i in range(13)
+        ]
+        rec_a = _rec(
+            player=_player(pid="6080", price=32_285_629, team_id="2"),
+            bid=32_608_485,
+            ep_gain=57.2,
+        )
+        rec_b = _rec(
+            player=_player(pid="6081", price=8_900_000, team_id="3"),
+            bid=9_000_000,
+            ep_gain=57.2,
+        )
+        ctx = EPSessionContext(
+            ep_result={
+                "buy_recs": [rec_a, rec_b],
+                "trade_pairs": [],
+                "squad_scores": [],
+                "market_players": {
+                    rec_a.player.id: rec_a.player,
+                    rec_b.player.id: rec_b.player,
+                },
+            },
+            matchday_phase=MatchdayPhase(
+                days_until_match=5,
+                phase="aggressive",
+                max_trades=5,
+                allow_flips=False,
+                reason="test",
+            ),
+            my_bids=[],
+            my_bid_amounts={},
+            squad=squad,
+            current_budget=95_317_114,
+            team_value=200_000_000,
+            flip_budget=95_317_114,
+        )
+        trader.api.get_squad.return_value = squad
+        trader.api.get_my_bids.return_value = []
+        trader.api.get_team_info.return_value = {
+            "budget": ctx.current_budget,
+            "team_value": ctx.team_value,
+        }
+
+        trader.run_unified_trade_phase(league=LEAGUE, ctx=ctx)
+
+        assert api.buy_player.call_count == 2
+        assert ctx.offers_placed == 2
+        assert ctx.executed_trade_count == 2
+        assert ctx.current_budget == 95_317_114 - 32_608_485 - 9_000_000
+        assert len(ctx.my_bids) == 2
 
 
 class TestTheProposalMachineryIsGone:

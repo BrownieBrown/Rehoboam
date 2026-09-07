@@ -102,11 +102,14 @@ def _send_daily_summary(api, league, settings, session):
     # plus any pre-PR-2a proposal the webhook resolved. Without this the
     # summary would never mention a EUR 32M offer the session placed.
     #
-    # Rows written BEFORE this session started: this session's own offers are
-    # already in `session.profit_trades`, and listing them twice under two
-    # labels is how "APPROVED" would survive into the summary of a bot that no
-    # longer asks. 24h, not 48h — the summary is daily, and a 48h window
-    # repeated yesterday's rows every morning.
+    # `proposals_since` filters by row CREATION time, not resolution time, so
+    # this pass covers rows CREATED in the last 24h and before this session
+    # started — this session's own offers are already in
+    # `session.profit_trades`, and listing them twice under two labels is how
+    # "APPROVED" would survive into the summary of a bot that no longer asks.
+    # A row created earlier than 24h ago but resolved today is NOT listed
+    # here (PR 2b's ledger replaces this pass). 24h, not 48h — the summary is
+    # daily, and a 48h window repeated yesterday's rows every morning.
     resolved = [
         p
         for p in learner.proposals_since(time.time() - 24 * 3600)

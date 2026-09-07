@@ -100,6 +100,8 @@ def _ctx(buy_recs, current_budget, *, squad=(), market=None, days_until_match=No
         current_budget=current_budget,
         flip_budget=current_budget,
         executed_trade_count=0,
+        offers_placed=0,
+        offers_refused=0,
         matchday_phase=SimpleNamespace(days_until_match=days_until_match),
     )
 
