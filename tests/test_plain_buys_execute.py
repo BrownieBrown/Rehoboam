@@ -288,6 +288,27 @@ class TestTheBoardIsSentOnce:
 
         send.assert_not_called()
 
+    def test_the_header_uses_the_sessions_opening_budget_not_a_derivation(self, trader):
+        """`budget_after + sum(placed)` misses trade pairs and flips, which
+        also move `ctx.current_budget` without ever appearing in `placed`."""
+        trader._session_budget_before = 95_317_114
+        rec = _rec()
+        ctx = _ctx(rec)
+
+        trader._execute_buy(LEAGUE, rec, ctx, free_slots=2)
+        # `_execute_buy` itself never touches `ctx.current_budget` — that's
+        # `run_unified_trade_phase`'s job on success — so stand in for it here,
+        # then simulate a trade pair/flip elsewhere in the same session that
+        # also spent money but never appears in `placed`.
+        ctx.current_budget -= rec.recommended_bid
+        ctx.current_budget -= 5_000_000
+
+        with patch("rehoboam.notify.telegram.send_message", return_value=True) as send:
+            trader._send_session_board(LEAGUE, ctx)
+
+        text = send.call_args[0][2]
+        assert "BUDGET EUR 95,317,114 -> EUR 57,708,629 (if every offer lands)" in text
+
 
 class TestTheUnifiedPhaseBuysInstead:
     def test_a_plain_buy_places_an_offer_and_takes_the_slot(self, trader, api):
@@ -308,6 +329,65 @@ class TestTheUnifiedPhaseBuysInstead:
         assert ctx.offers_placed == 1
         assert ctx.current_budget == 95_317_114 - 32_608_485
         trader.api.sell_player_instant.assert_not_called()
+
+    def test_the_club_limit_counts_offers_placed_this_session(self, trader, api):
+        """Two more from a club already holding 2 would make 4 — illegal the
+        moment the second offer is placed, not when the auction resolves."""
+        squad = [
+            SimpleNamespace(id="h1", team_id="7", position="Defender"),
+            SimpleNamespace(id="h2", team_id="7", position="Defender"),
+        ] + [
+            SimpleNamespace(id=f"s{i}", team_id=f"club{i}", position="Defender") for i in range(11)
+        ]
+        rec_a = _rec(
+            player=_player(pid="a1", price=10_000_000, team_id="7"),
+            bid=10_500_000,
+            ep_gain=57.2,  # strong_upgrade tier
+        )
+        rec_b = _rec(
+            player=_player(pid="a2", price=10_000_000, team_id="7"),
+            bid=10_500_000,
+            ep_gain=50.0,  # solid_upgrade tier
+        )
+        ctx = EPSessionContext(
+            ep_result={
+                "buy_recs": [rec_a, rec_b],
+                "trade_pairs": [],
+                "squad_scores": [],
+                "market_players": {
+                    rec_a.player.id: rec_a.player,
+                    rec_b.player.id: rec_b.player,
+                },
+            },
+            matchday_phase=MatchdayPhase(
+                days_until_match=5,
+                phase="aggressive",
+                max_trades=5,
+                allow_flips=False,
+                reason="test",
+            ),
+            my_bids=[],
+            my_bid_amounts={},
+            squad=squad,
+            current_budget=95_317_114,
+            team_value=200_000_000,
+            flip_budget=95_317_114,
+        )
+        trader.api.get_squad.return_value = squad
+        trader.api.get_my_bids.return_value = []
+        trader.api.get_team_info.return_value = {
+            "budget": ctx.current_budget,
+            "team_value": ctx.team_value,
+        }
+
+        trader.run_unified_trade_phase(league=LEAGUE, ctx=ctx)
+
+        assert api.buy_player.call_count == 1
+        bought_ids = {call.args[1].id for call in api.buy_player.call_args_list}
+        assert rec_b.player.id not in bought_ids
+        assert ctx.offers_refused == 1
+        refused_line = next(line for line in trader._session_board if line.outcome != "placed")
+        assert "club limit" in refused_line.detail
 
 
 class TestTheProposalMachineryIsGone:

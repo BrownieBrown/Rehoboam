@@ -62,7 +62,8 @@ class TestTheBoardReportsWhatHappened:
         text = _render()
 
         assert text.splitlines()[0] == (
-            f"SQUAD 11/15   BUDGET EUR {BUDGET_BEFORE:,} -> EUR {BUDGET_BEFORE - 41_920_990:,}"
+            f"SQUAD 11/15   BUDGET EUR {BUDGET_BEFORE:,} -> "
+            f"EUR {BUDGET_BEFORE - 41_920_990:,} (if every offer lands)"
         )
 
     def test_it_counts_and_names_every_offer_placed(self):
