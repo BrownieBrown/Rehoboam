@@ -141,7 +141,8 @@ def render_session_board(
     visible without a log query.
     """
     lines = [
-        f"SQUAD {squad_size}/{squad_cap}   BUDGET EUR {budget_before:,} -> EUR {budget_after:,}",
+        f"SQUAD {squad_size}/{squad_cap}   BUDGET EUR {budget_before:,} -> "
+        f"EUR {budget_after:,} (if every offer lands)",
         "",
     ]
 

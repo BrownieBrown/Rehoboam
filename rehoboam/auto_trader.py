@@ -402,6 +402,10 @@ class AutoTrader:
         # One message per session, not one per offer (REH-117). Every attempted
         # buy appends an `OfferLine` here; `_send_session_board` sends it once.
         self._session_board: list = []
+        # Snapshotted once per session, right after the context builds, so the
+        # board's header reflects the wallet BEFORE anything moved rather than
+        # a derivation that only accounts for plain offers.
+        self._session_budget_before: int | None = None
         self._session_batch_id: str = ""
         self.activity_feed_learner = ActivityFeedLearner()
         self.tracker = LearningTracker(self.learner)
@@ -803,10 +807,16 @@ class AutoTrader:
 
         placed = [line for line in self._session_board if line.outcome == "placed"]
         refused = [line for line in self._session_board if line.outcome != "placed"]
-        # `ctx.current_budget` was decremented by each placed offer, so the
-        # session's own accounting recovers the opening figure exactly.
+        # The opening budget is snapshotted once per session; every session
+        # move (plain offers, pairs, flips) has decremented ctx.current_budget
+        # since. The fallback only serves direct callers that never built a
+        # session.
         budget_after = int(getattr(ctx, "current_budget", 0) or 0)
-        budget_before = budget_after + sum(line.bid for line in placed)
+        budget_before = (
+            int(self._session_budget_before)
+            if self._session_budget_before is not None
+            else budget_after + sum(line.bid for line in placed)
+        )
         text = render_session_board(
             squad_size=len(getattr(ctx, "squad", []) or []),
             squad_cap=SQUAD_CAP,
@@ -1010,6 +1020,11 @@ class AutoTrader:
             ctx.matchday_phase.phase, ctx.current_budget, pending_bid_total, max_debt
         )
         ctx.my_bid_amounts = {p.id: p.user_offer_price for p in fresh_bids}
+        # `_build_buy_gate`'s club-limit count reads ctx.squad + ctx.my_bids;
+        # without this refresh it stays the pre-session snapshot forever, so a
+        # second offer on the same session's club can push past the limit
+        # while the gate still sees room.
+        ctx.my_bids = list(fresh_bids)
 
         console.print(
             f"[cyan]📋 Squad: {current_squad_size} + {active_bid_count} bids = "
@@ -1129,6 +1144,12 @@ class AutoTrader:
                     ctx.current_budget -= obj.recommended_bid
                     # Kickbase counts an open offer toward the squad cap.
                     available_slots -= 1
+                    # This offer is now held for the rest of THIS session too —
+                    # the club-limit gate and the "already have active bid"
+                    # skip must both see it on the very next candidate, not
+                    # only after the next session's refresh.
+                    ctx.my_bids = list(ctx.my_bids) + [obj.player]
+                    ctx.my_bid_amounts[obj.player.id] = obj.recommended_bid
                 continue
 
             elif kind == "pair":
@@ -1902,6 +1923,7 @@ class AutoTrader:
         # REH-117: one batch per session, so "Approve all" can take the set
         # that was chosen to fit the budget together.
         self._session_board = []
+        self._session_budget_before = None
         self._session_batch_id = uuid.uuid4().hex[:12]
 
         logger.info(
@@ -1989,6 +2011,10 @@ class AutoTrader:
         # Step 2: Build session context (single EP pipeline + trends + matchday phase)
         try:
             ctx = self._build_session_context(league)
+            # Snapshot the wallet BEFORE anything this session moves — the
+            # board's header reads this rather than re-deriving it, since a
+            # derivation from `placed` alone misses trade pairs and flips.
+            self._session_budget_before = int(ctx.current_budget)
         except Exception as e:
             error_msg = f"EP pipeline failed: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
