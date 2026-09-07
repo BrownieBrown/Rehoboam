@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from rehoboam.auto_trader import _is_too_falling_to_propose
+from rehoboam.auto_trader import _is_too_falling_to_buy
 from rehoboam.config import Settings
 
 SETTINGS = Settings(kickbase_email="test@example.com", kickbase_password="x")
@@ -32,18 +32,18 @@ SETTINGS = Settings(kickbase_email="test@example.com", kickbase_password="x")
     [("Itten", -27.0), ("Stalmach", -32.1), ("Trimmel", -20.1), ("steep", -99.0)],
 )
 def test_a_steeply_falling_player_is_blocked(name, trend):
-    assert _is_too_falling_to_propose(trend, SETTINGS) is True
+    assert _is_too_falling_to_buy(trend, SETTINGS) is True
 
 
 @pytest.mark.parametrize("trend", [-19.5, -10.0, -3.0, 0.0, 12.0, 121.8])
-def test_everything_shallower_is_still_proposed(trend):
+def test_everything_shallower_is_still_bought(trend):
     """-19.5% (Ndiaye) is flagged in the message, not blocked."""
-    assert _is_too_falling_to_propose(trend, SETTINGS) is False
+    assert _is_too_falling_to_buy(trend, SETTINGS) is False
 
 
 def test_an_unknown_trend_does_not_block():
     """Most candidates have no MV history at all — absence is not evidence."""
-    assert _is_too_falling_to_propose(None, SETTINGS) is False
+    assert _is_too_falling_to_buy(None, SETTINGS) is False
 
 
 def test_the_threshold_is_configurable():
@@ -51,5 +51,5 @@ def test_the_threshold_is_configurable():
         kickbase_email="t@e.com", kickbase_password="x", max_falling_trend_pct_to_buy=-5.0
     )
 
-    assert _is_too_falling_to_propose(-6.0, tighter) is True
-    assert _is_too_falling_to_propose(-6.0, SETTINGS) is False
+    assert _is_too_falling_to_buy(-6.0, tighter) is True
+    assert _is_too_falling_to_buy(-6.0, SETTINGS) is False

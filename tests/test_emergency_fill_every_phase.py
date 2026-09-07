@@ -195,3 +195,36 @@ class TestTheEmergencyBuySurvivesTheUnifiedTradePhaseRebind:
             sum(r.price for r in session.profit_trades if r.success and r.action == "BUY")
             == 4_000_000
         )
+
+
+class TestTheSessionReportsItsOffers:
+    """`trades=0/0` could not tell a gated bot from a broken one (spec §1)."""
+
+    def test_offers_placed_and_refused_reach_the_session_summary_and_the_log(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.chdir(tmp_path)
+        caplog.set_level(logging.INFO, logger="rehoboam.auto_trader")
+
+        squad = _squad_of_seven()
+        trader = AutoTrader(api=_Api(squad), settings=Settings(), dry_run=True)
+        ctx = _context("moderate", 3, squad)
+        ctx.offers_placed = 2
+        ctx.offers_refused = 1
+
+        with (
+            patch.object(AutoTrader, "_build_session_context", return_value=ctx),
+            patch.object(AutoTrader, "_run_emergency_squad_fill", return_value=[]),
+            patch.object(AutoTrader, "run_profit_sell_phase", return_value=[]),
+            patch.object(AutoTrader, "optimize_and_execute_squad", return_value=[]),
+            patch.object(AutoTrader, "run_unified_trade_phase", return_value=[]),
+            patch.object(AutoTrader, "_set_optimal_lineup", return_value=[]),
+        ):
+            session = trader.run_full_session(LEAGUE)
+
+        assert (session.offers_placed, session.offers_refused) == (2, 1)
+        assert "offers=2 refused=1" in caplog.text

@@ -2051,16 +2051,6 @@ class BidLearner:
             ).fetchone()
         return row is not None
 
-    def proposals_for_player(self, player_id: str) -> list[dict]:
-        """Every proposal ever made for this player, newest first."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM trade_proposals WHERE player_id = ? ORDER BY created_at DESC",
-                (str(player_id),),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
     def proposals_since(self, since_ts: float) -> list[dict]:
         """Every proposal created at or after ``since_ts``, oldest first.
 

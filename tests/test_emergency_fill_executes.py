@@ -12,7 +12,6 @@ is that `api.buy_player` is called, not that a stub recorded an argument.
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -116,8 +115,10 @@ class TestTheFillBuys:
     def test_it_never_proposes(self, trader, api, monkeypatch):
         monkeypatch.setattr(
             AutoTrader,
-            "_propose_buy",
-            lambda *a, **k: pytest.fail("the emergency fill must spend, not ask"),
+            "_execute_buy",
+            lambda *a, **k: pytest.fail(
+                "the emergency fill must not route through the plain-buy path"
+            ),
         )
         target = _player("f1", price=4_000_000)
         squad = _short_squad()
@@ -224,7 +225,5 @@ class TestTheAutoApproveMachineryIsGone:
     def test_the_session_has_no_auto_approval_step(self):
         assert not hasattr(AutoTrader, "_process_due_auto_approvals")
 
-    def test_propose_buy_takes_no_deadline(self):
-        params = inspect.signature(AutoTrader._propose_buy).parameters
-
-        assert "auto_approve_at" not in params
+    def test_propose_buy_is_gone(self):
+        assert not hasattr(AutoTrader, "_propose_buy")

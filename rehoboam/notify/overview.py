@@ -1,17 +1,11 @@
-"""One message for a whole session's proposals, budget-aware (REH-117).
+"""One message for what a session did with the wallet (spec §1).
 
-Proposals used to go out one Telegram message per player. Nothing could then
-show how they interact, and they compete for one wallet: on 2026-08-31 Marco
-approved Nusa and Ebnoutalib, which consumed the budget, and Avdullahu, Reis
-and a second Avdullahu all failed on "budget would go negative".
-
-So the session sends one message: the set that fits, then everything else.
-
-The split is a WALK, not a knapsack. A knapsack would fit marginally more
-money, and would sometimes skip the second line to afford the fourth — which,
-in a list a human reads top to bottom, reads as a bug rather than as
-optimisation. The order has to be explicable: slot-filling emergencies first
-because they carry the -100, then by expected points, take what fits.
+Proposals used to go out and wait for a tap: 13 approvals, 2 acquisitions,
+the rest poached while the message sat there (2026-08-29 to 2026-09-02). The
+session now places its offers itself, behind the safety gate, and this is the
+record: which offers went out, at what price and why; which candidates the
+gate refused and for what reason; the budget before and after. No buttons —
+there is nothing left to decide.
 
 Pure, so the message can be asserted directly.
 """
@@ -20,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: Below this weekly market-value move a proposal is called out as falling.
+#: Below this weekly market-value move a line is called out as falling.
 #: Itten went out at -27.0%/7d with the number printed and nothing flagged.
 FALLING_TREND_PCT = -10.0
 
@@ -33,24 +27,26 @@ _POSITION_ABBR = {
 
 
 @dataclass(frozen=True)
-class ProposalLine:
-    """One proposal, with everything the message needs to justify it.
+class OfferLine:
+    """One attempted buy, with everything the message needs to justify it.
 
-    The pipeline already computes all of this and the old renderer discarded
-    it — `PlayerScore` carries position, lineup probability, minutes trend,
-    average points and next opponent, and every proposal still said
-    "unknown club" with no position at all.
+    The pipeline already computes all of this — `PlayerScore` carries
+    position, lineup probability, minutes trend, average points and next
+    opponent — and the first renderer discarded it and printed "unknown club".
     """
 
-    proposal_id: str
+    offer_id: str
     name: str
     bid: int
     ep: float
     marginal_gain: float
+    #: "placed" — the offer is live. "refused" — the safety gate said no.
+    #: "failed" — Kickbase or the network said no. `detail` carries the why.
+    outcome: str = "placed"
+    detail: str = ""
     position: str = ""
     club: str = ""
     market_value: int = 0
-    is_emergency: bool = False
     fills_gap: bool = False
     trend_7d_pct: float | None = None
     season_avg: float | None = None
@@ -77,36 +73,7 @@ class ProposalLine:
         return _POSITION_ABBR.get(self.position, self.position[:3].upper() or "???")
 
 
-def split_by_budget(
-    lines: list[ProposalLine], budget: int
-) -> tuple[list[ProposalLine], list[ProposalLine]]:
-    """Split proposals into (fits now, needs money first).
-
-    Ordered by what costs points to leave undone, then by expected points. An
-    unfilled lineup slot is -100 every matchday, and a position below its
-    formation minimum makes the eleven illegal rather than merely weaker — the
-    same argument `emergency_basket._value` makes when it counts gap coverage
-    at the slot penalty. The two orderings have to agree, or the message
-    recommends a surplus midfielder over the only available striker.
-
-    A line that does not fit is moved aside and the walk continues, so one
-    expensive pick does not strand the cheaper ones behind it.
-    """
-    ordered = sorted(lines, key=lambda x: (not (x.is_emergency or x.fills_gap), -x.ep, x.bid))
-
-    recommended: list[ProposalLine] = []
-    alternatives: list[ProposalLine] = []
-    remaining = int(budget)
-    for line in ordered:
-        if line.bid <= remaining:
-            recommended.append(line)
-            remaining -= line.bid
-        else:
-            alternatives.append(line)
-    return recommended, alternatives
-
-
-def _availability(line: ProposalLine) -> str:
+def _availability(line: OfferLine) -> str:
     bits: list[str] = []
     if line.lineup_probability is not None:
         bits.append(
@@ -121,9 +88,8 @@ def _availability(line: ProposalLine) -> str:
     return " · ".join(bits)
 
 
-def _line_block(line: ProposalLine) -> list[str]:
-    """One proposal, four short lines. Position and club lead — they were the
-    two facts the old message never carried."""
+def _line_block(line: OfferLine) -> list[str]:
+    """One offer, a few short lines. Position and club lead."""
     club = line.club or "unknown club"
     head = f"  {line.name} ({line.pos_short}, {club})  EUR {line.bid:,}"
 
@@ -146,11 +112,7 @@ def _line_block(line: ProposalLine) -> list[str]:
     if availability:
         out.append(f"      {availability}")
 
-    if line.is_emergency:
-        # NOT "displaces the weakest starter (0.0)" — with a short squad there
-        # is no incumbent, and the old message printed a placeholder and a zero.
-        out.append("      fills an empty lineup slot (worth +100)")
-    elif line.fills_gap and line.position:
+    if line.fills_gap and line.position:
         out.append(f"      fills your {line.pos_short} gap")
     elif line.squad_at_position is not None and line.position_minimum is not None:
         out.append(
@@ -163,41 +125,40 @@ def _line_block(line: ProposalLine) -> list[str]:
     return out
 
 
-def render_proposal_overview(
+def render_session_board(
     *,
     squad_size: int,
     squad_cap: int,
-    budget: int,
-    recommended: list[ProposalLine],
-    alternatives: list[ProposalLine],
+    budget_before: int,
+    budget_after: int,
+    placed: list[OfferLine],
+    refused: list[OfferLine],
 ) -> str:
-    """The session's whole board, in one message.
+    """What this session did with the wallet, in one message.
 
-    `recommended` is expected to come from `split_by_budget` and to fit inside
-    `budget`; the total is printed either way so a caller that builds its own
-    set cannot quietly present an unaffordable one as affordable.
+    `placed` are live offers; `refused` are the gate's and Kickbase's refusals,
+    each with its reason on its own line so a ceiling that keeps firing is
+    visible without a log query.
     """
-    total = sum(line.bid for line in recommended)
     lines = [
-        f"SQUAD {squad_size}/{squad_cap}   BUDGET EUR {budget:,}",
+        f"SQUAD {squad_size}/{squad_cap}   BUDGET EUR {budget_before:,} -> EUR {budget_after:,}",
         "",
     ]
 
-    if recommended:
-        lines.append(f"RECOMMENDED — {len(recommended)} of {len(recommended) + len(alternatives)}")
-        for line in recommended:
+    if placed:
+        lines.append(f"OFFERS PLACED — {len(placed)}")
+        for line in placed:
             lines += _line_block(line)
             lines.append("")
-        lines.append(f"  total EUR {total:,}   leaves EUR {budget - total:,}")
-        if total > budget:
-            lines.append(f"  WARNING over budget by EUR {total - budget:,}")
+        lines.append(f"  total EUR {sum(line.bid for line in placed):,}")
     else:
-        lines.append("RECOMMENDED — none fit the current budget")
+        lines.append("OFFERS PLACED — none")
 
-    if alternatives:
-        lines += ["", "ALTERNATIVES — need a sell first"]
-        for line in alternatives:
+    if refused:
+        lines += ["", f"REFUSED — {len(refused)}"]
+        for line in refused:
             lines += _line_block(line)
+            lines.append(f"      ! {line.detail}")
             lines.append("")
 
     return "\n".join(lines).rstrip()
