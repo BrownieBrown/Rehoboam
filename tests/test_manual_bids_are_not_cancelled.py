@@ -78,7 +78,6 @@ def _evaluate(offer, *, bot_placed_ids, bid_tiers=None, trends=None):
     return evaluator.evaluate_active_bids(
         LEAGUE,
         player_trends=trends or {},
-        for_profit=True,
         bid_tiers=bid_tiers or {},
         bot_placed_ids=bot_placed_ids,
     )[0]
@@ -106,22 +105,21 @@ class TestAManualBidIsLeftAlone:
 
     def test_a_manual_bid_on_an_injured_player_is_still_kept(self):
         """Even the injury rule: Marco can see the injury and bid anyway."""
-        injured = _offer("9999", market_value=10_000_000, our_bid=13_440_000, status=1)
+        injured = _offer("9999", market_value=10_000_000, our_bid=13_440_000, status=4)
 
         result = _evaluate(injured, bot_placed_ids=set())
 
         assert result.recommendation == "KEEP", result.reason
 
 
-class TestTheBotStillPolicesItsOwnBids:
-    def test_an_untiered_bot_bid_is_still_evaluated(self):
-        """The guard keys on provenance, not on the tier being present."""
+class TestTheBotHoldsItsOwnBids:
+    def test_an_untiered_bot_bid_is_held(self):
+        """Provenance decides whether the bot MAY cancel; price never says it should."""
         result = _evaluate(HARDER, bot_placed_ids={"9999"})
 
-        assert result.recommendation == "CANCEL"
+        assert result.recommendation == "KEEP", result.reason
 
     def test_a_tiered_bot_bid_at_its_ceiling_is_kept(self):
-        """REH-111 still holds for bids the bot placed."""
         result = _evaluate(HARDER, bot_placed_ids={"9999"}, bid_tiers={"9999": "must_have"})
 
         assert result.recommendation == "KEEP", result.reason
@@ -136,7 +134,7 @@ class TestTheDefaultIsSafe:
         """
         evaluator = BidEvaluator(_Api([HARDER]), _settings())
 
-        result = evaluator.evaluate_active_bids(LEAGUE, player_trends={}, for_profit=True)[0]
+        result = evaluator.evaluate_active_bids(LEAGUE, player_trends={})[0]
 
         assert result.recommendation == "KEEP", result.reason
 

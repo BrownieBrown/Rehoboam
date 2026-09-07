@@ -28,6 +28,16 @@ MAX_LINEUP_PROB_FOR_BUY = 3
 # field that could be relaxed from .env by accident.
 MAX_PLAYERS_PER_CLUB = 3
 
+# Kickbase `st` values under which a player cannot be fielded: injured/out for
+# weeks (1), injured (4), long-term injured (256) — the set
+# `scoring/v2/availability.py` measured against live `stxt` on 2026-08-28
+# (REH-105 found status 1 missing and a status-1 player at rank 1 on the buy
+# board). One definition, read by the v2 availability model, the h2h
+# projection (`h2h.py`) and the open-bid evaluator (`bid_evaluator.py`) — a
+# bid is never held on a player the lineup would refuse, nor cancelled on a
+# status the lineup would still field.
+UNAVAILABLE_STATUSES: frozenset[int] = frozenset({1, 4, 256})
+
 # Selling instantly to Kickbase returns the FULL market value.
 #
 # REH-51 asserted 0.95 in its plan and nothing ever checked it. Measured in
@@ -465,18 +475,6 @@ class Settings(BaseSettings):
             "judgement call Marco should get to make, while a value in free-fall "
             "is usually the league pricing in an availability problem before we "
             "have seen it. Profit flips keep their own rules."
-        ),
-    )
-    emergency_auto_approve_hours: float = Field(
-        default=24.0,
-        description=(
-            "Hours an emergency squad-fill proposal waits for approval before "
-            "executing itself. The backstop is deliberately time-based rather "
-            "than tied to the matchday phase: `/myeleven` returning no upcoming "
-            "fixture is exactly the failure that produced a 7-player squad "
-            "(REH-112), so a phase trigger can wait forever on the same broken "
-            "lookup. Only emergency fills carry a deadline — an ordinary "
-            "upgrade waits for a human indefinitely."
         ),
     )
     overbid_pct_marginal: float = Field(
