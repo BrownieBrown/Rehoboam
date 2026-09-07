@@ -1601,16 +1601,6 @@ class BidLearner:
             ).fetchone()
         return row is not None
 
-    def proposals_for_player(self, player_id: str) -> list[dict]:
-        """Every proposal ever made for this player, newest first."""
-        with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM rehoboam.trade_proposals WHERE player_id = %s "
-                "ORDER BY created_at DESC",
-                (str(player_id),),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
     def proposals_since(self, since_ts: float) -> list[dict]:
         """Every proposal created at or after ``since_ts``, oldest first.
 

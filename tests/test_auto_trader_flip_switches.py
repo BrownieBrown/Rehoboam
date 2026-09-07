@@ -241,19 +241,15 @@ class TestFlipBuyBlockGate:
 
         mock_find.assert_called_once()
 
-    def test_ep_buy_path_still_reaches_proposal_when_flip_buys_disabled(self, trader):
+    def test_ep_buy_path_still_reaches_execution_when_flip_buys_disabled(self, trader):
         """The gate must disable only the flip block, not the surrounding
         EP-driven buy/trade-pair loop it lives inside — pinning the failure
         mode of a gate that accidentally disables more than the flip block.
 
-        Post-approval-gate: the EP buy path no longer executes a purchase, it
-        routes to `_propose_buy`. `results` stays empty because no trade
-        actually happened.
-
-        This asserts on `_propose_buy` rather than on `record_proposal`
-        because this fixture is dry_run=True, and a dry run deliberately
-        records nothing. What belongs here is that the buy path is REACHED;
-        that reaching it persists a proposal is pinned in test_proposal_wiring.
+        The buy path now executes through `_execute_buy` (spec §1). It is
+        patched to return None so nothing is attempted; what belongs here is
+        that the path is REACHED with the right candidate. That reaching it
+        places an offer is pinned in test_plain_buys_execute.
         """
         trader.settings.enable_flip_buys = False
         self._configure_trader(trader)
@@ -261,13 +257,14 @@ class TestFlipBuyBlockGate:
 
         with (
             patch("rehoboam.trader.Trader.find_profit_opportunities") as mock_find,
-            patch.object(AutoTrader, "_propose_buy", return_value=True) as mock_propose,
+            patch.object(AutoTrader, "_execute_buy", return_value=None) as mock_execute,
         ):
             results = trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
 
         mock_find.assert_not_called()
         assert results == []
         trader.api.buy_player.assert_not_called()
-        mock_propose.assert_called_once()
-        assert mock_propose.call_args[0][1].player.id == "p1"
-        assert mock_propose.call_args[0][1].recommended_bid == 1_000_000
+        mock_execute.assert_called_once()
+        assert mock_execute.call_args[0][1].player.id == "p1"
+        assert mock_execute.call_args[0][1].recommended_bid == 1_000_000
+        assert mock_execute.call_args.kwargs["free_slots"] >= 1
