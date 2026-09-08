@@ -127,3 +127,43 @@ class TestTheSummaryCanBuildButtonsFromWhatIsStored:
         _record(learner)
         learner.mark_proposal("p1", "approved")
         assert learner.pending_proposals() == []
+
+
+class TestTheSessionWritesTheOutcomeItself:
+    """Spec §1: rows are written AFTER the buy, with what happened."""
+
+    def test_a_row_can_be_recorded_as_executed(self, learner):
+        learner.record_proposal(
+            proposal_id="done",
+            player_id="6080",
+            player_name="Pavlović",
+            bid=32_608_485,
+            market_value=32_285_629,
+            message="BUY Pavlović — EUR 32,608,485",
+            tier="strong_upgrade",
+            status="executed",
+        )
+
+        assert learner.get_proposal("done")["status"] == "executed"
+        assert learner.pending_proposals() == []
+
+    def test_a_refused_row_keeps_the_reason_in_its_message(self, learner):
+        learner.record_proposal(
+            proposal_id="no",
+            player_id="13448",
+            player_name="Aouchiche",
+            bid=18_835_959,
+            market_value=13_451_351,
+            message="BUY Aouchiche — EUR 18,835,959\n\nREFUSED\n  overbid 40.0% exceeds the 35.0% ceiling",
+            status="refused",
+        )
+
+        row = learner.get_proposal("no")
+        assert row["status"] == "refused"
+        assert "REFUSED" in row["message"]
+
+    def test_the_default_is_still_pending_for_the_webhook(self, learner):
+        _record(learner, "p1")
+
+        assert learner.get_proposal("p1")["status"] == "pending"
+        assert [p["proposal_id"] for p in learner.pending_proposals()] == ["p1"]

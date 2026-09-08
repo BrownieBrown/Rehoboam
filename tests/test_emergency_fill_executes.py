@@ -12,7 +12,6 @@ is that `api.buy_player` is called, not that a stub recorded an argument.
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -87,6 +86,8 @@ def _ctx(
         team_value=100_000_000,
         flip_budget=current_budget,
         executed_trade_count=0,
+        offers_placed=0,
+        offers_refused=0,
         matchday_phase=SimpleNamespace(days_until_match=days_until_match, phase=phase),
     )
 
@@ -113,11 +114,55 @@ class TestTheFillBuys:
         assert api.buy_player.call_args[0][2] == 4_000_000
         assert [r.action for r in results if r.success] == ["BUY"]
 
+    def test_the_fill_reports_its_offers_on_the_board_and_in_the_counters(self, trader, api):
+        """Before this, a fill pick never reached the board or the session
+        counters — `offers=N refused=M` undercounted, and the 2026-09-07
+        session's board showed 1 offer for a session that spent on 2."""
+        target = _player("f1", price=4_000_000)
+        squad = _short_squad()
+        ctx = _ctx([_rec(target, 4_000_000)], 50_000_000, squad=squad)
+
+        trader._run_emergency_squad_fill(
+            league=LEAGUE,
+            ctx=ctx,
+            fresh_squad=squad,
+            slots_short=1,
+        )
+
+        assert trader._session_board[0].outcome == "placed"
+        assert ctx.offers_placed == 1
+        assert "f1" in trader._session_offer_ids
+
+    def test_the_club_limit_counts_the_fills_own_offers(self, trader, api):
+        """Two picks from the same club, both affordable on the wallet:
+        the second is illegal the moment the first offer is placed (3 from
+        one club), not only once the auction resolves. Without recording the
+        first pick onto `ctx.squad`/`ctx.my_bids`, the gate would still see
+        the pre-loop count and let both through."""
+        squad = [_player(f"h{i}", "Defender", team_id="7") for i in range(2)] + [
+            _player(f"s{i}", "Defender", team_id=f"club{i}") for i in range(7)
+        ]
+        a = _player("a1", price=4_000_000, team_id="7")
+        b = _player("a2", price=5_000_000, team_id="7")
+        ctx = _ctx(
+            [_rec(a, 4_000_000, ep_gain=20.0), _rec(b, 5_000_000, ep_gain=15.0)],
+            50_000_000,
+            squad=squad,
+        )
+
+        trader._run_emergency_squad_fill(league=LEAGUE, ctx=ctx, fresh_squad=squad, slots_short=2)
+
+        assert api.buy_player.call_count == 1
+        refused_line = next(line for line in trader._session_board if line.outcome != "placed")
+        assert "club limit" in refused_line.detail
+
     def test_it_never_proposes(self, trader, api, monkeypatch):
         monkeypatch.setattr(
             AutoTrader,
-            "_propose_buy",
-            lambda *a, **k: pytest.fail("the emergency fill must spend, not ask"),
+            "_execute_buy",
+            lambda *a, **k: pytest.fail(
+                "the emergency fill must not route through the plain-buy path"
+            ),
         )
         target = _player("f1", price=4_000_000)
         squad = _short_squad()
@@ -224,7 +269,5 @@ class TestTheAutoApproveMachineryIsGone:
     def test_the_session_has_no_auto_approval_step(self):
         assert not hasattr(AutoTrader, "_process_due_auto_approvals")
 
-    def test_propose_buy_takes_no_deadline(self):
-        params = inspect.signature(AutoTrader._propose_buy).parameters
-
-        assert "auto_approve_at" not in params
+    def test_propose_buy_is_gone(self):
+        assert not hasattr(AutoTrader, "_propose_buy")

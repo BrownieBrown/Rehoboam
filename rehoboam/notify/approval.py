@@ -143,9 +143,10 @@ def execute_proposal(proposal: dict, *, settings, learner, api, league) -> str:
 def _execute_batch(batch_id: str, *, settings, learner, api, league) -> str:
     """Execute one session's recommended set, in the order it was presented.
 
-    The set was chosen to fit the budget as a whole (`overview.split_by_budget`),
-    so order is load-bearing: running it out of order can strand the tail on
-    "budget would go negative", which is exactly the failure this replaces.
+    The set was chosen to fit the budget as a whole (the pre-PR-2a proposal
+    overview's budget walk), so order is load-bearing: running it out of
+    order can strand the tail on "budget would go negative", which is
+    exactly the failure this replaces.
 
     A gate refusal on one line does not abandon the rest. Each proposal is
     re-validated against live state at execution, so a market value that moved

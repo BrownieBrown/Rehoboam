@@ -210,6 +210,8 @@ def _emergency_fill_ctx(recommended_bid: int):
         current_budget=50_000_000,
         flip_budget=50_000_000,
         executed_trade_count=0,
+        offers_placed=0,
+        offers_refused=0,
         matchday_phase=SimpleNamespace(days_until_match=None),
     )
     return squad, target, ctx
