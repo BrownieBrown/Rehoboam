@@ -1,6 +1,7 @@
 """Configuration management for Rehoboam"""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -530,6 +531,15 @@ class Settings(BaseSettings):
     dry_run: bool = Field(
         default=True,
         description="If True, simulate trades without executing them",
+    )
+    trading_mode: Literal["full", "lineup_only"] = Field(
+        default="full",
+        description=(
+            "What a session may do. 'full' trades. 'lineup_only' sets the lineup, "
+            "runs the emergency fill, records learning, and skips every sell and "
+            "buy phase — the mode prod runs while the data foundation is rebuilt "
+            "(spec 2026-09-11 §5). Env: TRADING_MODE."
+        ),
     )
 
     # Telegram approval gate

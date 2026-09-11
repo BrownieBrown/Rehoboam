@@ -1979,12 +1979,17 @@ class AutoTrader:
         self._session_batch_id = uuid.uuid4().hex[:12]
 
         logger.info(
-            "session-start league=%s dry_run=%s max_trades=%d max_spend=%d",
+            "session-start league=%s mode=%s dry_run=%s max_trades=%d max_spend=%d",
             getattr(league, "name", league.id),
+            self.settings.trading_mode,
             self.dry_run,
             self.max_trades_per_session,
             self.max_daily_spend,
         )
+        if self.settings.trading_mode == "lineup_only":
+            console.print(
+                "[yellow]MODE lineup_only — no sells, no buys except the emergency fill[/yellow]"
+            )
 
         # Step 0: Sync activity feed for competitive intelligence
         try:
@@ -2044,7 +2049,16 @@ class AutoTrader:
             except Exception:  # pragma: no cover - defensive
                 logger.exception("cost-basis reconciliation failed (non-fatal)")
             # Execute any deferred sell plans from bids we won (buy-first-sell-after).
-            if deferred_sell_ids:
+            if deferred_sell_ids and self.settings.trading_mode != "full":
+                console.print(
+                    f"[yellow]Mode lineup_only — {len(deferred_sell_ids)} deferred sell "
+                    f"plan(s) skipped[/yellow]"
+                )
+                logger.info(
+                    "trading-mode lineup_only: deferred sell plans skipped n=%d",
+                    len(deferred_sell_ids),
+                )
+            elif deferred_sell_ids:
                 console.print(
                     f"[cyan]Executing deferred sell plan for {len(deferred_sell_ids)} player(s)[/cyan]"
                 )
@@ -2179,34 +2193,17 @@ class AutoTrader:
                 console.print(f"[red]{error_msg}[/red]")
                 errors.append(error_msg)
 
-        # If locked (match imminent), set the lineup and exit — the emergency
+        # Two reasons to stop after the lineup: the match is imminent, or the
+        # bot is in lineup_only mode (spec 2026-09-11 §5). The emergency fill
         # above has already had its chance to make an eleven fieldable.
+        stop_reason: str | None = None
         if ctx.matchday_phase.phase == "locked":
-            if slots_short == 0:
-                console.print(
-                    f"[yellow]Match imminent ({ctx.matchday_phase.days_until_match}d) "
-                    f"— setting lineup only, no trading[/yellow]"
-                )
-
-            self._send_proposal_overview(league, ctx)
-            lineup = (
-                self._set_optimal_lineup(
-                    league, errors, squad_scores=ctx.ep_result.get("squad_scores")
-                )
-                or []
-            )
-            total_spent = sum(r.price for r in trade_results if r.action == "BUY" and r.success)
-            total_earned = sum(r.price for r in trade_results if r.action == "SELL" and r.success)
-            return AutoTradeSession(
-                start_time=start_time,
-                end_time=time.time(),
-                profit_trades=trade_results,
-                lineup_trades=[],
-                errors=errors,
-                total_spent=total_spent,
-                total_earned=total_earned,
-                net_change=total_earned - total_spent,
-                lineup=lineup,
+            stop_reason = f"Match imminent ({ctx.matchday_phase.days_until_match}d)"
+        elif self.settings.trading_mode == "lineup_only":
+            stop_reason = "Mode lineup_only"
+        if stop_reason is not None:
+            return self._finish_lineup_only(
+                league, ctx, trade_results, errors, start_time, stop_reason
             )
 
         # Step 4: Trend-aware profit selling
@@ -2311,9 +2308,10 @@ class AutoTrader:
                 console.print(f"[red]  • {err}[/red]")
 
         logger.info(
-            "session-end duration=%.1fs phase=%s sells=%d trades=%d/%d "
+            "session-end duration=%.1fs mode=%s phase=%s sells=%d trades=%d/%d "
             "spent=%d earned=%d net=%d errors=%d",
             end_time - start_time,
+            self.settings.trading_mode,
             ctx.matchday_phase.phase,
             len([r for r in sell_results if r.success and r.action == "SELL"]),
             len([r for r in trade_results if r.success]),
@@ -2333,6 +2331,57 @@ class AutoTrader:
             total_spent=total_spent,
             total_earned=total_earned,
             net_change=net_change,
+            lineup=lineup,
+        )
+
+    def _finish_lineup_only(
+        self,
+        league,
+        ctx: EPSessionContext,
+        trade_results: list[AutoTradeResult],
+        errors: list[str],
+        start_time: float,
+        reason: str,
+    ) -> AutoTradeSession:
+        """Set the lineup and end the session without trading.
+
+        Shared by the locked phase and by ``trading_mode=lineup_only`` so the
+        two exits cannot drift apart, and so both log ``session-end`` — the
+        locked branch used to return without one, which is why prod telemetry
+        shows no session-end for 2026-09-10 20:00 or 2026-09-11 08:00.
+        """
+        console.print(f"[yellow]{reason} — setting lineup only, no trading[/yellow]")
+        self._send_proposal_overview(league, ctx)
+        lineup = (
+            self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
+            or []
+        )
+        total_spent = sum(r.price for r in trade_results if r.action == "BUY" and r.success)
+        total_earned = sum(r.price for r in trade_results if r.action == "SELL" and r.success)
+        end_time = time.time()
+        logger.info(
+            "session-end duration=%.1fs mode=%s phase=%s sells=0 trades=%d/%d "
+            "spent=%d earned=%d net=%d errors=%d | %s",
+            end_time - start_time,
+            self.settings.trading_mode,
+            ctx.matchday_phase.phase,
+            len([r for r in trade_results if r.success]),
+            len(trade_results),
+            total_spent,
+            total_earned,
+            total_earned - total_spent,
+            len(errors),
+            reason,
+        )
+        return AutoTradeSession(
+            start_time=start_time,
+            end_time=end_time,
+            profit_trades=trade_results,
+            lineup_trades=[],
+            errors=errors,
+            total_spent=total_spent,
+            total_earned=total_earned,
+            net_change=total_earned - total_spent,
             lineup=lineup,
         )
 
