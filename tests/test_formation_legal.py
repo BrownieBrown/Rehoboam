@@ -139,5 +139,10 @@ class TestWrappers:
     def test_is_legal_formation_rejects_ten_players(self):
         assert is_legal_formation(_squad(1, 5, 3, 1)) is False
 
-    def test_is_legal_formation_rejects_5_5_1(self):
-        assert is_legal_formation(_squad(1, 5, 5, 1)) is False
+    def test_is_legal_formation_rejects_an_eleven_outside_the_set(self):
+        """Eleven players: length guard passes, set check must reject 3-3-4."""
+        assert is_legal_formation(_squad(1, 3, 3, 4)) is False
+
+    def test_is_legal_formation_rejects_an_eleven_with_two_goalkeepers(self):
+        """Eleven players with two goalkeepers: GK != 1 guard must reject."""
+        assert is_legal_formation(_squad(2, 4, 4, 1)) is False
