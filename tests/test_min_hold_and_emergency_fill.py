@@ -384,7 +384,16 @@ class TestEmergencySquadFill:
 
     def test_no_buys_when_no_affordable_clean_candidates(self, trader):
         trader._propose_buy = spy = _ProposalSpy()
-        squad = [_player(f"p{i}", "Defender") for i in range(10)]
+        # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+        # purchases == 1, and a Forward signing closes it (4-4-2). A squad of
+        # ten defenders would be short a goalkeeper too and never describes a
+        # real board.
+        squad = (
+            [_player("gk0", "Goalkeeper")]
+            + [_player(f"d{i}", "Defender") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder") for i in range(4)]
+            + [_player("fwd0", "Forward")]
+        )
 
         buy_recs = [
             _rec("forward1", "Forward", price=20_000_000, ep_gain=30.0),  # too pricey

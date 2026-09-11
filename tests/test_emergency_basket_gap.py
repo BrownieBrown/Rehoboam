@@ -149,6 +149,56 @@ class TestGreedyPathAlsoRespectsTheGap:
         assert [p.candidate.id for p in picks] == ["m"]
 
 
+class TestTheBasketIsTheClosersAndNothingElse:
+    """A purchase reduces the shortfall by at most one, so the smallest basket
+    with the most closed slots IS the set of closers.
+
+    Ranking closed slots and then expected points let a 90-EP seventh defender
+    ride along with the midfielder that actually closed the slot: the bundle
+    scored the same `closed` as the closer alone and more EP, so it won, and
+    the wallet paid EUR 20,000,000 for a body that can never start.
+    """
+
+    COUNTS = {"Goalkeeper": 1, "Defender": 6, "Midfielder": 3, "Forward": 0}
+    DEAD_WEIGHT = EmergencyCandidate(
+        "d", "D", ask=20_000_000, max_bid=20_000_000, ep=90.0, position="Defender"
+    )
+    CLOSER = EmergencyCandidate(
+        "m", "M", ask=1_000_000, max_bid=1_000_000, ep=70.0, position="Midfielder"
+    )
+
+    def test_exact_path_drops_the_dead_weight(self):
+        picks = select_emergency_basket(
+            [self.DEAD_WEIGHT, self.CLOSER],
+            slots_short=2,
+            budget=50_000_000,
+            gap_after=_gap_after_for(self.COUNTS),
+        )
+        assert [p.candidate.id for p in picks] == ["m"]
+
+    def test_greedy_path_drops_the_dead_weight(self):
+        """Twenty-one candidates: above `_EXACT_ENUMERATION_LIMIT`, so the
+        greedy walk answers instead. It must reach the same basket."""
+        pool = [
+            EmergencyCandidate(
+                f"d{i}",
+                f"D{i}",
+                ask=20_000_000,
+                max_bid=20_000_000,
+                ep=90.0,
+                position="Defender",
+            )
+            for i in range(20)
+        ] + [self.CLOSER]
+        picks = select_emergency_basket(
+            pool,
+            slots_short=2,
+            budget=50_000_000,
+            gap_after=_gap_after_for(self.COUNTS),
+        )
+        assert [p.candidate.id for p in picks] == ["m"]
+
+
 def test_without_gap_after_the_old_objective_is_untouched():
     """`tests/test_emergency_basket.py` pins that behaviour in full; this is
     the one-line reminder that the default path did not move."""

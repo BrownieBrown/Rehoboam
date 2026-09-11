@@ -3,11 +3,11 @@
 Pure, like `safety_gate`, so the choice that spends the whole budget in one
 session can be tested exhaustively rather than observed in production.
 
-**The objective is `total_ep + 100 x players_bought`.** An empty lineup slot
-costs -100 points at kickoff, every matchday, and that penalty is per SLOT —
-it does not care who fills it. Ranking candidates by expected points and
-walking the list greedily ignores the term entirely, which is how the
-2026-08-31 session bought three players and left the fourth slot empty:
+An empty lineup slot costs -100 points at kickoff, every matchday, and that
+penalty is per SLOT — it does not care who fills it. Ranking candidates by
+expected points and walking the list greedily ignores the term entirely, which
+is how the 2026-08-31 session bought three players and left the fourth slot
+empty:
 
     Nadir        ask  2,571,571   bid  2,957,306  (+15%)   EP 35.0
     Ebnoutalib   ask 12,712,298   bid 15,252,298  (+20%)   EP 61.2   fills gap
@@ -20,9 +20,23 @@ on the asking price — the most slots that fit — and the leftover is spent
 afterwards as overbid, best players first. The overbid buys a better chance at
 one auction; the slot it costs is a certain -100.
 
-Writing the objective out rather than hard-coding "more players always wins"
-matters at the edges: cardinality dominates exactly while EP spreads stay
-under the penalty, and correctly stops dominating when one exceeds it.
+**Without `gap_after` the objective is `total_ep + 100 x players_bought`** —
+every body counts as a slot, which is the objective written above and the one
+this module shipped with. Writing it out rather than hard-coding "more players
+always wins" matters at the edges: cardinality dominates exactly while EP
+spreads stay under the penalty, and correctly stops dominating when one
+exceeds it. Kept for callers that have not computed fieldability.
+
+**With `gap_after` the objective is the slots a basket actually CLOSES**,
+then the smallest basket that closes them, then expected points, then the
+lower asking price. Counting bodies is only a proxy for counting slots, and on
+2026-09-07 the proxy failed: the squad was 1 GK, 6 DEF, 3 MID, 1 FW — ten can
+start, one short — and with EUR 2,334,394 to spend the basket bought Stergiou,
+a seventh defender, for 2,294,821. The lineup stayed at ten and the -100 was
+paid anyway. `gap_after` answers "how many purchases would the squad still
+need?", so a defender there closes nothing, size breaks the tie that would
+otherwise bundle dead weight with a real closer, and a basket that closes
+nothing at all is refused outright: the answer is "nothing", not "Stergiou".
 """
 
 from __future__ import annotations
@@ -107,21 +121,34 @@ def _value(members: tuple[EmergencyCandidate, ...]) -> float:
 
 def _rank_key(
     members: tuple[EmergencyCandidate, ...],
-    slots_short: int = 0,
     gap_after: GapAfter | None = None,
 ) -> tuple:
     """Sort key for picking the best basket. Higher is better.
 
     With ``gap_after`` the slots a basket actually closes come first — an
     emergency fill exists to make an eleven fieldable, and a 150-EP player at
-    a saturated position does not — then expected points, then lower cost.
-    Without it, the original ``(value, -cost)``.
+    a saturated position does not — then the SMALLEST basket that closes them,
+    then expected points, then lower cost.
+
+    Size has to outrank expected points. A purchase reduces the shortfall by
+    at most one, so the smallest basket closing the most slots is exactly the
+    set of closers; anything larger is a closer plus dead weight, which scores
+    the same ``closed`` and more EP and would otherwise win. That is how a
+    seventh defender at EUR 20,000,000 rides along with the midfielder that
+    actually made the eleven fieldable.
+
+    ``closed`` is measured against ``gap_after(())`` — the shortfall of the
+    squad as it stands — rather than the caller's ``slots_short``, so the key
+    is self-consistent with the function that answers it. ``slots_short``
+    stays what it always was: the cap on how many players to enumerate.
+
+    Without ``gap_after``, the original ``(value, -cost)``.
     """
     cost = -sum(c.ask for c in members)
     if gap_after is None:
         return (_value(members), cost)
-    closed = slots_short - gap_after([c.position for c in members])
-    return (closed, sum(c.ep for c in members), cost)
+    closed = gap_after(()) - gap_after([c.position for c in members])
+    return (closed, -len(members), sum(c.ep for c in members), cost)
 
 
 def _best_exact(
@@ -136,7 +163,7 @@ def _best_exact(
         for combo in combinations(candidates, size):
             if sum(c.ask for c in combo) > budget:
                 continue
-            key = _rank_key(combo, slots_short, gap_after)
+            key = _rank_key(combo, gap_after)
             if best_key is None or key > best_key:
                 best, best_key = combo, key
     if gap_after is not None and best and best_key is not None and best_key[0] <= 0:
@@ -158,12 +185,15 @@ def _best_greedy(
 
     With ``gap_after``: one pick at a time, choosing the affordable candidate
     that closes the most slots, then the most expected points, then the
-    cheapest; stops as soon as no candidate closes anything.
+    cheapest; stops as soon as no candidate closes anything. The running gap
+    starts at ``gap_after(())`` — what the squad is actually short — rather
+    than at ``slots_short``, so the walk and `_rank_key` measure the same
+    thing even when a caller's ``slots_short`` disagrees.
     """
     if gap_after is not None:
         chosen: list[EmergencyCandidate] = []
         remaining = budget
-        gap = slots_short
+        gap = gap_after(())
         while len(chosen) < slots_short and gap > 0:
             pool = [c for c in candidates if c not in chosen and 0 < c.ask <= remaining]
             if not pool:

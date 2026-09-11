@@ -1547,10 +1547,26 @@ class AutoTrader:
         # basket are dropped — proposing the whole board would bury the ask.
         deadline = time.time() + float(self.settings.emergency_auto_approve_hours) * 3600.0
         proposed = 0
+        proposed_positions: list[str] = []
         for rec, bid in attempts:
             if proposed >= slots_short:
                 break
             if bid > budget_remaining:
+                continue
+
+            # The basket refuses a buy that closes no slot; the reserves walk
+            # behind it has to honour the same invariant, because the gap
+            # moves as proposals land. With two slots open at 6 DEF / 3 MID /
+            # 0 FW the first midfielder closes one and the second closes
+            # none — only a forward closes what is left — and proposing him
+            # anyway is the seventh defender again, one position over.
+            if _gap_after(proposed_positions + [rec.player.position]) >= _gap_after(
+                proposed_positions
+            ):
+                console.print(
+                    f"[dim]Skip {rec.player.last_name} — "
+                    f"{rec.player.position} closes no remaining lineup slot[/dim]"
+                )
                 continue
 
             # Pre-flight the same gate approval will apply. Without this the
@@ -1575,10 +1591,10 @@ class AutoTrader:
 
             if self._propose_buy(league, rec, ctx, bid=bid, auto_approve_at=deadline):
                 proposed += 1
+                proposed_positions.append(rec.player.position)
                 # Reserve the money against the rest of this basket, so four
                 # proposals cannot each assume the whole wallet.
                 budget_remaining -= bid
-                gap_positions.discard(rec.player.position)
                 results.append(
                     AutoTradeResult(
                         success=True,

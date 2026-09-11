@@ -185,3 +185,113 @@ class TestTheFillTargetsTheOpenPosition:
         assert gap_after(["Midfielder"]) == 0
         assert gap_after(["Forward"]) == 0
         assert gap_after(["Defender"]) == 1
+
+
+class _ProposalSpy:
+    """The emergency fill proposes rather than buys since REH-114."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, league, rec, ctx, *, bid=None, auto_approve_at=None):
+        self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
+        return True
+
+    @property
+    def ids(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
+def _gated_rec(pid: str, position: str, ep: float, price: int, bid: int | None = None):
+    """A buy rec the real `_build_buy_gate` can read: it needs `market_value`
+    and `team_id`, which the display-only namespace above does not carry."""
+    return SimpleNamespace(
+        player=SimpleNamespace(
+            id=pid,
+            first_name="F",
+            last_name=f"P{pid}",
+            position=position,
+            price=price,
+            market_value=price,
+            team_id=f"club-{pid}",
+            average_points=10.0,
+            status=0,
+        ),
+        recommended_bid=price if bid is None else bid,
+        marginal_ep_gain=ep,
+        sell_plan=None,
+    )
+
+
+def _gated_ctx(squad, recs, budget: int) -> EPSessionContext:
+    return EPSessionContext(
+        ep_result={
+            "buy_recs": list(recs),
+            "squad_scores": [],
+            # The gate treats `market_players` as a security boundary: a
+            # candidate it has never seen cannot be bought at all.
+            "market_players": {r.player.id: r.player for r in recs},
+        },
+        matchday_phase=MatchdayPhase(
+            days_until_match=4, phase="moderate", max_trades=2, allow_flips=False, reason="t"
+        ),
+        my_bids=[],
+        my_bid_amounts={},
+        squad=list(squad),
+        current_budget=budget,
+        team_value=144_177_545,
+        flip_budget=0,
+    )
+
+
+class TestTheReservesWalkHonoursTheGap:
+    """A reserve is only a reserve while it still closes something.
+
+    The basket refuses a buy that closes no slot; the walk behind it used to
+    not, so a second midfielder could be proposed for a shortfall only a
+    forward can close — the same EUR-for-nothing the seventh defender was.
+    """
+
+    def test_a_second_pick_that_closes_nothing_is_skipped(self, monkeypatch, tmp_path):
+        """GK 1, DEF 6, MID 3, FW 0: two short. The first midfielder closes
+        one slot (5-4-1 minus a forward); the second closes none, because
+        only a forward can close what is left."""
+        squad = _squad(1, 6, 3, 0)
+        recs = [
+            _gated_rec("m1", "Midfielder", 70.0, 1_000_000),
+            _gated_rec("m2", "Midfielder", 60.0, 1_000_000),
+        ]
+        api = _Api(squad)
+        trader = _trader(api, monkeypatch, tmp_path)
+        trader._propose_buy = spy = _ProposalSpy()
+
+        with patch.object(AutoTrader, "_is_wash_trade", return_value=False):
+            results = trader._run_emergency_squad_fill(
+                LEAGUE, _gated_ctx(squad, recs, 12_929_567), squad, slots_short=2
+            )
+
+        assert spy.ids == ["m1"], "the second midfielder closes nothing"
+        assert sum(1 for r in results if r.success) == 1
+
+    def test_a_saturated_reserve_is_never_reached_when_the_closer_is_refused(
+        self, monkeypatch, tmp_path
+    ):
+        """The 2026-09-11 squad, one short at Midfielder or Forward. The only
+        closer is priced 40% over market value, which the gate refuses; the
+        affordable defender closes nothing, so the answer is to buy nobody."""
+        squad = _squad(1, 6, 3, 1)
+        recs = [
+            _gated_rec("m1", "Midfielder", 30.0, 5_000_000, bid=7_000_000),
+            _gated_rec("d1", "Defender", 90.0, 1_000_000),
+        ]
+        api = _Api(squad)
+        trader = _trader(api, monkeypatch, tmp_path)
+        trader._propose_buy = spy = _ProposalSpy()
+
+        with patch.object(AutoTrader, "_is_wash_trade", return_value=False):
+            results = trader._run_emergency_squad_fill(
+                LEAGUE, _gated_ctx(squad, recs, 12_929_567), squad, slots_short=1
+            )
+
+        assert spy.ids == []
+        assert results == []
