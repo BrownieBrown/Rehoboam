@@ -285,30 +285,18 @@ def _starter_swap_has_recovery_time(days_until_match: int | None, min_days: int)
 def _emergency_slots_short(squad: list) -> int:
     """How many players must be bought to make a legal eleven fieldable.
 
-    Zero when the squad can already field one. REH-82: this used to be
-    ``11 - len(squad)``, which is a headcount and therefore blind to the case
-    that actually costs -100 -- eleven players whose POSITIONS cannot fill any
-    legal formation (no goalkeeper, say) yields zero and triggers nothing,
-    while the emergency fill sitting behind the gate would have handled it
-    correctly, since it already prioritises positions below their minimum.
+    Zero when the squad can already field one. Answered by
+    :func:`rehoboam.formation.fieldability`, which knows the legal formations:
+    eleven bodies with six defenders can field ten, and this returns 1 for
+    them, at a position the fill path reads from the same answer.
 
-    ``can_fill_starting_eleven`` subsumes the headcount test -- it reports
-    "Only N available players, need 11" as well as a broken position mix -- so
-    this is strictly more coverage, not a trade.
-
-    The squad is passed unfiltered, exactly as the headcount version did.
-    ``can_fill_starting_eleven`` documents that injured and suspended players
-    should be excluded, which would be better still, but that makes emergencies
-    fire more often in the locked phase and is a behaviour change worth
-    measuring on its own.
+    The squad is passed unfiltered. Excluding injured and suspended players
+    would be better still, but it makes emergencies fire more often in the
+    locked phase and is a behaviour change worth measuring on its own.
     """
-    from .formation import FormationRequirements, can_fill_starting_eleven
+    from .formation import fieldability
 
-    if can_fill_starting_eleven(squad)["ok"]:
-        return 0
-    # Unfieldable despite enough bodies: buy at least one, and let the fill
-    # path's `gap_positions` choose which position it must be.
-    return max(FormationRequirements().starting_eleven_size - len(squad), 1)
+    return fieldability(squad).purchases
 
 
 def _target_availability(buy_recs: list, competitor_ids: set, bar: float) -> dict:
@@ -1448,22 +1436,23 @@ class AutoTrader:
         - Honors wash-trade and active-bid guards.
         - Caps spend at ``slots_short`` purchases.
         """
-        from .config import POSITION_MINIMUMS
-
         results: list[AutoTradeResult] = []
         buy_recs = ctx.ep_result.get("buy_recs", [])
         if not buy_recs:
             console.print("[red]No buy candidates available — cannot fill emergency slots[/red]")
             return results
 
-        position_counts: dict[str, int] = {}
-        for p in fresh_squad:
-            position_counts[p.position] = position_counts.get(p.position, 0) + 1
-        gap_positions = {
-            pos
-            for pos, minimum in POSITION_MINIMUMS.items()
-            if position_counts.get(pos, 0) < minimum
-        }
+        from .formation import fieldability_from_counts, get_position_counts
+
+        counts = get_position_counts(fresh_squad)
+        need = fieldability_from_counts(counts)
+        gap_positions = set(need.positions)
+
+        def _gap_after(positions) -> int:
+            after = dict(counts)
+            for pos in positions:
+                after[pos] = after.get(pos, 0) + 1
+            return fieldability_from_counts(after).purchases
 
         active_bid_ids = set(ctx.my_bid_amounts.keys())
         budget_remaining = int(ctx.current_budget)
@@ -1519,7 +1508,9 @@ class AutoTrader:
                 )
             )
 
-        picks = select_emergency_basket(candidates, slots_short, budget_remaining)
+        picks = select_emergency_basket(
+            candidates, slots_short, budget_remaining, gap_after=_gap_after
+        )
 
         if not picks:
             console.print(
@@ -1545,7 +1536,7 @@ class AutoTrader:
         attempts += [
             (by_id[c.id], c.max_bid)
             for c in sorted(candidates, key=lambda c: -c.ep)
-            if c.id not in chosen_ids
+            if c.id not in chosen_ids and c.position in gap_positions
         ]
 
         # REH-114: propose rather than spend. Marco approves squad trades, and
@@ -2363,7 +2354,13 @@ class AutoTrader:
         an empty list on any early-exit or failure path, so callers never see
         ``None``.
         """
-        from .formation import get_formation_string, order_for_lineup, select_best_eleven
+        from .formation import (
+            get_formation_string,
+            get_position_counts,
+            is_legal_formation,
+            order_for_lineup,
+            select_best_eleven,
+        )
 
         console.print("\n[bold cyan]📋 Setting Optimal Lineup[/bold cyan]")
 
@@ -2391,6 +2388,18 @@ class AutoTrader:
 
             # Select best 11, order by position for API (GK→DEF→MID→FWD)
             best_eleven = select_best_eleven(squad, ep_scores)
+            if not is_legal_formation(best_eleven):
+                counts = get_position_counts(squad)
+                msg = (
+                    f"lineup not legal: {len(best_eleven)} players as "
+                    f"{get_formation_string(best_eleven)} — squad "
+                    f"GK {counts['Goalkeeper']} DEF {counts['Defender']} "
+                    f"MID {counts['Midfielder']} FW {counts['Forward']}; not submitted"
+                )
+                console.print(f"[red]{msg}[/red]")
+                logger.error("lineup-illegal %s", msg)
+                errors.append(msg)
+                return []
             ordered = order_for_lineup(best_eleven)
             formation = get_formation_string(ordered)
             player_ids = [p.id for p in ordered]
