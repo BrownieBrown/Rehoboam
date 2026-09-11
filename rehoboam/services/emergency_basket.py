@@ -27,6 +27,7 @@ under the penalty, and correctly stops dominating when one exceeds it.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 
@@ -38,6 +39,11 @@ EMPTY_SLOT_PENALTY = 100.0
 #: runs, and the bound only stops a future widening of the pool from hanging
 #: a live trading session.
 _EXACT_ENUMERATION_LIMIT = 18
+
+#: Given the positions a basket would add, how many purchases the squad would
+#: still need. `None` means every player counts as a slot (the pre-2026-09-11
+#: objective), kept for callers that have not computed fieldability.
+GapAfter = Callable[[Sequence[str]], int]
 
 
 @dataclass(frozen=True)
@@ -99,37 +105,83 @@ def _value(members: tuple[EmergencyCandidate, ...]) -> float:
     return ep + slots + gaps
 
 
-def _rank_key(members: tuple[EmergencyCandidate, ...]) -> tuple:
+def _rank_key(
+    members: tuple[EmergencyCandidate, ...],
+    slots_short: int = 0,
+    gap_after: GapAfter | None = None,
+) -> tuple:
     """Sort key for picking the best basket. Higher is better.
 
-    Cost breaks ties so an equal-value basket does not spend more than it
-    needs to — the remainder is another player's bid.
+    With ``gap_after`` the slots a basket actually closes come first — an
+    emergency fill exists to make an eleven fieldable, and a 150-EP player at
+    a saturated position does not — then expected points, then lower cost.
+    Without it, the original ``(value, -cost)``.
     """
-    return (_value(members), -sum(c.ask for c in members))
+    cost = -sum(c.ask for c in members)
+    if gap_after is None:
+        return (_value(members), cost)
+    closed = slots_short - gap_after([c.position for c in members])
+    return (closed, sum(c.ep for c in members), cost)
 
 
 def _best_exact(
-    candidates: list[EmergencyCandidate], slots_short: int, budget: int
+    candidates: list[EmergencyCandidate],
+    slots_short: int,
+    budget: int,
+    gap_after: GapAfter | None = None,
 ) -> tuple[EmergencyCandidate, ...]:
     best: tuple[EmergencyCandidate, ...] = ()
+    best_key: tuple | None = None
     for size in range(1, min(slots_short, len(candidates)) + 1):
         for combo in combinations(candidates, size):
             if sum(c.ask for c in combo) > budget:
                 continue
-            if not best or _rank_key(combo) > _rank_key(best):
-                best = combo
+            key = _rank_key(combo, slots_short, gap_after)
+            if best_key is None or key > best_key:
+                best, best_key = combo, key
+    if gap_after is not None and best and best_key is not None and best_key[0] <= 0:
+        return ()  # closes nothing: not an emergency buy
     return best
 
 
 def _best_greedy(
-    candidates: list[EmergencyCandidate], slots_short: int, budget: int
+    candidates: list[EmergencyCandidate],
+    slots_short: int,
+    budget: int,
+    gap_after: GapAfter | None = None,
 ) -> tuple[EmergencyCandidate, ...]:
     """Feasibility-preserving greedy, for a pool too large to enumerate.
 
-    Takes candidates in value order but refuses any that would leave too
-    little to afford the cheapest remaining fillers — the check that keeps
-    cardinality intact, and precisely what the plain greedy walk lacked.
+    Without ``gap_after``: takes candidates in value order but refuses any
+    that would leave too little to afford the cheapest remaining fillers —
+    the check that keeps cardinality intact.
+
+    With ``gap_after``: one pick at a time, choosing the affordable candidate
+    that closes the most slots, then the most expected points, then the
+    cheapest; stops as soon as no candidate closes anything.
     """
+    if gap_after is not None:
+        chosen: list[EmergencyCandidate] = []
+        remaining = budget
+        gap = slots_short
+        while len(chosen) < slots_short and gap > 0:
+            pool = [c for c in candidates if c not in chosen and 0 < c.ask <= remaining]
+            if not pool:
+                break
+
+            def gain(c: EmergencyCandidate, _current_gap: int = gap) -> tuple:
+                after = gap_after([x.position for x in chosen] + [c.position])
+                return (_current_gap - after, c.ep, -c.ask)
+
+            pick = max(pool, key=gain)
+            closed = gain(pick)[0]
+            if closed <= 0:
+                break
+            chosen.append(pick)
+            remaining -= pick.ask
+            gap -= closed
+        return tuple(chosen)
+
     order = sorted(candidates, key=lambda c: (-_priority(c), c.ask))
     by_price = sorted(candidates, key=lambda c: c.ask)
 
@@ -143,7 +195,7 @@ def _best_greedy(
         running += c.ask
         target += 1
 
-    chosen: list[EmergencyCandidate] = []
+    chosen = []
     remaining = budget
     for c in order:
         if len(chosen) >= target:
@@ -178,7 +230,10 @@ def _spend_leftover(members: tuple[EmergencyCandidate, ...], budget: int) -> lis
 
 
 def select_emergency_basket(
-    candidates: list[EmergencyCandidate], slots_short: int, budget: int
+    candidates: list[EmergencyCandidate],
+    slots_short: int,
+    budget: int,
+    gap_after: GapAfter | None = None,
 ) -> list[EmergencyPick]:
     """Choose the basket of buys that scores the most points this matchday.
 
@@ -187,11 +242,16 @@ def select_emergency_basket(
             existing bids by the caller.
         slots_short: How many players an eleven is missing.
         budget: Money available to commit, in euros.
+        gap_after: Optional. Given the positions of a basket, how many
+            purchases the squad would still need. When provided, a basket
+            is ranked by the slots it closes before anything else, and a
+            basket that closes none is rejected — a seventh defender does
+            not fix a lineup that already has six.
 
     Returns:
         The chosen players with the bid to place for each, ask <= bid <=
         max_bid, totalling no more than `budget`. Empty when nothing is
-        affordable.
+        affordable, or nothing affordable closes a slot.
     """
     if slots_short <= 0 or budget <= 0:
         return []
@@ -201,9 +261,9 @@ def select_emergency_basket(
         return []
 
     if len(affordable) <= _EXACT_ENUMERATION_LIMIT:
-        members = _best_exact(affordable, slots_short, budget)
+        members = _best_exact(affordable, slots_short, budget, gap_after)
     else:
-        members = _best_greedy(affordable, slots_short, budget)
+        members = _best_greedy(affordable, slots_short, budget, gap_after)
 
     if not members:
         return []
