@@ -6,6 +6,7 @@ exists and is never called is how a season of NULLs happens.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -95,6 +96,24 @@ class TestTheLineupStepRefusesTenNames:
         assert lineup == []
         assert api.lineups == [], "ten names must never reach Kickbase"
         assert any("lineup not legal" in e for e in errors)
+
+    def test_a_squad_under_eleven_leaves_a_lineup_illegal_trace(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """The 2026-08-31 shape: seven players, no eleven to submit. This used
+        to return quietly, so M1 (lineup regret) had nothing to attribute the
+        -400 to."""
+        api = _Api(_squad(1, 4, 2, 0))
+        trader = _trader(api, monkeypatch, tmp_path)
+        errors: list[str] = []
+
+        with caplog.at_level(logging.ERROR, logger="rehoboam.auto_trader"):
+            lineup = trader._set_optimal_lineup(LEAGUE, errors, squad_scores=_scores(api._squad))
+
+        assert lineup == []
+        assert api.lineups == []
+        assert any("lineup not legal" in e and "7 players" in e for e in errors)
+        assert any(m.startswith("lineup-illegal") for m in caplog.messages)
 
     def test_legal_eleven_is_submitted_with_a_legal_formation(self, monkeypatch, tmp_path):
         api = _Api(_squad(1, 5, 5, 3))
@@ -297,3 +316,40 @@ class TestTheReservesWalkHonoursTheGap:
 
         assert spy.ids == []
         assert results == []
+
+
+class TestAFullSquadCannotBuyItsWayOut:
+    """At 15/15 there is no free slot, so the fill has nothing to offer.
+
+    The gate was being handed `free_slots=slots_short` — a number about the
+    lineup, not about the squad — so a full and unfieldable squad would
+    pre-flight clean and go on to propose a sixteenth player Kickbase would
+    refuse. The honest answer is that this shape needs a swap, and the fill
+    does not do swaps.
+    """
+
+    def test_a_full_unfieldable_squad_proposes_nothing_and_says_why(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """GK 2, DEF 8, MID 5, FW 0 — fifteen players, one short at Forward
+        (5-4-1 and 4-5-1 both want a forward nobody owns)."""
+        squad = _squad(2, 8, 5, 0)
+        assert len(squad) == 15
+        recs = [_gated_rec("f1", "Forward", 70.0, 1_000_000)]
+        api = _Api(squad)
+        trader = _trader(api, monkeypatch, tmp_path)
+        trader._propose_buy = spy = _ProposalSpy()
+
+        with (
+            patch.object(AutoTrader, "_is_wash_trade", return_value=False),
+            caplog.at_level(logging.WARNING, logger="rehoboam.auto_trader"),
+        ):
+            results = trader._run_emergency_squad_fill(
+                LEAGUE, _gated_ctx(squad, recs, 12_929_567), squad, slots_short=1
+            )
+
+        assert spy.ids == []
+        assert results == []
+        assert any(
+            "emergency-fill: squad full (15/15) and unfieldable" in m for m in caplog.messages
+        )

@@ -1432,11 +1432,28 @@ class AutoTrader:
 
         - Buys only plain in-budget candidates (no sell plans, no flips, no
           trade pairs — those all add complexity right before kickoff).
-        - Prioritizes positions below the formation minimum.
+        - Buys only positions that actually close a slot: a position a legal
+          formation still needs, re-checked as proposals land.
         - Honors wash-trade and active-bid guards.
-        - Caps spend at ``slots_short`` purchases.
+        - Caps spend at ``slots_short`` purchases, and at the free squad
+          slots — a full 15/15 squad needs a swap, which this path refuses to
+          make.
         """
         results: list[AutoTradeResult] = []
+
+        # A full squad has nowhere to put a sixteenth player, so an
+        # unfieldable 15/15 is not a buying problem at all — it is a seventh
+        # defender where a forward should be, and only a swap fixes it. Say so
+        # once and stop, rather than proposing a purchase that cannot land.
+        if len(fresh_squad) >= SQUAD_CAP:
+            msg = (
+                f"emergency-fill: squad full ({len(fresh_squad)}/{SQUAD_CAP}) "
+                "and unfieldable — needs a swap, not a buy"
+            )
+            console.print(f"[red]{msg}[/red]")
+            logger.warning(msg)
+            return results
+
         buy_recs = ctx.ep_result.get("buy_recs", [])
         if not buy_recs:
             console.print("[red]No buy candidates available — cannot fill emergency slots[/red]")
@@ -1579,7 +1596,12 @@ class AutoTrader:
                 ctx=ctx,
                 player=rec.player,
                 spendable_budget=budget_remaining,
-                free_slots=slots_short - proposed,
+                # Two different limits, and the gate needs the binding one:
+                # how many more players this emergency wants, and how many
+                # the squad can still hold. `slots_short` alone is a claim
+                # about the lineup, and a squad at 14/15 two slots short
+                # would have used it to pre-flight a buy with no room.
+                free_slots=min(slots_short - proposed, SQUAD_CAP - len(fresh_squad)),
                 marginal_ep_gain=rec.marginal_ep_gain,
             )
             verdict = gate.check(player_id=rec.player.id, bid=bid)
@@ -1970,14 +1992,25 @@ class AutoTrader:
     def run_full_session(self, league) -> AutoTradeSession:
         """Run a complete automated trading session.
 
-        New unified flow:
-        1. Sync activity feed (competitive intelligence)
-        2. Build session context (single EP pipeline call + trends + matchday timing)
-        3. If locked (0-1 days to match) → set lineup only
-        4. Trend-aware profit selling
-        5. Squad optimization (budget/size safety)
-        6. Unified trade phase (trade pairs compete with plain buys, ranked by EP)
-        7. Set optimal lineup
+        The flow, with the step numbers the console and the logs use:
+
+        0. Sync the activity feed (competitive intelligence).
+        1. Resolve pending bids into won/lost, reconcile squad cost basis, and
+           execute the sell plans deferred behind auctions we won — that last
+           part only in ``full`` mode; ``lineup_only`` skips and logs them.
+        2. Build the session context (one EP pipeline call + trends +
+           matchday timing).
+        2a. Learning: reconcile finished matchdays, settle the league's Top-5
+           forced-sale obligation, snapshot predictions and team value.
+        3. Emergency squad fill when no legal eleven is fieldable. Runs in
+           EVERY phase, locked included — an empty slot is -100 a matchday.
+        Then stop after the lineup if the match is imminent (phase ``locked``)
+        or ``trading_mode=lineup_only``; steps 4 to 7 do not run.
+        4. Trend-aware profit selling.
+        5. Squad optimisation (budget/size safety).
+        6. Bid compliance + open-bid quality check.
+        7. Unified trade phase (trade pairs compete with plain buys by EP).
+        8. Set the optimal lineup.
         """
         start_time = time.time()
 
@@ -2220,7 +2253,7 @@ class AutoTrader:
             stop_reason = "Mode lineup_only"
         if stop_reason is not None:
             return self._finish_lineup_only(
-                league, ctx, trade_results, errors, start_time, stop_reason
+                league, ctx, trade_results, sell_results, errors, start_time, stop_reason
             )
 
         # Step 4: Trend-aware profit selling
@@ -2356,6 +2389,7 @@ class AutoTrader:
         league,
         ctx: EPSessionContext,
         trade_results: list[AutoTradeResult],
+        sell_results: list[AutoTradeResult],
         errors: list[str],
         start_time: float,
         reason: str,
@@ -2366,6 +2400,13 @@ class AutoTrader:
         two exits cannot drift apart, and so both log ``session-end`` — the
         locked branch used to return without one, which is why prod telemetry
         shows no session-end for 2026-09-10 20:00 or 2026-09-11 08:00.
+
+        ``sell_results`` is not always empty on this path: step 1 executes the
+        sell plans deferred behind auctions this session won, and in ``full``
+        mode it does so before either exit condition is tested. The line used
+        to hard-code ``sells=0``, so a sale that really happened was reported
+        as none — the one number a telemetry reader would use to conclude the
+        locked path spends nothing.
         """
         console.print(f"[yellow]{reason} — setting lineup only, no trading[/yellow]")
         self._send_proposal_overview(league, ctx)
@@ -2373,15 +2414,17 @@ class AutoTrader:
             self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
             or []
         )
-        total_spent = sum(r.price for r in trade_results if r.action == "BUY" and r.success)
-        total_earned = sum(r.price for r in trade_results if r.action == "SELL" and r.success)
+        all_results = sell_results + trade_results
+        total_spent = sum(r.price for r in all_results if r.action == "BUY" and r.success)
+        total_earned = sum(r.price for r in all_results if r.action == "SELL" and r.success)
         end_time = time.time()
         logger.info(
-            "session-end duration=%.1fs mode=%s phase=%s sells=0 trades=%d/%d "
+            "session-end duration=%.1fs mode=%s phase=%s sells=%d trades=%d/%d "
             "spent=%d earned=%d net=%d errors=%d | %s",
             end_time - start_time,
             self.settings.trading_mode,
             ctx.matchday_phase.phase,
+            len([r for r in sell_results if r.success and r.action == "SELL"]),
             len([r for r in trade_results if r.success]),
             len(trade_results),
             total_spent,
@@ -2394,7 +2437,7 @@ class AutoTrader:
             start_time=start_time,
             end_time=end_time,
             profit_trades=trade_results,
-            lineup_trades=[],
+            lineup_trades=sell_results,
             errors=errors,
             total_spent=total_spent,
             total_earned=total_earned,
@@ -2433,7 +2476,15 @@ class AutoTrader:
         try:
             squad = self.api.get_squad(league)
             if not squad or len(squad) < 11:
-                console.print("[yellow]Not enough players to set lineup[/yellow]")
+                # A squad under eleven is the -100-per-slot case, not a quiet
+                # skip: on 2026-08-31 seven players sat unfielded and this
+                # branch left no trace at all, so M1 (lineup regret) had
+                # nothing to attribute the loss to. Same shape as the
+                # illegal-eleven refusal below, and read by the same grep.
+                msg = f"lineup not legal: squad has {len(squad or [])} players, need 11"
+                console.print(f"[yellow]{msg} — not submitted[/yellow]")
+                logger.error("lineup-illegal %s", msg)
+                errors.append(msg)
                 return []
 
             # Build ep_scores from the pipeline when available; fall back to a

@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from rehoboam.auto_trader import AutoTrader, EPSessionContext, MatchdayPhase
+from rehoboam.auto_trader import AutoTrader, AutoTradeResult, EPSessionContext, MatchdayPhase
 from rehoboam.config import Settings
 from rehoboam.kickbase_client import Player
 
@@ -89,12 +89,36 @@ def _context(squad, phase="moderate", days=4) -> EPSessionContext:
     )
 
 
-def _run(squad, mode, tmp_path, monkeypatch, phase="moderate", days=4):
+class _SellSpy:
+    """Stands in for `ExecutionService.instant_sell`, recording who was sold."""
+
+    def __init__(self):
+        self.sold: list[str] = []
+
+    def __call__(self, league, player, reason):
+        self.sold.append(player.id)
+        return AutoTradeResult(
+            success=True,
+            player_name=player.last_name,
+            action="SELL",
+            price=1_000_000,
+            reason=reason,
+            timestamp=0.0,
+        )
+
+
+def _run(squad, mode, tmp_path, monkeypatch, phase="moderate", days=4, deferred_sell_ids=None):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.setenv("TRADING_MODE", mode)
     monkeypatch.chdir(tmp_path)
     trader = AutoTrader(api=_Api(squad), settings=Settings(), dry_run=True)
+    sells_executed = _SellSpy()
+    if deferred_sell_ids is not None:
+        # Step 1 hands the session the auctions it won and the sell plans that
+        # were deferred behind them; the mode decides whether they execute.
+        trader.tracker.resolve_auctions = lambda **kwargs: list(deferred_sell_ids)
+        trader.execution.instant_sell = sells_executed
     ctx = _context(squad, phase=phase, days=days)
     with (
         patch.object(AutoTrader, "_build_session_context", return_value=ctx),
@@ -116,6 +140,7 @@ def _run(squad, mode, tmp_path, monkeypatch, phase="moderate", days=4):
         bid_eval=bid_eval,
         lineup=lineup,
         top5=top5,
+        sells_executed=sells_executed,
     )
 
 
@@ -165,6 +190,40 @@ class TestLineupOnlySkipsEveryTradingStep:
         assert r.top5.called
 
 
+class TestTheDeferredSellGate:
+    """A won auction can leave a sell plan queued behind it (buy first, sell
+    after). That sell is a trade, so `lineup_only` must not execute it — and
+    `full` must, or the squad stays oversized with the budget still spent."""
+
+    @staticmethod
+    def _squad_with_the_sell_target() -> list[Player]:
+        squad = _legal_squad()
+        squad[1] = _player("x", "Defender")  # GK 1, DEF 4, MID 4, FW 2
+        return squad
+
+    def test_lineup_only_skips_it_and_says_so(self, tmp_path, monkeypatch, caplog):
+        with caplog.at_level(logging.INFO, logger="rehoboam.auto_trader"):
+            r = _run(
+                self._squad_with_the_sell_target(),
+                "lineup_only",
+                tmp_path,
+                monkeypatch,
+                deferred_sell_ids=["x"],
+            )
+        assert r.sells_executed.sold == []
+        assert any("deferred sell plans skipped n=1" in m for m in caplog.messages)
+
+    def test_full_mode_executes_it(self, tmp_path, monkeypatch):
+        r = _run(
+            self._squad_with_the_sell_target(),
+            "full",
+            tmp_path,
+            monkeypatch,
+            deferred_sell_ids=["x"],
+        )
+        assert r.sells_executed.sold == ["x"]
+
+
 class TestFullModeIsUnchanged:
     def test_trading_steps_run(self, tmp_path, monkeypatch):
         r = _run(_legal_squad(), "full", tmp_path, monkeypatch)
@@ -182,6 +241,23 @@ class TestTheModeIsInTheLogs:
         ends = [m for m in caplog.messages if m.startswith("session-end")]
         assert starts and "mode=lineup_only" in starts[0]
         assert ends and "mode=lineup_only" in ends[0]
+
+    def test_session_end_counts_the_sells_the_exit_path_made(self, tmp_path, monkeypatch, caplog):
+        """The lineup-only exit used to hard-code `sells=0`, so a deferred
+        sell plan executed in step 1 was reported as no sale at all."""
+        squad = TestTheDeferredSellGate._squad_with_the_sell_target()
+        with caplog.at_level(logging.INFO, logger="rehoboam.auto_trader"):
+            _run(
+                squad,
+                "full",
+                tmp_path,
+                monkeypatch,
+                phase="locked",
+                days=1,
+                deferred_sell_ids=["x"],
+            )
+        ends = [m for m in caplog.messages if m.startswith("session-end")]
+        assert ends and "sells=1" in ends[0], ends
 
     def test_a_locked_session_logs_session_end_too(self, tmp_path, monkeypatch, caplog):
         """Today the locked branch returns without a session-end line, which
