@@ -17,16 +17,132 @@ class FormationRequirements:
 
 POSITION_MAPPING = {"Goalkeeper": "GK", "Defender": "DEF", "Midfielder": "MID", "Forward": "FWD"}
 
-# Maximum players per position that can ever start across all valid Kickbase
-# formations. GK is always 1. DEF tops out at 5 (5-x-x), MID at 5 (x-5-x),
-# FWD at 3 (x-x-3). Used to detect "dead weight" — a player who can never
-# enter any starting 11 because the position is already saturated.
+#: Formations Kickbase accepts, as (defenders, midfielders, forwards); one
+#: goalkeeper is implicit. This is the conservative set implied by the ceilings
+#: the bot has submitted lineups with all season (DEF 5, MID 5, FW 3). The app
+#: may also offer 3-6-1 and 4-2-4: add them ONLY after confirming them in the
+#: app's formation picker. A formation listed here that Kickbase rejects means a
+#: lineup that is never set, which is worse than a formation we never use.
+LEGAL_FORMATIONS: frozenset[tuple[int, int, int]] = frozenset(
+    {
+        (3, 4, 3),
+        (3, 5, 2),
+        (4, 3, 3),
+        (4, 4, 2),
+        (4, 5, 1),
+        (5, 2, 3),
+        (5, 3, 2),
+        (5, 4, 1),
+    }
+)
+
+# Maximum players per position that can ever start across the legal
+# formations. Derived, so the two can never disagree. Used to detect "dead
+# weight" — a player who can never enter any starting 11 because the position
+# is already saturated.
 _POSITION_MAX_STARTERS = {
     "Goalkeeper": 1,
-    "Defender": 5,
-    "Midfielder": 5,
-    "Forward": 3,
+    "Defender": max(d for d, _, _ in LEGAL_FORMATIONS),
+    "Midfielder": max(m for _, m, _ in LEGAL_FORMATIONS),
+    "Forward": max(f for _, _, f in LEGAL_FORMATIONS),
 }
+
+_POSITION_ORDER = ("Goalkeeper", "Defender", "Midfielder", "Forward")
+
+
+@dataclass(frozen=True)
+class Fieldability:
+    """Can these players field a legal eleven, and if not, what would it take?
+
+    ``purchases`` is the smallest number of players to buy so that some legal
+    formation fits. ``positions`` is the union of positions across every plan
+    of that minimal size — any one of them is an acceptable next buy. ``ok``
+    is ``purchases == 0``. ``reason`` is human-readable and stable enough for
+    logs: "Only N available players, need 11", "<Position>: have X, need Y",
+    or "Only N of M can start in any formation (<Position> X > ceiling)".
+    """
+
+    ok: bool
+    reason: str
+    counts: dict[str, int]
+    purchases: int
+    positions: frozenset[str]
+
+
+def _shortfall(counts: dict[str, int], formation: tuple[int, int, int]) -> dict[str, int]:
+    d, m, f = formation
+    need = {"Goalkeeper": 1, "Defender": d, "Midfielder": m, "Forward": f}
+    return {pos: max(0, n - counts.get(pos, 0)) for pos, n in need.items()}
+
+
+def fieldability_from_counts(counts: dict[str, int]) -> Fieldability:
+    """Answer fieldability from position counts alone.
+
+    Pure on counts so callers can ask "and after buying a midfielder?" by
+    adding one to a copy — the emergency basket does exactly that.
+    """
+    requirements = FormationRequirements()
+    plans = [_shortfall(counts, formation) for formation in LEGAL_FORMATIONS]
+    purchases = min(sum(plan.values()) for plan in plans)
+    positions = frozenset(
+        pos for plan in plans if sum(plan.values()) == purchases for pos, n in plan.items() if n > 0
+    )
+    available = sum(counts.get(pos, 0) for pos in _POSITION_ORDER)
+
+    if purchases == 0:
+        reason = "Legal starting 11 available"
+    elif available < requirements.starting_eleven_size:
+        reason = f"Only {available} available players, need {requirements.starting_eleven_size}"
+    else:
+        minimums = {
+            "Goalkeeper": requirements.min_goalkeepers,
+            "Defender": requirements.min_defenders,
+            "Midfielder": requirements.min_midfielders,
+            "Forward": requirements.min_forwards,
+        }
+        unmet = next((pos for pos in _POSITION_ORDER if counts.get(pos, 0) < minimums[pos]), None)
+        if unmet is not None:
+            reason = f"{unmet}: have {counts.get(unmet, 0)}, need {minimums[unmet]}"
+        else:
+            over = ", ".join(
+                f"{pos} {counts.get(pos, 0)} > {ceiling}"
+                for pos, ceiling in _POSITION_MAX_STARTERS.items()
+                if counts.get(pos, 0) > ceiling
+            )
+            fieldable = sum(
+                min(counts.get(pos, 0), ceiling) for pos, ceiling in _POSITION_MAX_STARTERS.items()
+            )
+            reason = (
+                f"Only {fieldable} of {available} can start in any formation ({over}); "
+                f"need {', '.join(sorted(positions))}"
+            )
+
+    return Fieldability(
+        ok=purchases == 0,
+        reason=reason,
+        counts={pos: counts.get(pos, 0) for pos in _POSITION_ORDER},
+        purchases=purchases,
+        positions=positions,
+    )
+
+
+def fieldability(available: list) -> Fieldability:
+    """`fieldability_from_counts` over a list of players (uses ``.position``)."""
+    return fieldability_from_counts(get_position_counts(available))
+
+
+def is_legal_formation(players: list) -> bool:
+    """True when ``players`` is exactly eleven in a formation Kickbase accepts."""
+    if len(players) != FormationRequirements().starting_eleven_size:
+        return False
+    counts = get_position_counts(players)
+    if counts["Goalkeeper"] != 1:
+        return False
+    return (
+        counts["Defender"],
+        counts["Midfielder"],
+        counts["Forward"],
+    ) in LEGAL_FORMATIONS
 
 
 def get_position_counts(players: list) -> dict[str, int]:
@@ -188,35 +304,8 @@ def can_fill_starting_eleven(available: list) -> dict[str, any]:
     Returns:
         ``{"ok": bool, "reason": str, "counts": dict[str, int]}``
     """
-    requirements = FormationRequirements()
-    counts = get_position_counts(available)
-
-    if len(available) < requirements.starting_eleven_size:
-        return {
-            "ok": False,
-            "reason": (
-                f"Only {len(available)} available players, need "
-                f"{requirements.starting_eleven_size}"
-            ),
-            "counts": counts,
-        }
-
-    minimums = {
-        "Goalkeeper": requirements.min_goalkeepers,
-        "Defender": requirements.min_defenders,
-        "Midfielder": requirements.min_midfielders,
-        "Forward": requirements.min_forwards,
-    }
-    for position, minimum in minimums.items():
-        have = counts.get(position, 0)
-        if have < minimum:
-            return {
-                "ok": False,
-                "reason": f"{position}: have {have}, need {minimum}",
-                "counts": counts,
-            }
-
-    return {"ok": True, "reason": "Legal starting 11 available", "counts": counts}
+    fb = fieldability(available)
+    return {"ok": fb.ok, "reason": fb.reason, "counts": fb.counts}
 
 
 def validate_trade(current_squad: list, players_out: list, players_in: list) -> dict[str, any]:
