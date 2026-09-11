@@ -72,6 +72,9 @@ param dryRun string = 'true'
 @description('When true, trading function uses aggressive thresholds.')
 param aggressiveMode string = 'true'
 
+@description('What a trading session may do: full | lineup_only. Read by Settings.trading_mode.')
+param tradingMode string = 'full'
+
 // ---------------------------------------------------------------------------
 // Shared infrastructure
 // ---------------------------------------------------------------------------
@@ -294,6 +297,7 @@ resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
     LEAGUE_INDEX: leagueIndex
     DRY_RUN: dryRun
     AGGRESSIVE: aggressiveMode
+    TRADING_MODE: tradingMode
     BLOB_CONTAINER: blobContainerName
   }, telegramSettings, smtpSettings)
 }

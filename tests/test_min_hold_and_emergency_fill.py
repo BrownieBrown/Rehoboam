@@ -271,7 +271,14 @@ class TestEmergencySquadFill:
 
     def test_skips_wash_trade_blocked_candidates(self, trader):
         trader._propose_buy = spy = _ProposalSpy()
-        squad = [_player(f"p{i}", "Defender") for i in range(10)]
+        # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+        # purchases == 1, and a Forward signing closes it (4-4-2).
+        squad = (
+            [_player("gk0", "Goalkeeper")]
+            + [_player(f"d{i}", "Defender") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder") for i in range(4)]
+            + [_player("fwd0", "Forward")]
+        )
 
         trader.learner.record_recent_sell(
             player_id="forward1",
@@ -295,7 +302,14 @@ class TestEmergencySquadFill:
 
     def test_skips_already_bid_candidates(self, trader):
         trader._propose_buy = spy = _ProposalSpy()
-        squad = [_player(f"p{i}", "Defender") for i in range(10)]
+        # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+        # purchases == 1, and a Forward signing closes it (4-4-2).
+        squad = (
+            [_player("gk0", "Goalkeeper")]
+            + [_player(f"d{i}", "Defender") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder") for i in range(4)]
+            + [_player("fwd0", "Forward")]
+        )
 
         buy_recs = [
             _rec("forward1", "Forward", price=2_000_000, ep_gain=20.0),
@@ -315,7 +329,14 @@ class TestEmergencySquadFill:
 
     def test_skips_unaffordable_candidates(self, trader):
         trader._propose_buy = spy = _ProposalSpy()
-        squad = [_player(f"p{i}", "Defender") for i in range(10)]
+        # Two short: GK 1, DEF 4, MID 3, FW 1 (9 players) -- fieldability
+        # purchases == 2, and a single Forward signing closes one of them.
+        squad = (
+            [_player("gk0", "Goalkeeper")]
+            + [_player(f"d{i}", "Defender") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder") for i in range(3)]
+            + [_player("fwd0", "Forward")]
+        )
 
         buy_recs = [
             _rec("forward1", "Forward", price=20_000_000, ep_gain=30.0),  # too pricey
@@ -331,19 +352,25 @@ class TestEmergencySquadFill:
 
     def test_prioritises_gap_positions_over_raw_ep(self, trader):
         trader._propose_buy = spy = _ProposalSpy()
-        # 0 forwards, 5 defenders, 3 midfielders, 1 GK = 9 players, FW gap.
+        # One short with a saturated outfield: DEF 4, MID 4, FW 2, no GK
+        # (10 players) -- fieldability.purchases == 1, positions ==
+        # {Goalkeeper}. Only a goalkeeper closes it; a defender (any
+        # outfield position, already at or above its formation ceiling)
+        # closes nothing.
         squad = (
-            [_player(f"def{i}", "Defender") for i in range(5)]
-            + [_player(f"mid{i}", "Midfielder") for i in range(3)]
-            + [_player("gk0", "Goalkeeper")]
+            [_player(f"def{i}", "Defender") for i in range(4)]
+            + [_player(f"mid{i}", "Midfielder") for i in range(4)]
+            + [_player(f"fwd{i}", "Forward") for i in range(2)]
         )
-        assert len(squad) == 9
+        assert len(squad) == 10
 
         buy_recs = [
-            # Higher-EP defender, but defender is already saturated.
+            # Higher-EP defender, but the position is saturated and closes
+            # nothing.
             _rec("def_top", "Defender", price=1_000_000, ep_gain=25.0),
-            # Lower-EP forward, but it fills the formation gap.
-            _rec("fwd_gap", "Forward", price=1_000_000, ep_gain=12.0),
+            # Lower-EP goalkeeper, but it is the only position that closes
+            # the gap.
+            _rec("gk_gap", "Goalkeeper", price=1_000_000, ep_gain=12.0),
         ]
         ctx = _ctx(buy_recs, current_budget=5_000_000)
 
@@ -351,13 +378,22 @@ class TestEmergencySquadFill:
             league=SimpleNamespace(id="L"), ctx=ctx, fresh_squad=squad, slots_short=1
         )
 
-        # The gap-filling forward must come first, even though raw EP gain
-        # would have ranked the defender above it.
-        assert spy.ids[0] == "fwd_gap"
+        # The gap-filling goalkeeper is proposed; the saturated-position
+        # defender closes nothing and must never be proposed at all.
+        assert spy.ids == ["gk_gap"]
 
     def test_no_buys_when_no_affordable_clean_candidates(self, trader):
         trader._propose_buy = spy = _ProposalSpy()
-        squad = [_player(f"p{i}", "Defender") for i in range(10)]
+        # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+        # purchases == 1, and a Forward signing closes it (4-4-2). A squad of
+        # ten defenders would be short a goalkeeper too and never describes a
+        # real board.
+        squad = (
+            [_player("gk0", "Goalkeeper")]
+            + [_player(f"d{i}", "Defender") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder") for i in range(4)]
+            + [_player("fwd0", "Forward")]
+        )
 
         buy_recs = [
             _rec("forward1", "Forward", price=20_000_000, ep_gain=30.0),  # too pricey

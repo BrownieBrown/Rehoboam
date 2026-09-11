@@ -75,7 +75,7 @@ class TestWouldCreateDeadWeight:
         assert not _would_create_dead_weight(candidate, squad)
 
     def test_mid_with_few_existing_not_dead_weight(self):
-        """Only 1 MID in squad, max=5 → buying 2nd MID is fine."""
+        """Only 1 MID in squad, max=6 → buying 2nd MID is fine."""
         squad = [_make_player("mid1", "Midfielder")]
         candidate = _make_player("mid2", "Midfielder")
         assert not _would_create_dead_weight(candidate, squad)
@@ -98,10 +98,16 @@ class TestWouldCreateDeadWeight:
         candidate = _make_player("def5", "Defender")
         assert _would_create_dead_weight(candidate, squad)
 
-    def test_fourth_forward_is_dead_weight(self):
-        """FWD count=3, max=3 → adding a 4th FWD is dead weight."""
+    def test_fourth_forward_not_dead_weight(self):
+        """FWD count=3, max=4 → a 4th FWD can start in 4-2-4."""
         squad = [_make_player(f"fwd{i}", "Forward") for i in range(3)]
         candidate = _make_player("fwd3", "Forward")
+        assert not _would_create_dead_weight(candidate, squad)
+
+    def test_fifth_forward_is_dead_weight(self):
+        """FWD count=4, max=4 → adding a 5th FWD is dead weight."""
+        squad = [_make_player(f"fwd{i}", "Forward") for i in range(4)]
+        candidate = _make_player("fwd4", "Forward")
         assert _would_create_dead_weight(candidate, squad)
 
 
@@ -117,11 +123,11 @@ class TestPositionMaxStarters:
     def test_def_max_is_5(self):
         assert _POSITION_MAX_STARTERS["Defender"] == 5
 
-    def test_mid_max_is_5(self):
-        assert _POSITION_MAX_STARTERS["Midfielder"] == 5
+    def test_mid_max_is_6(self):
+        assert _POSITION_MAX_STARTERS["Midfielder"] == 6
 
-    def test_fwd_max_is_3(self):
-        assert _POSITION_MAX_STARTERS["Forward"] == 3
+    def test_fwd_max_is_4(self):
+        assert _POSITION_MAX_STARTERS["Forward"] == 4
 
 
 # ---------------------------------------------------------------------------

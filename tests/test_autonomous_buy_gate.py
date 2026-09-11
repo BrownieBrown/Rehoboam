@@ -131,7 +131,16 @@ class TestEmergencyFillRefusal:
         """
         over = _player("over", price=5_000_000)
         clean = _player("clean", price=4_000_000)
-        squad = [_player(f"s{i}", "Defender", team_id=f"club{i}") for i in range(10)]
+        # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+        # purchases == 1, and a Forward signing closes it (4-4-2). Distinct
+        # `team_id`s (never "1", `over`/`clean`'s default club) keep the
+        # club-limit gate out of this test.
+        squad = (
+            [_player("gk0", "Goalkeeper", team_id="club-gk")]
+            + [_player(f"d{i}", "Defender", team_id=f"club-d{i}") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder", team_id=f"club-m{i}") for i in range(4)]
+            + [_player("fwd0", "Forward", team_id="club-fwd")]
+        )
 
         ctx = _ctx(
             [_rec(over, bid=7_000_000, ep_gain=30.0), _rec(clean, bid=4_000_000, ep_gain=5.0)],

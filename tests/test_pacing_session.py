@@ -183,19 +183,27 @@ class _ProposalSpy:
 
 
 def _emergency_fill_ctx(recommended_bid: int):
-    """A short squad (11/15, one gap slot) plus one candidate to fill it."""
-    squad = [
-        SimpleNamespace(
-            id=f"s{i}",
+    """One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+    purchases == 1, and the Forward candidate below closes it (4-4-2).
+    """
+
+    def _p(pid, position, team_id):
+        return SimpleNamespace(
+            id=pid,
             first_name="X",
-            last_name=f"P{i}",
-            position="Defender",
+            last_name=f"P{pid}",
+            position=position,
             price=1_000_000,
             market_value=1_000_000,
-            team_id=f"club{i}",
+            team_id=team_id,
         )
-        for i in range(9)
-    ]
+
+    squad = (
+        [_p("gk0", "Goalkeeper", "club-gk")]
+        + [_p(f"d{i}", "Defender", f"club-d{i}") for i in range(4)]
+        + [_p(f"m{i}", "Midfielder", f"club-m{i}") for i in range(4)]
+        + [_p("fwd0", "Forward", "club-fwd")]
+    )
     target = SimpleNamespace(
         id="fill",
         first_name="Fill",

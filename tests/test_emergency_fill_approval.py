@@ -106,7 +106,14 @@ def trader(tmp_path, monkeypatch):
 
 class TestTheFillProposesRatherThanBuying:
     def test_an_emergency_pick_is_recorded_as_a_proposal(self, trader):
-        squad = [_player(f"d{i}") for i in range(7)]
+        # One short: GK 1, DEF 4, MID 4, FW 1 (10 players) -- fieldability
+        # purchases == 1, and the Forward candidate below closes it (4-4-2).
+        squad = (
+            [_player("gk0", "Goalkeeper")]
+            + [_player(f"d{i}", "Defender") for i in range(4)]
+            + [_player(f"m{i}", "Midfielder") for i in range(4)]
+            + [_player("f0", "Forward")]
+        )
         recs = [_rec("f1", 5_000_000, 60.0)]
 
         with patch.object(AutoTrader, "_propose_buy", return_value=True) as propose:

@@ -67,7 +67,8 @@ deploy_params() {
        "smtpPassword=${SMTP_PASSWORD:-}" \
        "alertEmailTo=${ALERT_EMAIL_TO:-}" \
        "dryRun=${DEPLOY_DRY_RUN}" \
-       "aggressiveMode=${DEPLOY_AGGRESSIVE}"
+       "aggressiveMode=${DEPLOY_AGGRESSIVE}" \
+       "tradingMode=${DEPLOY_TRADING_MODE}"
 }
 
 deploy_infra() {
@@ -79,8 +80,9 @@ deploy_infra() {
   # simulation — it keeps running and reporting success while placing no bids.
   : "${DEPLOY_DRY_RUN:?must be set in .env — an infra deploy overwrites the live value}"
   : "${DEPLOY_AGGRESSIVE:?must be set in .env — an infra deploy overwrites the live value}"
+  : "${DEPLOY_TRADING_MODE:?must be set in .env — an infra deploy overwrites the live value}"
 
-  echo "==> Deploying with DRY_RUN=$DEPLOY_DRY_RUN AGGRESSIVE=$DEPLOY_AGGRESSIVE"
+  echo "==> Deploying with DRY_RUN=$DEPLOY_DRY_RUN AGGRESSIVE=$DEPLOY_AGGRESSIVE TRADING_MODE=$DEPLOY_TRADING_MODE"
 
   if [[ "$SUBACTION" == "--what-if" ]]; then
     echo "==> Running Bicep what-if (preview only)..."

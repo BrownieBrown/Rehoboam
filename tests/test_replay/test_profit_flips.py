@@ -36,12 +36,13 @@ def _squad_of_12(basis: int = 10_000_000):
 
 def _run(*, current_mv: int, profit_take_pct=None, loss_cut_pct=None, squad=None):
     state = ReplayState(budget=10_000_000, squad=squad or _squad_of_12())
-    # Player "11" is the flip candidate; everyone else holds their basis.
+    # Player "11" is the flip candidate: the lowest-scoring player, so he sits
+    # outside the best eleven under any tie-break; everyone else holds their basis.
     result = run_season(
         state=state,
         market=NoMarket(),
         matchdays=[Matchday(day_number=1, kickoff=10 * DAY, points={})],
-        score_fn=lambda pid, at: 10.0,
+        score_fn=lambda pid, at: 1.0 if pid == "11" else 10.0,
         mv_fn=lambda pid, at: current_mv if pid == "11" else 10_000_000,
         position_fn=lambda pid: "Forward",
         team_fn=lambda pid: pid,
