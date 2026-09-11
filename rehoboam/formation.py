@@ -204,8 +204,45 @@ def validate_formation(players: list, requirements: FormationRequirements = None
 
 
 def select_best_eleven(squad: list, player_values: dict[str, float]) -> list:
+    """Select the best starting eleven that Kickbase will accept.
+
+    Tries every legal formation: the top goalkeeper plus the top ``d`` / ``m``
+    / ``f`` players at each position by ``player_values``, and keeps the
+    formation with the highest total. Exact, and only eight formations wide.
+
+    When no legal formation fits (too few bodies, or a position over its
+    ceiling with nothing to fill the rest), falls back to the greedy partial
+    list the bot has always produced, so callers that reason about a
+    short squad — replay, backtest, marginal-EP — keep their behaviour. The
+    lineup step checks ``is_legal_formation`` before submitting.
+    """
+    by_position: dict[str, list] = {pos: [] for pos in _POSITION_ORDER}
+    ranked = sorted(squad, key=lambda p: player_values.get(p.id, 0), reverse=True)
+    for player in ranked:
+        if player.position in by_position:
+            by_position[player.position].append(player)
+
+    best: list | None = None
+    best_total = float("-inf")
+    for d, m, f in sorted(LEGAL_FORMATIONS):
+        need = {"Goalkeeper": 1, "Defender": d, "Midfielder": m, "Forward": f}
+        if any(len(by_position[pos]) < n for pos, n in need.items()):
+            continue
+        eleven = [p for pos in _POSITION_ORDER for p in by_position[pos][: need[pos]]]
+        total = sum(player_values.get(p.id, 0) for p in eleven)
+        if total > best_total:
+            best, best_total = eleven, total
+    if best is not None:
+        return best
+    return _greedy_partial_eleven(squad, player_values)
+
+
+def _greedy_partial_eleven(squad: list, player_values: dict[str, float]) -> list:
     """
     Select the best starting 11 from squad based on value scores
+
+    Fallback for squads that cannot field a legal eleven; returns fewer than
+    eleven.
 
     Args:
         squad: List of players

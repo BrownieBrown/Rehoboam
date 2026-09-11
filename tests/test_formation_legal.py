@@ -18,6 +18,7 @@ from rehoboam.formation import (
     fieldability,
     fieldability_from_counts,
     is_legal_formation,
+    select_best_eleven,
 )
 from rehoboam.kickbase_client import Player
 
@@ -146,3 +147,43 @@ class TestWrappers:
     def test_is_legal_formation_rejects_an_eleven_with_two_goalkeepers(self):
         """Eleven players with two goalkeepers: GK != 1 guard must reject."""
         assert is_legal_formation(_squad(2, 4, 4, 1)) is False
+
+
+class TestSelectBestElevenIsFormationAware:
+    def test_never_returns_an_illegal_eleven_when_a_legal_one_exists(self):
+        """GK 1, DEF 5, MID 5, FW 1 with flat scores: the old greedy filled
+        5-5-1, which Kickbase does not accept."""
+        squad = _squad(1, 5, 5, 1)
+        values = {p.id: 50.0 for p in squad}
+        eleven = select_best_eleven(squad, values)
+        assert len(eleven) == 11
+        assert is_legal_formation(eleven)
+
+    def test_picks_the_highest_scoring_legal_formation(self):
+        """Three strong forwards should pull the eleven toward 3-4-3 / 4-3-3,
+        not be capped by whatever the greedy pass filled first."""
+        squad = _squad(1, 5, 5, 3)
+        values = {p.id: 40.0 for p in squad}
+        for pid in ("f0", "f1", "f2"):
+            values[pid] = 90.0
+        eleven = select_best_eleven(squad, values)
+        assert is_legal_formation(eleven)
+        assert {p.id for p in eleven} >= {"f0", "f1", "f2"}
+        total = sum(values[p.id] for p in eleven)
+        assert total == 3 * 90.0 + 8 * 40.0
+
+    def test_falls_back_to_a_partial_list_when_nothing_fits(self):
+        """The 2026-09-11 squad. Callers in replay and decision code rely on
+        a partial result here; refusing to submit it is the lineup step's job."""
+        squad = _squad(1, 6, 3, 1)
+        values = {p.id: 50.0 for p in squad}
+        eleven = select_best_eleven(squad, values)
+        assert len(eleven) == 10
+        assert sum(1 for p in eleven if p.position == "Defender") == 5
+
+    def test_ties_are_deterministic(self):
+        squad = _squad(1, 5, 5, 3)
+        values = {p.id: 10.0 for p in squad}
+        first = [p.id for p in select_best_eleven(squad, values)]
+        second = [p.id for p in select_best_eleven(squad, values)]
+        assert first == second
