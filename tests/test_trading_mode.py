@@ -104,6 +104,7 @@ def _run(squad, mode, tmp_path, monkeypatch, phase="moderate", days=4):
         patch.object(AutoTrader, "run_unified_trade_phase", return_value=[]) as trades,
         patch.object(AutoTrader, "_evaluate_open_bids", return_value=None) as bid_eval,
         patch.object(AutoTrader, "_set_optimal_lineup", return_value=[]) as lineup,
+        patch.object(AutoTrader, "_settle_top5_obligation", return_value=None) as top5,
     ):
         session = trader.run_full_session(LEAGUE)
     return SimpleNamespace(
@@ -114,6 +115,7 @@ def _run(squad, mode, tmp_path, monkeypatch, phase="moderate", days=4):
         trades=trades,
         bid_eval=bid_eval,
         lineup=lineup,
+        top5=top5,
     )
 
 
@@ -157,6 +159,10 @@ class TestLineupOnlySkipsEveryTradingStep:
         r = _run(_legal_squad(), "lineup_only", tmp_path, monkeypatch, phase="locked", days=1)
         assert not r.trades.called
         assert r.lineup.call_count == 1
+
+    def test_the_top5_obligation_is_still_settled(self, tmp_path, monkeypatch):
+        r = _run(_legal_squad(), "lineup_only", tmp_path, monkeypatch)
+        assert r.top5.called
 
 
 class TestFullModeIsUnchanged:

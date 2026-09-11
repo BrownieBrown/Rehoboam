@@ -1988,7 +1988,8 @@ class AutoTrader:
         )
         if self.settings.trading_mode == "lineup_only":
             console.print(
-                "[yellow]MODE lineup_only — no sells, no buys except the emergency fill[/yellow]"
+                "[yellow]MODE lineup_only — no sells, no buys, except the emergency fill "
+                "and the league's Top-5 forced sale[/yellow]"
             )
 
         # Step 0: Sync activity feed for competitive intelligence

@@ -536,9 +536,10 @@ class Settings(BaseSettings):
         default="full",
         description=(
             "What a session may do. 'full' trades. 'lineup_only' sets the lineup, "
-            "runs the emergency fill, records learning, and skips every sell and "
-            "buy phase — the mode prod runs while the data foundation is rebuilt "
-            "(spec 2026-09-11 §5). Env: TRADING_MODE."
+            "runs the emergency fill and the league's Top-5 forced sale, records "
+            "learning, and skips every other sell and buy phase — the mode prod "
+            "runs while the data foundation is rebuilt (spec 2026-09-11 §5). "
+            "Env: TRADING_MODE."
         ),
     )
 
