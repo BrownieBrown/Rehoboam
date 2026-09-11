@@ -18,15 +18,23 @@ class FormationRequirements:
 POSITION_MAPPING = {"Goalkeeper": "GK", "Defender": "DEF", "Midfielder": "MID", "Forward": "FWD"}
 
 #: Formations Kickbase accepts, as (defenders, midfielders, forwards); one
-#: goalkeeper is implicit. This is the conservative set implied by the ceilings
-#: the bot has submitted lineups with all season (DEF 5, MID 5, FW 3). The app
-#: may also offer 3-6-1 and 4-2-4: add them ONLY after confirming them in the
-#: app's formation picker. A formation listed here that Kickbase rejects means a
-#: lineup that is never set, which is worse than a formation we never use.
+#: goalkeeper is implicit. This is the API's own list: `GET /v4/config` returns
+#: `cps[*].lts`, the same ten for every eleven-a-side competition (`lpc == 11`;
+#: the six-a-side modes list 2-1-2 / 1-2-2 / 2-2-1 and do not apply),
+#: read-only-probed on 2026-09-11. `scripts/probe_formations.py` re-verifies it
+#: against the live API and exits non-zero on a mismatch — run it if Kickbase
+#: ever answers a lineup call with `LineupNotEnoughPlayers` on a formation
+#: listed here.
+#: Guessing in either direction costs points: a formation missing here is an
+#: eleven we never field (3-6-1 and 4-2-4 were missing until this list came
+#: from the API), and one listed here that Kickbase rejects is a lineup that
+#: is never set at all.
 LEGAL_FORMATIONS: frozenset[tuple[int, int, int]] = frozenset(
     {
         (3, 4, 3),
         (3, 5, 2),
+        (3, 6, 1),
+        (4, 2, 4),
         (4, 3, 3),
         (4, 4, 2),
         (4, 5, 1),
@@ -208,7 +216,7 @@ def select_best_eleven(squad: list, player_values: dict[str, float]) -> list:
 
     Tries every legal formation: the top goalkeeper plus the top ``d`` / ``m``
     / ``f`` players at each position by ``player_values``, and keeps the
-    formation with the highest total. Exact, and only eight formations wide.
+    formation with the highest total. Exact, and only ten formations wide.
 
     When no legal formation fits (too few bodies, or a position over its
     ceiling with nothing to fill the rest), falls back to the greedy partial

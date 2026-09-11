@@ -51,11 +51,15 @@ class TestLegalFormations:
         for d, m, f in LEGAL_FORMATIONS:
             assert d + m + f == 10, (d, m, f)
 
-    def test_the_conservative_eight(self):
+    def test_the_ten_from_v4_config(self):
+        """`GET /v4/config` -> `cps[*].lts`, probed read-only on 2026-09-11
+        (`scripts/probe_formations.py` re-verifies it against the live API)."""
         assert LEGAL_FORMATIONS == frozenset(
             {
                 (3, 4, 3),
                 (3, 5, 2),
+                (3, 6, 1),
+                (4, 2, 4),
                 (4, 3, 3),
                 (4, 4, 2),
                 (4, 5, 1),
@@ -69,8 +73,8 @@ class TestLegalFormations:
         assert _POSITION_MAX_STARTERS == {
             "Goalkeeper": 1,
             "Defender": 5,
-            "Midfielder": 5,
-            "Forward": 3,
+            "Midfielder": 6,
+            "Forward": 4,
         }
 
 

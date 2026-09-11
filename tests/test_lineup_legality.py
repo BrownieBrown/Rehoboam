@@ -111,6 +111,8 @@ class TestTheLineupStepRefusesTenNames:
         assert (d, m, f) in {
             (3, 4, 3),
             (3, 5, 2),
+            (3, 6, 1),
+            (4, 2, 4),
             (4, 3, 3),
             (4, 4, 2),
             (4, 5, 1),
