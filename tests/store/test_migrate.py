@@ -136,7 +136,18 @@ def test_migrate_refreshes_the_bot_role_grants_on_new_tables(store_dsn, tmp_path
     with connect(store_dsn) as conn:
         migrate(conn)
         bootstrap(conn, "pw")
-        (tmp_path / "002_more.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        # A table created by the connecting superuser would pick up rehoboam_bot's
+        # grant via bootstrap()'s "alter default privileges ... for role <superuser>",
+        # masking whether refresh_grants() itself did anything — a second role that
+        # owns the new table is the only way to prove the fix, not this artifact.
+        exists = conn.execute("select 1 from pg_roles where rolname = 'other_admin'").fetchone()
+        if not exists:
+            conn.execute("create role other_admin")
+        conn.execute("grant usage, create on schema rehoboam to other_admin")
+        conn.commit()
+        (tmp_path / "002_more.sql").write_text(
+            "set role other_admin;\ncreate table rehoboam.t_new (x integer);\nreset role;\n"
+        )
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
         migrate(conn)
         ok = conn.execute(
