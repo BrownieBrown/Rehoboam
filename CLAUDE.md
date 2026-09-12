@@ -184,8 +184,8 @@ last resort — it clobbers the Function's writes.
 
 - `store/__init__.py`'s `connect()`: psycopg 3 to Supabase Postgres through the **transaction pooler** (port 6543, IPv4), `prepare_threshold=None` because the pooler rejects prepared statements, dict rows. Every statement schema-qualifies `rehoboam.<table>`; `public` stays empty.
 - `store/migrate.py`: numbered SQL files under `store/migrations/`, each applied once in its own transaction and recorded in `rehoboam.schema_migrations`. `001_schema.sql` is the SQLite schema translated (epoch doubles kept, identity ids that accept explicit values, `api_cache` with `jsonb` replacing the two JSON caches).
-- `store/import_sqlite.py`: `COPY` into a temp table, then `INSERT … ON CONFLICT DO NOTHING`; re-running adds nothing. `store/corpus_pull.py` writes the corpus back into a local SQLite file, because the replay scans it in a loop.
-- Tests under `tests/store/` run against a real PostgreSQL (`pytest-postgresql`: local `postgresql@17` binaries, or CI's service container via `TEST_PG_HOST`); they skip with a message when neither exists.
+- `store/import_sqlite.py`: `COPY` into a temp table, then `INSERT … ON CONFLICT DO NOTHING`; re-running adds nothing. `store/corpus_pull.py` writes the corpus back into a local SQLite file, because the replay scans it in a loop; it writes with `INSERT OR REPLACE`, so a re-pull **rewrites** existing rows — corpus rows are not immutable (a `player_match_history` placeholder becomes the real result once the match finishes).
+- Tests under `tests/store/` run against a real PostgreSQL (`pytest-postgresql`: local `postgresql@17` binaries, or CI's service container via `TEST_PG_HOST`); they skip with a message when neither exists locally, and hard-fail when `CI` is set so a green CI can never mean "never ran". On macOS: `brew install postgresql@17`; if `initdb` cannot find its share files (a keg-only install), symlink `share/postgresql@17` and `lib/postgresql@17` from the keg into `/opt/homebrew/opt/postgresql@17/`.
 - The bot's live read/write path still uses the SQLite files until PR B2.
 
 ### Roster-Aware Recommendations

@@ -44,6 +44,9 @@ def test_db_bootstrap_creates_the_role_with_rights_on_the_schema(store_dsn):
         app, ["db-bootstrap", "--admin-dsn", store_dsn, "--role-password", "s3cret"]
     )
     assert again.exit_code == 0
+    # The second run did not apply --role-password; say so, or an operator
+    # believes a rotation happened and the store's real password drifts.
+    assert "password unchanged" in again.output
 
 
 def test_import_and_pull_commands_round_trip(store_dsn, tmp_path):

@@ -1142,7 +1142,10 @@ def db_bootstrap_cmd(
             "port 6543; database postgres.[/dim]"
         )
     else:
-        console.print(f"role {ROLE} already existed; grants refreshed")
+        console.print(
+            f"role {ROLE} already existed; grants refreshed, password unchanged "
+            f"— rotate with: alter role {ROLE} password '…'"
+        )
 
 
 @app.command("import-sqlite")

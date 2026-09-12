@@ -9,7 +9,7 @@ from rehoboam.store.corpus_pull import pull_corpus
 from rehoboam.store.migrate import migrate
 
 
-def test_pull_writes_every_corpus_table_and_is_idempotent(store_dsn, tmp_path):
+def test_pull_writes_every_corpus_table_and_rewrites_on_repull(store_dsn, tmp_path):
     with connect(store_dsn) as conn:
         migrate(conn)
         conn.execute(
@@ -32,12 +32,18 @@ def test_pull_writes_every_corpus_table_and_is_idempotent(store_dsn, tmp_path):
         assert written["player_universe"] == 1
         assert written["player_match_history"] == 1
         assert written["mv_series"] == 1
+        # A finished match rewrites its row in the store: the placeholder's
+        # 0 points become the real result. The local file must follow.
+        conn.execute(
+            f"update {SCHEMA}.player_match_history set points = 99, minutes = 90 "
+            "where player_id = 'p1'"
+        )
         again = pull_corpus(conn, out)
-    assert again["player_match_history"] == 0
+    assert again["player_match_history"] == 1
     with sqlite3.connect(out) as db:
         row = db.execute(
             "select points, minutes, status from player_match_history where player_id = 'p1'"
         ).fetchone()
         universe = db.execute("select count(*) from player_universe").fetchone()[0]
-    assert row == (88, 90, 5)
+    assert row == (99, 90, 5)
     assert universe == 1

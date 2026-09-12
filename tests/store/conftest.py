@@ -46,6 +46,11 @@ elif _local_pg_ctl():
 else:
     pg_proc = None
 
+if os.environ.get("CI") and pg_proc is None:
+    # A skip here would be indistinguishable from a pass: CI would go green
+    # with the entire store suite never run. GitHub Actions sets CI=true.
+    raise RuntimeError("CI has no PostgreSQL: TEST_PG_HOST unset and no local pg_ctl")
+
 if pg_proc is not None:
     pg_conn = factories.postgresql("pg_proc")
 
