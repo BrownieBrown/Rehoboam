@@ -68,7 +68,8 @@ deploy_params() {
        "alertEmailTo=${ALERT_EMAIL_TO:-}" \
        "dryRun=${DEPLOY_DRY_RUN}" \
        "aggressiveMode=${DEPLOY_AGGRESSIVE}" \
-       "tradingMode=${DEPLOY_TRADING_MODE}"
+       "tradingMode=${DEPLOY_TRADING_MODE}" \
+       "databaseUrl=${DATABASE_URL:-}"
 }
 
 deploy_infra() {

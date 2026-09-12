@@ -75,6 +75,10 @@ param aggressiveMode string = 'true'
 @description('What a trading session may do: full | lineup_only. Read by Settings.trading_mode.')
 param tradingMode string = 'full'
 
+@description('Supabase Postgres connection string through the transaction pooler (port 6543). Empty leaves DATABASE_URL unset.')
+@secure()
+param databaseUrl string = ''
+
 // ---------------------------------------------------------------------------
 // Shared infrastructure
 // ---------------------------------------------------------------------------
@@ -209,6 +213,12 @@ resource secretSmtpPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if 
   properties: { value: smtpPassword }
 }
 
+resource secretDatabaseUrl 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(databaseUrl)) {
+  parent: keyVault
+  name: 'database-url'
+  properties: { value: databaseUrl }
+}
+
 // Built from the vault URI rather than from the conditional resources above,
 // so referencing them is never evaluated when they were not created.
 var kvSecretPrefix = '${keyVault.properties.vaultUri}secrets/'
@@ -225,6 +235,10 @@ var smtpSettings = empty(smtpHost) ? {} : {
   SMTP_USER: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}smtp-user)'
   SMTP_PASSWORD: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}smtp-password)'
   ALERT_EMAIL_TO: alertEmailTo
+}
+
+var databaseSettings = empty(databaseUrl) ? {} : {
+  DATABASE_URL: '@Microsoft.KeyVault(SecretUri=${kvSecretPrefix}database-url)'
 }
 
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${storageAccount.listKeys().keys[0].value}'
@@ -299,7 +313,7 @@ resource tradingAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
     AGGRESSIVE: aggressiveMode
     TRADING_MODE: tradingMode
     BLOB_CONTAINER: blobContainerName
-  }, telegramSettings, smtpSettings)
+  }, telegramSettings, smtpSettings, databaseSettings)
 }
 
 resource externalAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
@@ -307,12 +321,12 @@ resource externalAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
   dependsOn: [
     externalKvAccess
   ]
-  properties: {
+  properties: union({
     AzureWebJobsStorage: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
     AZURE_STORAGE_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
     APPLICATIONINSIGHTS_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretAppInsightsConn.properties.secretUri})'
     FUNCTIONS_EXTENSION_VERSION: '~4'
     FUNCTIONS_WORKER_RUNTIME: 'python'
     BLOB_CONTAINER: blobContainerName
-  }
+  }, databaseSettings)
 }
