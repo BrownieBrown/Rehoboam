@@ -6,7 +6,7 @@ import psycopg
 import pytest
 
 from rehoboam.store import SCHEMA, connect
-from rehoboam.store.bootstrap import bootstrap
+from rehoboam.store.bootstrap import ROLE, bootstrap
 from rehoboam.store.migrate import applied_versions, migrate
 
 EXPECTED_TABLES = {
@@ -168,3 +168,36 @@ def test_flip_outcomes_keeps_its_unique_player_buy_date(store_dsn):
         conn.execute(row)
         n = conn.execute("select count(*) as n from rehoboam.flip_outcomes").fetchone()["n"]
     assert n == 1
+
+
+def test_an_up_to_date_database_needs_only_select_from_the_bot_role(store_dsn):
+    with connect(store_dsn) as conn:
+        migrate(conn)
+        bootstrap(conn, "pw")
+        conn.commit()
+        conn.execute(f"set role {ROLE}")
+        conn.commit()
+        try:
+            assert applied_versions(conn) == {1}
+            assert migrate(conn) == []
+        finally:
+            conn.execute("reset role")
+
+
+def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_path, monkeypatch):
+    with connect(store_dsn) as conn:
+        migrate(conn)
+        bootstrap(conn, "pw")
+        conn.commit()
+        (tmp_path / "002_more.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
+        conn.execute(f"set role {ROLE}")
+        conn.commit()
+        try:
+            with pytest.raises(PermissionError) as excinfo:
+                migrate(conn)
+            assert "postgres admin" in str(excinfo.value)
+            assert isinstance(excinfo.value.__cause__, psycopg.errors.InsufficientPrivilege)
+        finally:
+            conn.execute("reset role")
+        assert applied_versions(conn) == {1}

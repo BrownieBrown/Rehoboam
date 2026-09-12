@@ -41,9 +41,18 @@ def resolve_dsn(dsn: str | None = None) -> str:
 def connect(dsn: str | None = None) -> Iterator[psycopg.Connection]:
     """A connection with dict rows and no prepared statements.
 
-    Commits when the block exits cleanly and rolls back when it raises,
-    which is psycopg's own context-manager contract; callers that need
-    several independent transactions use ``conn.transaction()`` inside.
+    The whole block is ONE transaction unless the caller commits inside it:
+    psycopg opens an implicit transaction at the first statement, commits it
+    when the block exits cleanly and rolls it back when it raises. Entering
+    ``conn.transaction()`` once that implicit transaction is already open
+    gives a *savepoint*, not an independent transaction — its "commit" only
+    releases the savepoint, so a later failure still discards it. A caller
+    that needs genuinely independent transactions must therefore either
+    ``conn.commit()`` first (the idiom ``applied_versions`` uses, for exactly
+    this reason) or open ``conn.transaction()`` before any other statement on
+    the connection. ``import_sqlite`` and ``migrate`` both work around this.
+    Turning on ``autocommit`` would remove the trap; that is a PR B2 decision
+    and is deliberately not taken here.
     """
     with psycopg.connect(
         resolve_dsn(dsn),
