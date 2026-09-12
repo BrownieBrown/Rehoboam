@@ -14,10 +14,12 @@ def test_pull_writes_every_corpus_table_and_is_idempotent(store_dsn, tmp_path):
         migrate(conn)
         conn.execute(
             f"insert into {SCHEMA}.player_universe (player_id, first_name, last_name, position, "
-            "team_id, market_value, average_points) values ('p1', 'O', 'One', 'Defender', 't', 5, 1.5)"
+            "team_id, market_value, average_points) values ('p1', 'O', 'One', "
+            "'Defender', 't', 5, 1.5)"
         )
         conn.execute(
-            f"insert into {SCHEMA}.player_match_history (player_id, season, day_number, match_date, "
+            f"insert into {SCHEMA}.player_match_history (player_id, season, "
+            "day_number, match_date, "
             "points, minutes, team_id, opponent_team_id, is_home, status) "
             "values ('p1', '2025/2026', 1, '2025-08-23T13:30:00Z', 88, 90, 't', 'u', 1, 5)"
         )
