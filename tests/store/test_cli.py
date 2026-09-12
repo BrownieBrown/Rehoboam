@@ -7,6 +7,7 @@ import sqlite3
 from typer.testing import CliRunner
 
 from rehoboam.cli import app
+from rehoboam.config import Settings
 from rehoboam.enrichment.corpus import TrainingCorpus
 from rehoboam.store import SCHEMA, connect
 
@@ -81,3 +82,15 @@ def test_import_and_pull_commands_round_trip(store_dsn, tmp_path):
     assert pulled.exit_code == 0, pulled.output
     with sqlite3.connect(out) as db:
         assert db.execute("select market_value from mv_series").fetchone()[0] == 9
+
+
+def test_store_commands_fail_cleanly_when_database_url_is_unset(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+    monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setitem(Settings.model_config, "env_file", tmp_path / ".env")
+    result = runner.invoke(app, ["migrate"])
+    assert result.exit_code == 1
+    assert "DATABASE_URL" in result.output
+    assert "Traceback" not in result.output

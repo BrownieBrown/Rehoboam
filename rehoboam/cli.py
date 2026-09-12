@@ -1090,11 +1090,15 @@ def migrate_cmd(
     dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
 ):
     """Apply unapplied store migrations (idempotent)."""
-    from .store import connect
+    from .store import StoreUnconfigured, connect
     from .store.migrate import migrate
 
-    with connect(dsn) as conn:
-        applied = migrate(conn)
+    try:
+        with connect(dsn) as conn:
+            applied = migrate(conn)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     console.print(f"applied {len(applied)} migration(s): {', '.join(applied) or 'none'}")
 
 
@@ -1115,13 +1119,17 @@ def db_bootstrap_cmd(
     """Create the rehoboam_bot role and grant it the rehoboam schema (idempotent)."""
     import secrets
 
-    from .store import connect
+    from .store import StoreUnconfigured, connect
     from .store.bootstrap import ROLE, bootstrap
 
     generated = role_password is None
     password = role_password or secrets.token_urlsafe(24)
-    with connect(admin_dsn) as conn:
-        result = bootstrap(conn, password)
+    try:
+        with connect(admin_dsn) as conn:
+            result = bootstrap(conn, password)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     if result["role_created"]:
         console.print(f"[green]created role {ROLE}[/green]")
         if generated:
@@ -1153,13 +1161,17 @@ def import_sqlite_cmd(
     dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
 ):
     """Copy the SQLite state into the store; safe to re-run (rows never duplicate)."""
-    from .store import connect
+    from .store import StoreUnconfigured, connect
     from .store.import_sqlite import import_all
     from .store.migrate import migrate
 
-    with connect(dsn) as conn:
-        migrate(conn)
-        reports = import_all(conn, learning=learning, corpus=corpus, cache=cache)
+    try:
+        with connect(dsn) as conn:
+            migrate(conn)
+            reports = import_all(conn, learning=learning, corpus=corpus, cache=cache)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     table = Table(title="import-sqlite")
     table.add_column("table")
     table.add_column("sqlite rows", justify="right")
@@ -1188,11 +1200,15 @@ def corpus_pull_cmd(
     dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
 ):
     """Write the corpus tables from the store into a local SQLite file for replay/backtest."""
-    from .store import connect
+    from .store import StoreUnconfigured, connect
     from .store.corpus_pull import pull_corpus
 
-    with connect(dsn) as conn:
-        written = pull_corpus(conn, out)
+    try:
+        with connect(dsn) as conn:
+            written = pull_corpus(conn, out)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     for name, n in written.items():
         console.print(f"{name}: {n} row(s) written")
     console.print(f"[green]corpus written to {out}[/green]")

@@ -6,6 +6,7 @@ import psycopg
 import pytest
 
 from rehoboam.store import SCHEMA, connect
+from rehoboam.store.bootstrap import bootstrap
 from rehoboam.store.migrate import applied_versions, migrate
 
 EXPECTED_TABLES = {
@@ -129,6 +130,19 @@ def test_a_failing_migration_leaves_earlier_ones_applied(store_dsn, tmp_path, mo
             "where table_schema = 'rehoboam' and table_name = 't_ok'"
         ).fetchone()
     assert exists is not None
+
+
+def test_migrate_refreshes_the_bot_role_grants_on_new_tables(store_dsn, tmp_path, monkeypatch):
+    with connect(store_dsn) as conn:
+        migrate(conn)
+        bootstrap(conn, "pw")
+        (tmp_path / "002_more.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
+        migrate(conn)
+        ok = conn.execute(
+            "select has_table_privilege('rehoboam_bot', 'rehoboam.t_new', 'INSERT') as ok"
+        ).fetchone()["ok"]
+    assert ok
 
 
 def test_flip_outcomes_keeps_its_unique_player_buy_date(store_dsn):

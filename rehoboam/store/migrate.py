@@ -48,7 +48,11 @@ def applied_versions(conn: psycopg.Connection) -> set[int]:
 
 
 def migrate(conn: psycopg.Connection) -> list[str]:
-    """Apply every unapplied migration in version order; return their file names."""
+    """Apply every unapplied migration in version order; return their file names.
+
+    When at least one file is applied, also refreshes the bot role's grants —
+    covering tables a newly-applied migration created, whoever ran it.
+    """
     done = applied_versions(conn)
     applied: list[str] = []
     files = sorted(p for p in MIGRATIONS.iterdir() if p.name.endswith(".sql"))
@@ -64,4 +68,9 @@ def migrate(conn: psycopg.Connection) -> list[str]:
                 (version, path.name, time.time()),
             )
         applied.append(path.name)
+    if applied:
+        from rehoboam.store.bootstrap import refresh_grants
+
+        with conn.transaction():
+            refresh_grants(conn)
     return applied
