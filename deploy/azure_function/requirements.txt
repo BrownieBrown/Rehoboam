@@ -34,6 +34,10 @@ markupsafe==3.0.3
     # via werkzeug
 mdurl==0.1.2
     # via markdown-it-py
+psycopg==3.3.5
+    # via rehoboam
+psycopg-binary==3.3.5 ; implementation_name != 'pypy'
+    # via psycopg
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
 pydantic==2.13.4
@@ -67,6 +71,7 @@ typing-extensions==4.15.0
     #   azure-core
     #   azure-storage-blob
     #   cryptography
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   typing-inspection
@@ -74,6 +79,8 @@ typing-inspection==0.4.2
     # via
     #   pydantic
     #   pydantic-settings
+tzdata==2026.3 ; sys_platform == 'win32'
+    # via psycopg
 urllib3==2.7.0
     # via requests
 werkzeug==3.1.8

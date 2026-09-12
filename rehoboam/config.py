@@ -543,6 +543,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    database_url: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Supabase Postgres connection string through the TRANSACTION pooler "
+            "(port 6543). Empty means the store is unconfigured; the store "
+            "commands refuse to run. Never logged. Env: DATABASE_URL."
+        ),
+    )
+
     # Telegram approval gate
     telegram_bot_token: str = Field(
         default="",
