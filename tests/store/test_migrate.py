@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import psycopg
+import pytest
+
 from rehoboam.store import SCHEMA, connect
 from rehoboam.store.migrate import applied_versions, migrate
 
@@ -84,6 +87,48 @@ def test_identity_columns_accept_explicit_ids_and_continue_after_them(store_dsn)
             for r in conn.execute(f"select id from {SCHEMA}.buy_decisions order by id").fetchall()
         ]
     assert ids == [41, 42]
+
+
+def test_alter_added_columns_are_in_the_schema(store_dsn):
+    with connect(store_dsn) as conn:
+        migrate(conn)
+        rows = conn.execute(
+            "select table_name, column_name from information_schema.columns "
+            "where table_schema = %s",
+            (SCHEMA,),
+        ).fetchall()
+        pairs = {(r["table_name"], r["column_name"]) for r in rows}
+    assert pairs >= {
+        ("flip_outcomes", "trend_pct_at_buy"),
+        ("flip_outcomes", "mv_at_buy"),
+        ("flip_outcomes", "pct_below_peak_30d_at_buy"),
+        ("pending_bids", "tier"),
+        ("trade_proposals", "tier"),
+        ("trade_proposals", "auto_approve_at"),
+        ("trade_proposals", "batch_id"),
+    }
+
+
+def test_a_failing_migration_leaves_earlier_ones_applied(store_dsn, tmp_path, monkeypatch):
+    (tmp_path / "001_ok.sql").write_text(
+        "create schema if not exists rehoboam;\ncreate table rehoboam.t_ok (x integer);\n"
+    )
+    (tmp_path / "002_bad.sql").write_text("this is not sql;\n")
+    monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
+    # The exception must propagate out of connect()'s own __exit__ (not be
+    # swallowed while still inside it) — connect() commits on a clean exit,
+    # which would mask the bug this test exists to catch. See it fail for
+    # real by checking a brand-new connection afterward.
+    with pytest.raises(psycopg.Error):
+        with connect(store_dsn) as conn:
+            migrate(conn)
+    with connect(store_dsn) as conn:
+        assert applied_versions(conn) == {1}
+        exists = conn.execute(
+            "select 1 from information_schema.tables "
+            "where table_schema = 'rehoboam' and table_name = 't_ok'"
+        ).fetchone()
+    assert exists is not None
 
 
 def test_flip_outcomes_keeps_its_unique_player_buy_date(store_dsn):

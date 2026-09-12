@@ -11,6 +11,7 @@ rows continue where history stopped.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,8 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from rehoboam.store import SCHEMA
+
+logger = logging.getLogger(__name__)
 
 LEARNING_TABLES: tuple[str, ...] = (
     "auction_outcomes",
@@ -68,6 +71,7 @@ class ImportReport:
     table: str
     sqlite_rows: int  # -1 when the source table or file was absent
     postgres_rows: int
+    skipped_columns: tuple[str, ...] = ()
 
 
 def _sqlite_table(src: sqlite3.Connection, table: str) -> tuple[list[str], list[tuple]] | None:
@@ -147,13 +151,19 @@ def _import_tables(
                 continue
             cols, rows = found
             target_cols = _target_columns(conn, table)
-            keep = [i for i, c in enumerate(cols) if c in target_cols]
-            if len(keep) != len(cols):
+            skipped = tuple(c for c in cols if c not in target_cols)
+            if skipped:
+                logger.warning(
+                    "import-sqlite: %s: source columns not in the store, skipped: %s",
+                    table,
+                    ", ".join(skipped),
+                )
+                keep = [i for i, c in enumerate(cols) if c in target_cols]
                 cols = [cols[i] for i in keep]
                 rows = [tuple(r[i] for i in keep) for r in rows]
             if rows:
                 _stage_and_insert(conn, table, cols, rows)
-            reports.append(ImportReport(table, len(rows), _count(conn, table)))
+            reports.append(ImportReport(table, len(rows), _count(conn, table), skipped))
     return reports
 
 

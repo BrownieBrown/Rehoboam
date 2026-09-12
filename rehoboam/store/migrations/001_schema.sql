@@ -36,7 +36,11 @@ create table if not exists rehoboam.flip_outcomes (
     trend_at_buy   text,
     average_points double precision,
     position       text,
-    was_injured    integer not null default 0
+    was_injured    integer not null default 0,
+    -- added by ALTER TABLE in the SQLite era (bid_learner.py); part of the live schema
+    trend_pct_at_buy          double precision,
+    mv_at_buy                 bigint,
+    pct_below_peak_30d_at_buy double precision
 );
 create index if not exists idx_flip_outcomes_player_id on rehoboam.flip_outcomes (player_id);
 create index if not exists idx_flip_outcomes_buy_date on rehoboam.flip_outcomes (buy_date);
@@ -67,7 +71,9 @@ create table if not exists rehoboam.pending_bids (
     our_overbid_pct    double precision not null,
     "timestamp"        double precision not null,
     market_value       bigint,
-    player_value_score double precision
+    player_value_score double precision,
+    -- added by ALTER TABLE in the SQLite era (bid_learner.py); part of the live schema
+    tier text
 );
 create index if not exists idx_pending_bids_timestamp on rehoboam.pending_bids ("timestamp");
 
@@ -207,7 +213,11 @@ create table if not exists rehoboam.trade_proposals (
     market_value bigint not null,
     message      text not null,
     status       text not null,
-    created_at   double precision not null
+    created_at   double precision not null,
+    -- added by ALTER TABLE in the SQLite era (bid_learner.py); part of the live schema
+    tier            text,
+    auto_approve_at double precision,
+    batch_id        text
 );
 
 create table if not exists rehoboam.league_transfers (

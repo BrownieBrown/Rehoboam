@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -105,6 +106,9 @@ def test_learning_import_copies_every_row_and_is_idempotent(store_dsn, tmp_path)
         assert report["league_transfers"].postgres_rows == 1
         assert report["predicted_eps"].postgres_rows == 1
         assert report["league_rank_history"].postgres_rows == 1
+        assert report["flip_outcomes"].skipped_columns == ()
+        assert report["pending_bids"].skipped_columns == ()
+        assert report["trade_proposals"].skipped_columns == ()
         again = {r.table: r for r in import_learning(conn, src)}
         assert again["buy_decisions"].postgres_rows == 2
         assert again["flip_outcomes"].postgres_rows == 1
@@ -141,6 +145,20 @@ def test_cache_import_folds_both_tables_into_api_cache_as_jsonb(store_dsn, tmp_p
         ).fetchall()
     assert [(r["kind"], r["key"]) for r in rows] == [("mv", "365"), ("performance", "")]
     assert rows[1]["payload"]["it"][0]["ti"] == "2025/2026"
+
+
+def test_a_source_column_the_store_lacks_is_reported_not_swallowed(store_dsn, tmp_path, caplog):
+    src = _learning_db(tmp_path)
+    with sqlite3.connect(src) as conn:
+        conn.execute("alter table pending_bids add column legacy_col text")
+        conn.commit()
+    with connect(store_dsn) as conn:
+        migrate(conn)
+        with caplog.at_level(logging.WARNING, logger="rehoboam.store.import_sqlite"):
+            report = {r.table: r for r in import_learning(conn, src)}
+    assert report["pending_bids"].skipped_columns == ("legacy_col",)
+    assert report["pending_bids"].postgres_rows == 1
+    assert any("legacy_col" in m for m in caplog.messages)
 
 
 def test_import_all_skips_missing_files(store_dsn, tmp_path):

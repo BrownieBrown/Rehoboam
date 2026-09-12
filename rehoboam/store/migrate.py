@@ -35,6 +35,15 @@ def _bootstrap(conn: psycopg.Connection) -> None:
 def applied_versions(conn: psycopg.Connection) -> set[int]:
     _bootstrap(conn)
     rows = conn.execute(f"select version from {SCHEMA}.schema_migrations").fetchall()
+    # That select, run outside an explicit conn.transaction(), leaves an
+    # implicit transaction open on the connection. If it stays open, the next
+    # caller's conn.transaction() (each migration file, in migrate() below)
+    # nests as a savepoint inside it rather than starting its own top-level
+    # transaction — so a file's COMMIT is only a SAVEPOINT release, and a
+    # later file's failure rolls back everything still open, earlier
+    # successful files included. Commit here so each file is its own
+    # top-level transaction.
+    conn.commit()
     return {r["version"] for r in rows}
 
 
