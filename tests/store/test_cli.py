@@ -14,11 +14,11 @@ from rehoboam.store import SCHEMA, connect
 runner = CliRunner()
 
 
-def test_migrate_command_applies_then_reports_nothing_to_do(store_dsn):
-    first = runner.invoke(app, ["migrate", "--dsn", store_dsn])
+def test_migrate_command_applies_then_reports_nothing_to_do(blank_dsn):
+    first = runner.invoke(app, ["migrate", "--dsn", blank_dsn])
     assert first.exit_code == 0, first.output
     assert "001_schema.sql" in first.output
-    second = runner.invoke(app, ["migrate", "--dsn", store_dsn])
+    second = runner.invoke(app, ["migrate", "--dsn", blank_dsn])
     assert second.exit_code == 0
     assert "none" in second.output
 

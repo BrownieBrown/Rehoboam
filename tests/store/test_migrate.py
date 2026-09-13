@@ -50,8 +50,8 @@ def _tables(conn) -> set[str]:
     return {r["table_name"] for r in rows}
 
 
-def test_migrate_creates_every_table_in_the_rehoboam_schema(store_dsn):
-    with connect(store_dsn) as conn:
+def test_migrate_creates_every_table_in_the_rehoboam_schema(blank_dsn):
+    with connect(blank_dsn) as conn:
         applied = migrate(conn)
         assert applied == ["001_schema.sql"]
         assert _tables(conn) == EXPECTED_TABLES
@@ -110,7 +110,7 @@ def test_alter_added_columns_are_in_the_schema(store_dsn):
     }
 
 
-def test_a_failing_migration_leaves_earlier_ones_applied(store_dsn, tmp_path, monkeypatch):
+def test_a_failing_migration_leaves_earlier_ones_applied(blank_dsn, tmp_path, monkeypatch):
     (tmp_path / "001_ok.sql").write_text(
         "create schema if not exists rehoboam;\ncreate table rehoboam.t_ok (x integer);\n"
     )
@@ -121,9 +121,9 @@ def test_a_failing_migration_leaves_earlier_ones_applied(store_dsn, tmp_path, mo
     # which would mask the bug this test exists to catch. See it fail for
     # real by checking a brand-new connection afterward.
     with pytest.raises(psycopg.Error):
-        with connect(store_dsn) as conn:
+        with connect(blank_dsn) as conn:
             migrate(conn)
-    with connect(store_dsn) as conn:
+    with connect(blank_dsn) as conn:
         assert applied_versions(conn) == {1}
         exists = conn.execute(
             "select 1 from information_schema.tables "

@@ -553,6 +553,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    database_admin_url: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Connection string of the postgres admin role, used only by `rehoboam migrate` "
+            "and `rehoboam db-bootstrap` (DDL and grants). Empty falls back to DATABASE_URL. "
+            "Never logged. Env: DATABASE_ADMIN_URL."
+        ),
+    )
+
     # Telegram approval gate
     telegram_bot_token: str = Field(
         default="",
