@@ -33,7 +33,7 @@ def authorize(secret_header: str | None, expected: str) -> bool:
     """Constant-time check of Telegram's shared secret.
 
     Exposed separately from ``handle_callback`` so the HTTP trigger can reject
-    an unauthenticated caller *before* spending a blob round trip and a
+    an unauthenticated caller *before* spending a store round trip and a
     Kickbase login on it. An unset ``expected`` rejects everything rather than
     accepting everything.
     """

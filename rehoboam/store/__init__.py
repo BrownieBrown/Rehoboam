@@ -51,8 +51,10 @@ def connect(dsn: str | None = None) -> Iterator[psycopg.Connection]:
     ``conn.commit()`` first (the idiom ``applied_versions`` uses, for exactly
     this reason) or open ``conn.transaction()`` before any other statement on
     the connection. ``import_sqlite`` and ``migrate`` both work around this.
-    Turning on ``autocommit`` would remove the trap; that is a PR B2 decision
-    and is deliberately not taken here.
+    ``autocommit`` stays off: each learner method is one unit of work, so an
+    implicit transaction per ``with self.connection()`` block — committed
+    whole on success, rolled back whole on failure — is the wanted semantics,
+    not an accident to route around.
     """
     with psycopg.connect(
         resolve_dsn(dsn),

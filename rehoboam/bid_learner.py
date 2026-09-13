@@ -879,8 +879,8 @@ class BidLearner:
                 player_name = row["player_name"]
                 if ts is None:
                     continue
-                # fetchall() first: psycopg cannot iterate this cursor while
-                # the UPDATE below runs on the same connection.
+                # fetchall() materialises the read up front, so the loop body
+                # below is only the UPDATE -- no cursor stays open across it.
                 transfers = conn.execute(
                     """
                     SELECT manager_id, transfer_price, transfer_dt

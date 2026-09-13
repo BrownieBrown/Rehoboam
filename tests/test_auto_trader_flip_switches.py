@@ -40,7 +40,10 @@ def trader(tmp_path, settings, monkeypatch) -> AutoTrader:
     execution service side-effect-free (no api.buy_player call), so the
     EP-driven buy path can run to completion without extra scaffolding.
     """
-    monkeypatch.chdir(tmp_path)  # BidLearner/ActivityFeedLearner default to ./logs
+    # BidLearner/ActivityFeedLearner take a store DSN now, not a file path,
+    # so this chdir isolates nothing of theirs; kept harmless in case a
+    # future setup_logging() call in this path writes ./logs/rehoboam.log.
+    monkeypatch.chdir(tmp_path)
     api = MagicMock()
     return AutoTrader(api=api, settings=settings, dry_run=True)
 

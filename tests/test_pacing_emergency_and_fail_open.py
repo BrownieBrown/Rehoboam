@@ -33,11 +33,12 @@ from rehoboam.trader import Trader
 
 
 def _trader_with_mock_api(tmp_path, monkeypatch, *, recent_buy_prices=None):
-    """Mirrors `test_pacing_session.py`'s `trader` fixture, but chdir's BEFORE
-    constructing `Trader` -- `Trader.__init__` eagerly opens a real
-    `ValueHistoryCache` sqlite file under `./logs/`, and constructing it
-    before the chdir would create that file in the repo root instead of
-    `tmp_path`.
+    """Mirrors `test_pacing_session.py`'s `trader` fixture.
+
+    `ValueHistoryCache` and the learners talk to the store over a DSN now,
+    not a `./logs/` sqlite file, so `Trader.__init__` no longer touches the
+    filesystem. The chdir stays only in case a future `setup_logging()` call
+    in this path writes `./logs/rehoboam.log`.
     """
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")

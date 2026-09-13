@@ -43,6 +43,12 @@ def _ensure_store() -> None:
     except psycopg.OperationalError as e:
         console.print(f"[red]store unreachable: {e}[/red]")
         raise typer.Exit(code=1) from e
+    except psycopg.Error as e:
+        # Catch-all for the rest of psycopg's tree, e.g. InsufficientPrivilege
+        # from a role with no USAGE on the rehoboam schema -- a config error,
+        # not a crash, so it gets the same one red line as the cases above.
+        console.print(f"[red]store error: {e}[/red]")
+        raise typer.Exit(code=1) from e
 
 
 def _admin_dsn(explicit: str | None) -> str | None:
@@ -264,7 +270,7 @@ def enrich_corpus(
         "--include-historical",
         help=(
             "Also recover players who left the league since last season "
-            "(read from logs/bid_learning.db) — needed for backtesting past "
+            "(recovered from the store) — needed for backtesting past "
             "matchdays, since /lineup/selection only sees current players."
         ),
     ),
