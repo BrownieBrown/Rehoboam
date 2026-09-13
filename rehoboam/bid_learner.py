@@ -209,10 +209,8 @@ class BidLearner:
     # ------------------------------------------------------------------
     # Operational state: pending bids + tracked purchases
     #
-    # These two table families used to live in JSON files (`pending_bids.json`,
-    # `tracked_purchases.json`) which Azure wiped between runs. They live
-    # here so they ride along with the existing `bid_learning.db` blob sync.
-    # On lifecycle close (auction resolved / player sold) the row is deleted
+    # These two table families hold in-flight state, not history. On
+    # lifecycle close (auction resolved / player sold) the row is deleted
     # and the historical outcome is appended to `auction_outcomes` /
     # `flip_outcomes` — those tables are the durable archive.
     # ------------------------------------------------------------------
