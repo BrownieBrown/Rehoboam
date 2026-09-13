@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from pathlib import Path
 
-from rehoboam.activity_feed_learner import ActivityFeedLearner
-from rehoboam.bid_learner import BidLearner
 from rehoboam.enrichment.corpus import TrainingCorpus
 from rehoboam.store import SCHEMA, connect
 from rehoboam.store.import_sqlite import (
@@ -17,27 +16,98 @@ from rehoboam.store.import_sqlite import (
     import_learning,
 )
 from rehoboam.store.migrate import migrate
-from rehoboam.value_history import ValueHistoryCache
+
+#: Minimal schema for the SQLite-era tables this module seeds directly.
+# `BidLearner`, `ActivityFeedLearner` and `ValueHistoryCache` no longer create
+# SQLite schemas (they are Postgres clients now) -- fixtures that need a
+# SQLite *source* file to import from must build it themselves. Columns are
+# exactly what the inserts below use; `id` is autoincrement on the three
+# tables `import_sqlite.IDENTITY_TABLES` treats specially.
+_SQLITE_DDL = """
+create table pending_bids (
+    player_id TEXT PRIMARY KEY,
+    player_name TEXT,
+    our_bid INTEGER,
+    asking_price INTEGER,
+    our_overbid_pct REAL,
+    timestamp REAL
+);
+create table buy_decisions (
+    id integer primary key autoincrement,
+    timestamp REAL,
+    player_id TEXT,
+    player_name TEXT,
+    decision TEXT,
+    reason TEXT
+);
+create table flip_outcomes (
+    id integer primary key autoincrement,
+    player_id TEXT,
+    player_name TEXT,
+    buy_price INTEGER,
+    sell_price INTEGER,
+    profit INTEGER,
+    profit_pct REAL,
+    hold_days INTEGER,
+    buy_date REAL,
+    sell_date REAL
+);
+create table league_rank_history (
+    snapshot_at REAL,
+    league_id TEXT,
+    manager_id TEXT,
+    day_number INTEGER,
+    rank_overall INTEGER,
+    rank_matchday INTEGER,
+    total_points INTEGER,
+    matchday_points INTEGER,
+    team_value INTEGER,
+    is_self INTEGER
+);
+create table league_transfers (
+    id integer primary key autoincrement,
+    activity_id TEXT,
+    player_id TEXT,
+    player_name TEXT,
+    transfer_price INTEGER,
+    transfer_type INTEGER,
+    timestamp TEXT,
+    processed_at REAL
+);
+create table predicted_eps (
+    player_id TEXT,
+    league_id TEXT,
+    predicted_at REAL,
+    predicted_ep REAL,
+    position TEXT,
+    was_in_best_11 INTEGER,
+    marginal_ep_gain REAL
+);
+create table performance_cache (
+    player_id TEXT,
+    league_id TEXT,
+    fetched_at INTEGER,
+    data TEXT
+);
+create table market_value_cache (
+    player_id TEXT,
+    league_id TEXT,
+    timeframe INTEGER,
+    fetched_at INTEGER,
+    data TEXT
+);
+"""
 
 
 def _learning_db(tmp_path: Path) -> Path:
     path = tmp_path / "bid_learning.db"
-    learner = BidLearner(db_path=path)
-    learner.snapshot_predictions(
-        [
-            {
-                "player_id": "p1",
-                "league_id": "L",
-                "predicted_at": 100.0,
-                "predicted_ep": 55.5,
-                "position": "Defender",
-                "was_in_best_11": True,
-                "marginal_ep_gain": None,
-            }
-        ]
-    )
-    ActivityFeedLearner(db_path=path)  # creates league_transfers / market_value_snapshots
     with sqlite3.connect(path) as conn:
+        conn.executescript(_SQLITE_DDL)
+        conn.execute(
+            "insert into predicted_eps (player_id, league_id, predicted_at, predicted_ep, "
+            "position, was_in_best_11, marginal_ep_gain) "
+            "values ('p1', 'L', 100.0, 55.5, 'Defender', 1, NULL)"
+        )
         conn.execute(
             "insert into pending_bids (player_id, player_name, our_bid, asking_price, "
             "our_overbid_pct, timestamp) values ('p1', 'One', 1100, 1000, 10.0, 1.0)"
@@ -88,9 +158,19 @@ def _corpus_db(tmp_path: Path) -> Path:
 
 def _cache_db(tmp_path: Path) -> Path:
     path = tmp_path / "player_history.db"
-    cache = ValueHistoryCache(db_path=path)
-    cache.cache_performance("p1", "L", {"it": [{"ti": "2025/2026", "ph": []}]})
-    cache.cache_history("p1", "L", 365, {"it": [{"dt": 1, "mv": 5}]})
+    with sqlite3.connect(path) as conn:
+        conn.executescript(_SQLITE_DDL)
+        conn.execute(
+            "insert into performance_cache (player_id, league_id, fetched_at, data) "
+            "values ('p1', 'L', 1, ?)",
+            (json.dumps({"it": [{"ti": "2025/2026", "ph": []}]}),),
+        )
+        conn.execute(
+            "insert into market_value_cache (player_id, league_id, timeframe, fetched_at, data) "
+            "values ('p1', 'L', 365, 1, ?)",
+            (json.dumps({"it": [{"dt": 1, "mv": 5}]}),),
+        )
+        conn.commit()
     return path
 
 

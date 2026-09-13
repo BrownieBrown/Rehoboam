@@ -391,31 +391,30 @@ class TestDGWBidding:
 class TestAggressiveCompetitorsHelper:
     """Tests for ActivityFeedLearner.has_aggressive_competitors()."""
 
-    def test_no_data_returns_false(self, tmp_path):
+    def test_no_data_returns_false(self, store_dsn):
         from rehoboam.activity_feed_learner import ActivityFeedLearner
 
-        learner = ActivityFeedLearner(db_path=tmp_path / "test.db")
+        learner = ActivityFeedLearner(dsn=store_dsn)
         assert learner.has_aggressive_competitors() is False
 
-    def test_high_threat_detected(self, tmp_path):
+    def test_high_threat_detected(self, store_dsn):
         """A manager with many purchases + high avg price → threat_score > 100."""
-        import sqlite3
         import time
 
         from rehoboam.activity_feed_learner import ActivityFeedLearner
+        from rehoboam.store import connect
 
-        db_path = tmp_path / "test.db"
-        learner = ActivityFeedLearner(db_path=db_path)
+        learner = ActivityFeedLearner(dsn=store_dsn)
 
         # Manually seed league_transfers with a "whale" manager
-        with sqlite3.connect(db_path) as conn:
+        with connect(store_dsn) as conn:
             for i in range(10):
                 conn.execute(
                     """
-                    INSERT INTO league_transfers (
+                    INSERT INTO rehoboam.league_transfers (
                         activity_id, player_id, player_name, buyer_name,
                         transfer_price, transfer_type, timestamp, processed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         f"act_{i}",
@@ -428,7 +427,6 @@ class TestAggressiveCompetitorsHelper:
                         time.time(),
                     ),
                 )
-            conn.commit()
 
         assert learner.has_aggressive_competitors() is True
 
