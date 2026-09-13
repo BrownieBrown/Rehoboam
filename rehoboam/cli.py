@@ -388,10 +388,7 @@ def backfill_mv_history(
     console.print(table)
 
     if not dry_run:
-        console.print(
-            "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
-            "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
-        )
+        console.print("\n[dim]Written to the store.[/dim]")
 
 
 @app.command("enrich-corpus")
@@ -619,10 +616,7 @@ def backfill_history(
     console.print(table)
 
     if not dry_run:
-        console.print(
-            "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
-            "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
-        )
+        console.print("\n[dim]Written to the store.[/dim]")
 
 
 @app.command("backtest-baseline")
