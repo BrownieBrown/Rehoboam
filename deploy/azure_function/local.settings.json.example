@@ -7,7 +7,6 @@
     "KICKBASE_PASSWORD": "your-password",
     "LEAGUE_INDEX": "0",
     "DRY_RUN": "true",
-    "AZURE_STORAGE_CONNECTION_STRING": "your-connection-string",
-    "BLOB_CONTAINER": "rehoboam-data"
+    "DATABASE_URL": "postgresql://rehoboam_bot.<project-ref>:<password>@<pooler-host>:6543/postgres"
   }
 }

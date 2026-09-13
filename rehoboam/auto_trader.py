@@ -2295,7 +2295,9 @@ class AutoTrader:
                     for p in kickbase_market[:50]
                 }
 
-                compliance_checker = LeagueComplianceChecker(self.api, self.settings)
+                compliance_checker = LeagueComplianceChecker(
+                    self.api, self.settings, learner=self.learner
+                )
                 adjusted, canceled = compliance_checker.run_bid_compliance_check(
                     league, player_trends=player_trends, auto_resolve=True, dry_run=self.dry_run
                 )

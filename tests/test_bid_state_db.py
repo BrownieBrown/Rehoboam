@@ -1,10 +1,9 @@
 """Tests for the store-backed bid/purchase state replacing legacy JSON files.
 
-The bot used to keep `pending_bids.json` and `tracked_purchases.json` in
-the working directory. Azure wiped those between runs because only
-`bid_learning.db` was synced to blob storage. These tests cover the
-`pending_bids` / `tracked_purchases` tables living alongside the other
-learning tables in the store.
+The bot used to keep this state as JSON files in the working directory,
+which never survived between runs since only one database file was synced
+off-box. These tests cover the `pending_bids` / `tracked_purchases` tables
+living alongside the other learning tables in the store.
 """
 
 import time
