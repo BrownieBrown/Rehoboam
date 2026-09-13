@@ -10,15 +10,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
-from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
-
 
 def _iso(days_ago: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days_ago * 86400))

@@ -6,9 +6,9 @@ trading path, but a backtest replaying a past season needs every player who
 was ever actually held, including anyone who has since transferred out of
 the Bundesliga and so no longer shows up in that endpoint at all.
 
-This module recovers those departed ids from the three tables in the
-learning DB (``bid_learning.db``, written by ``BidLearner``) that still
-reference them by id, even though the player is gone from the live league:
+This module recovers those departed ids from the three tables in the store
+(written by ``BidLearner``) that still reference them by id, even though the
+player is gone from the live league:
 
 - ``flip_outcomes.player_id`` — every buy+sell we ever completed
 - ``matchday_lineup_results.lineup_player_ids`` — a JSON array of the 11
@@ -35,36 +35,38 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rehoboam.bid_learner import BidLearner
 
 logger = logging.getLogger(__name__)
 
 
-def gather_historical_player_ids(db_path: Path) -> list[str]:
+def gather_historical_player_ids(learner: BidLearner) -> list[str]:
     """Union of every player id referenced by past trading activity.
 
     Returns a sorted list of distinct ids as strings. Safe to call against
-    an empty (freshly created) learning DB — returns ``[]`` rather than
-    raising when the tables are empty.
+    an empty (freshly created) store — returns ``[]`` rather than raising
+    when the tables are empty.
 
     ``lineup_player_ids`` is written by a single ``json.dumps`` call today,
-    so a malformed row is unlikely — but CLAUDE.md's own documented
-    debugging workflow is opening the SQLite file directly
-    (``sqlite3 logs/bid_learning.db``), which makes a hand-edited row a real
-    path, not a hypothetical. A row that fails to parse as a JSON list
+    so a malformed row is unlikely — but a row can still be hand-edited by
+    editing a row in the Supabase dashboard, which makes a hand-edited row a
+    real path, not a hypothetical. A row that fails to parse as a JSON list
     (invalid JSON text, or valid JSON that isn't a list) is skipped and
     logged rather than allowed to abort the whole sweep, matching every
     other per-item failure path this module's caller (``sweep.run_sweep``)
     already treats this way — this is the one that didn't, until now.
     """
     ids: set[str] = set()
-    with sqlite3.connect(db_path) as conn:
-        for (pid,) in conn.execute("SELECT DISTINCT player_id FROM flip_outcomes"):
-            ids.add(str(pid))
-        for (pid,) in conn.execute("SELECT DISTINCT player_id FROM player_mv_history"):
-            ids.add(str(pid))
-        for (blob,) in conn.execute("SELECT lineup_player_ids FROM matchday_lineup_results"):
+    with learner.connection() as conn:
+        for r in conn.execute("SELECT DISTINCT player_id FROM rehoboam.flip_outcomes"):
+            ids.add(str(r["player_id"]))
+        for r in conn.execute("SELECT DISTINCT player_id FROM rehoboam.player_mv_history"):
+            ids.add(str(r["player_id"]))
+        for r in conn.execute("SELECT lineup_player_ids FROM rehoboam.matchday_lineup_results"):
+            blob = r["lineup_player_ids"]
             try:
                 parsed = json.loads(blob)
                 if not isinstance(parsed, list):

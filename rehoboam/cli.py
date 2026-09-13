@@ -1,7 +1,6 @@
 """CLI interface for Rehoboam — minimal surface for auto + diagnostics."""
 
 import logging
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -359,10 +358,8 @@ def backfill_mv_history(
     Idempotent: rerunning silently skips duplicates via the existing
     UNIQUE(player_id, snapshot_at) constraint.
 
-    Workflow when targeting prod state:
-      1. rehoboam fetch-azure-state
-      2. rehoboam backfill-mv-history
-      3. rehoboam push-azure-state --i-know-what-im-doing
+    Writes straight to the store; run during a quiet window between Function
+    sessions.
     """
     from .bid_learner import BidLearner
     from .mv_backfill import run_mv_backfill
@@ -483,11 +480,9 @@ def enrich_corpus(
 
     extra_player_ids = None
     if include_historical:
-        learner_db_path = BidLearner().db_path
-        extra_player_ids = gather_historical_player_ids(learner_db_path)
+        extra_player_ids = gather_historical_player_ids(BidLearner())
         console.print(
-            f"[dim]Recovered {len(extra_player_ids)} historical player ids from "
-            f"{learner_db_path}[/dim]"
+            f"[dim]Recovered {len(extra_player_ids)} historical player ids from the store[/dim]"
         )
 
     corpus = TrainingCorpus()
@@ -521,11 +516,7 @@ def enrich_corpus(
 
 
 @app.command("backfill-flip-entry-context")
-def backfill_flip_entry_context(
-    learning_db: Path = typer.Option(  # noqa: B008
-        Path("logs/bid_learning.db"), help="Path to the learning DB"
-    ),
-):
+def backfill_flip_entry_context():
     """Reconstruct what the market looked like when each closed flip was bought (REH-104).
 
     `flip_outcomes.trend_at_buy` has existed since the table was created and was
@@ -540,18 +531,11 @@ def backfill_flip_entry_context(
     """
     from rehoboam.bid_learner import BidLearner
 
-    if not learning_db.exists():
-        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
-        raise typer.Exit(1)
-
-    learner = BidLearner(db_path=learning_db)
+    learner = BidLearner()
     written = learner.backfill_flip_entry_context()
     console.print(f"[green]Annotated {written} flip(s) with entry context[/green]")
 
-    with sqlite3.connect(learning_db) as conn:
-        total, annotated = conn.execute(
-            "SELECT COUNT(*), COUNT(mv_at_buy) FROM flip_outcomes"
-        ).fetchone()
+    annotated, total = learner.flip_entry_context_coverage()
     console.print(f"[dim]{annotated} of {total} flips now carry entry context[/dim]")
 
 
@@ -573,10 +557,8 @@ def backfill_history(
 
     Idempotent: rerunning silently skips duplicates.
 
-    Workflow when targeting prod state:
-      1. rehoboam fetch-azure-state
-      2. rehoboam backfill-history
-      3. rehoboam push-azure-state --i-know-what-im-doing
+    Writes straight to the store; run during a quiet window between Function
+    sessions.
     """
     from .backfill import run_backfill
     from .bid_learner import BidLearner

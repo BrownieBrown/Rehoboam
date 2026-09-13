@@ -14,12 +14,11 @@ which did record Raum) rather than depending on the bidding path having
 remembered.
 """
 
-import sqlite3
-
 import pytest
 
 from rehoboam.bid_learner import BidLearner
 from rehoboam.learning.tracker import LearningTracker
+from rehoboam.store import connect
 
 LEAGUE = "1933872"
 US = "3616202"
@@ -27,11 +26,6 @@ THEM = "1907519"
 
 BUY = 1
 SELL = 2
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
 
 
 @pytest.fixture
@@ -226,11 +220,10 @@ class TestReconcileSquadCostBasis:
 
         assert learner.get_tracked_purchase("gone") is None
 
-    def test_a_learning_failure_never_raises_into_the_session(self, learner, tracker):
+    def test_a_learning_failure_never_raises_into_the_session(self, learner, tracker, store_dsn):
         """Every tracker method is best-effort; a broken DB must not stop trading."""
-        with sqlite3.connect(learner.db_path) as conn:
-            conn.execute("DROP TABLE manager_transfers")
-            conn.commit()
+        with connect(store_dsn) as conn:
+            conn.execute("DROP TABLE rehoboam.manager_transfers")
 
         result = tracker.reconcile_squad_cost_basis(
             [FakePlayer("p1", "David", "Raum")], manager_id=US
@@ -247,7 +240,9 @@ class TestTheSessionActuallyCallsIt:
     trap applies here, so the call site is proved rather than assumed.
     """
 
-    def test_step_one_recovers_cost_basis_for_the_live_squad(self, tmp_path, monkeypatch):
+    def test_step_one_recovers_cost_basis_for_the_live_squad(
+        self, tmp_path, monkeypatch, store_dsn
+    ):
         from types import SimpleNamespace
         from unittest.mock import patch
 
@@ -271,7 +266,7 @@ class TestTheSessionActuallyCallsIt:
                 return {"budget": 21_650_227, "teamValue": 145_278_078}
 
         trader = AutoTrader(api=_Api(), settings=Settings(), dry_run=True)
-        trader.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+        trader.learner = BidLearner(dsn=store_dsn)
         trader.tracker = LearningTracker(trader.learner)
         trader.learner.record_manager_transfers(
             [_transfer("p1", "Raum", "2026-08-26T15:28:32Z", BUY, 40_717_295)]

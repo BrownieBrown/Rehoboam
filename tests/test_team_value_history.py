@@ -7,20 +7,13 @@ series for goal 3 (team value growth) and feeding REH-37 (rank-trajectory
 regression).
 """
 
-import sqlite3
-
-import pytest
-
 from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+from rehoboam.store import connect
 
 
 class TestTeamValueSnapshot:
-    def test_round_trip_single_row(self, learner):
+    def test_round_trip_single_row(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         inserted = learner.record_team_value_snapshot(
             league_id="L1",
             team_value=85_000_000,
@@ -30,14 +23,21 @@ class TestTeamValueSnapshot:
         )
         assert inserted is True
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
                 "SELECT snapshot_at, league_id, team_value, budget, squad_size "
-                "FROM team_value_history"
+                "FROM rehoboam.team_value_history"
             ).fetchone()
-        assert row == (1_700_000_000.0, "L1", 85_000_000, 12_500_000, 15)
+        assert (
+            row["snapshot_at"],
+            row["league_id"],
+            row["team_value"],
+            row["budget"],
+            row["squad_size"],
+        ) == (1_700_000_000.0, "L1", 85_000_000, 12_500_000, 15)
 
-    def test_default_timestamp_is_now(self, learner):
+    def test_default_timestamp_is_now(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # When snapshot_at is omitted, should default to roughly current time.
         # Don't assert exact; assert > a fixed past sentinel.
         learner.record_team_value_snapshot(
@@ -46,12 +46,13 @@ class TestTeamValueSnapshot:
             budget=5_000_000,
             squad_size=11,
         )
-        with sqlite3.connect(learner.db_path) as conn:
-            ts = conn.execute("SELECT snapshot_at FROM team_value_history").fetchone()[0]
+        with connect(store_dsn) as conn:
+            row = conn.execute("SELECT snapshot_at FROM rehoboam.team_value_history").fetchone()
         # 2026-01-01 = 1767225600. Anything written today is well past that.
-        assert ts > 1_767_225_600
+        assert row["snapshot_at"] > 1_767_225_600
 
-    def test_multiple_snapshots_ordered_monotonically(self, learner):
+    def test_multiple_snapshots_ordered_monotonically(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         for i, ts in enumerate([100.0, 200.0, 300.0]):
             learner.record_team_value_snapshot(
                 league_id="L1",
@@ -60,17 +61,19 @@ class TestTeamValueSnapshot:
                 squad_size=15,
                 snapshot_at=ts,
             )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             rows = conn.execute(
-                "SELECT snapshot_at, team_value FROM team_value_history " "ORDER BY snapshot_at"
+                "SELECT snapshot_at, team_value FROM rehoboam.team_value_history "
+                "ORDER BY snapshot_at"
             ).fetchall()
-        assert rows == [
+        assert [(r["snapshot_at"], r["team_value"]) for r in rows] == [
             (100.0, 50_000_000),
             (200.0, 51_000_000),
             (300.0, 52_000_000),
         ]
 
-    def test_collision_at_same_timestamp_silently_dropped(self, learner):
+    def test_collision_at_same_timestamp_silently_dropped(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # PK is snapshot_at. Two writes at the same timestamp (e.g. Azure
         # cold-start retry) should not raise; second insert returns False.
         first = learner.record_team_value_snapshot(
@@ -90,16 +93,19 @@ class TestTeamValueSnapshot:
         assert first is True
         assert second is False
 
-        # Verify the first row was preserved (INSERT OR IGNORE — not REPLACE).
-        with sqlite3.connect(learner.db_path) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM team_value_history").fetchone()[0]
+        # Verify the first row was preserved (ON CONFLICT DO NOTHING — not an upsert).
+        with connect(store_dsn) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM rehoboam.team_value_history"
+            ).fetchone()["n"]
             kept = conn.execute(
-                "SELECT team_value FROM team_value_history WHERE snapshot_at = 42.0"
-            ).fetchone()[0]
+                "SELECT team_value FROM rehoboam.team_value_history WHERE snapshot_at = 42.0"
+            ).fetchone()["team_value"]
         assert count == 1
         assert kept == 50_000_000
 
-    def test_int_coercion_for_team_value_and_budget(self, learner):
+    def test_int_coercion_for_team_value_and_budget(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # Caller might pass float (Kickbase API sometimes returns floats).
         # Schema is INTEGER — record method should coerce.
         learner.record_team_value_snapshot(
@@ -109,6 +115,8 @@ class TestTeamValueSnapshot:
             squad_size=15,
             snapshot_at=999.0,
         )
-        with sqlite3.connect(learner.db_path) as conn:
-            row = conn.execute("SELECT team_value, budget FROM team_value_history").fetchone()
-        assert row == (85_500_000, 12_500_000)
+        with connect(store_dsn) as conn:
+            row = conn.execute(
+                "SELECT team_value, budget FROM rehoboam.team_value_history"
+            ).fetchone()
+        assert (row["team_value"], row["budget"]) == (85_500_000, 12_500_000)

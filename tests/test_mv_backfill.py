@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -12,12 +11,13 @@ from rehoboam.mv_backfill import (
     _history_to_rows,
     run_mv_backfill,
 )
+from rehoboam.store import connect
 
 
-def _learner_with_flips(tmp_path, player_ids: list[str]) -> BidLearner:
+def _learner_with_flips(store_dsn, player_ids: list[str]) -> BidLearner:
     """BidLearner pre-seeded with one minimal flip per player_id so the
     backfill has a non-empty distinct-id list to walk."""
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    learner = BidLearner(dsn=store_dsn)
     for i, pid in enumerate(player_ids):
         # buy_date varies so the UNIQUE(player_id, buy_date) constraint
         # never collides on rerun.
@@ -52,6 +52,11 @@ def _client_with_history(per_player: dict[str, dict[str, Any]]) -> MagicMock:
 
     c.get_player_market_value_history_v2.side_effect = get_history
     return c
+
+
+def _mv_row_count(dsn: str) -> int:
+    with connect(dsn) as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM rehoboam.player_mv_history").fetchone()["n"]
 
 
 # --- _history_to_rows -----------------------------------------------------
@@ -91,8 +96,8 @@ def test_history_to_rows_handles_empty_response():
 # --- run_mv_backfill ------------------------------------------------------
 
 
-def test_backfill_writes_one_row_per_dt(tmp_path):
-    learner = _learner_with_flips(tmp_path, ["p1", "p2", "p3"])
+def test_backfill_writes_one_row_per_dt(store_dsn):
+    learner = _learner_with_flips(store_dsn, ["p1", "p2", "p3"])
     client = _client_with_history(
         {
             "p1": _mv_history([(20000, 1_000_000), (20001, 1_100_000)]),
@@ -107,38 +112,32 @@ def test_backfill_writes_one_row_per_dt(tmp_path):
     assert stats.rows_attempted == 6  # 2 + 1 + 3
     assert stats.players_failed == 0
 
-    with sqlite3.connect(learner.db_path) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM player_mv_history").fetchone()[0]
-    assert count == 6
+    assert _mv_row_count(store_dsn) == 6
 
 
-def test_backfill_is_idempotent(tmp_path):
-    learner = _learner_with_flips(tmp_path, ["p1"])
+def test_backfill_is_idempotent(store_dsn):
+    learner = _learner_with_flips(store_dsn, ["p1"])
     client = _client_with_history({"p1": _mv_history([(20000, 1_000_000), (20001, 1_100_000)])})
 
     run_mv_backfill(client, learner, dry_run=False)
     run_mv_backfill(client, learner, dry_run=False)
 
-    with sqlite3.connect(learner.db_path) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM player_mv_history").fetchone()[0]
     # Two runs against the same data still yield 2 rows (UNIQUE on (pid, snapshot_at))
-    assert count == 2
+    assert _mv_row_count(store_dsn) == 2
 
 
-def test_backfill_dry_run_writes_no_rows(tmp_path):
-    learner = _learner_with_flips(tmp_path, ["p1"])
+def test_backfill_dry_run_writes_no_rows(store_dsn):
+    learner = _learner_with_flips(store_dsn, ["p1"])
     client = _client_with_history({"p1": _mv_history([(20000, 1_000_000), (20001, 1_100_000)])})
 
     stats = run_mv_backfill(client, learner, dry_run=True)
 
     assert stats.rows_attempted == 2
-    with sqlite3.connect(learner.db_path) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM player_mv_history").fetchone()[0]
-    assert count == 0
+    assert _mv_row_count(store_dsn) == 0
 
 
-def test_backfill_isolates_per_player_failures(tmp_path):
-    learner = _learner_with_flips(tmp_path, ["p1", "pfail", "p3"])
+def test_backfill_isolates_per_player_failures(store_dsn):
+    learner = _learner_with_flips(store_dsn, ["p1", "pfail", "p3"])
     client = _client_with_history(
         {
             "p1": _mv_history([(20000, 1_000_000)]),
@@ -151,15 +150,13 @@ def test_backfill_isolates_per_player_failures(tmp_path):
 
     assert stats.players_failed == 1
     assert stats.players_processed == 2
-    with sqlite3.connect(learner.db_path) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM player_mv_history").fetchone()[0]
-    assert count == 2
+    assert _mv_row_count(store_dsn) == 2
 
 
-def test_backfill_counts_empty_mv_data_separately(tmp_path):
+def test_backfill_counts_empty_mv_data_separately(store_dsn):
     """Newly-listed players may legitimately return no history. Don't
     confuse them with HTTP failures."""
-    learner = _learner_with_flips(tmp_path, ["p1", "pempty"])
+    learner = _learner_with_flips(store_dsn, ["p1", "pempty"])
     client = _client_with_history(
         {
             "p1": _mv_history([(20000, 1_000_000)]),
@@ -174,8 +171,8 @@ def test_backfill_counts_empty_mv_data_separately(tmp_path):
     assert stats.players_failed == 0
 
 
-def test_backfill_no_flips_is_noop(tmp_path):
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+def test_backfill_no_flips_is_noop(store_dsn):
+    learner = BidLearner(dsn=store_dsn)
     client = MagicMock()
 
     stats = run_mv_backfill(client, learner)

@@ -6,16 +6,7 @@ captures the dashboard's `prft` + `mdw` per session; `record_manager_transfers`
 ingests the per-trade history from /managers/{mid}/transfer.
 """
 
-import sqlite3
-
-import pytest
-
-from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+from rehoboam.store import connect
 
 
 def _profile_row(
@@ -59,18 +50,23 @@ def _transfer_row(
 
 
 class TestRecordManagerProfileSnapshot:
-    def test_round_trip_one_row(self, learner):
+    def test_round_trip_one_row(self, learner, store_dsn):
         n = learner.record_manager_profile_snapshot([_profile_row("m1", is_self=True)])
         assert n == 1
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
                 "SELECT manager_id, transfer_pnl, matchday_wins, is_self "
-                "FROM manager_profile_history"
+                "FROM rehoboam.manager_profile_history"
             ).fetchone()
-        assert row == ("m1", -34_812_837, 0, 1)
+        assert (
+            row["manager_id"],
+            row["transfer_pnl"],
+            row["matchday_wins"],
+            row["is_self"],
+        ) == ("m1", -34_812_837, 0, 1)
 
-    def test_bulk_insert_multiple_managers(self, learner):
+    def test_bulk_insert_multiple_managers(self, learner, store_dsn):
         rows = [
             _profile_row("m1", transfer_pnl=-34_812_837, is_self=True),
             _profile_row("m2", transfer_pnl=-48_555_897),
@@ -78,12 +74,12 @@ class TestRecordManagerProfileSnapshot:
         ]
         learner.record_manager_profile_snapshot(rows)
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             data = conn.execute(
-                "SELECT manager_id, transfer_pnl FROM manager_profile_history "
+                "SELECT manager_id, transfer_pnl FROM rehoboam.manager_profile_history "
                 "ORDER BY transfer_pnl"
             ).fetchall()
-        assert data == [
+        assert [(r["manager_id"], r["transfer_pnl"]) for r in data] == [
             ("m2", -48_555_897),
             ("m1", -34_812_837),
             ("m3", 12_500_000),
@@ -92,7 +88,7 @@ class TestRecordManagerProfileSnapshot:
     def test_empty_input_is_noop(self, learner):
         assert learner.record_manager_profile_snapshot([]) == 0
 
-    def test_collision_at_same_pk_is_silently_dropped(self, learner):
+    def test_collision_at_same_pk_is_silently_dropped(self, learner, store_dsn):
         # PK (snapshot_at, manager_id) — same-second retry preserves the first.
         learner.record_manager_profile_snapshot(
             [_profile_row("m1", snapshot_at=42.0, transfer_pnl=-1)]
@@ -100,30 +96,32 @@ class TestRecordManagerProfileSnapshot:
         learner.record_manager_profile_snapshot(
             [_profile_row("m1", snapshot_at=42.0, transfer_pnl=-999)]
         )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             rows = conn.execute(
-                "SELECT manager_id, transfer_pnl FROM manager_profile_history"
+                "SELECT manager_id, transfer_pnl FROM rehoboam.manager_profile_history"
             ).fetchall()
-        assert rows == [("m1", -1)]
+        assert [(r["manager_id"], r["transfer_pnl"]) for r in rows] == [("m1", -1)]
 
-    def test_matchday_wins_accepts_none(self, learner):
+    def test_matchday_wins_accepts_none(self, learner, store_dsn):
         # Pre-season the dashboard may legitimately omit `mdw`.
         learner.record_manager_profile_snapshot([_profile_row("m1", matchday_wins=None)])
-        with sqlite3.connect(learner.db_path) as conn:
-            row = conn.execute("SELECT matchday_wins FROM manager_profile_history").fetchone()
-        assert row == (None,)
+        with connect(store_dsn) as conn:
+            row = conn.execute(
+                "SELECT matchday_wins FROM rehoboam.manager_profile_history"
+            ).fetchone()
+        assert row["matchday_wins"] is None
 
-    def test_is_self_flag_round_trips_as_int(self, learner):
+    def test_is_self_flag_round_trips_as_int(self, learner, store_dsn):
         learner.record_manager_profile_snapshot(
             [_profile_row("m1", is_self=True), _profile_row("m2", is_self=False)]
         )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             self_row = conn.execute(
-                "SELECT manager_id FROM manager_profile_history WHERE is_self=1"
+                "SELECT manager_id FROM rehoboam.manager_profile_history WHERE is_self=1"
             ).fetchone()
-        assert self_row == ("m1",)
+        assert self_row["manager_id"] == "m1"
 
-    def test_trajectory_query_for_self(self, learner):
+    def test_trajectory_query_for_self(self, learner, store_dsn):
         # The canonical post-deploy verification query: read self's prft trend.
         learner.record_manager_profile_snapshot(
             [
@@ -131,25 +129,33 @@ class TestRecordManagerProfileSnapshot:
                 _profile_row("m1", snapshot_at=200.0, transfer_pnl=-34_812_837, is_self=True),
             ]
         )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             latest = conn.execute(
-                "SELECT manager_id, transfer_pnl FROM manager_profile_history "
+                "SELECT manager_id, transfer_pnl FROM rehoboam.manager_profile_history "
                 "WHERE is_self=1 ORDER BY snapshot_at DESC LIMIT 1"
             ).fetchone()
-        assert latest == ("m1", -34_812_837)
+        assert (latest["manager_id"], latest["transfer_pnl"]) == ("m1", -34_812_837)
 
 
 class TestRecordManagerTransfers:
-    def test_round_trip_one_row(self, learner):
+    def test_round_trip_one_row(self, learner, store_dsn):
         n = learner.record_manager_transfers([_transfer_row()])
         assert n == 1
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
                 "SELECT league_id, manager_id, transfer_dt, player_id, "
-                "player_name, transfer_type, transfer_price FROM manager_transfers"
+                "player_name, transfer_type, transfer_price FROM rehoboam.manager_transfers"
             ).fetchone()
-        assert row == (
+        assert (
+            row["league_id"],
+            row["manager_id"],
+            row["transfer_dt"],
+            row["player_id"],
+            row["player_name"],
+            row["transfer_type"],
+            row["transfer_price"],
+        ) == (
             "L1",
             "m1",
             "2026-05-04T09:57:07Z",
@@ -162,7 +168,7 @@ class TestRecordManagerTransfers:
     def test_empty_input_is_noop(self, learner):
         assert learner.record_manager_transfers([]) == 0
 
-    def test_collision_on_pk_is_silently_dropped(self, learner):
+    def test_collision_on_pk_is_silently_dropped(self, learner, store_dsn):
         # PK (league_id, manager_id, transfer_dt, player_id) — re-importing
         # an overlapping page during backfill must NOT error or duplicate.
         original = _transfer_row(transfer_price=1_926_310)
@@ -170,13 +176,13 @@ class TestRecordManagerTransfers:
         learner.record_manager_transfers([original])
         learner.record_manager_transfers([rewritten])
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             rows = conn.execute(
-                "SELECT player_id, transfer_price FROM manager_transfers"
+                "SELECT player_id, transfer_price FROM rehoboam.manager_transfers"
             ).fetchall()
-        assert rows == [("10049", 1_926_310)]
+        assert [(r["player_id"], r["transfer_price"]) for r in rows] == [("10049", 1_926_310)]
 
-    def test_distinct_dts_for_same_player_create_separate_rows(self, learner):
+    def test_distinct_dts_for_same_player_create_separate_rows(self, learner, store_dsn):
         # The same player can be bought and sold multiple times — each
         # transfer is a distinct event keyed on transfer_dt.
         learner.record_manager_transfers(
@@ -185,24 +191,25 @@ class TestRecordManagerTransfers:
                 _transfer_row(transfer_dt="2026-04-15T20:00:00Z", transfer_type=2),
             ]
         )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             rows = conn.execute(
-                "SELECT transfer_dt, transfer_type FROM manager_transfers " "ORDER BY transfer_dt"
+                "SELECT transfer_dt, transfer_type FROM rehoboam.manager_transfers "
+                "ORDER BY transfer_dt"
             ).fetchall()
-        assert rows == [
+        assert [(r["transfer_dt"], r["transfer_type"]) for r in rows] == [
             ("2026-04-01T10:00:00Z", 1),
             ("2026-04-15T20:00:00Z", 2),
         ]
 
-    def test_optional_numeric_fields_accept_none(self, learner):
+    def test_optional_numeric_fields_accept_none(self, learner, store_dsn):
         learner.record_manager_transfers([_transfer_row(transfer_type=None, transfer_price=None)])
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
-                "SELECT transfer_type, transfer_price FROM manager_transfers"
+                "SELECT transfer_type, transfer_price FROM rehoboam.manager_transfers"
             ).fetchone()
-        assert row == (None, None)
+        assert (row["transfer_type"], row["transfer_price"]) == (None, None)
 
-    def test_bulk_insert_across_managers(self, learner):
+    def test_bulk_insert_across_managers(self, learner, store_dsn):
         learner.record_manager_transfers(
             [
                 _transfer_row(manager_id="m1", player_id="p1"),
@@ -210,6 +217,8 @@ class TestRecordManagerTransfers:
                 _transfer_row(manager_id="m1", player_id="p2"),
             ]
         )
-        with sqlite3.connect(learner.db_path) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM manager_transfers").fetchone()[0]
+        with connect(store_dsn) as conn:
+            count = conn.execute("SELECT COUNT(*) AS n FROM rehoboam.manager_transfers").fetchone()[
+                "n"
+            ]
         assert count == 3

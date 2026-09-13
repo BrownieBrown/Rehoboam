@@ -4,19 +4,18 @@
 league via ``/lineup/selection``. A backtest replaying a past season needs
 every player who was ever actually held, including ones who have since left
 the Bundesliga. ``gather_historical_player_ids`` recovers those ids from the
-three learning-DB tables that still reference them.
+three store tables that still reference them.
 """
 
 from __future__ import annotations
 
-import sqlite3
-
 from rehoboam.bid_learner import BidLearner, FlipOutcome
 from rehoboam.enrichment.historical_ids import gather_historical_player_ids
+from rehoboam.store import connect
 
 
-def test_gather_historical_player_ids_unions_three_tables(tmp_path):
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+def test_gather_historical_player_ids_unions_three_tables(store_dsn):
+    learner = BidLearner(dsn=store_dsn)
 
     learner.record_flip(
         FlipOutcome(
@@ -44,13 +43,13 @@ def test_gather_historical_player_ids_unions_three_tables(tmp_path):
         snapshot_at=1000.0,
     )
 
-    ids = gather_historical_player_ids(learner.db_path)
+    ids = gather_historical_player_ids(learner)
 
     assert set(ids) == {"1", "2", "3", "4"}
 
 
-def test_gather_historical_player_ids_dedupes_across_tables(tmp_path):
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+def test_gather_historical_player_ids_dedupes_across_tables(store_dsn):
+    learner = BidLearner(dsn=store_dsn)
 
     learner.record_flip(
         FlipOutcome(
@@ -78,24 +77,24 @@ def test_gather_historical_player_ids_dedupes_across_tables(tmp_path):
         snapshot_at=1000.0,
     )
 
-    ids = gather_historical_player_ids(learner.db_path)
+    ids = gather_historical_player_ids(learner)
 
     assert ids == ["1", "5"]
 
 
-def test_gather_historical_player_ids_handles_empty_db(tmp_path):
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+def test_gather_historical_player_ids_handles_empty_db(store_dsn):
+    learner = BidLearner(dsn=store_dsn)
 
-    assert gather_historical_player_ids(learner.db_path) == []
+    assert gather_historical_player_ids(learner) == []
 
 
-def test_gather_historical_player_ids_skips_malformed_lineup_row(tmp_path):
+def test_gather_historical_player_ids_skips_malformed_lineup_row(store_dsn):
     """The writer (record_matchday_lineup_result) always json.dumps a real
-    list, so a malformed row can only get in via a hand-edit of the DB — but
-    CLAUDE.md's own documented debugging workflow is opening the SQLite file
-    directly, so this is a realistic path, not a hypothetical. One bad row
-    must not take down ids recoverable from the good rows around it."""
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    list, so a malformed row can only get in via a hand-edit of the store —
+    but a row can still be hand-edited in the Supabase dashboard, so this is
+    a realistic path, not a hypothetical. One bad row must not take down ids
+    recoverable from the good rows around it."""
+    learner = BidLearner(dsn=store_dsn)
 
     learner.record_matchday_lineup_result(
         league_id="L1",
@@ -115,27 +114,26 @@ def test_gather_historical_player_ids_skips_malformed_lineup_row(tmp_path):
         lineup_count=11,
         snapshot_at=3000.0,
     )
-    # Hand-corrupt the middle row the way a direct `sqlite3 logs/bid_learning.db`
-    # edit could — not valid JSON at all.
-    with sqlite3.connect(learner.db_path) as conn:
+    # Hand-corrupt the middle row the way a direct Supabase dashboard edit
+    # could — not valid JSON at all.
+    with connect(store_dsn) as conn:
         conn.execute(
-            "INSERT INTO matchday_lineup_results "
+            "INSERT INTO rehoboam.matchday_lineup_results "
             "(league_id, day_number, matchday_date, total_points, "
-            "lineup_player_ids, lineup_count, snapshot_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "lineup_player_ids, lineup_count, snapshot_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             ("L1", 2, "2025-08-30", 490, "not valid json{{{", 11, 2000.0),
         )
-        conn.commit()
 
-    ids = gather_historical_player_ids(learner.db_path)
+    ids = gather_historical_player_ids(learner)
 
     assert set(ids) == {"1", "2", "5", "6"}
 
 
-def test_gather_historical_player_ids_skips_lineup_row_that_is_not_a_list(tmp_path):
+def test_gather_historical_player_ids_skips_lineup_row_that_is_not_a_list(store_dsn):
     """Valid JSON that isn't a list (e.g. an object) is a different failure
     mode than invalid JSON text — decoding succeeds, so this must be caught
     separately from the JSONDecodeError path."""
-    learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    learner = BidLearner(dsn=store_dsn)
 
     learner.record_matchday_lineup_result(
         league_id="L1",
@@ -146,15 +144,14 @@ def test_gather_historical_player_ids_skips_lineup_row_that_is_not_a_list(tmp_pa
         lineup_count=11,
         snapshot_at=1000.0,
     )
-    with sqlite3.connect(learner.db_path) as conn:
+    with connect(store_dsn) as conn:
         conn.execute(
-            "INSERT INTO matchday_lineup_results "
+            "INSERT INTO rehoboam.matchday_lineup_results "
             "(league_id, day_number, matchday_date, total_points, "
-            "lineup_player_ids, lineup_count, snapshot_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "lineup_player_ids, lineup_count, snapshot_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             ("L1", 2, "2025-08-30", 490, '{"not": "a list"}', 11, 2000.0),
         )
-        conn.commit()
 
-    ids = gather_historical_player_ids(learner.db_path)
+    ids = gather_historical_player_ids(learner)
 
     assert set(ids) == {"1", "2"}

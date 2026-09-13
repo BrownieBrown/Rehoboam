@@ -10,7 +10,7 @@ This module fixes that by walking every distinct ``player_id`` in
 ``flip_outcomes`` and fetching the full season's MV history via the v2
 endpoint (``/v4/competitions/1/players/{pid}/marketValue/{timeframe}``).
 Each daily point becomes a row in ``player_mv_history``; the existing
-``INSERT OR IGNORE`` PK keeps reruns idempotent.
+PK plus ON CONFLICT DO NOTHING keeps reruns idempotent.
 
 Forward-looking coverage of market players is handled inline in
 ``trader.py`` (it's free — the market data is already in memory each
@@ -36,15 +36,15 @@ class MvBackfillStats:
     players_processed: int = 0
     players_skipped_no_data: int = 0
     players_failed: int = 0
-    rows_attempted: int = 0  # upper bound — actual inserts dedupe via INSERT OR IGNORE
+    rows_attempted: int = 0  # upper bound — actual inserts dedupe via ON CONFLICT DO NOTHING
 
 
 def _distinct_flip_player_ids(learner: BidLearner) -> list[str]:
-    import sqlite3
-
-    with sqlite3.connect(learner.db_path) as conn:
-        rows = conn.execute("SELECT DISTINCT player_id FROM flip_outcomes").fetchall()
-    return [r[0] for r in rows]
+    with learner.connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT player_id FROM rehoboam.flip_outcomes ORDER BY player_id"
+        ).fetchall()
+    return [r["player_id"] for r in rows]
 
 
 def _history_to_rows(player_id: str, history: dict[str, Any]) -> list[dict[str, Any]]:
@@ -86,7 +86,7 @@ def run_mv_backfill(
 ) -> MvBackfillStats:
     """Fetch + persist MV trajectories for every player in flip_outcomes.
 
-    Idempotent: ``record_player_mv_snapshot`` is INSERT OR IGNORE on
+    Idempotent: ``record_player_mv_snapshot`` uses ON CONFLICT DO NOTHING on
     ``(player_id, snapshot_at)``, so reruns silently dedupe.
 
     ``dry_run`` performs all HTTP calls so the count estimate reflects

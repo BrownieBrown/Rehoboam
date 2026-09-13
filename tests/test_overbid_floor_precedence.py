@@ -29,29 +29,23 @@ Off-season leaves that window empty, so season start -- when the bot spends
 most -- is exactly when an unmeasured floor takes over.
 """
 
-import sqlite3
 import time
 
-import pytest
-
-from rehoboam.bid_learner import BidLearner
 from rehoboam.bidding_strategy import SmartBidding
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bids.db")
 
 
 def _seed_auctions(learner, n, won=True, age_days=1):
     ts = time.time() - age_days * 24 * 3600
-    with sqlite3.connect(learner.db_path) as conn:
-        for i in range(n):
-            conn.execute(
-                "INSERT INTO auction_outcomes "
+    with learner.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO rehoboam.auction_outcomes "
                 "(player_id, player_name, our_bid, asking_price, our_overbid_pct, "
-                " won, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (f"p{i}", f"P{i}", 1_100_000, 1_000_000, 10.0, 1 if won else 0, ts),
+                " won, timestamp) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                [
+                    (f"p{i}", f"P{i}", 1_100_000, 1_000_000, 10.0, 1 if won else 0, ts)
+                    for i in range(n)
+                ],
             )
 
 

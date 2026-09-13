@@ -1,8 +1,8 @@
 """Tests for rehoboam.backfill — REH-39 historical foundation-table backfill.
 
 The KICKBASE client is mocked end-to-end so tests don't hit the network. The
-``BidLearner`` is exercised against a fresh sqlite db in tmp_path, which
-gives us real INSERT OR IGNORE semantics for the idempotency tests.
+``BidLearner`` is exercised against a fresh store database per test, which
+gives us real ON CONFLICT DO NOTHING semantics for the idempotency tests.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from rehoboam.backfill import (
 )
 from rehoboam.bid_learner import BidLearner
 from rehoboam.kickbase_client import League
+from rehoboam.store import connect
 
 
 def _t(pi: str, tty: int, dt: str, trp: int = 1_000_000, pn: str = "Player") -> dict[str, Any]:
@@ -30,8 +31,8 @@ def _league(lid: str = "lid-1") -> League:
     return League(id=lid, name="Test League", creator_id="creator")
 
 
-def _learner(tmp_path) -> BidLearner:
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+def _learner(store_dsn) -> BidLearner:
+    return BidLearner(dsn=store_dsn)
 
 
 # --- _pair_flips ----------------------------------------------------------
@@ -151,14 +152,14 @@ def _baseline_client(transfers: list[dict[str, Any]], current_day: int = 0) -> M
     return c
 
 
-def test_run_backfill_writes_flip_outcomes(tmp_path):
+def test_run_backfill_writes_flip_outcomes(store_dsn):
     transfers = [
         _t("p1", TRANSFER_BUY, "2026-04-01T10:00:00Z", trp=1_000_000, pn="P1"),
         _t("p1", TRANSFER_SELL, "2026-04-05T10:00:00Z", trp=1_200_000, pn="P1"),
         _t("p2", TRANSFER_BUY, "2026-04-02T10:00:00Z", trp=2_000_000, pn="P2"),
         _t("p2", TRANSFER_SELL, "2026-04-08T10:00:00Z", trp=1_800_000, pn="P2"),
     ]
-    learner = _learner(tmp_path)
+    learner = _learner(store_dsn)
     client = _baseline_client(transfers, current_day=0)
 
     stats = run_backfill(client, _league(), "uid", "mid", learner, dry_run=False)
@@ -167,12 +168,12 @@ def test_run_backfill_writes_flip_outcomes(tmp_path):
     assert stats.flip_outcomes_skipped_duplicate == 0
 
 
-def test_run_backfill_is_idempotent_on_rerun(tmp_path):
+def test_run_backfill_is_idempotent_on_rerun(store_dsn):
     transfers = [
         _t("p1", TRANSFER_BUY, "2026-04-01T10:00:00Z", trp=1_000_000),
         _t("p1", TRANSFER_SELL, "2026-04-05T10:00:00Z", trp=1_200_000),
     ]
-    learner = _learner(tmp_path)
+    learner = _learner(store_dsn)
 
     client1 = _baseline_client(transfers, current_day=0)
     s1 = run_backfill(client1, _league(), "uid", "mid", learner, dry_run=False)
@@ -184,12 +185,12 @@ def test_run_backfill_is_idempotent_on_rerun(tmp_path):
     assert s2.flip_outcomes_skipped_duplicate == 1
 
 
-def test_run_backfill_dry_run_writes_nothing(tmp_path):
+def test_run_backfill_dry_run_writes_nothing(store_dsn):
     transfers = [
         _t("p1", TRANSFER_BUY, "2026-04-01T10:00:00Z", trp=1_000_000),
         _t("p1", TRANSFER_SELL, "2026-04-05T10:00:00Z", trp=1_200_000),
     ]
-    learner = _learner(tmp_path)
+    learner = _learner(store_dsn)
     client = _baseline_client(transfers, current_day=0)
 
     stats = run_backfill(client, _league(), "uid", "mid", learner, dry_run=True)
@@ -197,17 +198,15 @@ def test_run_backfill_dry_run_writes_nothing(tmp_path):
     # Stats reflect what WOULD have been written
     assert stats.flip_outcomes_inserted == 1
     # But the DB is empty
-    import sqlite3
-
-    with sqlite3.connect(learner.db_path) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM flip_outcomes").fetchone()[0]
+    with connect(store_dsn) as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM rehoboam.flip_outcomes").fetchone()["n"]
     assert count == 0
 
 
-def test_run_backfill_writes_lineup_and_rank_per_matchday(tmp_path):
+def test_run_backfill_writes_lineup_and_rank_per_matchday(store_dsn):
     """Phase 2/3: when current_day>0 and teamcenter returns a real lineup,
     we get one matchday_lineup_results row and N league_rank_history rows."""
-    learner = _learner(tmp_path)
+    learner = _learner(store_dsn)
 
     teamcenter_for_md1 = {
         "lp": [
@@ -237,27 +236,30 @@ def test_run_backfill_writes_lineup_and_rank_per_matchday(tmp_path):
     assert stats.matchday_lineup_results_inserted == 1
     assert stats.league_rank_history_inserted == 2
 
-    import sqlite3
-
-    with sqlite3.connect(learner.db_path) as conn:
+    with connect(store_dsn) as conn:
         lineup_row = conn.execute(
-            "SELECT total_points, lineup_count, matchday_date FROM matchday_lineup_results"
+            "SELECT total_points, lineup_count, matchday_date "
+            "FROM rehoboam.matchday_lineup_results"
         ).fetchone()
-        assert lineup_row[0] == 80 + 65 + 90
-        assert lineup_row[1] == 3
-        assert lineup_row[2] == "2025-08-23T13:30:00Z"
+        assert lineup_row["total_points"] == 80 + 65 + 90
+        assert lineup_row["lineup_count"] == 3
+        assert lineup_row["matchday_date"] == "2025-08-23T13:30:00Z"
 
         self_rank = conn.execute(
-            "SELECT rank_overall, total_points, is_self FROM league_rank_history "
+            "SELECT rank_overall, total_points, is_self FROM rehoboam.league_rank_history "
             "WHERE manager_id = 'uid'"
         ).fetchone()
-        assert self_rank == (1, 235, 1)
+        assert (self_rank["rank_overall"], self_rank["total_points"], self_rank["is_self"]) == (
+            1,
+            235,
+            1,
+        )
 
 
-def test_run_backfill_skips_matchday_with_no_lineup(tmp_path):
+def test_run_backfill_skips_matchday_with_no_lineup(store_dsn):
     """Pre-league-join matchdays return empty lp; should be counted but not
     written, and the ranking call for that matchday should NOT fire."""
-    learner = _learner(tmp_path)
+    learner = _learner(store_dsn)
     c = MagicMock()
     c.get_league_ranking.side_effect = [{"day": 1, "us": []}]
     c.get_manager_transfer_history.side_effect = [{"it": []}]
