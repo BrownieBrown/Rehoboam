@@ -14,7 +14,7 @@ from rehoboam.config import Settings
 
 
 @pytest.fixture
-def trader(tmp_path, monkeypatch):
+def trader(tmp_path, store_dsn, monkeypatch):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.chdir(tmp_path)
@@ -100,7 +100,7 @@ class TestSellPlanDependentBuys:
 
 
 class TestDryRun:
-    def test_a_dry_run_records_nothing_and_sends_nothing(self, tmp_path, monkeypatch):
+    def test_a_dry_run_records_nothing_and_sends_nothing(self, tmp_path, store_dsn, monkeypatch):
         monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
         monkeypatch.setenv("KICKBASE_PASSWORD", "test")
         monkeypatch.chdir(tmp_path)
@@ -112,18 +112,19 @@ class TestDryRun:
 
 
 class TestStaleProposalsStopBlocking:
-    def test_a_proposal_older_than_the_window_stops_blocking(self, trader):
+    def test_a_proposal_older_than_the_window_stops_blocking(self, trader, store_dsn):
         """Expiry is not implemented, so an unbounded guard blocks forever."""
-        import sqlite3
         import time as _time
+
+        from rehoboam.store import connect
 
         with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
             trader._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx())
         assert trader._has_pending_proposal("6080") is True
 
-        with sqlite3.connect(trader.learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             conn.execute(
-                "UPDATE trade_proposals SET created_at = ?",
+                "update rehoboam.trade_proposals set created_at = %s",
                 (_time.time() - 4 * 86400,),
             )
         assert trader._has_pending_proposal("6080") is False
@@ -147,18 +148,22 @@ class TestRejectionSuppressesReproposal:
         assert trader.learner.pending_proposals() == []
         assert trader._has_pending_proposal("6080") is True
 
-    def test_a_rejection_stops_suppressing_once_it_is_old(self, trader):
+    def test_a_rejection_stops_suppressing_once_it_is_old(self, trader, store_dsn):
         """Not forever: the price and the player's form both move."""
-        import sqlite3
         import time as _time
+
+        from rehoboam.store import connect
 
         with patch("rehoboam.notify.telegram.send_proposal", return_value=True):
             trader._propose_buy(SimpleNamespace(id="L"), _rec(), _ctx())
         pid = trader.learner.pending_proposals()[0]["proposal_id"]
         trader.learner.mark_proposal(pid, "rejected")
 
-        with sqlite3.connect(trader.learner.db_path) as conn:
-            conn.execute("UPDATE trade_proposals SET created_at = ?", (_time.time() - 20 * 86400,))
+        with connect(store_dsn) as conn:
+            conn.execute(
+                "update rehoboam.trade_proposals set created_at = %s",
+                (_time.time() - 20 * 86400,),
+            )
         assert trader._has_pending_proposal("6080") is False
 
     def test_an_executed_proposal_does_not_suppress(self, trader):

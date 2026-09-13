@@ -17,22 +17,17 @@ additions that make next season answerable:
   at 1.0% overbid" into "we lost at 1.0% and it took 24%".
 """
 
-import sqlite3
-
 import pytest
 
-from rehoboam.bid_learner import BidLearner
+from rehoboam.store import connect
 
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+# `learner` comes from tests/conftest.py: BidLearner(dsn=store_dsn) on a
+# fresh, fully migrated database.
 
 
 def _rows(learner, table):
-    with sqlite3.connect(learner.db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute(f"SELECT * FROM {table}")]
+    with connect(learner.dsn) as conn:
+        return [dict(r) for r in conn.execute(f"select * from rehoboam.{table}")]
 
 
 # --- declined candidates -------------------------------------------------

@@ -1,4 +1,4 @@
-"""Trade proposals persist in bid_learning.db, not a JSON file.
+"""Trade proposals persist in the store, not a JSON file.
 
 pending_bids.json and tracked_purchases.json were migrated into tables because
 loose JSON is not synced to blob storage. A proposal is created by the timer
@@ -7,15 +7,6 @@ trip or approving does nothing.
 """
 
 import time
-
-import pytest
-
-from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bids.db")
 
 
 def _record(learner, pid="p1"):

@@ -95,12 +95,12 @@ def _ctx(buy_recs, budget):
 
 
 @pytest.fixture
-def trader(tmp_path, monkeypatch):
+def trader(tmp_path, store_dsn, monkeypatch):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.chdir(tmp_path)
     t = AutoTrader(api=SimpleNamespace(), settings=Settings(), dry_run=False)
-    t.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    t.learner = BidLearner(dsn=store_dsn)
     return t
 
 

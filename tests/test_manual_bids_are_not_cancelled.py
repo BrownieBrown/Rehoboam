@@ -155,7 +155,7 @@ class TestTheSessionPassesProvenance:
     existed and nothing called it (REH-86). Same trap, so the wiring is proved.
     """
 
-    def test_the_session_supplies_bot_placed_ids(self, tmp_path, monkeypatch):
+    def test_the_session_supplies_bot_placed_ids(self, tmp_path, store_dsn, monkeypatch):
         from types import SimpleNamespace
         from unittest.mock import patch
 
@@ -167,7 +167,7 @@ class TestTheSessionPassesProvenance:
         monkeypatch.chdir(tmp_path)
 
         trader = AutoTrader(api=_Api([HARDER]), settings=_settings(), dry_run=True)
-        trader.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+        trader.learner = BidLearner(dsn=store_dsn)
         trader.learner.add_pending_bid(
             player_id="849",
             player_name="Kleindienst",

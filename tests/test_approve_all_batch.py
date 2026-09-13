@@ -16,9 +16,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
-from rehoboam.bid_learner import BidLearner
 from rehoboam.config import Settings
 from rehoboam.kickbase_client import MarketPlayer
 
@@ -73,11 +70,6 @@ class _Api:
         self.bought.append((player.id, price))
         self.budget -= price
         return True
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
 
 
 def _record(learner, pid, bid, *, batch_id=BATCH):

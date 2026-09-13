@@ -12,13 +12,13 @@ branch directly instead.
 
 from __future__ import annotations
 
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from rehoboam.auto_trader import AutoTrader, EPSessionContext, MatchdayPhase
 from rehoboam.bid_learner import BidLearner
+from rehoboam.store import connect
 
 
 class _Api:
@@ -56,13 +56,13 @@ def _rec(pid: str, bid, gain: float, reason: str):
 
 
 @pytest.fixture
-def trader(tmp_path, monkeypatch):
+def trader(store_dsn, monkeypatch):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "x")
     from rehoboam.config import Settings
 
     t = AutoTrader(api=_Api(), settings=Settings(), dry_run=True)
-    t.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    t.learner = BidLearner(dsn=store_dsn)
     return t
 
 
@@ -82,9 +82,8 @@ def _ctx(buy_recs):
 
 
 def _declines(trader):
-    with sqlite3.connect(trader.learner.db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM buy_decisions")]
+    with connect(trader.learner.dsn) as conn:
+        return [dict(r) for r in conn.execute("select * from rehoboam.buy_decisions")]
 
 
 def test_a_candidate_the_bot_does_not_bid_on_is_recorded(trader):

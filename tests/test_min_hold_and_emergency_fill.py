@@ -29,17 +29,17 @@ def settings(monkeypatch):
 
 
 @pytest.fixture
-def trader(tmp_path, settings, monkeypatch):
-    """An AutoTrader stitched together with a real BidLearner on a temp DB.
+def trader(tmp_path, store_dsn, settings, monkeypatch):
+    """An AutoTrader stitched together with a real BidLearner on a test database.
 
     The Kickbase API isn't touched in these tests — the helpers under test
     only read from settings + the learner. Building a full API mock would
     add noise without coverage.
     """
-    monkeypatch.chdir(tmp_path)  # so logs/ goes to tmp
+    monkeypatch.chdir(tmp_path)  # isolate any incidental cwd file writes
     api = SimpleNamespace()
     t = AutoTrader(api=api, settings=settings, dry_run=True)
-    t.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    t.learner = BidLearner(dsn=store_dsn)
     return t
 
 

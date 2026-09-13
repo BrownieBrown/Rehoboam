@@ -53,11 +53,11 @@ def api():
 
 
 @pytest.fixture
-def trader(tmp_path, settings, api, monkeypatch):
+def trader(tmp_path, store_dsn, settings, api, monkeypatch):
     """An AutoTrader wired to the REAL ExecutionService, so the gate runs."""
     monkeypatch.chdir(tmp_path)
     t = AutoTrader(api=api, settings=settings, dry_run=False)
-    t.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    t.learner = BidLearner(dsn=store_dsn)
     t.execution = ExecutionService(api=api, tracker=MagicMock(), dry_run=False)
     return t
 

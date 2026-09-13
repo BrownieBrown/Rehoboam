@@ -14,8 +14,8 @@ from rehoboam.notify.approval import authorize, build_callback_response, handle_
 
 
 @pytest.fixture
-def learner(tmp_path):
-    lr = BidLearner(db_path=tmp_path / "bids.db")
+def learner(store_dsn):
+    lr = BidLearner(dsn=store_dsn)
     lr.record_proposal(
         proposal_id="p1",
         player_id="6080",
@@ -242,9 +242,9 @@ class TestOpenOffersAreDeductedFromBudget:
     """
 
     def test_a_second_approval_cannot_spend_money_the_first_already_committed(
-        self, tmp_path, settings, api
+        self, store_dsn, settings, api
     ):
-        learner = BidLearner(db_path=tmp_path / "bids.db")
+        learner = BidLearner(dsn=store_dsn)
         for pid, player_id, bid in (("p1", "1", 30_000_000), ("p2", "2", 35_000_000)):
             learner.record_proposal(
                 proposal_id=pid,
