@@ -1080,6 +1080,143 @@ def derive_thresholds(
     console.print("[dim]Read-only. Apply these by editing config.py / bidding_strategy.py.[/dim]")
 
 
+# ---------------------------------------------------------------------------
+# The store (spec 2026-09-11 §1): Supabase Postgres via the transaction pooler
+# ---------------------------------------------------------------------------
+
+
+@app.command("migrate")
+def migrate_cmd(
+    dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
+):
+    """Apply unapplied store migrations (idempotent)."""
+    from .store import StoreUnconfigured, connect
+    from .store.migrate import migrate
+
+    try:
+        with connect(dsn) as conn:
+            applied = migrate(conn)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    console.print(f"applied {len(applied)} migration(s): {', '.join(applied) or 'none'}")
+
+
+@app.command("db-bootstrap")
+def db_bootstrap_cmd(
+    admin_dsn: str | None = typer.Option(
+        None,
+        "--admin-dsn",
+        envvar="DATABASE_ADMIN_URL",
+        help="Admin connection string (the postgres user). Defaults to DATABASE_URL.",
+    ),
+    role_password: str | None = typer.Option(
+        None,
+        "--role-password",
+        help="Password for rehoboam_bot; generated when omitted.",
+    ),
+):
+    """Create the rehoboam_bot role and grant it the rehoboam schema (idempotent)."""
+    import secrets
+
+    from .store import StoreUnconfigured, connect
+    from .store.bootstrap import ROLE, bootstrap
+
+    generated = role_password is None
+    password = role_password or secrets.token_urlsafe(24)
+    try:
+        with connect(admin_dsn) as conn:
+            result = bootstrap(conn, password)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    if result["role_created"]:
+        console.print(f"[green]created role {ROLE}[/green]")
+        if generated:
+            console.print(
+                "[yellow]Generated password (shown once — put it in Key Vault and .env):[/yellow]"
+            )
+            console.print(password)
+        console.print(
+            f"[dim]Pooler username for this role is {ROLE}.<project-ref>; "
+            "port 6543; database postgres.[/dim]"
+        )
+    else:
+        console.print(
+            f"role {ROLE} already existed; grants refreshed, password unchanged "
+            f"— rotate with: alter role {ROLE} password '…'"
+        )
+
+
+@app.command("import-sqlite")
+def import_sqlite_cmd(
+    learning: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"), "--learning", help="bid_learning.db to import."
+    ),
+    corpus: Path = typer.Option(  # noqa: B008
+        Path("logs/training_corpus.db"),
+        "--corpus",
+        help="training_corpus.db to import.",
+    ),
+    cache: Path = typer.Option(  # noqa: B008
+        Path("logs/player_history.db"), "--cache", help="player_history.db to import."
+    ),
+    dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
+):
+    """Copy the SQLite state into the store; safe to re-run (rows never duplicate)."""
+    from .store import StoreUnconfigured, connect
+    from .store.import_sqlite import import_all
+    from .store.migrate import migrate
+
+    try:
+        with connect(dsn) as conn:
+            migrate(conn)
+            reports = import_all(conn, learning=learning, corpus=corpus, cache=cache)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    table = Table(title="import-sqlite")
+    table.add_column("table")
+    table.add_column("sqlite rows", justify="right")
+    table.add_column("postgres rows (total)", justify="right")
+    table.add_column("skipped columns")
+    any_skipped = False
+    for r in reports:
+        sqlite_rows = "absent" if r.sqlite_rows < 0 else str(r.sqlite_rows)
+        skipped = ", ".join(r.skipped_columns) if r.skipped_columns else "—"
+        if r.skipped_columns:
+            any_skipped = True
+        table.add_row(r.table, sqlite_rows, str(r.postgres_rows), skipped)
+    console.print(table)
+    if any_skipped:
+        console.print(
+            "[yellow]Some source columns have no home in the store — "
+            "see the skipped columns above.[/yellow]"
+        )
+
+
+@app.command("corpus-pull")
+def corpus_pull_cmd(
+    out: Path = typer.Option(  # noqa: B008
+        Path("logs/training_corpus.db"), "--out", help="SQLite file to write."
+    ),
+    dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
+):
+    """Write the corpus tables from the store into a local SQLite file for replay/backtest."""
+    from .store import StoreUnconfigured, connect
+    from .store.corpus_pull import pull_corpus
+
+    try:
+        with connect(dsn) as conn:
+            written = pull_corpus(conn, out)
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    for name, n in written.items():
+        console.print(f"{name}: {n} row(s) written")
+    console.print(f"[green]corpus written to {out}[/green]")
+
+
 @app.callback()
 def callback(
     verbose: bool = typer.Option(

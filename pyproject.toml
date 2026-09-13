@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
     "azure-storage-blob>=12.19.0",  # Prod state debugging via fetch-azure-state
+    "psycopg[binary]>=3.2",  # the store: Supabase Postgres via the transaction pooler
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ dev = [
     "build>=1.0.0",
     # Type stubs
     "types-requests>=2.31.0",
+    "pytest-postgresql>=9.1",
 ]
 
 [project.scripts]
@@ -51,6 +53,9 @@ rehoboam = "rehoboam.cli:app"
 where = ["."]
 include = ["rehoboam*"]
 exclude = ["tests*", "setup*", "docs*"]
+
+[tool.setuptools.package-data]
+rehoboam = ["store/migrations/*.sql"]
 
 [tool.black]
 line-length = 100
