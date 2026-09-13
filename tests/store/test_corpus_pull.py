@@ -47,3 +47,49 @@ def test_pull_writes_every_corpus_table_and_rewrites_on_repull(store_dsn, tmp_pa
         universe = db.execute("select count(*) from player_universe").fetchone()[0]
     assert row == (99, 90, 5)
     assert universe == 1
+
+
+def test_replay_tables_are_pulled_into_a_local_learning_file(store_dsn, tmp_path):
+    from rehoboam.store import connect
+    from rehoboam.store.corpus_pull import REPLAY_TABLES, pull_replay_tables
+
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "insert into rehoboam.matchday_lineup_results (league_id, day_number, matchday_date, "
+            "total_points, lineup_player_ids, lineup_count, snapshot_at) "
+            "values ('L', 1, '2026-08-22T13:30:00Z', 600, '[\"p1\"]', 11, 1.0)"
+        )
+        conn.execute(
+            "insert into rehoboam.flip_outcomes (player_id, player_name, buy_price, sell_price, "
+            "profit, profit_pct, hold_days, buy_date, sell_date) "
+            "values ('p1', 'One', 10, 12, 2, 20.0, 3, 100.0, 400.0)"
+        )
+        conn.execute(
+            "insert into rehoboam.league_rank_history (snapshot_at, league_id, manager_id, "
+            "day_number, total_points, matchday_points, is_self) "
+            "values (1.0, 'L', 'me', 1, 600, 600, 1)"
+        )
+        out = tmp_path / "bid_learning.db"
+        written = pull_replay_tables(conn, out)
+        # A second pull rewrites rather than duplicates.
+        again = pull_replay_tables(conn, out)
+    assert set(written) == set(REPLAY_TABLES)
+    assert written == again == {t: 1 for t in REPLAY_TABLES}
+    with sqlite3.connect(out) as db:
+        assert db.execute("select total_points from matchday_lineup_results").fetchone()[0] == 600
+        assert db.execute("select id, player_id from flip_outcomes").fetchone() == (
+            1,
+            "p1",
+        )
+        assert db.execute("select count(*) from league_rank_history").fetchone()[0] == 1
+
+
+def test_create_replay_tables_is_idempotent(tmp_path):
+    from rehoboam.store.corpus_pull import create_replay_tables
+
+    path = tmp_path / "bid_learning.db"
+    create_replay_tables(path)
+    create_replay_tables(path)
+    with sqlite3.connect(path) as db:
+        names = {r[0] for r in db.execute("select name from sqlite_master where type='table'")}
+    assert {"flip_outcomes", "matchday_lineup_results", "league_rank_history"} <= names

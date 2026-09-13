@@ -1198,23 +1198,35 @@ def import_sqlite_cmd(
 @app.command("corpus-pull")
 def corpus_pull_cmd(
     out: Path = typer.Option(  # noqa: B008
-        Path("logs/training_corpus.db"), "--out", help="SQLite file to write."
+        Path("logs/training_corpus.db"),
+        "--out",
+        help="SQLite file for the corpus tables.",
+    ),
+    learning_out: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"),
+        "--learning-out",
+        help="SQLite file for the replay's learning tables (flip_outcomes, "
+        "matchday_lineup_results, league_rank_history).",
     ),
     dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
 ):
-    """Write the corpus tables from the store into a local SQLite file for replay/backtest."""
+    """Write the corpus and the replay's learning tables from the store into local SQLite files."""
     from .store import StoreUnconfigured, connect
-    from .store.corpus_pull import pull_corpus
+    from .store.corpus_pull import pull_corpus, pull_replay_tables
 
     try:
         with connect(dsn) as conn:
             written = pull_corpus(conn, out)
+            replay_written = pull_replay_tables(conn, learning_out)
     except StoreUnconfigured as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
     for name, n in written.items():
         console.print(f"{name}: {n} row(s) written")
     console.print(f"[green]corpus written to {out}[/green]")
+    for name, n in replay_written.items():
+        console.print(f"{name}: {n} row(s) written")
+    console.print(f"[green]replay tables written to {learning_out}[/green]")
 
 
 @app.callback()
