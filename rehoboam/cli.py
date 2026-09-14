@@ -297,7 +297,12 @@ def enrich_corpus(
         ),
     ),
 ):
-    """Sweep the full competition into logs/training_corpus.db (v2 scorer training data).
+    """Sweep the full competition into the store (v2 scorer training data).
+
+    The sweep now writes to the store (``CorpusStore``), not
+    ``logs/training_corpus.db``; ``corpus-pull`` materialises a local SQLite
+    copy for the offline backtest/training tools that still read
+    ``TrainingCorpus`` directly.
 
     Long-running and API-bound — thousands of requests. Safe to interrupt and
     rerun: progress is tracked per player, so a rerun resumes rather than
@@ -328,9 +333,11 @@ def enrich_corpus(
     a given matchday.
     """
     from .bid_learner import BidLearner
-    from .enrichment.corpus import TrainingCorpus
     from .enrichment.historical_ids import gather_historical_player_ids
     from .enrichment.sweep import run_sweep
+    from .store.corpus_store import CorpusStore
+
+    _ensure_store()
 
     # The universe endpoint is league-scoped, so we need a league. Reuse the
     # existing helper rather than re-deriving it — it already handles login,
@@ -345,7 +352,7 @@ def enrich_corpus(
             f"[dim]Recovered {len(extra_player_ids)} historical player ids from the store[/dim]"
         )
 
-    corpus = TrainingCorpus()
+    corpus = CorpusStore()
     stats = run_sweep(
         api.client,
         corpus,
@@ -372,7 +379,77 @@ def enrich_corpus(
         table.add_row("Historical positions resolved", str(stats.positions_resolved))
         table.add_row("Historical positions unresolved", str(stats.positions_unresolved))
     console.print(table)
-    console.print(f"[dim]Corpus: {corpus.db_path}[/dim]")
+    console.print("[dim]Corpus: the store[/dim]")
+
+
+@app.command("ingest")
+def ingest_cmd(
+    deadline_seconds: float | None = typer.Option(None, "--deadline-seconds"),
+    max_requests: int | None = typer.Option(None, "--max-requests"),
+    throttle: float = typer.Option(0.25, "--throttle", help="Seconds between requests."),
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """One budgeted ingestion pass — what func-rehoboam-external runs twice a day."""
+    import time
+
+    from .enrichment.ingest import IngestBudget, run_ingestion
+    from .store.corpus_store import CorpusStore
+
+    _ensure_store()
+    api, settings, league = _login_and_get_league(league_index)
+    budget = IngestBudget(
+        deadline=time.time() + (deadline_seconds or settings.ingest_deadline_seconds),
+        max_requests=max_requests or settings.ingest_max_requests,
+    )
+    stats = run_ingestion(
+        api.client,
+        CorpusStore(),
+        league_id=league.id,
+        budget=budget,
+        stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
+        mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
+        throttle_seconds=throttle,
+    )
+    table = Table(title="Ingestion")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    for name in (
+        "universe_size",
+        "status_written",
+        "performance_fetched",
+        "mv_fetched",
+        "failed",
+        "requests",
+    ):
+        table.add_row(name, str(getattr(stats, name)))
+    table.add_row("stopped_by", stats.stopped_by or "—")
+    table.add_row("duration_s", f"{stats.duration_s:.0f}")
+    console.print(table)
+
+
+@app.command("export")
+def export_cmd():
+    """One-off weekly export — every store table as gzip CSV in the Blob container."""
+    import os
+    from datetime import date
+
+    from .store import connect
+    from .store.export import blob_uploader, export_tables
+
+    _ensure_store()
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    if not conn_str:
+        console.print("[red]AZURE_STORAGE_CONNECTION_STRING is not set[/red]")
+        raise typer.Exit(code=1)
+    container = os.getenv("BLOB_CONTAINER", "rehoboam-data")
+    with connect() as conn:
+        sizes = export_tables(conn, blob_uploader(conn_str, container), day=date.today())
+    table = Table(title="Export")
+    table.add_column("Table")
+    table.add_column("Bytes", justify="right")
+    for name, size in sizes.items():
+        table.add_row(name, str(size))
+    console.print(table)
 
 
 @app.command("backfill-flip-entry-context")

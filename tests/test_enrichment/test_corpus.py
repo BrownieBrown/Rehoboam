@@ -628,3 +628,87 @@ def test_existing_db_without_player_transfers_is_migrated_preserving_rows(tmp_pa
     assert columns_again == post_sweep_columns
     assert transfer_count_again == 1
     assert corpus_again.transfers_for_player("1")[0]["price"] == 100
+
+
+def test_existing_db_without_status_fetched_at_is_migrated_preserving_rows(tmp_path):
+    """A corpus DB created before the store grew ``player_status_daily`` (and
+    ``sweep_progress.status_fetched_at`` along with it) must gain the column
+    without touching an existing ``sweep_progress`` row -- the same shape of
+    migration as ``transfers_fetched_at`` above, one column later."""
+    db_path = tmp_path / "corpus.db"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE player_universe (
+                player_id      TEXT PRIMARY KEY,
+                first_name     TEXT,
+                last_name      TEXT,
+                position       TEXT,
+                team_id        TEXT,
+                market_value   INTEGER,
+                average_points REAL
+            );
+            CREATE TABLE player_match_history (
+                player_id        TEXT NOT NULL,
+                season           TEXT NOT NULL,
+                day_number       INTEGER NOT NULL,
+                match_date       TEXT,
+                points           INTEGER NOT NULL,
+                minutes          INTEGER NOT NULL,
+                team_id          TEXT,
+                opponent_team_id TEXT,
+                is_home          INTEGER NOT NULL DEFAULT 0,
+                status           INTEGER,
+                PRIMARY KEY (player_id, season, day_number)
+            );
+            CREATE TABLE mv_series (
+                player_id    TEXT NOT NULL,
+                snapshot_at  REAL NOT NULL,
+                market_value INTEGER NOT NULL,
+                PRIMARY KEY (player_id, snapshot_at)
+            );
+            CREATE TABLE sweep_progress (
+                player_id             TEXT PRIMARY KEY,
+                performance_fetched_at REAL,
+                mv_fetched_at          REAL,
+                transfers_fetched_at   REAL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO player_universe (player_id, last_name, position) "
+            "VALUES ('1', 'Musiala', 'Midfielder')"
+        )
+        conn.execute(
+            "INSERT INTO sweep_progress (player_id, performance_fetched_at, mv_fetched_at, "
+            "transfers_fetched_at) VALUES ('1', 123.0, 456.0, 789.0)"
+        )
+        conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        pre_sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+    assert "status_fetched_at" not in pre_sweep_columns
+
+    # Opening this pre-existing file through TrainingCorpus must migrate it in place.
+    TrainingCorpus(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        post_sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+        post_sweep_row = conn.execute(
+            "SELECT performance_fetched_at, mv_fetched_at, transfers_fetched_at, "
+            "status_fetched_at FROM sweep_progress WHERE player_id = '1'"
+        ).fetchone()
+        universe_row = conn.execute(
+            "SELECT last_name, position FROM player_universe WHERE player_id = '1'"
+        ).fetchone()
+    assert "status_fetched_at" in post_sweep_columns
+    # Pre-existing sweep_progress row is preserved, with the new column NULL.
+    assert post_sweep_row == (123.0, 456.0, 789.0, None)
+    assert universe_row == ("Musiala", "Midfielder")
+
+    # Idempotent on a second open.
+    TrainingCorpus(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        columns_again = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
+    assert columns_again == post_sweep_columns

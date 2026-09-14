@@ -563,6 +563,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    ingest_stale_after_hours: float = Field(
+        default=20.0,
+        description=(
+            "A player's status/performance/MV is refreshed by the ingestion when its last "
+            "fetch is older than this. 20 h means twice-daily runs refresh everyone once a "
+            "day and the second run only catches what the first could not. "
+            "Env: INGEST_STALE_AFTER_HOURS."
+        ),
+    )
+    ingest_deadline_seconds: float = Field(
+        default=480.0,
+        description="Ingestion stops cleanly after this many seconds (the Function has 600). "
+        "Env: INGEST_DEADLINE_SECONDS.",
+    )
+    ingest_max_requests: int = Field(
+        default=1500,
+        description=(
+            "Ingestion stops cleanly after this many Kickbase requests. "
+            "Env: INGEST_MAX_REQUESTS."
+        ),
+    )
+    ingest_mv_stale_after_hours: float = Field(
+        default=144.0,
+        description=(
+            "MV series refresh when older than this (six days: they change slowly and "
+            "cost one request per player). Env: INGEST_MV_STALE_AFTER_HOURS."
+        ),
+    )
+
     # Telegram approval gate
     telegram_bot_token: str = Field(
         default="",

@@ -99,7 +99,8 @@ jobs:
         run: uv run mypy rehoboam/ --ignore-missing-imports
         continue-on-error: true  # Don't fail build on type errors initially
 
-  # Verify deploy/azure_function/requirements.txt matches uv.lock
+  # Verify deploy/azure_function/requirements.txt and
+  # deploy/azure_function_external/requirements.txt match uv.lock
   deploy-deps-sync:
     name: Verify Azure deploy deps in sync
     runs-on: ubuntu-latest
@@ -116,8 +117,8 @@ jobs:
 
       - name: Fail if requirements.txt drifted from uv.lock
         run: |
-          if ! git diff --exit-code deploy/azure_function/requirements.txt; then
-            echo "::error::deploy/azure_function/requirements.txt is stale. Run scripts/sync-azure-deps.sh and commit the result."
+          if ! git diff --exit-code deploy/azure_function/requirements.txt deploy/azure_function_external/requirements.txt; then
+            echo "::error::deploy/azure_function/requirements.txt or deploy/azure_function_external/requirements.txt is stale. Run scripts/sync-azure-deps.sh and commit the result."
             exit 1
           fi
 
@@ -256,6 +257,32 @@ jobs:
         working-directory: deploy_package
         run: func azure functionapp publish func-rehoboam --python
 
+      - name: Prepare external package
+        run: |
+          mkdir -p deploy_package_external
+          cp deploy/azure_function_external/function_app.py deploy_package_external/
+          cp deploy/azure_function_external/host.json deploy_package_external/
+          cp deploy/azure_function_external/requirements.txt deploy_package_external/
+          cp -r rehoboam/ deploy_package_external/
+          cp pyproject.toml deploy_package_external/
+          cp README.md deploy_package_external/
+
+      - name: Install Python dependencies in Azure Functions runtime container
+        # Same rationale as the trading package's equivalent step above: build
+        # inside the official image so binaries match Linux Consumption's glibc.
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/deploy_package_external:/pkg" \
+            mcr.microsoft.com/azure-functions/python:4-python3.11 \
+            bash -c "pip install --target=/pkg/.python_packages/lib/site-packages -r /pkg/requirements.txt"
+
+      - name: Deploy external app
+        # Same remote-build rationale as the trading app's publish step above:
+        # no --no-build, so the deploy goes through Kudu rather than the
+        # connection-string storage path REH-48 removed.
+        working-directory: deploy_package_external
+        run: func azure functionapp publish func-rehoboam-external --python
+
       - name: Open an issue if the deploy failed
         # A job that can only fail after merge is a job whose failures nobody
         # sees. REH-65 accumulated silently for two PRs because PRs show green
@@ -272,5 +299,5 @@ jobs:
           Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
           The deployed function app is now behind \`main\`. Deploy manually with
-          \`bash deploy/deploy.sh code trading\`, or re-run this workflow from the
+          \`bash deploy/deploy.sh code\`, or re-run this workflow from the
           Actions tab once the cause is fixed." || true

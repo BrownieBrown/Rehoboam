@@ -74,8 +74,9 @@ uv run rehoboam backfill-history --dry-run   # Preview historical foundation-tab
 uv run rehoboam backfill-history             # Replay KICKBASE history → flip_outcomes + matchday_lineup_results + league_rank_history
 uv run rehoboam backfill-mv-history          # Backfill player_mv_history trajectories for all flipped players (REH-40)
 uv run rehoboam enrich-corpus --dry-run      # Preview v2 training-corpus sweep size
-uv run rehoboam enrich-corpus                # League-wide sweep into logs/training_corpus.db (v2 scorer training data)
+uv run rehoboam enrich-corpus                # League-wide sweep; writes to the store (v2 scorer training data)
 uv run rehoboam backtest-baseline            # Reproduce the season-average regret baseline weeks 2-3 must beat
+uv run rehoboam ingest                       # One budgeted ingestion pass — what func-rehoboam-external runs at 05:00/17:00 UTC
 uv run rehoboam migrate                      # Apply store migrations to DATABASE_URL (idempotent)
 uv run rehoboam db-bootstrap                 # Create the rehoboam_bot role + grants (once per project)
 uv run rehoboam import-sqlite                # Copy logs/*.db into the store; safe to re-run
@@ -108,7 +109,7 @@ bash deploy/deploy.sh                  # provision + publish both function apps
 bash deploy/deploy.sh infra --what-if  # preview Bicep changes (run before first migration)
 bash deploy/deploy.sh infra            # just Bicep deploy
 bash deploy/deploy.sh code trading     # publish trading function only
-bash deploy/deploy.sh code external    # publish external-refresh function only (after REH-41 P2 lands)
+bash deploy/deploy.sh code external    # publish the ingestion app
 ```
 
 ## Store workflow (data foundation PR B2)
@@ -183,6 +184,7 @@ only for the SQLite-era files — nothing produces new ones.
 - `store/import_sqlite.py`: `COPY` into a temp table, then `INSERT … ON CONFLICT DO NOTHING`; re-running adds nothing. `store/corpus_pull.py` writes the corpus back into a local SQLite file, because the replay scans it in a loop; it writes with `INSERT OR REPLACE`, so a re-pull **rewrites** existing rows — corpus rows are not immutable (a `player_match_history` placeholder becomes the real result once the match finishes). It also writes the three learning tables the replay reads — `flip_outcomes`, `matchday_lineup_results`, `league_rank_history` — into `logs/bid_learning.db` (`--learning-out`).
 - Tests under `tests/store/` run against a real PostgreSQL (`pytest-postgresql`: local `postgresql@17` binaries, or CI's service container via `TEST_PG_HOST`); they skip with a message when neither exists locally, and hard-fail when `CI` is set so a green CI can never mean "never ran". On macOS: `brew install postgresql@17`; if `initdb` cannot find its share files (a keg-only install), symlink `share/postgresql@17` and `lib/postgresql@17` from the keg into `/opt/homebrew/opt/postgresql@17/`.
 - PR B2 (2026-09-13): `BidLearner`, `ActivityFeedLearner` and `ValueHistoryCache` are Postgres clients; the Function app and the `auto`/`status` commands call `store.ensure_ready()` first and refuse to run without a migrated store; the blob sync is gone. Tests share one PostgreSQL: `store_dsn` is a fresh migrated database, and an autouse fixture pins `DATABASE_URL` so no test can reach the real project.
+- **Ingestion (PR C1, 2026-09-14)**: `func-rehoboam-external` runs `enrichment/ingest.run_ingestion` twice a day into `store/corpus_store.CorpusStore` — universe, `player_status_daily` (status + lineup probability per player per day), match history, MV series — stalest player first, every stale kind for that player (status/performance daily, MV weekly), within `INGEST_DEADLINE_SECONDS` / `INGEST_MAX_REQUESTS`, and exports every table as gzip CSV to the Blob container on Sunday 03:00 UTC (`store/export.py`). The trading session still fetches per player; PR C2 switches it to read the store first.
 
 ### Roster-Aware Recommendations
 

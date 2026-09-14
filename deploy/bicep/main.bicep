@@ -325,8 +325,11 @@ resource externalAppSettings 'Microsoft.Web/sites/config@2023-01-01' = {
     AzureWebJobsStorage: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
     AZURE_STORAGE_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretStorageConn.properties.secretUri})'
     APPLICATIONINSIGHTS_CONNECTION_STRING: '@Microsoft.KeyVault(SecretUri=${secretAppInsightsConn.properties.secretUri})'
+    KICKBASE_EMAIL: '@Microsoft.KeyVault(SecretUri=${secretKickbaseEmail.properties.secretUri})'
+    KICKBASE_PASSWORD: '@Microsoft.KeyVault(SecretUri=${secretKickbasePassword.properties.secretUri})'
     FUNCTIONS_EXTENSION_VERSION: '~4'
     FUNCTIONS_WORKER_RUNTIME: 'python'
+    LEAGUE_INDEX: leagueIndex
     BLOB_CONTAINER: blobContainerName
   }, databaseSettings)
 }

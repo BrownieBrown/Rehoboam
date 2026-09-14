@@ -6,6 +6,7 @@ import sqlite3
 
 from rehoboam.store import SCHEMA, connect
 from rehoboam.store.corpus_pull import pull_corpus
+from rehoboam.store.corpus_store import CorpusStore
 from rehoboam.store.migrate import migrate
 
 
@@ -82,6 +83,23 @@ def test_replay_tables_are_pulled_into_a_local_learning_file(store_dsn, tmp_path
             "p1",
         )
         assert db.execute("select count(*) from league_rank_history").fetchone()[0] == 1
+
+
+def test_pull_carries_status_fetched_at_into_the_sqlite_sweep_progress_row(store_dsn, tmp_path):
+    """``sweep_progress`` gained ``status_fetched_at`` in the store before the
+    SQLite ``TrainingCorpus`` schema did; ``select *`` over the store row must
+    not outrun what the destination table can hold."""
+    with connect(store_dsn) as conn:
+        migrate(conn)
+        conn.execute(f"insert into {SCHEMA}.player_universe (player_id) values ('p1')")
+        CorpusStore(dsn=store_dsn).mark_fetched("p1", status=True)
+        out = tmp_path / "training_corpus.db"
+        pull_corpus(conn, out)
+    with sqlite3.connect(out) as db:
+        row = db.execute(
+            "select status_fetched_at from sweep_progress where player_id = 'p1'"
+        ).fetchone()
+    assert row is not None and row[0] is not None
 
 
 def test_create_replay_tables_is_idempotent(tmp_path):

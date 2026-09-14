@@ -7,7 +7,7 @@
 #   bash deploy/deploy.sh infra --what-if  # preview Bicep changes, no apply
 #   bash deploy/deploy.sh code             # just func publish both function apps
 #   bash deploy/deploy.sh code trading     # publish trading function only
-#   bash deploy/deploy.sh code external    # publish external function only
+#   bash deploy/deploy.sh code external    # publish the ingestion app only
 #
 # WARNING: 'bash deploy/deploy.sh infra' alone wipes WEBSITE_RUN_FROM_PACKAGE
 # from app settings. Always follow with 'code' to restore the package
@@ -140,7 +140,7 @@ deploy_code() {
     publish_function "func-rehoboam" "$SCRIPT_DIR/azure_function"
   fi
   if [[ "$target" == "both" || "$target" == "external" ]]; then
-    publish_function "func-rehoboam-external" "$SCRIPT_DIR/azure_function_external_refresh"
+    publish_function "func-rehoboam-external" "$SCRIPT_DIR/azure_function_external"
   fi
 }
 

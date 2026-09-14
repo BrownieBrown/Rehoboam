@@ -15,8 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from rehoboam.match_parsing import parse_minutes
-
 DEFAULT_CORPUS_PATH = Path("logs") / "training_corpus.db"
 
 _SCHEMA = """
@@ -65,7 +63,8 @@ CREATE TABLE IF NOT EXISTS sweep_progress (
     player_id             TEXT PRIMARY KEY,
     performance_fetched_at REAL,
     mv_fetched_at          REAL,
-    transfers_fetched_at   REAL
+    transfers_fetched_at   REAL,
+    status_fetched_at      REAL
 );
 
 -- Real per-transaction transfer prices (REH-55), the only local source of a
@@ -150,6 +149,8 @@ class TrainingCorpus:
         sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
         if "transfers_fetched_at" not in sweep_columns:
             conn.execute("ALTER TABLE sweep_progress ADD COLUMN transfers_fetched_at REAL")
+        if "status_fetched_at" not in sweep_columns:
+            conn.execute("ALTER TABLE sweep_progress ADD COLUMN status_fetched_at REAL")
 
     def upsert_players(self, players: list[dict[str, Any]]) -> int:
         """Insert or update universe rows. Returns rows written."""
@@ -274,65 +275,27 @@ class TrainingCorpus:
     ) -> int:
         """Flatten a performance response into per-match rows.
 
-        Shape: ``{"it": [{"ti": "2025/2026", "ph": [{...match...}]}]}``.
-        Matches without a ``day`` are skipped — they cannot be placed on a
-        timeline and so are useless for both training and backtesting.
-
-        Each match's ``pt`` field is the player's team *for that match* —
-        verified to stay constant for a player within a season while
-        ``t1``/``t2`` alternate. It is the primary source for is_home,
-        opponent_team_id and the stored team_id, because the caller-supplied
-        ``team_id`` reflects only the player's *current* team (e.g.
-        ``sweep.py``'s ``team_by_id``, built from the live universe
-        snapshot) and is wrong for every match before a player's most recent
-        transfer — every 15-season history for a transferred player would
-        otherwise mislabel home/away and record the player's own former team
-        as the opponent. ``team_id`` is only a fallback for the rare match
-        entry that omits ``pt``.
-
-        Each match also carries an ``st`` field, stored as ``status`` (see
-        the column comment in ``_SCHEMA`` for why it isn't named ``st``
-        here). Deliberately NOT stored: ``ap``, ``tp``, ``asp``. They look
-        like point-in-time per-match aggregates but are not — ``tp`` was
-        verified live to be constant across an entire season (362 on every
-        matchday for a sampled player), i.e. a season-end total stamped onto
-        every row. Storing it would leak the season outcome into training
-        rows for matchdays that hadn't happened yet. Do not re-add these
-        three without re-verifying that finding.
+        Parsing rules (pt-first team, day-less skip, the unstored ap/tp/asp
+        season totals) live in ``rows.match_history_rows`` — both corpus
+        writers share them from there.
         """
-        rows: list[tuple] = []
-        fallback_team = str(team_id) if team_id is not None else None
+        from rehoboam.enrichment import rows as _rows
 
-        for season in performance.get("it") or []:
-            title = season.get("ti")
-            if not title:
-                continue
-            for m in season.get("ph") or []:
-                day = m.get("day")
-                if day is None:
-                    continue
-                t1 = str(m.get("t1", "")) or None
-                t2 = str(m.get("t2", "")) or None
-                pt = m.get("pt")
-                team = str(pt) if pt is not None else fallback_team
-                is_home = 1 if team is not None and team == t1 else 0
-                opponent = t2 if is_home else t1
-                st = m.get("st")
-                status = int(st) if st is not None else None
-                rows.append(
-                    (
-                        str(player_id),
-                        str(title),
-                        int(day),
-                        m.get("md"),
-                        int(m.get("p") or 0),
-                        parse_minutes(m.get("mp")),
-                        team,
-                        opponent,
-                        is_home,
-                        status,
-                    )
-                )
+        rows = [
+            (
+                r["player_id"],
+                r["season"],
+                r["day_number"],
+                r["match_date"],
+                r["points"],
+                r["minutes"],
+                r["team_id"],
+                r["opponent_team_id"],
+                r["is_home"],
+                r["status"],
+            )
+            for r in _rows.match_history_rows(player_id, team_id, performance)
+        ]
 
         if not rows:
             return 0
@@ -353,14 +316,14 @@ class TrainingCorpus:
     def record_mv_series(self, player_id: str, history: dict[str, Any]) -> int:
         """Persist a market-value series.
 
-        Shape: ``{"it": [{"dt": <days_since_epoch>, "mv": <value>}]}``.
-        Non-positive ``mv`` is a sentinel for newly-listed players and is
-        dropped — same rule as ``mv_backfill._history_to_rows``.
+        Parsing rule (non-positive ``mv`` is a sentinel and is dropped, same
+        as ``mv_backfill._history_to_rows``) lives in ``rows.mv_series_rows``.
         """
+        from rehoboam.enrichment import rows as _rows
+
         rows = [
-            (str(player_id), float(item["dt"]) * 86400.0, int(item["mv"]))
-            for item in (history.get("it") or [])
-            if item.get("dt") is not None and item.get("mv") and item["mv"] > 0
+            (r["player_id"], r["snapshot_at"], r["market_value"])
+            for r in _rows.mv_series_rows(player_id, history)
         ]
         if not rows:
             return 0
@@ -376,41 +339,23 @@ class TrainingCorpus:
     def record_player_transfers(self, player_id: str, history: dict[str, Any]) -> int:
         """Persist a player's real transfer transactions (REH-55).
 
-        Shape: ``{"it": [{"u": counterparty_id, "unm": counterparty_name,
-        "dt": <ISO-8601 timestamp>, "trp": price, "t": transfer_type}]}``.
-
-        Unlike ``mv_series``'s ``dt`` (days-since-epoch), this endpoint's
-        ``dt`` is an ISO-8601 timestamp string -- verified against the live
-        probe response (2026-07-29). Items missing ``dt`` cannot be placed on
-        a timeline and are skipped, same rule as
-        ``record_match_history``'s day-less matches.
-
-        ``t`` (stored as ``transfer_type``) is persisted exactly as received
-        and never interpreted here -- see
-        ``KickbaseV4Client.get_player_transfer_history`` for the empirical
-        read from the full REH-55 sweep (0/2/3 observed; only 2 carries a
-        real price and is what the market reconstruction should use).
+        Parsing rule (ISO-8601 ``dt``, skip items missing it, ``t`` stored
+        uninterpreted — see ``KickbaseV4Client.get_player_transfer_history``
+        for the REH-55 empirical read) lives in ``rows.transfer_rows``.
         """
-        rows: list[tuple] = []
-        for item in history.get("it") or []:
-            dt = item.get("dt")
-            if not dt:
-                continue
-            try:
-                transfer_at = _to_epoch(dt)
-            except (ValueError, TypeError):
-                continue
-            counterparty_id = item.get("u")
-            rows.append(
-                (
-                    str(player_id),
-                    transfer_at,
-                    item.get("trp"),
-                    item.get("t"),
-                    str(counterparty_id) if counterparty_id is not None else None,
-                    item.get("unm"),
-                )
+        from rehoboam.enrichment import rows as _rows
+
+        rows = [
+            (
+                r["player_id"],
+                r["transfer_at"],
+                r["price"],
+                r["transfer_type"],
+                r["counterparty_id"],
+                r["counterparty_name"],
             )
+            for r in _rows.transfer_rows(player_id, history)
+        ]
 
         if not rows:
             return 0

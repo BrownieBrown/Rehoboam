@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "KICKBASE_EMAIL": "your@email.com",
+    "KICKBASE_PASSWORD": "your-password",
+    "LEAGUE_INDEX": "0",
+    "DATABASE_URL": "postgresql://rehoboam_bot.<project-ref>:<password>@<pooler-host>:6543/postgres",
+    "AZURE_STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=...",
+    "BLOB_CONTAINER": "rehoboam-data"
+  }
+}

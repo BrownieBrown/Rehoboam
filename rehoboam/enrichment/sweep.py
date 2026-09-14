@@ -1,9 +1,10 @@
 """League-wide corpus sweep — the long pole of week 1.
 
 Enumerates every selectable player in the league and pulls per-match
-performance plus the full market-value series into ``TrainingCorpus``. Around
-a thousand requests, so it is throttled, resumable, and tolerant of individual
-failures.
+performance plus the full market-value series into whatever ``CorpusWriter``
+it's given — the store in production, the offline tools' SQLite
+``TrainingCorpus`` in their tests. Around a thousand requests, so it is
+throttled, resumable, and tolerant of individual failures.
 
 Resumability is the important property: ``sweep_progress`` is only marked
 after a successful write, so an interrupted or partially-failed run picks up
@@ -16,7 +17,8 @@ import logging
 import time
 from dataclasses import dataclass
 
-from rehoboam.enrichment.corpus import TrainingCorpus
+from rehoboam.enrichment.rows import POSITIONS, universe_rows
+from rehoboam.enrichment.writer import CorpusWriter
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +28,6 @@ DEFAULT_PAGE_SIZE = 50
 # Generous ceiling: the largest real position (MID) needed 4 pages. This only
 # exists so a misbehaving endpoint cannot spin the loop forever.
 DEFAULT_MAX_PAGES_PER_POSITION = 40
-
-_POSITIONS = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 
 
 @dataclass
@@ -40,32 +40,6 @@ class SweepStats:
     skipped: int = 0
     positions_resolved: int = 0
     positions_unresolved: int = 0
-
-
-def _universe_to_rows(items: list[dict]) -> list[dict]:
-    """Map lineup-selection items to ``upsert_players`` rows.
-
-    Field names are measured from the live endpoint, not inherited from
-    ``Player.from_dict`` — the two disagree. Here the id is ``pi``, and there
-    is no first-name field at all, so ``first_name`` is always None.
-    """
-    rows = []
-    for item in items:
-        pid = item.get("pi")
-        if pid is None:
-            continue
-        rows.append(
-            {
-                "player_id": str(pid),
-                "first_name": None,
-                "last_name": item.get("n"),
-                "position": _POSITIONS.get(item.get("pos"), None),
-                "team_id": item.get("tid"),
-                "market_value": item.get("mv"),
-                "average_points": item.get("ap"),
-            }
-        )
-    return rows
 
 
 def fetch_universe(
@@ -102,7 +76,7 @@ def fetch_universe(
             if not items:
                 break
 
-            for row in _universe_to_rows(items):
+            for row in universe_rows(items):
                 by_id[row["player_id"]] = row
 
             start += len(items)  # actual count, never page_size
@@ -121,7 +95,7 @@ def fetch_universe(
 
 def run_sweep(
     client,
-    corpus: TrainingCorpus,
+    corpus: CorpusWriter,
     *,
     league_id: str,
     dry_run: bool = False,
@@ -207,7 +181,7 @@ def run_sweep(
                     time.sleep(throttle_seconds)
                 continue
 
-            position = _POSITIONS.get(details.get("pos"))
+            position = POSITIONS.get(details.get("pos"))
             if position is None:
                 stats.positions_unresolved += 1
                 logger.warning("Competition player details for %s carried no usable position", pid)
