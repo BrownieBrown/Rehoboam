@@ -16,8 +16,8 @@ import logging
 import time
 from dataclasses import dataclass
 
-from rehoboam.enrichment.corpus import TrainingCorpus
 from rehoboam.enrichment.rows import POSITIONS, universe_rows
+from rehoboam.enrichment.writer import CorpusWriter
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def fetch_universe(
 
 def run_sweep(
     client,
-    corpus: TrainingCorpus,
+    corpus: CorpusWriter,
     *,
     league_id: str,
     dry_run: bool = False,
