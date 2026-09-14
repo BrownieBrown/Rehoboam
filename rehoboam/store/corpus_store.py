@@ -36,17 +36,19 @@ class CorpusStore:
         Each method still runs as its own top-level transaction (autocommit on,
         `conn.transaction()` per call), so a crash mid-run keeps every write that
         already committed — but the TLS + SCRAM handshake happens once, not
-        twice per kind per player.
+        twice per kind per player. Restores whatever was pinned before on
+        exit, so a re-entered session can't null out an outer one's pin.
         """
         from rehoboam.store import connect
 
+        previous = self._pinned
         with connect(self.dsn) as conn:
             conn.autocommit = True
             self._pinned = conn
             try:
                 yield conn
             finally:
-                self._pinned = None
+                self._pinned = previous
 
     @contextmanager
     def _pinned_transaction(self):
@@ -328,9 +330,10 @@ class CorpusStore:
         ``player_ids``, when given, restricts to that set — ``player_universe``
         also holds players no longer in any live squad (the historical
         corpus), and a refresh pass has no reason to spend budget on them.
-        Applied as a filter on top of the already-ordered inner query rather
-        than folded into its WHERE, so it changes which rows survive, not how
-        the survivors are ranked against each other.
+        Folded into the same WHERE as the staleness check, on the one and
+        only SELECT: a subquery's ORDER BY is not guaranteed by Postgres to
+        survive an outer filter, so restricting rows and ordering them both
+        have to happen on this query's own, outermost ORDER BY.
         """
         kinds = [k for k in ("status", "performance", "mv") if k in older_than]
         if not kinds:
@@ -341,20 +344,23 @@ class CorpusStore:
         order_terms = ", ".join(
             f"case when s.{c} is null or s.{c} < %s then coalesce(s.{c}, 0) end" for c in cols
         )
-        params: list[Any] = [older_than[k] for k in kinds] + [older_than[k] for k in kinds]
-        player_filter = " WHERE t.player_id = ANY(%s)" if player_ids is not None else ""
+        # Placeholder order must match the query text: WHERE windows, then
+        # player_ids (also in WHERE, right after), then the ORDER BY's own
+        # second binding of the same windows.
+        params: list[Any] = [older_than[k] for k in kinds]
+        where_clause = f"({stale_clause})"
         if player_ids is not None:
+            where_clause += " AND u.player_id = ANY(%s)"
             params.append([str(p) for p in player_ids])
+        params.extend(older_than[k] for k in kinds)
         with self.connection() as conn:
             rows = conn.execute(
                 f"""
-                SELECT * FROM (
-                    SELECT u.player_id, {select_cols}
-                    FROM rehoboam.player_universe u
-                    LEFT JOIN rehoboam.sweep_progress s ON s.player_id = u.player_id
-                    WHERE {stale_clause}
-                    ORDER BY least({order_terms}) ASC, u.player_id
-                ) t{player_filter}
+                SELECT u.player_id, {select_cols}
+                FROM rehoboam.player_universe u
+                LEFT JOIN rehoboam.sweep_progress s ON s.player_id = u.player_id
+                WHERE {where_clause}
+                ORDER BY least({order_terms}) ASC, u.player_id
                 """,
                 params,
             ).fetchall()
