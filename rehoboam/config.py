@@ -567,8 +567,9 @@ class Settings(BaseSettings):
         default=20.0,
         description=(
             "A player's status/performance/MV is refreshed by the ingestion when its last "
-            "fetch is older than this. 20 h means twice-daily runs refresh everyone once a day "
-            "and the second run only catches what the first could not. Env: INGEST_STALE_AFTER_HOURS."
+            "fetch is older than this. 20 h means twice-daily runs refresh everyone once a "
+            "day and the second run only catches what the first could not. "
+            "Env: INGEST_STALE_AFTER_HOURS."
         ),
     )
     ingest_deadline_seconds: float = Field(
@@ -578,7 +579,10 @@ class Settings(BaseSettings):
     )
     ingest_max_requests: int = Field(
         default=1500,
-        description="Ingestion stops cleanly after this many Kickbase requests. Env: INGEST_MAX_REQUESTS.",
+        description=(
+            "Ingestion stops cleanly after this many Kickbase requests. "
+            "Env: INGEST_MAX_REQUESTS."
+        ),
     )
 
     # Telegram approval gate

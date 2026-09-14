@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
 from rehoboam.enrichment.sweep import fetch_universe
+from rehoboam.store.corpus_store import CorpusStore
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def _counting_client(client, budget: IngestBudget):
 
 def run_ingestion(
     client,
-    store,
+    store: CorpusStore,
     *,
     league_id: str,
     budget: IngestBudget,
