@@ -196,6 +196,22 @@ class KickbaseV4Client:
             }
         )
 
+        # A league-wide pass is ~1,500 requests; without this a single 429 or
+        # a 502 from the CDN failed the player and the sweep moved on. Retries
+        # are GET-only: a retried POST could place a bid twice.
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        retry = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retry))
+
     def login(self, email: str, password: str) -> bool:
         """
         Login to Kickbase
