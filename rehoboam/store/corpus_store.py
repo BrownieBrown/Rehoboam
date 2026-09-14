@@ -275,6 +275,43 @@ class CorpusStore:
             ).fetchall()
         return [r["player_id"] for r in rows]
 
+    def players_needing_any_refresh(
+        self, older_than: dict[str, float]
+    ) -> list[tuple[str, list[str]]]:
+        """Players with at least one stale kind, stalest player first.
+
+        A player's staleness is the oldest of its relevant fetch times, never
+        fetched counting as oldest, so a budgeted run that stops mid-list
+        resumes next time with exactly the players it did not reach. Each
+        kind carries its own window: MV series change slowly and refresh
+        weekly, status and performance daily.
+        """
+        kinds = [k for k in ("status", "performance", "mv") if k in older_than]
+        if not kinds:
+            return []
+        cols = [_PROGRESS_COLUMNS[k] for k in kinds]
+        select_cols = ", ".join(f"s.{c}" for c in cols)
+        stale_clause = " OR ".join(f"s.{c} IS NULL OR s.{c} < %s" for c in cols)
+        least = ", ".join(f"coalesce(s.{c}, 0)" for c in cols)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT u.player_id, {select_cols}
+                FROM rehoboam.player_universe u
+                LEFT JOIN rehoboam.sweep_progress s ON s.player_id = u.player_id
+                WHERE {stale_clause}
+                ORDER BY least({least}) ASC, u.player_id
+                """,
+                [older_than[k] for k in kinds],
+            ).fetchall()
+        out: list[tuple[str, list[str]]] = []
+        for r in rows:
+            stale = [
+                k for k, c in zip(kinds, cols, strict=True) if r[c] is None or r[c] < older_than[k]
+            ]
+            out.append((r["player_id"], stale))
+        return out
+
     def players_missing_position(self, player_ids: list[str]) -> list[str]:
         """Ids with no real position: stubs and ids unknown to the universe."""
         ids = [str(p) for p in player_ids]

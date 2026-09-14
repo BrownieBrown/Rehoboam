@@ -2,11 +2,15 @@
 
 Three reads per player — league player details (status + lineup
 probability), competition performance (per-match history) and the
-market-value series — for every player whose last fetch of that kind is
-older than the staleness window, stalest first. The budget is a wall-clock
-deadline and a request cap; a run that hits either stops between requests,
-records why, and the next run starts with exactly the players it did not
-reach, because progress is marked only after a successful write.
+market-value series. Players are visited stalest player first, every stale
+kind for that player, then the next player: a per-kind pass let status
+starve performance and MV when the budget ran out mid-universe, since every
+run always started the list over at the same kind. MV refreshes on its own,
+wider window — it changes slowly and costs one request per player. The
+budget is a wall-clock deadline and a request cap; a run that hits either
+stops between requests, records why, and the next run starts with exactly
+the players and kinds it did not reach, because progress is marked only
+after a successful write.
 """
 
 from __future__ import annotations
@@ -89,6 +93,7 @@ def run_ingestion(
     league_id: str,
     budget: IngestBudget,
     stale_after_seconds: float,
+    mv_stale_after_seconds: float,
     throttle_seconds: float = 0.25,
     timeframe_days: int = 365,
     today: date | None = None,
@@ -101,13 +106,38 @@ def run_ingestion(
         stats.universe_size = len(rows)
         store.upsert_players(rows)
         team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
-        older_than = budget.now() - stale_after_seconds
 
-        def _pass(kind: str, attr: str, fetch, write) -> None:
-            # Progress lives on `stats` directly, not a return value: a
-            # BudgetExhausted unwind must not lose what this pass already
-            # wrote, and the tests require the count to survive a stop.
-            for pid in store.players_needing_refresh(kind, older_than=older_than):
+        now = budget.now()
+        windows = {
+            "status": now - stale_after_seconds,
+            "performance": now - stale_after_seconds,
+            "mv": now - mv_stale_after_seconds,
+        }
+        fetchers = {
+            "status": (
+                lambda pid: api.get_player_details(league_id=league_id, player_id=pid),
+                lambda pid, d: store.record_status_daily(pid, day, d, budget.now()),
+                "status_written",
+            ),
+            "performance": (
+                lambda pid: api.get_competition_player_performance(player_id=pid),
+                lambda pid, p: store.record_match_history(pid, team_by_id.get(pid), p),
+                "performance_fetched",
+            ),
+            "mv": (
+                lambda pid: api.get_player_market_value_history_v2(
+                    player_id=pid, timeframe=timeframe_days
+                ),
+                lambda pid, h: store.record_mv_series(pid, h),
+                "mv_fetched",
+            ),
+        }
+        # Progress lives on `stats` directly, not a return value: a
+        # BudgetExhausted unwind must not lose what this player already
+        # wrote, and the tests require the counts to survive a stop.
+        for pid, stale_kinds in store.players_needing_any_refresh(windows):
+            for kind in stale_kinds:
+                fetch, write, attr = fetchers[kind]
                 try:
                     payload = fetch(pid)
                 except BudgetExhausted:
@@ -121,27 +151,6 @@ def run_ingestion(
                     setattr(stats, attr, getattr(stats, attr) + 1)
                 if throttle_seconds:
                     time.sleep(throttle_seconds)
-
-        _pass(
-            "status",
-            "status_written",
-            lambda pid: api.get_player_details(league_id=league_id, player_id=pid),
-            lambda pid, d: store.record_status_daily(pid, day, d, budget.now()),
-        )
-        _pass(
-            "performance",
-            "performance_fetched",
-            lambda pid: api.get_competition_player_performance(player_id=pid),
-            lambda pid, p: store.record_match_history(pid, team_by_id.get(pid), p),
-        )
-        _pass(
-            "mv",
-            "mv_fetched",
-            lambda pid: api.get_player_market_value_history_v2(
-                player_id=pid, timeframe=timeframe_days
-            ),
-            lambda pid, h: store.record_mv_series(pid, h),
-        )
     except BudgetExhausted as stop:
         stats.stopped_by = stop.reason
     stats.requests = budget.requests

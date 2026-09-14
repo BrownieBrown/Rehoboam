@@ -1780,6 +1780,186 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+### Task 8: Interleave the three kinds per player (ruled after the first live pass)
+
+**Why:** the first live pass (2026-09-14, 462 players) wrote 435 status rows in 480 s and stopped on the deadline before a single performance or MV fetch: the league player-details endpoint costs about one second per request. With per-kind passes, every run spends its whole budget on status and performance/MV starve forever. Processing *players* stalest-first, fetching every stale kind for each before moving on, spreads the budget across kinds; a stopped run resumes with the next stalest player, and MV series (one request per player, changes slowly) refresh weekly rather than daily.
+
+**Files:**
+
+- Modify: `rehoboam/store/corpus_store.py` (new reader), `rehoboam/enrichment/ingest.py` (`run_ingestion` loop), `rehoboam/config.py` (one setting), `rehoboam/cli.py` (`ingest` passes the MV window), `deploy/azure_function_external/function_app.py` (same), `.env.example`
+- Test: `tests/store/test_corpus_store.py`, `tests/test_enrichment/test_ingest.py`
+
+**Interfaces:**
+
+- `Settings.ingest_mv_stale_after_hours: float = 144.0` (env `INGEST_MV_STALE_AFTER_HOURS`) — six days.
+
+- `CorpusStore.players_needing_any_refresh(older_than: dict[str, float]) -> list[tuple[str, list[str]]]` — `older_than` maps kind (`status`, `performance`, `mv`) to the epoch before which that kind is stale. Returns `(player_id, stale_kinds)` for every universe player with at least one stale kind, ordered by the oldest of that player's relevant `fetched_at` values, never-fetched first (`NULLS FIRST`), ties by `player_id`; `stale_kinds` keeps the order `status, performance, mv`.
+
+- `run_ingestion(client, store, *, league_id, budget, stale_after_seconds, mv_stale_after_seconds, throttle_seconds=0.25, timeframe_days=365, today=None)` — new required keyword `mv_stale_after_seconds`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/store/test_corpus_store.py`:
+
+```python
+def test_players_needing_any_refresh_orders_by_the_stalest_kind(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "a", "b", "c")
+    with connect(store_dsn) as conn:
+        # a: status fresh, performance stale (oldest of all); b: everything fresh; c: never fetched
+        conn.execute(
+            "insert into rehoboam.sweep_progress (player_id, status_fetched_at, "
+            "performance_fetched_at, mv_fetched_at) values "
+            "('a', 9_000.0, 1_000.0, 9_000.0), ('b', 9_000.0, 9_000.0, 9_000.0)"
+        )
+    out = store.players_needing_any_refresh(
+        {"status": 5_000.0, "performance": 5_000.0, "mv": 5_000.0}
+    )
+    assert out == [("c", ["status", "performance", "mv"]), ("a", ["performance"])]
+
+
+def test_players_needing_any_refresh_applies_per_kind_windows(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "a")
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "insert into rehoboam.sweep_progress (player_id, status_fetched_at, "
+            "performance_fetched_at, mv_fetched_at) values ('a', 1_000.0, 1_000.0, 1_000.0)"
+        )
+    # MV window is wider: 1_000 is fresh for mv, stale for the other two.
+    out = store.players_needing_any_refresh(
+        {"status": 5_000.0, "performance": 5_000.0, "mv": 500.0}
+    )
+    assert out == [("a", ["status", "performance"])]
+```
+
+Replace the body of `tests/test_enrichment/test_ingest.py` so that every `run_ingestion(...)` call also passes `mv_stale_after_seconds=72_000`, and change these expectations to the interleaved semantics:
+
+- `test_fresh_players_are_skipped_and_stale_ones_refreshed_oldest_first`: unchanged assertions (`status_written == 2`, details calls `["a", "c"]`) — still true.
+
+- `test_deadline_stops_cleanly_and_next_run_resumes`: with each details call burning 300 s, the run now completes player `a` fully (details, performance, mv = 3 requests, the deadline only trips on the *next* `spend`) then starts `b`: its details call at t+300 succeeds (t+300 \< t+480), so `b`'s status is written and its performance fetch trips the deadline. Assert `stats.stopped_by == "deadline"`, `stats.status_written == 2`, `stats.performance_fetched == 1`, `stats.mv_fetched == 1`. The second run then refreshes `b`'s remaining kinds and all of `c`: assert `stats2.stopped_by is None`, `stats2.status_written == 1` (only `c`; `b`'s status is fresh), `stats2.performance_fetched == 2`, `stats2.mv_fetched == 2`.
+
+- `test_request_cap_stops_cleanly`: `max_requests=6` → 5 universe pages + `a`'s details; assert `stats.stopped_by == "cap"`, `stats.requests == 6`, `stats.status_written == 1`, `stats.performance_fetched == 0`.
+
+- `test_a_failing_player_is_counted_and_the_pass_continues`: `a`'s details fail, its performance and mv still run (a failed kind does not skip the player's other kinds), `b` completes: assert `stats.failed == 1`, `stats.status_written == 1`, `stats.performance_fetched == 2`, and `store.players_needing_fetch("status") == ["a"]`.
+
+- Add `test_mv_refreshes_on_its_own_wider_window`: universe `a` with all three fetched at `clock.t - 100_000`, `stale_after_seconds=72_000`, `mv_stale_after_seconds=200_000` → status and performance fetched (1 each), `mv_fetched == 0`.
+
+- [ ] **Step 2: Run to see them fail**
+
+Run: `uv run pytest tests/store/test_corpus_store.py tests/test_enrichment/test_ingest.py -q -p no:cacheprovider`
+Expected: FAIL — missing reader, unexpected keyword `mv_stale_after_seconds`.
+
+- [ ] **Step 3: The reader**
+
+In `CorpusStore`:
+
+```python
+def players_needing_any_refresh(
+    self, older_than: dict[str, float]
+) -> list[tuple[str, list[str]]]:
+    """Players with at least one stale kind, stalest player first.
+
+    A player's staleness is the oldest of its relevant fetch times, never
+    fetched counting as oldest, so a budgeted run that stops mid-list
+    resumes next time with exactly the players it did not reach. Each
+    kind carries its own window: MV series change slowly and refresh
+    weekly, status and performance daily.
+    """
+    kinds = [k for k in ("status", "performance", "mv") if k in older_than]
+    if not kinds:
+        return []
+    cols = [_PROGRESS_COLUMNS[k] for k in kinds]
+    select_cols = ", ".join(f"s.{c}" for c in cols)
+    stale_clause = " OR ".join(f"s.{c} IS NULL OR s.{c} < %s" for c in cols)
+    least = ", ".join(f"coalesce(s.{c}, 0)" for c in cols)
+    with self.connection() as conn:
+        rows = conn.execute(
+            f"""
+                SELECT u.player_id, {select_cols}
+                FROM rehoboam.player_universe u
+                LEFT JOIN rehoboam.sweep_progress s ON s.player_id = u.player_id
+                WHERE {stale_clause}
+                ORDER BY least({least}) ASC, u.player_id
+                """,
+            [older_than[k] for k in kinds],
+        ).fetchall()
+    out: list[tuple[str, list[str]]] = []
+    for r in rows:
+        stale = [k for k, c in zip(kinds, cols) if r[c] is None or r[c] < older_than[k]]
+        out.append((r["player_id"], stale))
+    return out
+```
+
+(`coalesce(..., 0)` makes a never-fetched kind sort first, matching `NULLS FIRST`. The f-strings interpolate only `_PROGRESS_COLUMNS` values.)
+
+- [ ] **Step 4: The loop**
+
+In `run_ingestion`, replace the three `_pass` calls with one player loop:
+
+```python
+        now = budget.now()
+        windows = {
+            "status": now - stale_after_seconds,
+            "performance": now - stale_after_seconds,
+            "mv": now - mv_stale_after_seconds,
+        }
+        fetchers = {
+            "status": (
+                lambda pid: api.get_player_details(league_id=league_id, player_id=pid),
+                lambda pid, d: store.record_status_daily(pid, day, d, budget.now()),
+                "status_written",
+            ),
+            "performance": (
+                lambda pid: api.get_competition_player_performance(player_id=pid),
+                lambda pid, p: store.record_match_history(pid, team_by_id.get(pid), p),
+                "performance_fetched",
+            ),
+            "mv": (
+                lambda pid: api.get_player_market_value_history_v2(
+                    player_id=pid, timeframe=timeframe_days
+                ),
+                lambda pid, h: store.record_mv_series(pid, h),
+                "mv_fetched",
+            ),
+        }
+        for pid, stale_kinds in store.players_needing_any_refresh(windows):
+            for kind in stale_kinds:
+                fetch, write, attr = fetchers[kind]
+                try:
+                    payload = fetch(pid)
+                except BudgetExhausted:
+                    raise
+                except Exception as e:
+                    stats.failed += 1
+                    logger.warning("ingest %s failed for %s: %s", kind, pid, e)
+                else:
+                    write(pid, payload)
+                    store.mark_fetched(pid, **{kind: True})
+                    setattr(stats, attr, getattr(stats, attr) + 1)
+                if throttle_seconds:
+                    time.sleep(throttle_seconds)
+```
+
+Delete `_pass`. Update the module docstring: "stalest player first, every stale kind for that player, then the next player".
+
+- [ ] **Step 5: Settings, CLI, Function app, docs**
+
+`config.py`: `ingest_mv_stale_after_hours: float = Field(default=144.0, description="MV series refresh when older than this (six days: they change slowly and cost one request per player). Env: INGEST_MV_STALE_AFTER_HOURS.")`. `cli.py` `ingest_cmd` and `deploy/azure_function_external/function_app.py` `ingest` pass `mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0`. `.env.example`: add the line. `CLAUDE.md` ingestion bullet: "stalest player first, every stale kind for that player (status/performance daily, MV weekly)".
+
+- [ ] **Step 6: Run the tests**
+
+Run: `uv run pytest tests/store tests/test_enrichment tests/test_cli_ingest.py -q -p no:cacheprovider`, then the whole suite. Expected: all pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add rehoboam/store/corpus_store.py rehoboam/enrichment/ingest.py rehoboam/config.py rehoboam/cli.py deploy/azure_function_external/function_app.py .env.example CLAUDE.md tests/store/test_corpus_store.py tests/test_enrichment/test_ingest.py docs/superpowers/plans/2026-09-14-pr-c1-ingestion.md
+git commit -m "fix(ingest): one player at a time, every stale kind — status and performance no longer starve MV"
+```
+
+______________________________________________________________________
+
 ## Self-review against spec §2 and the ruling
 
 | requirement                                                                                                                                                                                                      | task                                          |

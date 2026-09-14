@@ -102,3 +102,34 @@ def test_clear_performance_fetched_is_scoped(store_dsn):
     store.mark_fetched("b", performance=True)
     assert store.clear_performance_fetched(["a"]) == 1
     assert store.players_needing_fetch("performance") == ["a"]
+
+
+def test_players_needing_any_refresh_orders_by_the_stalest_kind(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "a", "b", "c")
+    with connect(store_dsn) as conn:
+        # a: status fresh, performance stale (oldest of all); b: everything fresh; c: never fetched
+        conn.execute(
+            "insert into rehoboam.sweep_progress (player_id, status_fetched_at, "
+            "performance_fetched_at, mv_fetched_at) values "
+            "('a', 9_000.0, 1_000.0, 9_000.0), ('b', 9_000.0, 9_000.0, 9_000.0)"
+        )
+    out = store.players_needing_any_refresh(
+        {"status": 5_000.0, "performance": 5_000.0, "mv": 5_000.0}
+    )
+    assert out == [("c", ["status", "performance", "mv"]), ("a", ["performance"])]
+
+
+def test_players_needing_any_refresh_applies_per_kind_windows(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "a")
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "insert into rehoboam.sweep_progress (player_id, status_fetched_at, "
+            "performance_fetched_at, mv_fetched_at) values ('a', 1_000.0, 1_000.0, 1_000.0)"
+        )
+    # MV window is wider: 1_000 is fresh for mv, stale for the other two.
+    out = store.players_needing_any_refresh(
+        {"status": 5_000.0, "performance": 5_000.0, "mv": 500.0}
+    )
+    assert out == [("a", ["status", "performance"])]

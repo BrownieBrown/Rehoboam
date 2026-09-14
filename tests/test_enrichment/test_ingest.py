@@ -49,6 +49,7 @@ def test_full_pass_writes_status_history_and_mv_for_every_player(store_dsn):
         league_id=LEAGUE,
         budget=budget,
         stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
         throttle_seconds=0,
         today=DAY,
     )
@@ -90,6 +91,7 @@ def test_fresh_players_are_skipped_and_stale_ones_refreshed_oldest_first(store_d
         league_id=LEAGUE,
         budget=budget,
         stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
         throttle_seconds=0,
         today=DAY,
     )
@@ -113,12 +115,15 @@ def test_deadline_stops_cleanly_and_next_run_resumes(store_dsn):
         league_id=LEAGUE,
         budget=budget,
         stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
         throttle_seconds=0,
         today=DAY,
     )
     assert stats.stopped_by == "deadline"
-    assert stats.status_written == 2 and stats.performance_fetched == 0
-    # Next run: the remaining player is first in line.
+    assert stats.status_written == 2
+    assert stats.performance_fetched == 1
+    assert stats.mv_fetched == 1
+    # Next run: b's remaining kinds, then all of c.
     client.get_player_details.side_effect = None
     budget2 = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
     stats2 = run_ingestion(
@@ -127,10 +132,14 @@ def test_deadline_stops_cleanly_and_next_run_resumes(store_dsn):
         league_id=LEAGUE,
         budget=budget2,
         stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
         throttle_seconds=0,
         today=DAY,
     )
-    assert stats2.status_written == 1 and stats2.stopped_by is None
+    assert stats2.stopped_by is None
+    assert stats2.status_written == 1  # only c; b's status is fresh
+    assert stats2.performance_fetched == 2
+    assert stats2.mv_fetched == 2
 
 
 def test_request_cap_stops_cleanly(store_dsn):
@@ -142,11 +151,13 @@ def test_request_cap_stops_cleanly(store_dsn):
         league_id=LEAGUE,
         budget=budget,
         stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
         throttle_seconds=0,
         today=DAY,
     )
     assert stats.stopped_by == "cap" and stats.requests == 6
     assert stats.status_written == 1
+    assert stats.performance_fetched == 0
 
 
 def test_a_failing_player_is_counted_and_the_pass_continues(store_dsn):
@@ -159,8 +170,38 @@ def test_a_failing_player_is_counted_and_the_pass_continues(store_dsn):
         league_id=LEAGUE,
         budget=budget,
         stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
         throttle_seconds=0,
         today=DAY,
     )
     assert stats.failed == 1 and stats.status_written == 1
+    assert (
+        stats.performance_fetched == 2
+    )  # a's performance and mv still run despite the status fail
     assert store.players_needing_fetch("status") == ["a"]  # not marked, retried next run
+
+
+def test_mv_refreshes_on_its_own_wider_window(store_dsn):
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a"]), Clock()
+    store.upsert_players([{"player_id": "a", "position": "Forward"}])
+    store.mark_fetched("a", status=True, performance=True, mv=True)
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "update rehoboam.sweep_progress set status_fetched_at = %s, "
+            "performance_fetched_at = %s, mv_fetched_at = %s where player_id = 'a'",
+            (clock.t - 100_000, clock.t - 100_000, clock.t - 100_000),
+        )
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=200_000,
+        throttle_seconds=0,
+        today=DAY,
+    )
+    assert stats.status_written == 1
+    assert stats.performance_fetched == 1
+    assert stats.mv_fetched == 0

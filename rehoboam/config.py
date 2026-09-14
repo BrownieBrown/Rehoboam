@@ -584,6 +584,13 @@ class Settings(BaseSettings):
             "Env: INGEST_MAX_REQUESTS."
         ),
     )
+    ingest_mv_stale_after_hours: float = Field(
+        default=144.0,
+        description=(
+            "MV series refresh when older than this (six days: they change slowly and "
+            "cost one request per player). Env: INGEST_MV_STALE_AFTER_HOURS."
+        ),
+    )
 
     # Telegram approval gate
     telegram_bot_token: str = Field(
