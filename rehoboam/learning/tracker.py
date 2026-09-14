@@ -6,14 +6,9 @@ focused on decisions and execution. Two slices of state are managed:
 - pending bids — auctions placed but not yet known to be won/lost
 - tracked purchases — players we currently hold, with their cost basis
 
-Both used to live in JSON files (`pending_bids.json`,
-`tracked_purchases.json`) under `logs/`. Azure didn't sync those, so
-they were silently wiped between runs. Both now live in `bid_learning.db`
-alongside `auction_outcomes` and `flip_outcomes` (which are the
-historical archive — operational rows are deleted on lifecycle close).
-
-On `__init__`, any leftover JSON files are imported into the DB and
-renamed to `.bak` (one-time, idempotent — see `migration.py`).
+Both live in the store's `pending_bids` and `tracked_purchases` tables,
+alongside `auction_outcomes` and `flip_outcomes` (which are the historical
+archive — operational rows are deleted on lifecycle close).
 
 On each `resolve_auctions()` call, pending bids are checked against the
 current squad + active bids to determine won/lost; outcomes are pushed
@@ -24,11 +19,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from ..bid_learner import AuctionOutcome, BidLearner, FlipOutcome
 from .entry_context import EntryContext, entry_context
-from .migration import migrate_json_state_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +48,6 @@ def _iso_to_epoch(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-_LOG_DIR = Path("logs")
-_PENDING_BIDS_JSON = _LOG_DIR / "pending_bids.json"
-_TRACKED_PURCHASES_JSON = _LOG_DIR / "tracked_purchases.json"
-
-
 class LearningTracker:
     """Persists trade outcomes for the adaptive bidding feedback loop.
 
@@ -70,18 +58,6 @@ class LearningTracker:
 
     def __init__(self, bid_learner: BidLearner):
         self.bid_learner = bid_learner
-
-        # One-time migration from legacy JSON state files. Idempotent:
-        # missing files are no-ops, and successful imports rename the
-        # source to `.bak` so subsequent boots skip the work.
-        try:
-            migrate_json_state_if_needed(
-                bid_learner,
-                pending_bids_path=_PENDING_BIDS_JSON,
-                tracked_purchases_path=_TRACKED_PURCHASES_JSON,
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning("State migration failed (continuing): %s", e)
 
     # ------------------------------------------------------------------
     # Bid placed → pending

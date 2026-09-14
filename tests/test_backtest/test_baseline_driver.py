@@ -3,13 +3,16 @@ week 1's headline regret number."""
 
 from __future__ import annotations
 
+import json
+import sqlite3
+
 from rehoboam.backtest.baseline_driver import (
     MIN_USABLE_SQUAD_SIZE,
     build_matchday_inputs,
     run_baseline,
 )
-from rehoboam.bid_learner import BidLearner, FlipOutcome
 from rehoboam.enrichment.corpus import TrainingCorpus
+from rehoboam.store.corpus_pull import create_replay_tables
 
 SEASON = "2025/2026"
 DAY = 86400.0
@@ -18,33 +21,57 @@ DAY = 86400.0
 MATCHDAY_TS = 1_771_079_400.0
 
 
-def _learner(tmp_path) -> BidLearner:
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+def _learner_db(tmp_path):
+    """A local SQLite file carrying the replay tables `run_baseline` reads.
+
+    `run_baseline` / `build_matchday_inputs` scan these tables in a loop and
+    must never do that over the network — they read a local SQLite dump
+    (`store.corpus_pull.pull_replay_tables` in production), not the store
+    directly. Tests build that dump by hand.
+    """
+    path = tmp_path / "bid_learning.db"
+    create_replay_tables(path)
+    return path
 
 
-def _record_lineup(learner: BidLearner, day_number: int, fielded_ids: list[str]) -> None:
-    learner.record_matchday_lineup_result(
-        league_id="1",
-        day_number=day_number,
-        matchday_date="2026-02-14T14:30:00Z",
-        total_points=sum(range(len(fielded_ids))),
-        lineup_player_ids=fielded_ids,
-        lineup_count=len(fielded_ids),
-    )
+def _record_lineup(db_path, day_number: int, fielded_ids: list[str]) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO matchday_lineup_results "
+            "(league_id, day_number, matchday_date, total_points, "
+            "lineup_player_ids, lineup_count, snapshot_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "1",
+                day_number,
+                "2026-02-14T14:30:00Z",
+                sum(range(len(fielded_ids))),
+                json.dumps([str(pid) for pid in fielded_ids]),
+                len(fielded_ids),
+                MATCHDAY_TS,
+            ),
+        )
+        conn.commit()
 
 
-def _flip(pid: str, buy_offset_days: float, sell_offset_days: float) -> FlipOutcome:
-    return FlipOutcome(
-        player_id=pid,
-        player_name=f"P{pid}",
-        buy_price=1_000_000,
-        sell_price=1_100_000,
-        profit=100_000,
-        profit_pct=10.0,
-        hold_days=int(sell_offset_days - buy_offset_days),
-        buy_date=MATCHDAY_TS + buy_offset_days * DAY,
-        sell_date=MATCHDAY_TS + sell_offset_days * DAY,
-    )
+def _record_flip(db_path, pid: str, buy_offset_days: float, sell_offset_days: float) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO flip_outcomes "
+            "(player_id, player_name, buy_price, sell_price, profit, profit_pct, "
+            " hold_days, buy_date, sell_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                pid,
+                f"P{pid}",
+                1_000_000,
+                1_100_000,
+                100_000,
+                10.0,
+                int(sell_offset_days - buy_offset_days),
+                MATCHDAY_TS + buy_offset_days * DAY,
+                MATCHDAY_TS + sell_offset_days * DAY,
+            ),
+        )
+        conn.commit()
 
 
 def _corpus_with_positions_and_points(
@@ -78,20 +105,20 @@ def _legal_position_set(n_extra_mid: int = 0) -> dict[str, str]:
 
 
 def test_matchday_with_enough_players_is_usable(tmp_path):
-    learner = _learner(tmp_path)
+    db_path = _learner_db(tmp_path)
     fielded = list(_legal_position_set().keys())  # 7 players fielded
-    _record_lineup(learner, day_number=10, fielded_ids=fielded)
+    _record_lineup(db_path, day_number=10, fielded_ids=fielded)
 
     # Two bench players held via flip windows, bringing the squad to 9 --
     # still short of MIN_USABLE_SQUAD_SIZE, so add enough to clear it.
     extra_positions = _legal_position_set(n_extra_mid=5)
     for pid in list(extra_positions.keys())[7:]:
-        learner.record_flip(_flip(pid, -5, 5))
+        _record_flip(db_path, pid, -5, 5)
 
     points = {pid: {10: 40} for pid in extra_positions}
     corpus = _corpus_with_positions_and_points(tmp_path, extra_positions, points)
 
-    matchdays, stats = build_matchday_inputs(corpus, learner_db_path=learner.db_path, season=SEASON)
+    matchdays, stats = build_matchday_inputs(corpus, learner_db_path=db_path, season=SEASON)
 
     assert stats.matchdays_total == 1
     assert stats.matchdays_usable == 1
@@ -103,17 +130,17 @@ def test_matchday_with_enough_players_is_usable(tmp_path):
 
 
 def test_matchday_below_min_usable_squad_size_is_skipped(tmp_path):
-    learner = _learner(tmp_path)
+    db_path = _learner_db(tmp_path)
     positions = _legal_position_set()  # exactly 7 players -- below the floor
     fielded = list(positions.keys())
-    _record_lineup(learner, day_number=10, fielded_ids=fielded)
+    _record_lineup(db_path, day_number=10, fielded_ids=fielded)
 
     assert len(positions) < MIN_USABLE_SQUAD_SIZE
 
     points = {pid: {10: 40} for pid in positions}
     corpus = _corpus_with_positions_and_points(tmp_path, positions, points)
 
-    matchdays, stats = build_matchday_inputs(corpus, learner_db_path=learner.db_path, season=SEASON)
+    matchdays, stats = build_matchday_inputs(corpus, learner_db_path=db_path, season=SEASON)
 
     assert matchdays == []
     assert stats.matchdays_skipped_small_squad == 1
@@ -121,40 +148,39 @@ def test_matchday_below_min_usable_squad_size_is_skipped(tmp_path):
 
 
 def test_players_with_unresolved_position_are_dropped_from_the_squad(tmp_path):
-    learner = BidLearner(db_path=tmp_path / "ghost_bid_learning.db")
+    db_path = tmp_path / "ghost_bid_learning.db"
+    create_replay_tables(db_path)
     positions = _legal_position_set(n_extra_mid=5)
     fielded = list(positions.keys())
 
     # One extra fielded id ("999") has no player_universe row at all --
     # unresolved -- and must not survive into the squad.
-    _record_lineup(learner, day_number=10, fielded_ids=fielded + ["999"])
+    _record_lineup(db_path, day_number=10, fielded_ids=fielded + ["999"])
 
     points = {pid: {10: 40} for pid in positions}
     corpus = _corpus_with_positions_and_points(tmp_path, positions, points)
 
-    matchdays, _stats = build_matchday_inputs(
-        corpus, learner_db_path=learner.db_path, season=SEASON
-    )
+    matchdays, _stats = build_matchday_inputs(corpus, learner_db_path=db_path, season=SEASON)
 
     assert "999" not in {p.id for p in matchdays[0].squad}
     assert "999" not in matchdays[0].actual_points
 
 
 def test_max_squad_size_keeps_fielded_players_first(tmp_path):
-    learner = _learner(tmp_path)
+    db_path = _learner_db(tmp_path)
     positions = _legal_position_set(n_extra_mid=8)  # 15 players total
     fielded = list(positions.keys())[:7]
     bench = list(positions.keys())[7:]  # 8 bench players via flip holds
-    _record_lineup(learner, day_number=10, fielded_ids=fielded)
+    _record_lineup(db_path, day_number=10, fielded_ids=fielded)
     for offset, pid in enumerate(bench):
         # staggered buy dates so "most recently bought" has a clear order
-        learner.record_flip(_flip(pid, -10 + offset, 10))
+        _record_flip(db_path, pid, -10 + offset, 10)
 
     points = {pid: {10: 40} for pid in positions}
     corpus = _corpus_with_positions_and_points(tmp_path, positions, points)
 
     matchdays, _stats = build_matchday_inputs(
-        corpus, learner_db_path=learner.db_path, season=SEASON, max_squad_size=12
+        corpus, learner_db_path=db_path, season=SEASON, max_squad_size=12
     )
 
     squad_ids = {p.id for p in matchdays[0].squad}
@@ -167,37 +193,35 @@ def test_max_squad_size_keeps_fielded_players_first(tmp_path):
 
 
 def test_max_squad_size_none_means_uncapped(tmp_path):
-    learner = _learner(tmp_path)
+    db_path = _learner_db(tmp_path)
     positions = _legal_position_set(n_extra_mid=10)  # 17 players total
     fielded = list(positions.keys())[:7]
     bench = list(positions.keys())[7:]
-    _record_lineup(learner, day_number=10, fielded_ids=fielded)
+    _record_lineup(db_path, day_number=10, fielded_ids=fielded)
     for offset, pid in enumerate(bench):
-        learner.record_flip(_flip(pid, -10 + offset, 10))
+        _record_flip(db_path, pid, -10 + offset, 10)
 
     points = {pid: {10: 40} for pid in positions}
     corpus = _corpus_with_positions_and_points(tmp_path, positions, points)
 
     matchdays, _stats = build_matchday_inputs(
-        corpus, learner_db_path=learner.db_path, season=SEASON, max_squad_size=None
+        corpus, learner_db_path=db_path, season=SEASON, max_squad_size=None
     )
 
     assert {p.id for p in matchdays[0].squad} == set(positions.keys())
 
 
 def test_run_baseline_returns_report_and_stats(tmp_path):
-    learner = _learner(tmp_path)
+    db_path = _learner_db(tmp_path)
     positions = _legal_position_set(n_extra_mid=5)  # 12 players
     fielded = list(positions.keys())
-    _record_lineup(learner, day_number=10, fielded_ids=fielded)
+    _record_lineup(db_path, day_number=10, fielded_ids=fielded)
 
     points = {pid: {9: 30, 10: 40} for pid in positions}
     corpus_path = tmp_path / "corpus.db"
     _corpus_with_positions_and_points(tmp_path, positions, points)
 
-    report, stats = run_baseline(
-        learner_db_path=learner.db_path, corpus_db_path=corpus_path, season=SEASON
-    )
+    report, stats = run_baseline(learner_db_path=db_path, corpus_db_path=corpus_path, season=SEASON)
 
     assert stats.matchdays_usable == 1
     assert len(report.results) == 1

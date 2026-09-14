@@ -50,7 +50,10 @@ def settings(monkeypatch) -> Settings:
 
 @pytest.fixture
 def trader(tmp_path, settings, monkeypatch) -> AutoTrader:
-    monkeypatch.chdir(tmp_path)  # ValueHistoryCache writes to ./logs -- isolate it
+    # ValueHistoryCache reads/writes the store now, not a ./logs sqlite file,
+    # so this chdir isolates nothing of its own; kept harmless in case a
+    # future setup_logging() call in this path writes ./logs/rehoboam.log.
+    monkeypatch.chdir(tmp_path)
     api = MagicMock()
     api.client.get_player_performance.return_value = _perf(STALE_MATCH_DATE, STALE_STATUS)
     return AutoTrader(api=api, settings=settings, dry_run=True)

@@ -2,11 +2,9 @@
 
 import json
 import logging
-import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -120,529 +118,36 @@ MIN_LEARNED_OVERBID_PCT = 8.0
 class BidLearner:
     """Learn from auction outcomes to improve bidding strategy"""
 
-    def __init__(self, db_path: Path | None = None):
-        if db_path is None:
-            db_path = Path("logs") / "bid_learning.db"
+    def __init__(self, dsn: str | None = None):
+        """`dsn` overrides DATABASE_URL — tests pass a fresh database.
 
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.db_path = db_path
-        self._init_db()
+        Resolution is lazy: a session that never records anything never needs
+        the store, and a missing DATABASE_URL surfaces at the first write as
+        StoreUnconfigured — or, for the paths that matter, at startup through
+        `store.ensure_ready()`.
+        """
+        self.dsn = dsn
 
-    def _init_db(self):
-        """Initialize database schema"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS auction_outcomes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    player_id TEXT NOT NULL,
-                    player_name TEXT NOT NULL,
-                    our_bid INTEGER NOT NULL,
-                    asking_price INTEGER NOT NULL,
-                    our_overbid_pct REAL NOT NULL,
-                    won INTEGER NOT NULL,
-                    winning_bid INTEGER,
-                    winning_overbid_pct REAL,
-                    winner_user_id TEXT,
-                    timestamp REAL NOT NULL,
-                    player_value_score REAL,
-                    market_value INTEGER
-                )
-            """
-            )
+    def connection(self):
+        """A connection with dict rows; one transaction per `with` block."""
+        from rehoboam.store import connect
 
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_player_id
-                ON auction_outcomes(player_id)
-            """
-            )
-
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_timestamp
-                ON auction_outcomes(timestamp)
-            """
-            )
-
-            # Flip outcomes table for tracking buy+sell transactions
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS flip_outcomes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    player_id TEXT NOT NULL,
-                    player_name TEXT NOT NULL,
-                    buy_price INTEGER NOT NULL,
-                    sell_price INTEGER NOT NULL,
-                    profit INTEGER NOT NULL,
-                    profit_pct REAL NOT NULL,
-                    hold_days INTEGER NOT NULL,
-                    buy_date REAL NOT NULL,
-                    sell_date REAL NOT NULL,
-                    trend_at_buy TEXT,
-                    average_points REAL,
-                    position TEXT,
-                    was_injured INTEGER NOT NULL DEFAULT 0
-                )
-            """
-            )
-
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_flip_player_id
-                ON flip_outcomes(player_id)
-            """
-            )
-
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_flip_buy_date
-                ON flip_outcomes(buy_date)
-            """
-            )
-
-            # REH-39: idempotency for the backfill-history CLI. Each real-world
-            # flip is uniquely identified by (player_id, buy_date), so this
-            # also catches accidental duplicate live writes as a side benefit.
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_flip_unique
-                ON flip_outcomes(player_id, buy_date)
-            """
-            )
-
-            # Matchday outcomes table for tracking EP accuracy
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS matchday_outcomes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    player_id TEXT NOT NULL,
-                    player_position TEXT NOT NULL,
-                    matchday_date TEXT NOT NULL,
-                    predicted_ep REAL NOT NULL,
-                    actual_points REAL NOT NULL,
-                    was_in_best_11 INTEGER DEFAULT 0,
-                    opponent_strength TEXT,
-                    purchase_price INTEGER,
-                    marginal_ep_gain_at_purchase REAL,
-                    timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(player_id, matchday_date)
-                )
-            """
-            )
-
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_matchday_player
-                ON matchday_outcomes(player_id)
-            """
-            )
-
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_matchday_position
-                ON matchday_outcomes(player_position)
-            """
-            )
-
-            # Operational state — bids placed but not yet resolved.
-            # Replaces the legacy `pending_bids.json` file, which Azure
-            # didn't sync between runs. One row per active auction; on
-            # win/loss, the row is deleted and the outcome is appended
-            # to `auction_outcomes` (which is the historical record).
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pending_bids (
-                    player_id TEXT PRIMARY KEY,
-                    player_name TEXT NOT NULL,
-                    our_bid INTEGER NOT NULL,
-                    asking_price INTEGER NOT NULL,
-                    our_overbid_pct REAL NOT NULL,
-                    timestamp REAL NOT NULL,
-                    market_value INTEGER,
-                    player_value_score REAL
-                )
-            """
-            )
-            # REH-111: the ceiling the bid was priced against. `bid_evaluator`
-            # re-reads every open bid each session and cancelled anything above
-            # a flat 25% — exactly the `strong` ceiling, so `must_have` was the
-            # only tier it could cancel. Without the tier here it cannot tell a
-            # squad upgrade from a flip. Added separately so an existing prod
-            # table gains it in place; rows written before this read NULL.
-            try:
-                conn.execute("ALTER TABLE pending_bids ADD COLUMN tier TEXT")
-            except sqlite3.OperationalError:
-                pass  # already present
-
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pending_bids_timestamp
-                ON pending_bids(timestamp)
-            """
-            )
-
-            # Sell-plan join table: when a bid wins, the listed players
-            # are sold to recover budget. Normalized so we can answer
-            # "which auctions freed which slots" without parsing JSON.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pending_bid_sell_plans (
-                    pending_bid_player_id TEXT NOT NULL,
-                    sell_player_id TEXT NOT NULL,
-                    PRIMARY KEY (pending_bid_player_id, sell_player_id)
-                )
-            """
-            )
-
-            # Operational state — players we currently hold with their
-            # cost basis. Replaces `tracked_purchases.json`. On sell,
-            # the row is deleted and the closed flip is appended to
-            # `flip_outcomes` (which is the historical record).
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tracked_purchases (
-                    player_id TEXT PRIMARY KEY,
-                    player_name TEXT NOT NULL,
-                    buy_price INTEGER NOT NULL,
-                    buy_date REAL NOT NULL,
-                    source TEXT
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_tracked_purchases_buy_date
-                ON tracked_purchases(buy_date)
-            """
-            )
-
-            # Wash-trade guard — every sell is recorded here so the buy path
-            # can refuse to re-bid on a player we just dumped. Without this
-            # the same player can be sold and re-bought within hours,
-            # paying the bid spread on both legs for no EP gain.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS recently_sold (
-                    player_id TEXT PRIMARY KEY,
-                    player_name TEXT NOT NULL,
-                    sold_price INTEGER NOT NULL,
-                    sold_at REAL NOT NULL,
-                    reason TEXT
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_recently_sold_sold_at
-                ON recently_sold(sold_at)
-            """
-            )
-
-            # Per-session EP prediction snapshots — required so post-matchday
-            # reconciliation can pair "what we predicted before kickoff" with
-            # "what actually happened" (matchday_outcomes). Without this
-            # table the scorer-self-calibration loop in
-            # get_position_calibration_multiplier has no input.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS predicted_eps (
-                    player_id TEXT NOT NULL,
-                    league_id TEXT NOT NULL,
-                    predicted_at REAL NOT NULL,
-                    predicted_ep REAL NOT NULL,
-                    position TEXT NOT NULL,
-                    was_in_best_11 INTEGER NOT NULL DEFAULT 0,
-                    marginal_ep_gain REAL,
-                    PRIMARY KEY (player_id, predicted_at)
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_predicted_eps_player_at
-                ON predicted_eps(player_id, predicted_at)
-            """
-            )
-
-            # Per-session team-value snapshot — REH-23.
-            # The bot fetches budget + team_value every run via get_team_info()
-            # but throws the result away after logging it. Persisting it gives
-            # us a longitudinal series for goal 3 (team value increases over
-            # time) and feeds REH-37 (rank-trajectory regression).
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS team_value_history (
-                    snapshot_at REAL PRIMARY KEY,
-                    league_id TEXT NOT NULL,
-                    team_value INTEGER NOT NULL,
-                    budget INTEGER NOT NULL,
-                    squad_size INTEGER NOT NULL
-                )
-            """
-            )
-
-            # Daily market-value snapshots for held players — REH-26.
-            # The bot fetches /player/{id}/marketValue history every session
-            # via TrendService (cached 24h) and consumes it transiently for
-            # trend computation. The current MV plus 30-day peak/trough are
-            # discarded after that, so we have no daily series to detect
-            # slow drift on held positions (goal 2: loss avoidance).
-            # Constrained to squad players to avoid blowing up DB size —
-            # market players (~50/session) would multiply rows ~3x.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS player_mv_history (
-                    player_id TEXT NOT NULL,
-                    snapshot_at REAL NOT NULL,
-                    market_value INTEGER NOT NULL,
-                    peak_mv_30d INTEGER,
-                    trough_mv_30d INTEGER,
-                    PRIMARY KEY (player_id, snapshot_at)
-                )
-            """
-            )
-            # Explicit index matches the convention of every other time-series
-            # table in this file. The composite PK already covers
-            # (player_id, snapshot_at) lookups, but the named index makes
-            # REH-33's "sold X% off peak" join obvious to readers.
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_mv_history_player
-                ON player_mv_history(player_id, snapshot_at)
-            """
-            )
-
-            # Matchday lineup actual results — REH-25.
-            # One row per (league, matchday) capturing the lineup the bot
-            # actually fielded that week and what it scored. Source: the
-            # /users/{uid}/teamcenter?dayNumber=N endpoint, lp[] array.
-            # Goal 4 (more points each week) is unmeasurable without this;
-            # `matchday_outcomes` (REH-20) tracks per-player EP accuracy but
-            # not total lineup output.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS matchday_lineup_results (
-                    league_id TEXT NOT NULL,
-                    day_number INTEGER NOT NULL,
-                    matchday_date TEXT NOT NULL,
-                    total_points INTEGER NOT NULL,
-                    lineup_player_ids TEXT NOT NULL,
-                    lineup_count INTEGER NOT NULL,
-                    snapshot_at REAL NOT NULL,
-                    PRIMARY KEY (league_id, day_number)
-                )
-            """
-            )
-
-            # League rank snapshot per session — REH-24.
-            # The /ranking response already includes per-manager team_value
-            # (`tv`), season points (`sp`), season placement (`spl`),
-            # matchday points (`mdp`), matchday placement (`mdpl`) — all the
-            # data goals 3, 4, 5 need. trader.py:179 was already calling this
-            # for competitor_player_ids; we now persist what was discarded.
-            # Composite PK lets a single session insert one row per manager.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS league_rank_history (
-                    snapshot_at REAL NOT NULL,
-                    league_id TEXT NOT NULL,
-                    manager_id TEXT NOT NULL,
-                    day_number INTEGER NOT NULL,
-                    rank_overall INTEGER,
-                    rank_matchday INTEGER,
-                    total_points INTEGER,
-                    matchday_points INTEGER,
-                    team_value INTEGER,
-                    is_self INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (snapshot_at, manager_id)
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_league_rank_self_at
-                ON league_rank_history(is_self, snapshot_at)
-            """
-            )
-
-            # Per-manager transfer P&L snapshot — REH-38.
-            # /managers/{mid}/dashboard returns `prft` (cumulative transfer
-            # P&L) and `mdw` (matchday wins) — neither is in /ranking. We
-            # snapshot both per session so we can plot trajectory and
-            # benchmark the bot's flip P&L against leaguemates.
-            # Composite PK matches league_rank_history for symmetry.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS manager_profile_history (
-                    snapshot_at REAL NOT NULL,
-                    league_id TEXT NOT NULL,
-                    manager_id TEXT NOT NULL,
-                    transfer_pnl INTEGER NOT NULL,
-                    matchday_wins INTEGER,
-                    is_self INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (snapshot_at, manager_id)
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_manager_profile_self_at
-                ON manager_profile_history(is_self, snapshot_at)
-            """
-            )
-
-            # Per-manager transfer history — REH-38.
-            # /managers/{mid}/transfer returns each completed buy/sell with
-            # price + datetime. PK on (league, manager, dt, player) makes
-            # re-imports idempotent: the same trade always collapses to one
-            # row regardless of how many sessions see it.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS buy_decisions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp REAL NOT NULL,
-                    player_id TEXT NOT NULL,
-                    player_name TEXT,
-                    decision TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    marginal_ep_gain REAL,
-                    asking_price INTEGER,
-                    market_value INTEGER,
-                    budget_ceiling INTEGER
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_buy_decisions_at
-                ON buy_decisions(timestamp)
-            """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS manager_transfers (
-                    league_id TEXT NOT NULL,
-                    manager_id TEXT NOT NULL,
-                    transfer_dt TEXT NOT NULL,
-                    player_id TEXT NOT NULL,
-                    player_name TEXT NOT NULL,
-                    transfer_type INTEGER,
-                    transfer_price INTEGER,
-                    PRIMARY KEY (league_id, manager_id, transfer_dt, player_id)
-                )
-            """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_manager_transfers_mgr_dt
-                ON manager_transfers(manager_id, transfer_dt)
-            """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS forced_sales (
-                    matchday INTEGER PRIMARY KEY,
-                    place INTEGER NOT NULL,
-                    player_id TEXT NOT NULL,
-                    player_name TEXT NOT NULL,
-                    pool TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    executed INTEGER NOT NULL,
-                    settled_at REAL NOT NULL
-                )
-                """
-            )
-
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trade_proposals (
-                    proposal_id TEXT PRIMARY KEY,
-                    player_id TEXT NOT NULL,
-                    player_name TEXT NOT NULL,
-                    bid INTEGER NOT NULL,
-                    market_value INTEGER NOT NULL,
-                    message TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                )
-                """
-            )
-            # REH-99: approval recomputes the bid ceiling against the *live*
-            # market value, which needs the tier the bid was sized under. Added
-            # separately so an existing prod table gains it in place; rows
-            # written before this land with tier NULL and fall back to the
-            # tightest tier, which refuses rather than over-permits.
-            try:
-                conn.execute("ALTER TABLE trade_proposals ADD COLUMN tier TEXT")
-            except sqlite3.OperationalError:
-                pass  # already present
-
-            # REH-114: when an unapproved proposal becomes a buy anyway. Set
-            # only on emergency squad fills, where the alternative to spending
-            # is -100 per empty slot every matchday. NULL — the default, and
-            # every row written before this — means "waits for a human
-            # indefinitely", which is what an ordinary upgrade should do.
-            try:
-                conn.execute("ALTER TABLE trade_proposals ADD COLUMN auto_approve_at REAL")
-            except sqlite3.OperationalError:
-                pass  # already present
-
-            # REH-117: the session that proposed this, so one tap can approve
-            # the set that was chosen to fit the budget together. NULL means a
-            # proposal that stands alone and keeps its own single button.
-            try:
-                conn.execute("ALTER TABLE trade_proposals ADD COLUMN batch_id TEXT")
-            except sqlite3.OperationalError:
-                pass  # already present
-
-            # REH-104: entry context for a flip. `trend_at_buy` has existed
-            # since this table was created and was NULL in all 151 rows —
-            # `record_flip_outcome` runs at sell time and had nothing to write.
-            # Added in place so prod rows can be backfilled rather than lost.
-            for _col, _type in (
-                ("trend_pct_at_buy", "REAL"),
-                ("mv_at_buy", "INTEGER"),
-                ("pct_below_peak_30d_at_buy", "REAL"),
-            ):
-                try:
-                    conn.execute(f"ALTER TABLE flip_outcomes ADD COLUMN {_col} {_type}")
-                except sqlite3.OperationalError:
-                    pass  # already present
-
-            # REH-22: drop legacy tables that no live code references.
-            # `position_bidding_stats` was orphaned by REH-27 (writer + reader
-            # methods deleted). The other three are stale residue from
-            # deleted modules (factor_weight_learner, historical_tracker)
-            # whose CREATE TABLE statements no longer exist in source. The
-            # tables persist on Azure Blob Storage forever otherwise — once
-            # SQLite creates a table, deleting the producing code doesn't
-            # remove the table from the file. Idempotent: runs once on Azure,
-            # becomes a no-op forever.
-            for legacy_table in (
-                "matchday_results",
-                "recommendation_history",
-                "factor_attribution",
-                "position_bidding_stats",
-            ):
-                conn.execute(f"DROP TABLE IF EXISTS {legacy_table}")
-
-            conn.commit()
+        return connect(self.dsn)
 
     def record_outcome(self, outcome: AuctionOutcome):
         """Record an auction outcome for learning"""
         if outcome.timestamp is None:
             outcome.timestamp = datetime.now().timestamp()
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO auction_outcomes (
+                INSERT INTO rehoboam.auction_outcomes (
                     player_id, player_name, our_bid, asking_price, our_overbid_pct,
                     won, winning_bid, winning_overbid_pct, winner_user_id, timestamp,
                     player_value_score, market_value
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
                 (
                     outcome.player_id,
@@ -659,25 +164,26 @@ class BidLearner:
                     outcome.market_value,
                 ),
             )
-            conn.commit()
 
     def record_flip(self, outcome: FlipOutcome) -> bool:
         """Record a completed flip for learning.
 
-        Uses INSERT OR IGNORE so backfill reruns and accidental double-writes
-        from the live trader collapse deterministically (idx_flip_unique on
-        (player_id, buy_date)). Returns True if a row was actually inserted.
+        Uses ON CONFLICT DO NOTHING so backfill reruns and accidental
+        double-writes from the live trader collapse deterministically
+        (idx_flip_unique on (player_id, buy_date)). Returns True if a row was
+        actually inserted.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO flip_outcomes (
+                INSERT INTO rehoboam.flip_outcomes (
                     player_id, player_name, buy_price, sell_price, profit, profit_pct,
                     hold_days, buy_date, sell_date, trend_at_buy, average_points, position,
                     was_injured, trend_pct_at_buy, mv_at_buy, pct_below_peak_30d_at_buy
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (player_id, buy_date) DO NOTHING
+                """,
                 (
                     outcome.player_id,
                     outcome.player_name,
@@ -697,16 +203,13 @@ class BidLearner:
                     outcome.pct_below_peak_30d_at_buy,
                 ),
             )
-            conn.commit()
             return cur.rowcount > 0
 
     # ------------------------------------------------------------------
     # Operational state: pending bids + tracked purchases
     #
-    # These two table families used to live in JSON files (`pending_bids.json`,
-    # `tracked_purchases.json`) which Azure wiped between runs. They live
-    # here so they ride along with the existing `bid_learning.db` blob sync.
-    # On lifecycle close (auction resolved / player sold) the row is deleted
+    # These two table families hold in-flight state, not history. On
+    # lifecycle close (auction resolved / player sold) the row is deleted
     # and the historical outcome is appended to `auction_outcomes` /
     # `flip_outcomes` — those tables are the durable archive.
     # ------------------------------------------------------------------
@@ -730,16 +233,24 @@ class BidLearner:
         Re-bidding on the same player overwrites the existing row — there's
         only ever one active auction per player from our side.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO pending_bids (
+                INSERT INTO rehoboam.pending_bids (
                     player_id, player_name, our_bid, asking_price,
-                    our_overbid_pct, timestamp, market_value, player_value_score,
-                    tier
+                    our_overbid_pct, timestamp, market_value, player_value_score, tier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (player_id) DO UPDATE SET
+                    player_name = excluded.player_name,
+                    our_bid = excluded.our_bid,
+                    asking_price = excluded.asking_price,
+                    our_overbid_pct = excluded.our_overbid_pct,
+                    timestamp = excluded.timestamp,
+                    market_value = excluded.market_value,
+                    player_value_score = excluded.player_value_score,
+                    tier = excluded.tier
+                """,
                 (
                     player_id,
                     player_name,
@@ -752,33 +263,29 @@ class BidLearner:
                     tier,
                 ),
             )
-            # Replace sell-plan rows: an INSERT OR REPLACE on pending_bids
-            # alone leaves stale join rows behind, so clear and reinsert.
+            # Sell-plan rows are replaced wholesale: an upsert on pending_bids
+            # alone would leave stale join rows behind.
             conn.execute(
-                "DELETE FROM pending_bid_sell_plans WHERE pending_bid_player_id = ?",
+                "DELETE FROM rehoboam.pending_bid_sell_plans WHERE pending_bid_player_id = %s",
                 (player_id,),
             )
             if sell_plan_player_ids:
-                conn.executemany(
-                    """
-                    INSERT INTO pending_bid_sell_plans (
-                        pending_bid_player_id, sell_player_id
-                    ) VALUES (?, ?)
-                """,
-                    [(player_id, sp) for sp in sell_plan_player_ids],
-                )
-            conn.commit()
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO rehoboam.pending_bid_sell_plans "
+                        "(pending_bid_player_id, sell_player_id) VALUES (%s, %s)",
+                        [(player_id, sp) for sp in sell_plan_player_ids],
+                    )
 
     def get_pending_bids(self) -> list[dict[str, Any]]:
         """Return all pending bids, oldest first, with their sell plans inlined."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT player_id, player_name, our_bid, asking_price,
                        our_overbid_pct, timestamp, market_value, player_value_score,
                        tier
-                FROM pending_bids
+                FROM rehoboam.pending_bids
                 ORDER BY timestamp ASC
             """
             ).fetchall()
@@ -786,7 +293,7 @@ class BidLearner:
             sell_plan_rows = conn.execute(
                 """
                 SELECT pending_bid_player_id, sell_player_id
-                FROM pending_bid_sell_plans
+                FROM rehoboam.pending_bid_sell_plans
             """
             ).fetchall()
 
@@ -801,16 +308,15 @@ class BidLearner:
 
     def delete_pending_bid(self, player_id: str) -> None:
         """Remove the pending bid + its sell-plan rows. No-op if missing."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
-                "DELETE FROM pending_bid_sell_plans WHERE pending_bid_player_id = ?",
+                "DELETE FROM rehoboam.pending_bid_sell_plans WHERE pending_bid_player_id = %s",
                 (player_id,),
             )
             conn.execute(
-                "DELETE FROM pending_bids WHERE player_id = ?",
+                "DELETE FROM rehoboam.pending_bids WHERE player_id = %s",
                 (player_id,),
             )
-            conn.commit()
 
     def add_tracked_purchase(
         self,
@@ -826,38 +332,40 @@ class BidLearner:
         Re-buying overwrites the existing row — the latest cost basis
         wins so flip P&L always reflects the most recent purchase.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO tracked_purchases (
+                INSERT INTO rehoboam.tracked_purchases (
                     player_id, player_name, buy_price, buy_date, source
                 )
-                VALUES (?, ?, ?, ?, ?)
-            """,
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (player_id) DO UPDATE SET
+                    player_name = excluded.player_name,
+                    buy_price = excluded.buy_price,
+                    buy_date = excluded.buy_date,
+                    source = excluded.source
+                """,
                 (player_id, player_name, buy_price, buy_date, source),
             )
-            conn.commit()
 
     def get_tracked_purchase(self, player_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             row = conn.execute(
                 """
                 SELECT player_id, player_name, buy_price, buy_date, source
-                FROM tracked_purchases
-                WHERE player_id = ?
+                FROM rehoboam.tracked_purchases
+                WHERE player_id = %s
             """,
                 (player_id,),
             ).fetchone()
         return dict(row) if row else None
 
     def delete_tracked_purchase(self, player_id: str) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
-                "DELETE FROM tracked_purchases WHERE player_id = ?",
+                "DELETE FROM rehoboam.tracked_purchases WHERE player_id = %s",
                 (player_id,),
             )
-            conn.commit()
 
     # ------------------------------------------------------------------
     # Wash-trade guard
@@ -877,36 +385,39 @@ class BidLearner:
         Re-selling the same player overwrites the row — the latest sell
         timestamp is what the wash-trade check needs.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO recently_sold (
+                INSERT INTO rehoboam.recently_sold (
                     player_id, player_name, sold_price, sold_at, reason
                 )
-                VALUES (?, ?, ?, ?, ?)
-            """,
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (player_id) DO UPDATE SET
+                    player_name = excluded.player_name,
+                    sold_price = excluded.sold_price,
+                    sold_at = excluded.sold_at,
+                    reason = excluded.reason
+                """,
                 (player_id, player_name, sold_price, sold_at, reason),
             )
-            conn.commit()
 
     def was_recently_sold(self, player_id: str, within_seconds: float) -> bool:
         """True iff we sold this player within the last *within_seconds*."""
         cutoff = datetime.now(tz=timezone.utc).timestamp() - within_seconds
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             row = conn.execute(
-                "SELECT sold_at FROM recently_sold WHERE player_id = ?",
+                "SELECT sold_at FROM rehoboam.recently_sold WHERE player_id = %s",
                 (player_id,),
             ).fetchone()
-        return bool(row and row[0] >= cutoff)
+        return bool(row and row["sold_at"] >= cutoff)
 
     def get_recent_sell(self, player_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             row = conn.execute(
                 """
                 SELECT player_id, player_name, sold_price, sold_at, reason
-                FROM recently_sold
-                WHERE player_id = ?
+                FROM rehoboam.recently_sold
+                WHERE player_id = %s
             """,
                 (player_id,),
             ).fetchone()
@@ -915,9 +426,8 @@ class BidLearner:
     def prune_recent_sells(self, older_than_seconds: float) -> int:
         """Drop wash-trade-guard rows older than the given age. Returns rows deleted."""
         cutoff = datetime.now(tz=timezone.utc).timestamp() - older_than_seconds
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute("DELETE FROM recently_sold WHERE sold_at < ?", (cutoff,))
-            conn.commit()
+        with self.connection() as conn:
+            cur = conn.execute("DELETE FROM rehoboam.recently_sold WHERE sold_at < %s", (cutoff,))
             return cur.rowcount
 
     def snapshot_predictions(self, rows: list[dict]) -> int:
@@ -933,29 +443,35 @@ class BidLearner:
         """
         if not rows:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO predicted_eps (
-                    player_id, league_id, predicted_at, predicted_ep,
-                    position, was_in_best_11, marginal_ep_gain
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r["player_id"],
-                        r["league_id"],
-                        r["predicted_at"],
-                        r["predicted_ep"],
-                        r["position"],
-                        1 if r.get("was_in_best_11") else 0,
-                        r.get("marginal_ep_gain"),
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO rehoboam.predicted_eps (
+                        player_id, league_id, predicted_at, predicted_ep,
+                        position, was_in_best_11, marginal_ep_gain
                     )
-                    for r in rows
-                ],
-            )
-            conn.commit()
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (player_id, predicted_at) DO UPDATE SET
+                        league_id = excluded.league_id,
+                        predicted_ep = excluded.predicted_ep,
+                        position = excluded.position,
+                        was_in_best_11 = excluded.was_in_best_11,
+                        marginal_ep_gain = excluded.marginal_ep_gain
+                    """,
+                    [
+                        (
+                            r["player_id"],
+                            r["league_id"],
+                            r["predicted_at"],
+                            r["predicted_ep"],
+                            r["position"],
+                            1 if r.get("was_in_best_11") else 0,
+                            r.get("marginal_ep_gain"),
+                        )
+                        for r in rows
+                    ],
+                )
         return len(rows)
 
     def get_latest_prediction_before(self, player_id: str, before_ts: float) -> dict | None:
@@ -965,20 +481,18 @@ class BidLearner:
         Used by the matchday reconciliation path to find "what did we predict
         for this player before kickoff?".
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
+        with self.connection() as conn:
+            row = conn.execute(
                 """
                 SELECT player_id, league_id, predicted_at, predicted_ep,
                        position, was_in_best_11, marginal_ep_gain
-                FROM predicted_eps
-                WHERE player_id = ? AND predicted_at <= ?
+                FROM rehoboam.predicted_eps
+                WHERE player_id = %s AND predicted_at <= %s
                 ORDER BY predicted_at DESC
                 LIMIT 1
                 """,
                 (player_id, before_ts),
-            )
-            row = cur.fetchone()
+            ).fetchone()
             return dict(row) if row else None
 
     def record_team_value_snapshot(
@@ -994,24 +508,24 @@ class BidLearner:
         Returns True if a row was inserted, False if a row already existed at
         the same ``snapshot_at`` (theoretical collision when two sessions land
         in the same float second — the second is silently dropped via
-        ``INSERT OR IGNORE``). Caller does not need to check the return value;
-        it's exposed for tests.
+        ``ON CONFLICT DO NOTHING``). Caller does not need to check the return
+        value; it's exposed for tests.
 
         REH-23: feeds goal 3 (team value increases over time) and unblocks
         REH-37 (rank-trajectory regression).
         """
         ts = snapshot_at if snapshot_at is not None else datetime.now().timestamp()
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO team_value_history (
+                INSERT INTO rehoboam.team_value_history (
                     snapshot_at, league_id, team_value, budget, squad_size
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
                 """,
                 (ts, league_id, int(team_value), int(budget), int(squad_size)),
             )
-            conn.commit()
             return cur.rowcount > 0
 
     def mv_history_for(self, player_id: str) -> list[tuple[float, int]]:
@@ -1021,15 +535,13 @@ class BidLearner:
         tuples rather than rows so the reconstruction stays pure and testable
         without a database.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            return [
-                (float(ts), int(mv))
-                for ts, mv in conn.execute(
-                    "SELECT snapshot_at, market_value FROM player_mv_history "
-                    "WHERE player_id = ? ORDER BY snapshot_at",
-                    (str(player_id),),
-                )
-            ]
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT snapshot_at, market_value FROM rehoboam.player_mv_history "
+                "WHERE player_id = %s ORDER BY snapshot_at",
+                (str(player_id),),
+            ).fetchall()
+        return [(float(r["snapshot_at"]), int(r["market_value"])) for r in rows]
 
     def backfill_flip_entry_context(self) -> int:
         """Fill entry context on closed flips that have none. Returns rows written.
@@ -1042,10 +554,10 @@ class BidLearner:
         """
         from rehoboam.learning.entry_context import entry_context
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             pending = conn.execute(
-                "SELECT id, player_id, buy_date FROM flip_outcomes WHERE mv_at_buy IS NULL"
+                "SELECT id, player_id, buy_date FROM rehoboam.flip_outcomes "
+                "WHERE mv_at_buy IS NULL"
             ).fetchall()
 
             written = 0
@@ -1054,9 +566,9 @@ class BidLearner:
                 if ctx.mv_at_buy is None:
                     continue
                 conn.execute(
-                    "UPDATE flip_outcomes SET trend_at_buy = COALESCE(trend_at_buy, ?), "
-                    "trend_pct_at_buy = ?, mv_at_buy = ?, pct_below_peak_30d_at_buy = ? "
-                    "WHERE id = ?",
+                    "UPDATE rehoboam.flip_outcomes SET trend_at_buy = COALESCE(trend_at_buy, %s), "
+                    "trend_pct_at_buy = %s, mv_at_buy = %s, pct_below_peak_30d_at_buy = %s "
+                    "WHERE id = %s",
                     (
                         ctx.trend_at_buy,
                         ctx.trend_pct_at_buy,
@@ -1066,8 +578,16 @@ class BidLearner:
                     ),
                 )
                 written += 1
-            conn.commit()
             return written
+
+    def flip_entry_context_coverage(self) -> tuple[int, int]:
+        """(flips carrying entry context, flips in total)."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total, COUNT(mv_at_buy) AS annotated "
+                "FROM rehoboam.flip_outcomes"
+            ).fetchone()
+        return int(row["annotated"]), int(row["total"])
 
     def record_player_mv_snapshot(self, rows: list[dict]) -> int:
         """Bulk-persist one row per held player into ``player_mv_history``.
@@ -1077,7 +597,7 @@ class BidLearner:
         legitimately return an empty history for newly-listed players),
         coerced via ``_opt_int``.
 
-        Uses ``INSERT OR IGNORE`` keyed on ``(player_id, snapshot_at)``;
+        Uses ``ON CONFLICT DO NOTHING`` keyed on ``(player_id, snapshot_at)``;
         same-second retry on the same player is a no-op.
 
         REH-26: feeds goal 2 (loss avoidance) via daily drift detection
@@ -1085,43 +605,44 @@ class BidLearner:
         """
         if not rows:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO player_mv_history (
-                    player_id, snapshot_at, market_value,
-                    peak_mv_30d, trough_mv_30d
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r["player_id"],
-                        r["snapshot_at"],
-                        int(r["market_value"]),
-                        _opt_int(r.get("peak_mv_30d")),
-                        _opt_int(r.get("trough_mv_30d")),
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO rehoboam.player_mv_history (
+                        player_id, snapshot_at, market_value,
+                        peak_mv_30d, trough_mv_30d
                     )
-                    for r in rows
-                ],
-            )
-            conn.commit()
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            r["player_id"],
+                            r["snapshot_at"],
+                            int(r["market_value"]),
+                            _opt_int(r.get("peak_mv_30d")),
+                            _opt_int(r.get("trough_mv_30d")),
+                        )
+                        for r in rows
+                    ],
+                )
         return len(rows)
 
     def has_matchday_lineup_result(self, league_id: str, day_number: int) -> bool:
         """True if ``matchday_lineup_results`` already has a row for this
         (league_id, day_number). Used by the trader to skip the extra
         /teamcenter call once a matchday is captured."""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
+        with self.connection() as conn:
+            row = conn.execute(
                 """
-                SELECT 1 FROM matchday_lineup_results
-                WHERE league_id = ? AND day_number = ?
+                SELECT 1 FROM rehoboam.matchday_lineup_results
+                WHERE league_id = %s AND day_number = %s
                 LIMIT 1
                 """,
                 (league_id, int(day_number)),
-            )
-            return cur.fetchone() is not None
+            ).fetchone()
+            return row is not None
 
     def record_matchday_lineup_result(
         self,
@@ -1140,21 +661,22 @@ class BidLearner:
         ``lineup_count`` (the API's ``clpc``) is normally 11; values < 11
         indicate empty slots and a -100 penalty applied by Kickbase.
 
-        Uses ``INSERT OR IGNORE`` keyed on ``(league_id, day_number)`` so
+        Uses ``ON CONFLICT DO NOTHING`` keyed on ``(league_id, day_number)`` so
         a session that runs twice on the same matchday is a no-op.
 
         Returns True on insert, False on collision (already recorded).
         """
         ts = snapshot_at if snapshot_at is not None else datetime.now().timestamp()
         ids_json = json.dumps([str(pid) for pid in lineup_player_ids])
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO matchday_lineup_results (
+                INSERT INTO rehoboam.matchday_lineup_results (
                     league_id, day_number, matchday_date, total_points,
                     lineup_player_ids, lineup_count, snapshot_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     league_id,
@@ -1166,7 +688,6 @@ class BidLearner:
                     ts,
                 ),
             )
-            conn.commit()
             return cur.rowcount > 0
 
     def record_league_rank_snapshot(self, rows: list[dict]) -> int:
@@ -1180,46 +701,45 @@ class BidLearner:
         all the numeric columns so a partial response (e.g. mid-season the
         previous-week's matchday placement is None) doesn't blow up the row.
 
-        Uses ``INSERT OR IGNORE`` so a same-second retry collapses
+        Uses ``ON CONFLICT DO NOTHING`` so a same-second retry collapses
         deterministically rather than overwriting; PK is
         ``(snapshot_at, manager_id)``.
 
         REH-24: feeds goals 3 (team value growth across the league),
         4 (matchday points trajectory), and 5 (rank trajectory). Returns the
-        number of rows attempted (NOT the number actually inserted, since
-        sqlite3 doesn't expose per-row outcomes from executemany; tests
-        verify behavior by reading back).
+        number of rows attempted; conflicts are silent, tests read back.
         """
         if not rows:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO league_rank_history (
-                    snapshot_at, league_id, manager_id, day_number,
-                    rank_overall, rank_matchday,
-                    total_points, matchday_points,
-                    team_value, is_self
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r["snapshot_at"],
-                        r["league_id"],
-                        r["manager_id"],
-                        int(r["day_number"]),
-                        _opt_int(r.get("rank_overall")),
-                        _opt_int(r.get("rank_matchday")),
-                        _opt_int(r.get("total_points")),
-                        _opt_int(r.get("matchday_points")),
-                        _opt_int(r.get("team_value")),
-                        1 if r.get("is_self") else 0,
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO rehoboam.league_rank_history (
+                        snapshot_at, league_id, manager_id, day_number,
+                        rank_overall, rank_matchday,
+                        total_points, matchday_points,
+                        team_value, is_self
                     )
-                    for r in rows
-                ],
-            )
-            conn.commit()
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            r["snapshot_at"],
+                            r["league_id"],
+                            r["manager_id"],
+                            int(r["day_number"]),
+                            _opt_int(r.get("rank_overall")),
+                            _opt_int(r.get("rank_matchday")),
+                            _opt_int(r.get("total_points")),
+                            _opt_int(r.get("matchday_points")),
+                            _opt_int(r.get("team_value")),
+                            1 if r.get("is_self") else 0,
+                        )
+                        for r in rows
+                    ],
+                )
         return len(rows)
 
     def record_manager_profile_snapshot(self, rows: list[dict]) -> int:
@@ -1234,37 +754,39 @@ class BidLearner:
         the purpose of the table, so callers must coerce or skip explicitly
         rather than passing None through.
 
-        Uses ``INSERT OR IGNORE`` matching ``record_league_rank_snapshot``
+        Uses ``ON CONFLICT DO NOTHING`` matching ``record_league_rank_snapshot``
         so a same-second retry collapses deterministically.
 
         REH-38: feeds goals 1 (flip revenue) and 2 (loss avoidance), and
         gives competitive intel on which leaguemates are bleeding transfer
-        P&L. Returns the number of rows attempted.
+        P&L. Returns the number of rows attempted; conflicts are silent,
+        tests read back.
         """
         if not rows:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO manager_profile_history (
-                    snapshot_at, league_id, manager_id,
-                    transfer_pnl, matchday_wins, is_self
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r["snapshot_at"],
-                        r["league_id"],
-                        r["manager_id"],
-                        int(r["transfer_pnl"]),
-                        _opt_int(r.get("matchday_wins")),
-                        1 if r.get("is_self") else 0,
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO rehoboam.manager_profile_history (
+                        snapshot_at, league_id, manager_id,
+                        transfer_pnl, matchday_wins, is_self
                     )
-                    for r in rows
-                ],
-            )
-            conn.commit()
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            r["snapshot_at"],
+                            r["league_id"],
+                            r["manager_id"],
+                            int(r["transfer_pnl"]),
+                            _opt_int(r.get("matchday_wins")),
+                            1 if r.get("is_self") else 0,
+                        )
+                        for r in rows
+                    ],
+                )
         return len(rows)
 
     def record_buy_decision(
@@ -1294,13 +816,13 @@ class BidLearner:
         ``unaffordable``, ``contested_skip``, ``squad_full``) so the column can
         be grouped without parsing prose.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO buy_decisions (
+                INSERT INTO rehoboam.buy_decisions (
                     timestamp, player_id, player_name, decision, reason,
                     marginal_ep_gain, asking_price, market_value, budget_ceiling
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     float(
@@ -1318,7 +840,6 @@ class BidLearner:
                     _opt_int(budget_ceiling),
                 ),
             )
-            conn.commit()
 
     def resolve_auction_winners(self, *, window_days: float = 3.0) -> int:
         """Fill `winning_bid` / `winner_user_id` on auctions we lost.
@@ -1341,26 +862,38 @@ class BidLearner:
         """
         filled = 0
         window = float(window_days) * 86400.0
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             pending = conn.execute(
                 """
                 SELECT id, player_id, timestamp, our_bid, asking_price, player_name
-                FROM auction_outcomes
+                FROM rehoboam.auction_outcomes
                 WHERE won = 0 AND winning_bid IS NULL
                 """
             ).fetchall()
-            for row_id, player_id, ts, _our_bid, asking, player_name in pending:
+            for row in pending:
+                row_id = row["id"]
+                player_id = row["player_id"]
+                ts = row["timestamp"]
+                our_bid = row["our_bid"]
+                asking = row["asking_price"]
+                player_name = row["player_name"]
                 if ts is None:
                     continue
-                best = None
-                for mgr, price, dt_str in conn.execute(
+                # fetchall() materialises the read up front, so the loop body
+                # below is only the UPDATE -- no cursor stays open across it.
+                transfers = conn.execute(
                     """
                     SELECT manager_id, transfer_price, transfer_dt
-                    FROM manager_transfers
-                    WHERE player_id = ? AND transfer_price IS NOT NULL
+                    FROM rehoboam.manager_transfers
+                    WHERE player_id = %s AND transfer_price IS NOT NULL
                     """,
                     (str(player_id),),
-                ):
+                ).fetchall()
+                best = None
+                for t in transfers:
+                    mgr = t["manager_id"]
+                    price = t["transfer_price"]
+                    dt_str = t["transfer_dt"]
                     epoch = _iso_to_epoch(dt_str)
                     if epoch is None or abs(epoch - float(ts)) > window:
                         continue
@@ -1375,9 +908,9 @@ class BidLearner:
                     overbid = (price - asking) / asking * 100.0
                 conn.execute(
                     """
-                    UPDATE auction_outcomes
-                    SET winning_bid = ?, winner_user_id = ?, winning_overbid_pct = ?
-                    WHERE id = ?
+                    UPDATE rehoboam.auction_outcomes
+                    SET winning_bid = %s, winner_user_id = %s, winning_overbid_pct = %s
+                    WHERE id = %s
                     """,
                     (int(price), str(winner), overbid, row_id),
                 )
@@ -1390,18 +923,17 @@ class BidLearner:
                 # because `won` is a boolean and cannot say "we were ahead".
                 # This is the first instant the anomaly is knowable, so it is
                 # raised here rather than left for someone to query.
-                if _our_bid is not None and int(price) < int(_our_bid):
+                if our_bid is not None and int(price) < int(our_bid):
                     logger.warning(
                         "auction anomaly: we were HIGH BIDDER and still lost %s — "
                         "ours EUR %s, winner paid EUR %s (margin EUR %s). "
                         "An offer that loses to a lower price was not present at "
                         "resolution; see REH-102.",
                         player_name,
-                        f"{int(_our_bid):,}",
+                        f"{int(our_bid):,}",
                         f"{int(price):,}",
-                        f"{int(_our_bid) - int(price):,}",
+                        f"{int(our_bid) - int(price):,}",
                     )
-            conn.commit()
         return filled
 
     def high_bidder_losses(self) -> list[dict[str, Any]]:
@@ -1417,13 +949,12 @@ class BidLearner:
         signal that distinguishes this failure from ordinary competition into
         noise.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT player_id, player_name, our_bid, winning_bid, timestamp,
                        our_bid - winning_bid AS margin
-                FROM auction_outcomes
+                FROM rehoboam.auction_outcomes
                 WHERE won = 0
                   AND winning_bid IS NOT NULL
                   AND winning_bid > 0
@@ -1440,8 +971,8 @@ class BidLearner:
             league_id, manager_id, transfer_dt, player_id, player_name
             transfer_type (optional), transfer_price (optional)
 
-        Uses ``INSERT OR IGNORE`` so re-importing the same transfer history
-        page doesn't error or duplicate rows. The PK
+        Uses ``ON CONFLICT DO NOTHING`` so re-importing the same transfer
+        history page doesn't error or duplicate rows. The PK
         ``(league_id, manager_id, transfer_dt, player_id)`` collapses
         duplicates from overlapping pages during backfill.
 
@@ -1449,30 +980,31 @@ class BidLearner:
         """
         if not rows:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO manager_transfers (
-                    league_id, manager_id, transfer_dt,
-                    player_id, player_name,
-                    transfer_type, transfer_price
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r["league_id"],
-                        r["manager_id"],
-                        r["transfer_dt"],
-                        r["player_id"],
-                        r["player_name"],
-                        _opt_int(r.get("transfer_type")),
-                        _opt_int(r.get("transfer_price")),
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO rehoboam.manager_transfers (
+                        league_id, manager_id, transfer_dt,
+                        player_id, player_name,
+                        transfer_type, transfer_price
                     )
-                    for r in rows
-                ],
-            )
-            conn.commit()
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        (
+                            r["league_id"],
+                            r["manager_id"],
+                            r["transfer_dt"],
+                            r["player_id"],
+                            r["player_name"],
+                            _opt_int(r.get("transfer_type")),
+                            _opt_int(r.get("transfer_price")),
+                        )
+                        for r in rows
+                    ],
+                )
         return len(rows)
 
     def get_last_purchase(self, manager_id: str, player_id: str) -> dict[str, Any] | None:
@@ -1493,13 +1025,12 @@ class BidLearner:
         `transfer_dt` is stored as an ISO-8601 string, so the ordering and the
         after-the-sale comparison are both plain lexicographic.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             buy = conn.execute(
                 """
                 SELECT transfer_price, transfer_dt
-                FROM manager_transfers
-                WHERE manager_id = ? AND player_id = ? AND transfer_type = 1
+                FROM rehoboam.manager_transfers
+                WHERE manager_id = %s AND player_id = %s AND transfer_type = 1
                   AND transfer_price IS NOT NULL
                 ORDER BY transfer_dt DESC
                 LIMIT 1
@@ -1512,9 +1043,9 @@ class BidLearner:
             sold_since = conn.execute(
                 """
                 SELECT 1
-                FROM manager_transfers
-                WHERE manager_id = ? AND player_id = ? AND transfer_type = 2
-                  AND transfer_dt > ?
+                FROM rehoboam.manager_transfers
+                WHERE manager_id = %s AND player_id = %s AND transfer_type = 2
+                  AND transfer_dt > %s
                 LIMIT 1
                 """,
                 (str(manager_id), str(player_id), buy["transfer_dt"]),
@@ -1543,31 +1074,31 @@ class BidLearner:
         lexicographically without parsing.
         """
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - window_days * 86400))
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT ABS(transfer_price)
-                FROM manager_transfers
+                SELECT ABS(transfer_price) AS price
+                FROM rehoboam.manager_transfers
                 WHERE transfer_type = 1
                   AND transfer_price IS NOT NULL
-                  AND transfer_dt >= ?
+                  AND transfer_dt >= %s
                 """,
                 (cutoff,),
             ).fetchall()
-        return [int(r[0]) for r in rows]
+        return [int(r["price"]) for r in rows]
 
     def has_matchday_outcome(self, player_id: str, matchday_date: str) -> bool:
         """True if ``matchday_outcomes`` already has a row for this player+date."""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
+        with self.connection() as conn:
+            row = conn.execute(
                 """
-                SELECT 1 FROM matchday_outcomes
-                WHERE player_id = ? AND matchday_date = ?
+                SELECT 1 FROM rehoboam.matchday_outcomes
+                WHERE player_id = %s AND matchday_date = %s
                 LIMIT 1
                 """,
                 (player_id, matchday_date),
-            )
-            return cur.fetchone() is not None
+            ).fetchone()
+            return row is not None
 
     def record_matchday_outcome(
         self,
@@ -1583,18 +1114,29 @@ class BidLearner:
     ) -> None:
         """Record actual matchday points vs predicted EP.
 
-        Uses INSERT OR REPLACE so duplicate (player_id, matchday_date) rows are
-        silently overwritten rather than raising an error.
+        Upserts on (player_id, matchday_date) — via ON CONFLICT DO UPDATE — so
+        duplicate rows are overwritten rather than raising an error. The
+        `timestamp` column is left untouched on both insert and update; its
+        schema default sets it once and reconciliation reruns must not disturb
+        that recorded-at marker.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO matchday_outcomes (
+                INSERT INTO rehoboam.matchday_outcomes (
                     player_id, player_position, matchday_date,
                     predicted_ep, actual_points, was_in_best_11,
                     opponent_strength, purchase_price, marginal_ep_gain_at_purchase
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (player_id, matchday_date) DO UPDATE SET
+                    player_position = excluded.player_position,
+                    predicted_ep = excluded.predicted_ep,
+                    actual_points = excluded.actual_points,
+                    was_in_best_11 = excluded.was_in_best_11,
+                    opponent_strength = excluded.opponent_strength,
+                    purchase_price = excluded.purchase_price,
+                    marginal_ep_gain_at_purchase = excluded.marginal_ep_gain_at_purchase
                 """,
                 (
                     player_id,
@@ -1608,7 +1150,6 @@ class BidLearner:
                     marginal_ep_gain_at_purchase,
                 ),
             )
-            conn.commit()
 
     # Half-life (days) for exponential decay of historical EP accuracy data.
     # Recent predictions count more — a 60-day half-life means 2-month-old
@@ -1637,16 +1178,15 @@ class BidLearner:
         :attr:`POSITION_CALIBRATION_MIN_MATCHDAYS` records, or when total
         weighted predicted EP is zero.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
+        with self.connection() as conn:
+            rows = conn.execute(
                 """
                 SELECT predicted_ep, actual_points, timestamp
-                FROM matchday_outcomes
-                WHERE player_position = ? AND predicted_ep > 0
+                FROM rehoboam.matchday_outcomes
+                WHERE player_position = %s AND predicted_ep > 0
                 """,
                 (position,),
-            )
-            rows = cursor.fetchall()
+            ).fetchall()
 
         if len(rows) < self.POSITION_CALIBRATION_MIN_MATCHDAYS:
             return 1.0
@@ -1656,11 +1196,11 @@ class BidLearner:
 
         weighted_actual = 0.0
         weighted_predicted = 0.0
-        for predicted_ep, actual_points, ts in rows:
-            age_seconds = self._age_seconds(ts, now_ts)
+        for r in rows:
+            age_seconds = self._age_seconds(r["timestamp"], now_ts)
             weight = 0.5 ** (age_seconds / half_life_seconds)
-            weighted_actual += weight * actual_points
-            weighted_predicted += weight * predicted_ep
+            weighted_actual += weight * r["actual_points"]
+            weighted_predicted += weight * r["predicted_ep"]
 
         if weighted_predicted <= 0:
             return 1.0
@@ -1724,16 +1264,15 @@ class BidLearner:
         if filter_col not in ("player_id", "player_position"):
             raise ValueError(f"invalid filter_col: {filter_col}")
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
+        with self.connection() as conn:
+            rows = conn.execute(
                 f"""
                 SELECT predicted_ep, actual_points, timestamp
-                FROM matchday_outcomes
-                WHERE {filter_col} = ? AND predicted_ep > 0
+                FROM rehoboam.matchday_outcomes
+                WHERE {filter_col} = %s AND predicted_ep > 0
                 """,
                 (filter_val,),
-            )
-            rows = cursor.fetchall()
+            ).fetchall()
 
         if len(rows) < min_matchdays:
             return None
@@ -1743,11 +1282,11 @@ class BidLearner:
 
         weighted_actual = 0.0
         weighted_predicted = 0.0
-        for predicted_ep, actual_points, ts in rows:
-            age_seconds = self._age_seconds(ts, now_ts)
+        for r in rows:
+            age_seconds = self._age_seconds(r["timestamp"], now_ts)
             weight = 0.5 ** (age_seconds / half_life_seconds)
-            weighted_actual += weight * actual_points
-            weighted_predicted += weight * predicted_ep
+            weighted_actual += weight * r["actual_points"]
+            weighted_predicted += weight * r["predicted_ep"]
 
         if weighted_predicted <= 0:
             return None
@@ -1759,10 +1298,11 @@ class BidLearner:
     def _age_seconds(timestamp_str: str | None, now_ts: float) -> float:
         """Age in seconds of a matchday_outcomes.timestamp value.
 
-        SQLite's CURRENT_TIMESTAMP stores UTC as text ("YYYY-MM-DD HH:MM:SS").
-        We parse it as UTC-aware so the arithmetic against *now_ts* (also UTC)
-        is correct. Unparseable or missing timestamps return age=0 so they're
-        treated as fresh rather than discarded.
+        The column defaults to Postgres's ``now() at time zone 'utc'``
+        formatted as text ("YYYY-MM-DD HH:MM:SS"), so it is parsed as
+        UTC-aware for the arithmetic against *now_ts* (also UTC).
+        Unparseable or missing timestamps return age=0 so they're treated as
+        fresh rather than discarded.
         """
         if not timestamp_str:
             return 0.0
@@ -1779,21 +1319,22 @@ class BidLearner:
         AVG(actual_points) / AVG(predicted_ep).  Returns a quality multiplier
         clamped to [0.5, 1.2]; defaults to 1.0 when data is insufficient.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
+        with self.connection() as conn:
+            row = conn.execute(
                 """
-                SELECT COUNT(*), AVG(mo.actual_points), AVG(mo.predicted_ep)
-                FROM matchday_outcomes mo
-                INNER JOIN auction_outcomes ao ON ao.player_id = mo.player_id
+                SELECT COUNT(*) AS n,
+                       AVG(mo.actual_points)::float8 AS avg_actual,
+                       AVG(mo.predicted_ep)::float8 AS avg_predicted
+                FROM rehoboam.matchday_outcomes mo
+                INNER JOIN rehoboam.auction_outcomes ao ON ao.player_id = mo.player_id
                 WHERE ao.won = 1 AND mo.predicted_ep > 0
                 """
-            )
-            row = cursor.fetchone()
+            ).fetchone()
 
         if not row:
             return 1.0
 
-        count, avg_actual, avg_predicted = row
+        count, avg_actual, avg_predicted = row["n"], row["avg_actual"], row["avg_predicted"]
         if not count or count < 3 or not avg_predicted or avg_predicted <= 0:
             return 1.0
 
@@ -1832,20 +1373,19 @@ class BidLearner:
         max_overbid_pct = (max_extra / asking_price) * 100.0
 
         # Win-rate adjustment from historical auction data
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
+        with self.connection() as conn:
+            row = conn.execute(
                 """
-                SELECT COUNT(*), SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END)
-                FROM auction_outcomes
-                WHERE timestamp > ?
+                SELECT COUNT(*) AS total_auctions,
+                       SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END)::bigint AS total_wins
+                FROM rehoboam.auction_outcomes
+                WHERE timestamp > %s
                 """,
                 (datetime.now().timestamp() - (AUCTION_HISTORY_WINDOW_DAYS * 24 * 3600),),
-            )
-            row = cursor.fetchone()
+            ).fetchone()
 
-        total_auctions, total_wins = row if row else (0, 0)
-        total_auctions = total_auctions or 0
-        total_wins = total_wins or 0
+        total_auctions = (row["total_auctions"] if row else 0) or 0
+        total_wins = (row["total_wins"] if row else 0) or 0
 
         # No evidence, no opinion. The caller treats any positive value as
         # authoritative and lets it replace the whole bid stack -- including
@@ -1919,12 +1459,23 @@ class BidLearner:
         needs it to recompute the ceiling against the live market value
         (REH-99); None falls back to the tightest tier.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO trade_proposals "
+                "INSERT INTO rehoboam.trade_proposals "
                 "(proposal_id, player_id, player_name, bid, market_value, message, "
                 " status, created_at, tier, auto_approve_at, batch_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s) "
+                "ON CONFLICT (proposal_id) DO UPDATE SET "
+                "player_id = excluded.player_id, "
+                "player_name = excluded.player_name, "
+                "bid = excluded.bid, "
+                "market_value = excluded.market_value, "
+                "message = excluded.message, "
+                "status = excluded.status, "
+                "created_at = excluded.created_at, "
+                "tier = excluded.tier, "
+                "auto_approve_at = excluded.auto_approve_at, "
+                "batch_id = excluded.batch_id",
                 (
                     proposal_id,
                     player_id,
@@ -1952,13 +1503,12 @@ class BidLearner:
         """
         if not batch_id:
             return []
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM trade_proposals
-                WHERE batch_id = ? AND status = 'pending'
-                ORDER BY created_at ASC, rowid ASC
+                SELECT * FROM rehoboam.trade_proposals
+                WHERE batch_id = %s AND status = 'pending'
+                ORDER BY created_at ASC, proposal_id ASC
                 """,
                 (batch_id,),
             ).fetchall()
@@ -1972,14 +1522,13 @@ class BidLearner:
         rejected or already-executed row out — the deadline is a backstop for
         silence, not an override of a decision Marco has already made.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM trade_proposals
+                SELECT * FROM rehoboam.trade_proposals
                 WHERE status = 'pending'
                   AND auto_approve_at IS NOT NULL
-                  AND auto_approve_at <= ?
+                  AND auto_approve_at <= %s
                 ORDER BY auto_approve_at ASC
                 """,
                 (float(now),),
@@ -1988,10 +1537,9 @@ class BidLearner:
 
     def get_proposal(self, proposal_id: str) -> dict | None:
         """One proposal by id, or None."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM trade_proposals WHERE proposal_id = ?", (proposal_id,)
+                "SELECT * FROM rehoboam.trade_proposals WHERE proposal_id = %s", (proposal_id,)
             ).fetchone()
         return dict(row) if row else None
 
@@ -2001,10 +1549,10 @@ class BidLearner:
         The WHERE clause is the idempotency guarantee: Telegram retries
         callbacks, and a second tap must not buy the player twice.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cur = conn.execute(
-                "UPDATE trade_proposals SET status = ? "
-                "WHERE proposal_id = ? AND status = 'pending'",
+                "UPDATE rehoboam.trade_proposals SET status = %s "
+                "WHERE proposal_id = %s AND status = 'pending'",
                 (status, proposal_id),
             )
             return cur.rowcount > 0
@@ -2017,9 +1565,9 @@ class BidLearner:
         proposal it owns it, and the follow-up transitions to 'executed' or
         'failed' must not be blocked by that guard.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             conn.execute(
-                "UPDATE trade_proposals SET status = ? WHERE proposal_id = ?",
+                "UPDATE rehoboam.trade_proposals SET status = %s WHERE proposal_id = %s",
                 (status, proposal_id),
             )
 
@@ -2041,11 +1589,12 @@ class BidLearner:
         one player per matchday, and a re-run of the session must not compound
         it.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO forced_sales "
+                "INSERT INTO rehoboam.forced_sales "
                 "(matchday, place, player_id, player_name, pool, reason, executed, settled_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
                 (
                     int(matchday),
                     int(place),
@@ -2061,18 +1610,18 @@ class BidLearner:
 
     def forced_sale_settled(self, matchday: int) -> bool:
         """Has the Top-5 obligation for this matchday already been discharged?"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.connection() as conn:
             row = conn.execute(
-                "SELECT 1 FROM forced_sales WHERE matchday = ?", (int(matchday),)
+                "SELECT 1 FROM rehoboam.forced_sales WHERE matchday = %s", (int(matchday),)
             ).fetchone()
         return row is not None
 
     def proposals_for_player(self, player_id: str) -> list[dict]:
         """Every proposal ever made for this player, newest first."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM trade_proposals WHERE player_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM rehoboam.trade_proposals WHERE player_id = %s "
+                "ORDER BY created_at DESC",
                 (str(player_id),),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -2084,19 +1633,19 @@ class BidLearner:
         without it an approved purchase and a gate-refused one both vanish,
         since the session's own results only cover autonomous trades.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM trade_proposals WHERE created_at >= ? ORDER BY created_at",
+                "SELECT * FROM rehoboam.trade_proposals WHERE created_at >= %s "
+                "ORDER BY created_at",
                 (float(since_ts),),
             ).fetchall()
         return [dict(r) for r in rows]
 
     def pending_proposals(self) -> list[dict]:
         """All proposals still awaiting a decision, oldest first."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM trade_proposals WHERE status = 'pending' " "ORDER BY created_at"
+                "SELECT * FROM rehoboam.trade_proposals WHERE status = 'pending' "
+                "ORDER BY created_at"
             ).fetchall()
         return [dict(r) for r in rows]

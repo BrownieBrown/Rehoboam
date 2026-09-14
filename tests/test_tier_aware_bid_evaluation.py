@@ -107,8 +107,8 @@ class TestABidIsJudgedByItsOwnCeiling:
 class TestTheTierSurvivesTheRoundTrip:
     """The evaluator can only honour a tier the DB actually kept."""
 
-    def test_a_recorded_tier_comes_back_out(self, tmp_path):
-        learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    def test_a_recorded_tier_comes_back_out(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         learner.add_pending_bid(
             player_id="849",
             player_name="Tim Kleindienst",
@@ -122,9 +122,9 @@ class TestTheTierSurvivesTheRoundTrip:
 
         assert learner.get_pending_bids()[0]["tier"] == "must_have"
 
-    def test_a_bid_recorded_without_a_tier_reads_back_as_none(self, tmp_path):
+    def test_a_bid_recorded_without_a_tier_reads_back_as_none(self, store_dsn):
         """Pre-REH-111 rows, and paths that do not carry a tier."""
-        learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+        learner = BidLearner(dsn=store_dsn)
         learner.add_pending_bid(
             player_id="849",
             player_name="Tim Kleindienst",
@@ -141,10 +141,10 @@ class TestTheTierSurvivesTheRoundTrip:
 class TestTheApprovedBidRecordsItsTier:
     """The approval path knows the tier — it must not drop it on the floor."""
 
-    def test_record_bid_placed_persists_the_tier(self, tmp_path):
+    def test_record_bid_placed_persists_the_tier(self, store_dsn):
         from rehoboam.learning.tracker import LearningTracker
 
-        learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+        learner = BidLearner(dsn=store_dsn)
         listing = _listing("849", "Kleindienst", market_value=19_038_891, our_bid=24_748_891)
 
         LearningTracker(learner).record_bid_placed(listing, 24_748_891, tier=Tier.MUST_HAVE.value)

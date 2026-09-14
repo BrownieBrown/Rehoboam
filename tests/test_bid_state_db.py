@@ -1,23 +1,12 @@
-"""Tests for the SQLite-backed bid/purchase state replacing legacy JSON files.
+"""Tests for the store-backed bid/purchase state replacing legacy JSON files.
 
-The bot used to keep `pending_bids.json` and `tracked_purchases.json` in
-the working directory. Azure wiped those between runs because only
-`bid_learning.db` was synced to blob storage. These tests cover the new
-in-DB equivalents living alongside the existing learning tables in
-`bid_learning.db`.
+The bot used to keep this state as JSON files in the working directory,
+which never survived between runs since only one database file was synced
+off-box. These tests cover the `pending_bids` / `tracked_purchases` tables
+living alongside the other learning tables in the store.
 """
 
 import time
-
-import pytest
-
-from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
-
 
 # ---------------------------------------------------------------------------
 # pending_bids

@@ -7,16 +7,8 @@ goal 2 (loss avoidance) becomes measurable on slow drift, and REH-33's
 "sold X% off peak" calculation has historical data to join against.
 """
 
-import sqlite3
-
-import pytest
-
 from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+from rehoboam.store import connect
 
 
 def _row(
@@ -37,17 +29,25 @@ def _row(
 
 
 class TestPlayerMvSnapshot:
-    def test_round_trip_one_row(self, learner):
+    def test_round_trip_one_row(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         n = learner.record_player_mv_snapshot([_row("p1")])
         assert n == 1
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
                 "SELECT player_id, snapshot_at, market_value, "
-                "peak_mv_30d, trough_mv_30d FROM player_mv_history"
+                "peak_mv_30d, trough_mv_30d FROM rehoboam.player_mv_history"
             ).fetchone()
-        assert row == ("p1", 1_000.0, 10_000_000, 11_000_000, 9_500_000)
+        assert (
+            row["player_id"],
+            row["snapshot_at"],
+            row["market_value"],
+            row["peak_mv_30d"],
+            row["trough_mv_30d"],
+        ) == ("p1", 1_000.0, 10_000_000, 11_000_000, 9_500_000)
 
-    def test_bulk_insert_squad(self, learner):
+    def test_bulk_insert_squad(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         rows = [
             _row("p1", market_value=10_000_000),
             _row("p2", market_value=12_000_000),
@@ -55,24 +55,31 @@ class TestPlayerMvSnapshot:
         ]
         learner.record_player_mv_snapshot(rows)
 
-        with sqlite3.connect(learner.db_path) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM player_mv_history").fetchone()[0]
+        with connect(store_dsn) as conn:
+            count = conn.execute("SELECT COUNT(*) AS n FROM rehoboam.player_mv_history").fetchone()[
+                "n"
+            ]
         assert count == 3
 
-    def test_empty_input_is_noop(self, learner):
+    def test_empty_input_is_noop(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         assert learner.record_player_mv_snapshot([]) == 0
 
-    def test_collision_at_same_pk_silently_dropped(self, learner):
+    def test_collision_at_same_pk_silently_dropped(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # PK = (player_id, snapshot_at). Same-second retry on the same player
         # → second write is dropped, first preserved.
         learner.record_player_mv_snapshot([_row("p1", snapshot_at=42.0, market_value=10_000_000)])
         learner.record_player_mv_snapshot([_row("p1", snapshot_at=42.0, market_value=99_999_999)])
 
-        with sqlite3.connect(learner.db_path) as conn:
-            rows = conn.execute("SELECT player_id, market_value FROM player_mv_history").fetchall()
-        assert rows == [("p1", 10_000_000)]
+        with connect(store_dsn) as conn:
+            rows = conn.execute(
+                "SELECT player_id, market_value FROM rehoboam.player_mv_history"
+            ).fetchall()
+        assert [(r["player_id"], r["market_value"]) for r in rows] == [("p1", 10_000_000)]
 
-    def test_peak_and_trough_optional(self, learner):
+    def test_peak_and_trough_optional(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # Newly-listed players may have no history → peak/trough come back
         # as None. Schema must accept NULLs without raising.
         learner.record_player_mv_snapshot(
@@ -84,13 +91,14 @@ class TestPlayerMvSnapshot:
                 )
             ]
         )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
-                "SELECT peak_mv_30d, trough_mv_30d FROM player_mv_history"
+                "SELECT peak_mv_30d, trough_mv_30d FROM rehoboam.player_mv_history"
             ).fetchone()
-        assert row == (None, None)
+        assert (row["peak_mv_30d"], row["trough_mv_30d"]) == (None, None)
 
-    def test_float_market_value_coerced_to_int(self, learner):
+    def test_float_market_value_coerced_to_int(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # MV history occasionally returns floats; INTEGER column should
         # round-trip cleanly via int() coercion in the writer.
         learner.record_player_mv_snapshot(
@@ -101,22 +109,23 @@ class TestPlayerMvSnapshot:
                 )
             ]
         )
-        with sqlite3.connect(learner.db_path) as conn:
-            row = conn.execute("SELECT market_value FROM player_mv_history").fetchone()
-        assert row == (10_500_000,)
+        with connect(store_dsn) as conn:
+            row = conn.execute("SELECT market_value FROM rehoboam.player_mv_history").fetchone()
+        assert row["market_value"] == 10_500_000
 
-    def test_multiple_snapshots_same_player_different_times(self, learner):
+    def test_multiple_snapshots_same_player_different_times(self, store_dsn):
+        learner = BidLearner(dsn=store_dsn)
         # The whole point of the table — daily series for one player.
         for i, ts in enumerate([100.0, 200.0, 300.0]):
             learner.record_player_mv_snapshot(
                 [_row("p1", snapshot_at=ts, market_value=10_000_000 + i * 250_000)]
             )
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             rows = conn.execute(
-                "SELECT snapshot_at, market_value FROM player_mv_history "
+                "SELECT snapshot_at, market_value FROM rehoboam.player_mv_history "
                 "WHERE player_id = 'p1' ORDER BY snapshot_at"
             ).fetchall()
-        assert rows == [
+        assert [(r["snapshot_at"], r["market_value"]) for r in rows] == [
             (100.0, 10_000_000),
             (200.0, 10_250_000),
             (300.0, 10_500_000),

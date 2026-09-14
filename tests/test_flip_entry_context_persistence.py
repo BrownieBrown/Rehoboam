@@ -6,19 +6,13 @@ the reconstruction consumes, and the backfill that makes the 151 rows of
 existing history measurable.
 """
 
-import sqlite3
-
 import pytest
 
-from rehoboam.bid_learner import BidLearner, FlipOutcome
+from rehoboam.bid_learner import FlipOutcome
+from rehoboam.store import connect
 
 DAY = 86400.0
 BUY = 1_700_000_000.0
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bids.db")
 
 
 def _flip(learner, pid="p1", **over):
@@ -44,16 +38,15 @@ def _mv(learner, pid, *pairs):
     )
 
 
-def _rows(learner):
-    """Read flip_outcomes straight from the file — a persistence test should
-    assert on what actually landed on disk, not through another accessor."""
-    with sqlite3.connect(learner.db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM flip_outcomes")]
+def _rows(dsn):
+    """Read flip_outcomes straight from the store — a persistence test should
+    assert on what actually landed there, not through another accessor."""
+    with connect(dsn) as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM rehoboam.flip_outcomes")]
 
 
 class TestTheColumnsRoundTrip:
-    def test_entry_context_is_stored_and_read_back(self, learner):
+    def test_entry_context_is_stored_and_read_back(self, learner, store_dsn):
         _flip(
             learner,
             trend_at_buy="rising",
@@ -61,17 +54,17 @@ class TestTheColumnsRoundTrip:
             mv_at_buy=9_400_000,
             pct_below_peak_30d_at_buy=-2.5,
         )
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["trend_at_buy"] == "rising"
         assert row["trend_pct_at_buy"] == pytest.approx(13.2)
         assert row["mv_at_buy"] == 9_400_000
         assert row["pct_below_peak_30d_at_buy"] == pytest.approx(-2.5)
 
-    def test_a_flip_recorded_without_context_stores_nulls_not_zeros(self, learner):
+    def test_a_flip_recorded_without_context_stores_nulls_not_zeros(self, learner, store_dsn):
         """A zero would be a real reading — 'bought exactly at the peak'. An
         unknown entry must stay distinguishable from that or the aggregates lie."""
         _flip(learner)
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["trend_pct_at_buy"] is None
         assert row["pct_below_peak_30d_at_buy"] is None
 
@@ -87,28 +80,28 @@ class TestTheMarketValueReader:
 
 
 class TestTheBackfill:
-    def test_it_populates_a_row_that_has_no_context(self, learner):
+    def test_it_populates_a_row_that_has_no_context(self, learner, store_dsn):
         _flip(learner, pid="p1")
         _mv(learner, "p1", (0, 9_400_000), (14, 8_300_000), (10, 10_000_000))
         assert learner.backfill_flip_entry_context() == 1
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["trend_at_buy"] == "rising"
         assert row["mv_at_buy"] == 9_400_000
         # peak in the 30d window is 10,000,000 → we bought 6% under it
         assert row["pct_below_peak_30d_at_buy"] == pytest.approx(-6.0)
 
-    def test_it_leaves_a_row_that_already_has_context_alone(self, learner):
+    def test_it_leaves_a_row_that_already_has_context_alone(self, learner, store_dsn):
         """Idempotent, so a rerun cannot overwrite a value captured live."""
         _flip(learner, pid="p1", trend_at_buy="falling", mv_at_buy=1)
         _mv(learner, "p1", (0, 9_400_000), (14, 8_300_000))
         assert learner.backfill_flip_entry_context() == 0
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["trend_at_buy"] == "falling"
 
-    def test_a_flip_with_no_market_value_history_is_skipped_not_faked(self, learner):
+    def test_a_flip_with_no_market_value_history_is_skipped_not_faked(self, learner, store_dsn):
         _flip(learner, pid="ghost")
         assert learner.backfill_flip_entry_context() == 0
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["mv_at_buy"] is None
 
     def test_it_is_idempotent_across_reruns(self, learner):
@@ -140,7 +133,7 @@ class TestTheLiveSellPathRecordsContext:
 
         return LearningTracker(learner)
 
-    def test_a_closed_flip_carries_its_entry_context(self, learner):
+    def test_a_closed_flip_carries_its_entry_context(self, learner, store_dsn):
         _mv(learner, "p1", (0, 9_400_000), (14, 8_300_000), (10, 10_000_000))
         learner.add_tracked_purchase(
             player_id="p1",
@@ -151,12 +144,12 @@ class TestTheLiveSellPathRecordsContext:
         )
         self._tracker(learner).record_flip_outcome(self._player(), sell_price=9_000_000)
 
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["trend_at_buy"] == "rising"
         assert row["mv_at_buy"] == 9_400_000
         assert row["pct_below_peak_30d_at_buy"] == pytest.approx(-6.0)
 
-    def test_missing_market_value_history_still_records_the_flip(self, learner):
+    def test_missing_market_value_history_still_records_the_flip(self, learner, store_dsn):
         """Context is a learning nicety; losing the P&L row would be a real loss."""
         learner.add_tracked_purchase(
             player_id="ghost",
@@ -167,6 +160,6 @@ class TestTheLiveSellPathRecordsContext:
         )
         self._tracker(learner).record_flip_outcome(self._player("ghost"), sell_price=9_000_000)
 
-        (row,) = _rows(learner)
+        (row,) = _rows(store_dsn)
         assert row["profit"] == -1_000_000
         assert row["mv_at_buy"] is None

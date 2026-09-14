@@ -14,11 +14,11 @@ from rehoboam.store import SCHEMA, connect
 runner = CliRunner()
 
 
-def test_migrate_command_applies_then_reports_nothing_to_do(store_dsn):
-    first = runner.invoke(app, ["migrate", "--dsn", store_dsn])
+def test_migrate_command_applies_then_reports_nothing_to_do(blank_dsn):
+    first = runner.invoke(app, ["migrate", "--dsn", blank_dsn])
     assert first.exit_code == 0, first.output
     assert "001_schema.sql" in first.output
-    second = runner.invoke(app, ["migrate", "--dsn", store_dsn])
+    second = runner.invoke(app, ["migrate", "--dsn", blank_dsn])
     assert second.exit_code == 0
     assert "none" in second.output
 
@@ -81,10 +81,23 @@ def test_import_and_pull_commands_round_trip(store_dsn, tmp_path):
         in imported.output
     )
     out = tmp_path / "pulled.db"
-    pulled = runner.invoke(app, ["corpus-pull", "--dsn", store_dsn, "--out", str(out)])
+    learning_out = tmp_path / "pulled_learning.db"
+    pulled = runner.invoke(
+        app,
+        [
+            "corpus-pull",
+            "--dsn",
+            store_dsn,
+            "--out",
+            str(out),
+            "--learning-out",
+            str(learning_out),
+        ],
+    )
     assert pulled.exit_code == 0, pulled.output
     with sqlite3.connect(out) as db:
         assert db.execute("select market_value from mv_series").fetchone()[0] == 9
+    assert learning_out.exists()
 
 
 def test_store_commands_fail_cleanly_when_database_url_is_unset(monkeypatch, tmp_path):

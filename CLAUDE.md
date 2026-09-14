@@ -34,6 +34,7 @@ The bot started as a market value trader (buy low, sell high). It now runs a uni
 
 Current state (post-foundation tier, May 2026):
 
+- **The store is live (2026-09-13)**: every learner writes to Supabase Postgres; `DATABASE_URL` is required at startup.
 - **Lineups only (2026-09-11)**: prod is switched to `TRADING_MODE=lineup_only` with this PR's deploy (app setting first, then code) and stays there until the data foundation's calibration gate passes (spec §4). The mode skips every sell and buy phase *except the emergency fill and the league's Top-5 forced sale* — the latter is a league rule, not a trade. Fieldability knows Kickbase's legal formations (`formation.LEGAL_FORMATIONS`, the ten from `/v4/config` `cps[].lts`, re-verified by `scripts/probe_formations.py`); `select_best_eleven` returns the best legal eleven; the emergency fill buys the position a formation needs; `_set_optimal_lineup` never submits an illegal eleven.
 - **Approval gate (2026-08-24)**: a plain squad-improvement buy is no longer executed by the bot. It becomes a *proposal* — recorded in `trade_proposals`, rendered by `notify/render.py` with its full reasoning, and sent by `notify/telegram.py` with Approve/Reject buttons. Approving hits the `telegram_approval` HTTP trigger, which re-validates against live prices, runs `services/safety_gate.check_buy`, and only then bids. **Everything else stays autonomous**: profit trading, trade pairs, emergency squad fill and lineup setting are untouched, deliberately — pairs sell before they bid, and an empty lineup slot is -100.
 - `auto` command: Unified aggressive trading — single EP pipeline call, trade pairs compete with plain buys ranked by EP, matchday-aware aggressiveness (aggressive 5+d, moderate 2-4d, locked 0-1d), trend-aware profit selling, up to 10 trades/session (15 aggressive). Plain improvement buys now propose rather than execute (see above).
@@ -60,7 +61,7 @@ The project uses `uv` for dependency management. Install uv (`brew install uv` o
 # Install dependencies (creates .venv automatically; .python-version pins 3.12)
 uv sync --extra dev
 
-# Run the CLI (login, auto, status, fetch-azure-state, push-azure-state,
+# Run the CLI (login, auto, status,
 # backfill-history, backfill-mv-history, enrich-corpus, backtest-baseline are exposed)
 uv run rehoboam --help
 uv run rehoboam login              # Test credentials + list leagues
@@ -69,8 +70,6 @@ uv run rehoboam status -v          # Verbose: DEBUG-level decision logs to stder
 uv run rehoboam auto --dry-run     # Simulate one trading session
 uv run rehoboam auto               # Live trading session
 uv run rehoboam auto --aggressive  # Up to 15 trades, lower EP threshold, +50% spend
-uv run rehoboam fetch-azure-state --dry-run  # Preview prod blob state (REH-15)
-uv run rehoboam fetch-azure-state            # Pull prod SQLite DBs into ./logs/
 uv run rehoboam backfill-history --dry-run   # Preview historical foundation-table backfill (REH-39)
 uv run rehoboam backfill-history             # Replay KICKBASE history → flip_outcomes + matchday_lineup_results + league_rank_history
 uv run rehoboam backfill-mv-history          # Backfill player_mv_history trajectories for all flipped players (REH-40)
@@ -80,7 +79,7 @@ uv run rehoboam backtest-baseline            # Reproduce the season-average regr
 uv run rehoboam migrate                      # Apply store migrations to DATABASE_URL (idempotent)
 uv run rehoboam db-bootstrap                 # Create the rehoboam_bot role + grants (once per project)
 uv run rehoboam import-sqlite                # Copy logs/*.db into the store; safe to re-run
-uv run rehoboam corpus-pull                  # Materialise the corpus into logs/training_corpus.db for replay
+uv run rehoboam corpus-pull                  # Materialise the corpus + the replay's learning tables into logs/*.db for replay/backtest
 
 # Code quality
 uv run black rehoboam/                        # Format code
@@ -112,30 +111,27 @@ bash deploy/deploy.sh code trading     # publish trading function only
 bash deploy/deploy.sh code external    # publish external-refresh function only (after REH-41 P2 lands)
 ```
 
-## Prod-state debugging workflow (REH-15 / REH-39)
+## Store workflow (data foundation PR B2)
 
-The bot's state lives in Azure Blob Storage. To inspect, mutate, and re-publish:
+The bot's state lives in Supabase Postgres, schema `rehoboam`. Local runs and
+prod use the same database through the same bot-role `DATABASE_URL` — there
+is no file to fetch or push.
 
 ```bash
-# 1. Pull the live blob into local ./logs/ (writes a .fetch_state.json sidecar)
-uv run rehoboam fetch-azure-state
+# Inspect: any psql client works against DATABASE_URL
+psql "$DATABASE_URL"
 
-# 2. Mutate locally — examples:
-#    - Open SQLite directly: sqlite3 logs/bid_learning.db
-#    - One-shot historical backfill: uv run rehoboam backfill-history
-#    - Anything else (manual queries, REPL exploration, etc.)
+# Schema changes: add store/migrations/NNN_<name>.sql, then apply it as the
+# admin (DATABASE_ADMIN_URL) BEFORE deploying code that depends on it
+uv run rehoboam migrate
 
-# 3. Push back during a quiet window between Function runs
-uv run rehoboam push-azure-state --i-know-what-im-doing
+# Offline tools (replay, backtest) need local SQLite files, not a live connection
+uv run rehoboam corpus-pull   # writes logs/training_corpus.db + logs/bid_learning.db
 ```
 
-The Azure Function runs at 08:00 / 20:00 UTC. **Push during the quiet window**
-(roughly 08:02–19:58 UTC, or after 20:02). `push-azure-state` enforces this
-automatically: it compares each blob's current `last_modified` against the
-sidecar from `fetch-azure-state` and refuses if the Function ran in between.
-On refusal, re-run `fetch-azure-state` (preserves your local work as
-`.local-bak`), redo your mutations, and push again. Pass `--force` only as a
-last resort — it clobbers the Function's writes.
+A local `status` run writes its learning snapshots (predicted EPs, rank
+history, MV history) into the live tables by design. `import-sqlite` remains
+only for the SQLite-era files — nothing produces new ones.
 
 ## Architecture
 
@@ -165,18 +161,18 @@ last resort — it clobbers the Function's writes.
 
 **Learning System** (`bid_learner.py`, `learning/tracker.py`, `activity_feed_learner.py`):
 
-- `BidLearner`: SQLite writer + reader for all learning tables — auction outcomes, flip outcomes, matchday outcomes (REH-20), predicted EPs (REH-20), team value history (REH-23), league rank history (REH-24), matchday lineup results (REH-25), player MV history (REH-26).
+- `BidLearner`: the store's writer + reader for all learning tables (one transaction per call) — auction outcomes, flip outcomes, matchday outcomes (REH-20), predicted EPs (REH-20), team value history (REH-23), league rank history (REH-24), matchday lineup results (REH-25), player MV history (REH-26).
 - `LearningTracker`: Lifecycle wrapper around BidLearner — pending bids → resolve_auctions → record_outcome; tracked_purchases → record_flip_outcome.
 - `ActivityFeedLearner`: League transfers + market value snapshot events from the activity feed for competitor and demand signals.
 
 **CLI** (`cli.py`):
 
-- Typer-based CLI: `login`, `auto`, `status`, `fetch-azure-state`, `push-azure-state`, `backfill-history`, `backfill-mv-history`, `enrich-corpus`, `backtest-baseline`. Global `--verbose`/`-v` flag toggles DEBUG-level console logging (the rotating file handler at `logs/rehoboam.log` is always DEBUG).
+- Typer-based CLI: `login`, `auto`, `status`, `backfill-history`, `backfill-mv-history`, `enrich-corpus`, `backtest-baseline`. Global `--verbose`/`-v` flag toggles DEBUG-level console logging (the rotating file handler at `logs/rehoboam.log` is always DEBUG).
 - Rich console output for formatted tables and status.
 
 **Training corpus + backtest harness** (`enrichment/`, `backtest/`) — week 1 of the v2 rebuild (`docs/superpowers/specs/2026-07-29-rehoboam-v2-design.md`):
 
-- `enrichment/corpus.py`'s `TrainingCorpus`: durable, non-expiring SQLite store — `player_universe`, `player_match_history`, `mv_series`, `sweep_progress` — deliberately separate from `value_history.py`'s 6h-TTL `performance_cache`. Lives at `logs/training_corpus.db`, deliberately **not** synced to Azure Blob (absent from `azure_blob.DB_FILES`) — it's training data, not bot operating state.
+- `enrichment/corpus.py`'s `TrainingCorpus`: durable, non-expiring SQLite store — `player_universe`, `player_match_history`, `mv_series`, `sweep_progress` — deliberately separate from `value_history.py`'s 6h-TTL `performance_cache`. Lives at `logs/training_corpus.db`, deliberately **not** part of the store's live operating tables — it's training data, not bot operating state.
 - `enrichment/sweep.py`'s `run_sweep`: resumable, throttled, league-wide sweep (`rehoboam enrich-corpus`) — tolerant of per-player failure, `sweep_progress` tracks per-player completion so a rerun only retries what's missing. `--refetch-performance` forces a one-off re-fetch of already-complete players (e.g. after a parsing bug fix) without touching MV-series resumability.
 - `backtest/`: a *tuning* instrument, not a verdict — `harness.run_backtest` replays matchday-by-matchday using only pre-matchday data (`snapshot.matches_before`, leakage-tested), scoring via `metrics.spearman` + `metrics.lineup_regret` against `baselines.season_average_baseline` (the model weeks 2-3 must beat). `squad_reconstruction.squad_on_matchday` rebuilds squad membership from flip hold-windows ∪ fielded lineups — medium fidelity, see spec §6.1 for the sensitivity caveats. `baseline_driver.run_baseline` is the committed composition behind `rehoboam backtest-baseline`.
 
@@ -184,9 +180,9 @@ last resort — it clobbers the Function's writes.
 
 - `store/__init__.py`'s `connect()`: psycopg 3 to Supabase Postgres through the **transaction pooler** (port 6543, IPv4), `prepare_threshold=None` because the pooler rejects prepared statements, dict rows. Every statement schema-qualifies `rehoboam.<table>`; `public` stays empty.
 - `store/migrate.py`: numbered SQL files under `store/migrations/`, each applied once in its own transaction and recorded in `rehoboam.schema_migrations`. `001_schema.sql` is the SQLite schema translated (epoch doubles kept, identity ids that accept explicit values, `api_cache` with `jsonb` replacing the two JSON caches).
-- `store/import_sqlite.py`: `COPY` into a temp table, then `INSERT … ON CONFLICT DO NOTHING`; re-running adds nothing. `store/corpus_pull.py` writes the corpus back into a local SQLite file, because the replay scans it in a loop; it writes with `INSERT OR REPLACE`, so a re-pull **rewrites** existing rows — corpus rows are not immutable (a `player_match_history` placeholder becomes the real result once the match finishes).
+- `store/import_sqlite.py`: `COPY` into a temp table, then `INSERT … ON CONFLICT DO NOTHING`; re-running adds nothing. `store/corpus_pull.py` writes the corpus back into a local SQLite file, because the replay scans it in a loop; it writes with `INSERT OR REPLACE`, so a re-pull **rewrites** existing rows — corpus rows are not immutable (a `player_match_history` placeholder becomes the real result once the match finishes). It also writes the three learning tables the replay reads — `flip_outcomes`, `matchday_lineup_results`, `league_rank_history` — into `logs/bid_learning.db` (`--learning-out`).
 - Tests under `tests/store/` run against a real PostgreSQL (`pytest-postgresql`: local `postgresql@17` binaries, or CI's service container via `TEST_PG_HOST`); they skip with a message when neither exists locally, and hard-fail when `CI` is set so a green CI can never mean "never ran". On macOS: `brew install postgresql@17`; if `initdb` cannot find its share files (a keg-only install), symlink `share/postgresql@17` and `lib/postgresql@17` from the keg into `/opt/homebrew/opt/postgresql@17/`.
-- The bot's live read/write path still uses the SQLite files until PR B2.
+- PR B2 (2026-09-13): `BidLearner`, `ActivityFeedLearner` and `ValueHistoryCache` are Postgres clients; the Function app and the `auto`/`status` commands call `store.ensure_ready()` first and refuse to run without a migrated store; the blob sync is gone. Tests share one PostgreSQL: `store_dsn` is a fresh migrated database, and an autouse fixture pins `DATABASE_URL` so no test can reach the real project.
 
 ### Roster-Aware Recommendations
 

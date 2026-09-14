@@ -1,17 +1,14 @@
 """CLI interface for Rehoboam — minimal surface for auto + diagnostics."""
 
 import logging
-import sqlite3
-from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from . import azure_blob
 from .api import KickbaseAPI
-from .config import AzureBlobSettings, get_settings
+from .config import get_settings
 from .logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -27,6 +24,38 @@ console = Console()
 def _get_api() -> KickbaseAPI:
     settings = get_settings()
     return KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
+
+
+def _ensure_store() -> None:
+    """Refuse to start a session the store cannot serve; say why in one line."""
+    import psycopg
+
+    from .store import StoreUnconfigured, ensure_ready
+
+    try:
+        ensure_ready()
+    except StoreUnconfigured as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    except PermissionError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    except psycopg.OperationalError as e:
+        console.print(f"[red]store unreachable: {e}[/red]")
+        raise typer.Exit(code=1) from e
+    except psycopg.Error as e:
+        # Catch-all for the rest of psycopg's tree, e.g. InsufficientPrivilege
+        # from a role with no USAGE on the rehoboam schema -- a config error,
+        # not a crash, so it gets the same one red line as the cases above.
+        console.print(f"[red]store error: {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+
+def _admin_dsn(explicit: str | None) -> str | None:
+    """DATABASE_ADMIN_URL when set; None lets connect() fall back to DATABASE_URL."""
+    if explicit:
+        return explicit
+    return get_settings().database_admin_url or None
 
 
 def _login_and_get_league(league_index: int):
@@ -81,6 +110,8 @@ def auto(
     """Run one automated trading session (unified EP pipeline + profit flips)."""
     from .auto_trader import AutoTrader
 
+    _ensure_store()
+
     console.print("[bold cyan]🤖 Automated Trading Session[/bold cyan]")
     if dry_run:
         console.print("[yellow]DRY RUN MODE — No trades will be executed[/yellow]")
@@ -128,6 +159,8 @@ def status(
     """
     from .auto_trader import AutoTrader
 
+    _ensure_store()
+
     api, settings, league = _login_and_get_league(league_index)
 
     # Fetch squad + budget for summary
@@ -165,177 +198,6 @@ def status(
     auto_trader.run_full_session(league)
 
 
-def _fmt_size(n: int | None) -> str:
-    if n is None:
-        return "—"
-    if n < 1024:
-        return f"{n} B"
-    if n < 1024 * 1024:
-        return f"{n / 1024:.1f} KiB"
-    return f"{n / (1024 * 1024):.1f} MiB"
-
-
-def _fmt_dt(dt: datetime | None) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC") if dt else "—"
-
-
-_FETCH_STATUS_STYLE = {
-    "downloaded": "green",
-    "missing_in_blob": "yellow",
-    "skipped_dry_run": "cyan",
-    "error": "red",
-}
-
-_PUSH_STATUS_STYLE = {
-    "uploaded": "green",
-    "missing_local": "yellow",
-    "skipped_dry_run": "cyan",
-    "error": "red",
-}
-
-
-def _render_fetch_table(results: list[azure_blob.FetchResult], *, dry_run: bool) -> Table:
-    title = "Would fetch" if dry_run else "Fetched"
-    table = Table(title=title)
-    table.add_column("DB", style="bold")
-    table.add_column("Blob last modified")
-    table.add_column("Blob size", justify="right")
-    table.add_column("Local target")
-    table.add_column("Backup")
-    table.add_column("Status")
-
-    for r in results:
-        backup = str(r.backed_up_to) if r.backed_up_to else "—"
-        status_label = r.status.replace("_", " ")
-        if r.status == "error" and r.error:
-            status_label = f"error: {r.error[:40]}"
-        table.add_row(
-            r.db_file,
-            _fmt_dt(r.blob.last_modified),
-            _fmt_size(r.blob.size),
-            str(r.local_path),
-            backup,
-            f"[{_FETCH_STATUS_STYLE[r.status]}]{status_label}[/{_FETCH_STATUS_STYLE[r.status]}]",
-        )
-    return table
-
-
-def _render_push_table(results: list[azure_blob.PushResult], *, dry_run: bool) -> Table:
-    title = "Would push" if dry_run else "Pushed"
-    table = Table(title=title)
-    table.add_column("DB", style="bold")
-    table.add_column("Local path")
-    table.add_column("Local size", justify="right")
-    table.add_column("Status")
-
-    for r in results:
-        status_label = r.status.replace("_", " ")
-        if r.status == "error" and r.error:
-            status_label = f"error: {r.error[:40]}"
-        table.add_row(
-            r.db_file,
-            str(r.local_path),
-            _fmt_size(r.local_size),
-            f"[{_PUSH_STATUS_STYLE[r.status]}]{status_label}[/{_PUSH_STATUS_STYLE[r.status]}]",
-        )
-    return table
-
-
-@app.command("fetch-azure-state")
-def fetch_azure_state(
-    dry_run: bool = typer.Option(False, "--dry-run", help="List blobs without downloading"),
-    backup: bool = typer.Option(
-        True,
-        "--backup/--no-backup",
-        help="Rename existing local files to .local-bak before overwriting",
-    ),
-):
-    """Pull SQLite state from Azure Blob Storage into ./logs/ for prod debugging."""
-    blob_settings = AzureBlobSettings()
-    try:
-        results = azure_blob.fetch_state(
-            connection_string=blob_settings.azure_storage_connection_string,
-            container_name=blob_settings.blob_container,
-            dest_dir=Path("logs"),
-            backup=backup,
-            dry_run=dry_run,
-        )
-    except azure_blob.MissingAzureCredentials as e:
-        console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(code=1) from e
-
-    console.print(_render_fetch_table(results, dry_run=dry_run))
-
-    if not dry_run and any(r.status == "error" for r in results):
-        raise typer.Exit(code=1)
-
-
-@app.command("push-azure-state")
-def push_azure_state(
-    confirm: bool = typer.Option(
-        False,
-        "--i-know-what-im-doing",
-        help="Required to actually upload — without it the command refuses.",
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="List local files without uploading"),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="Bypass the freshness check and clobber even if blob has been "
-        "modified since fetch (DANGEROUS — likely overwrites the bot's writes).",
-    ),
-):
-    """Push local ./logs/ SQLite state to Azure Blob Storage (DANGEROUS).
-
-    Overwrites the live bot's persistent state. Refuses to run without
-    --i-know-what-im-doing. By default, also refuses if the blob has been
-    modified since the last fetch (Function ran in the meantime); re-fetch
-    or pass --force to override. Use --dry-run to preview.
-    """
-    if not confirm:
-        console.print(
-            "[red]⛔ Refusing to overwrite prod state from local.[/red]\n"
-            "This will replace the live bot's databases (bid_learning.db, "
-            "value_tracking.db, market_prices.db, player_history.db) with "
-            "whatever is in ./logs/.\n"
-            "Re-run with [bold]--i-know-what-im-doing[/bold] if you actually want this."
-        )
-        raise typer.Exit(code=1)
-
-    blob_settings = AzureBlobSettings()
-    try:
-        results = azure_blob.push_state(
-            connection_string=blob_settings.azure_storage_connection_string,
-            container_name=blob_settings.blob_container,
-            source_dir=Path("logs"),
-            dry_run=dry_run,
-            force=force,
-        )
-    except azure_blob.MissingAzureCredentials as e:
-        console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(code=1) from e
-    except azure_blob.BlobChangedSinceFetch as e:
-        console.print("[red]⛔ Refusing to push — blob has been modified since fetch.[/red]")
-        for s in e.stale:
-            console.print(
-                f"  • {s.db_file}: fetched at "
-                f"[cyan]{s.fetched_last_modified.isoformat()}[/cyan]"
-                f", current blob at [yellow]{s.current_last_modified.isoformat()}[/yellow]"
-            )
-        console.print(
-            "\nThe Azure Function probably ran since you fetched. Either:\n"
-            "  1. Re-run [bold]rehoboam fetch-azure-state[/bold] (preserves your local "
-            "work as .local-bak), redo your local mutations, then push again, OR\n"
-            "  2. Pass [bold]--force[/bold] to clobber the bot's writes (NOT recommended)."
-        )
-        raise typer.Exit(code=1) from e
-
-    console.print(_render_push_table(results, dry_run=dry_run))
-
-    if not dry_run and any(r.status == "error" for r in results):
-        raise typer.Exit(code=1)
-
-
 @app.command("backfill-mv-history")
 def backfill_mv_history(
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
@@ -359,10 +221,8 @@ def backfill_mv_history(
     Idempotent: rerunning silently skips duplicates via the existing
     UNIQUE(player_id, snapshot_at) constraint.
 
-    Workflow when targeting prod state:
-      1. rehoboam fetch-azure-state
-      2. rehoboam backfill-mv-history
-      3. rehoboam push-azure-state --i-know-what-im-doing
+    Writes straight to the store; run during a quiet window between Function
+    sessions.
     """
     from .bid_learner import BidLearner
     from .mv_backfill import run_mv_backfill
@@ -391,10 +251,7 @@ def backfill_mv_history(
     console.print(table)
 
     if not dry_run:
-        console.print(
-            "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
-            "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
-        )
+        console.print("\n[dim]Written to the store.[/dim]")
 
 
 @app.command("enrich-corpus")
@@ -413,7 +270,7 @@ def enrich_corpus(
         "--include-historical",
         help=(
             "Also recover players who left the league since last season "
-            "(read from logs/bid_learning.db) — needed for backtesting past "
+            "(recovered from the store) — needed for backtesting past "
             "matchdays, since /lineup/selection only sees current players."
         ),
     ),
@@ -483,11 +340,9 @@ def enrich_corpus(
 
     extra_player_ids = None
     if include_historical:
-        learner_db_path = BidLearner().db_path
-        extra_player_ids = gather_historical_player_ids(learner_db_path)
+        extra_player_ids = gather_historical_player_ids(BidLearner())
         console.print(
-            f"[dim]Recovered {len(extra_player_ids)} historical player ids from "
-            f"{learner_db_path}[/dim]"
+            f"[dim]Recovered {len(extra_player_ids)} historical player ids from the store[/dim]"
         )
 
     corpus = TrainingCorpus()
@@ -521,11 +376,7 @@ def enrich_corpus(
 
 
 @app.command("backfill-flip-entry-context")
-def backfill_flip_entry_context(
-    learning_db: Path = typer.Option(  # noqa: B008
-        Path("logs/bid_learning.db"), help="Path to the learning DB"
-    ),
-):
+def backfill_flip_entry_context():
     """Reconstruct what the market looked like when each closed flip was bought (REH-104).
 
     `flip_outcomes.trend_at_buy` has existed since the table was created and was
@@ -540,18 +391,11 @@ def backfill_flip_entry_context(
     """
     from rehoboam.bid_learner import BidLearner
 
-    if not learning_db.exists():
-        console.print(f"[red]Learning DB not found: {learning_db}[/red]")
-        raise typer.Exit(1)
-
-    learner = BidLearner(db_path=learning_db)
+    learner = BidLearner()
     written = learner.backfill_flip_entry_context()
     console.print(f"[green]Annotated {written} flip(s) with entry context[/green]")
 
-    with sqlite3.connect(learning_db) as conn:
-        total, annotated = conn.execute(
-            "SELECT COUNT(*), COUNT(mv_at_buy) FROM flip_outcomes"
-        ).fetchone()
+    annotated, total = learner.flip_entry_context_coverage()
     console.print(f"[dim]{annotated} of {total} flips now carry entry context[/dim]")
 
 
@@ -573,10 +417,8 @@ def backfill_history(
 
     Idempotent: rerunning silently skips duplicates.
 
-    Workflow when targeting prod state:
-      1. rehoboam fetch-azure-state
-      2. rehoboam backfill-history
-      3. rehoboam push-azure-state --i-know-what-im-doing
+    Writes straight to the store; run during a quiet window between Function
+    sessions.
     """
     from .backfill import run_backfill
     from .bid_learner import BidLearner
@@ -637,10 +479,7 @@ def backfill_history(
     console.print(table)
 
     if not dry_run:
-        console.print(
-            "\n[dim]Next step: rehoboam push-azure-state --i-know-what-im-doing  "
-            "(during a quiet window — between 08:02 and 19:58 UTC, or after 20:02)[/dim]"
-        )
+        console.print("\n[dim]Written to the store.[/dim]")
 
 
 @app.command("backtest-baseline")
@@ -1087,14 +926,16 @@ def derive_thresholds(
 
 @app.command("migrate")
 def migrate_cmd(
-    dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
+    dsn: str | None = typer.Option(
+        None, "--dsn", help="Override DATABASE_ADMIN_URL / DATABASE_URL for this run."
+    ),
 ):
     """Apply unapplied store migrations (idempotent)."""
     from .store import StoreUnconfigured, connect
     from .store.migrate import migrate
 
     try:
-        with connect(dsn) as conn:
+        with connect(_admin_dsn(dsn)) as conn:
             applied = migrate(conn)
     except StoreUnconfigured as e:
         console.print(f"[red]{e}[/red]")
@@ -1107,8 +948,7 @@ def db_bootstrap_cmd(
     admin_dsn: str | None = typer.Option(
         None,
         "--admin-dsn",
-        envvar="DATABASE_ADMIN_URL",
-        help="Admin connection string (the postgres user). Defaults to DATABASE_URL.",
+        help="Admin connection string (the postgres user). Defaults to DATABASE_ADMIN_URL / DATABASE_URL.",
     ),
     role_password: str | None = typer.Option(
         None,
@@ -1125,7 +965,7 @@ def db_bootstrap_cmd(
     generated = role_password is None
     password = role_password or secrets.token_urlsafe(24)
     try:
-        with connect(admin_dsn) as conn:
+        with connect(_admin_dsn(admin_dsn)) as conn:
             result = bootstrap(conn, password)
     except StoreUnconfigured as e:
         console.print(f"[red]{e}[/red]")
@@ -1169,7 +1009,7 @@ def import_sqlite_cmd(
     from .store.migrate import migrate
 
     try:
-        with connect(dsn) as conn:
+        with connect(_admin_dsn(dsn)) as conn:
             migrate(conn)
             reports = import_all(conn, learning=learning, corpus=corpus, cache=cache)
     except StoreUnconfigured as e:
@@ -1198,23 +1038,35 @@ def import_sqlite_cmd(
 @app.command("corpus-pull")
 def corpus_pull_cmd(
     out: Path = typer.Option(  # noqa: B008
-        Path("logs/training_corpus.db"), "--out", help="SQLite file to write."
+        Path("logs/training_corpus.db"),
+        "--out",
+        help="SQLite file for the corpus tables.",
+    ),
+    learning_out: Path = typer.Option(  # noqa: B008
+        Path("logs/bid_learning.db"),
+        "--learning-out",
+        help="SQLite file for the replay's learning tables (flip_outcomes, "
+        "matchday_lineup_results, league_rank_history).",
     ),
     dsn: str | None = typer.Option(None, "--dsn", help="Override DATABASE_URL for this run."),
 ):
-    """Write the corpus tables from the store into a local SQLite file for replay/backtest."""
+    """Write the corpus and the replay's learning tables from the store into local SQLite files."""
     from .store import StoreUnconfigured, connect
-    from .store.corpus_pull import pull_corpus
+    from .store.corpus_pull import pull_corpus, pull_replay_tables
 
     try:
         with connect(dsn) as conn:
             written = pull_corpus(conn, out)
+            replay_written = pull_replay_tables(conn, learning_out)
     except StoreUnconfigured as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
     for name, n in written.items():
         console.print(f"{name}: {n} row(s) written")
     console.print(f"[green]corpus written to {out}[/green]")
+    for name, n in replay_written.items():
+        console.print(f"{name}: {n} row(s) written")
+    console.print(f"[green]replay tables written to {learning_out}[/green]")
 
 
 @app.callback()

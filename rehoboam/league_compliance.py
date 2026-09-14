@@ -40,14 +40,18 @@ class BidComplianceIssue:
 class LeagueComplianceChecker:
     """Checks for and resolves league rule violations"""
 
-    def __init__(self, api, settings):
+    def __init__(self, api, settings, learner=None):
         """
         Args:
             api: KickbaseAPI instance
             settings: Bot settings
+            learner: BidLearner holding tracked_purchases (the cost basis); built on demand
         """
+        from .bid_learner import BidLearner
+
         self.api = api
         self.settings = settings
+        self.learner = learner or BidLearner()
 
     def check_market_value_compliance(self, league) -> list[ComplianceIssue]:
         """
@@ -59,32 +63,18 @@ class LeagueComplianceChecker:
         Returns:
             List of ComplianceIssue objects for players violating the rule
         """
-        import json
-        from pathlib import Path
-
         issues = []
 
         # Get current squad
         my_team = self.api.get_squad(league)
 
-        # Load purchase tracking to know what we paid
-        purchases_file = Path("logs") / "tracked_purchases.json"
-        if not purchases_file.exists():
-            console.print("[yellow]No purchase tracking data - cannot check compliance[/yellow]")
-            console.print("[dim]Purchases made by the bot are automatically tracked[/dim]")
-            return issues
-
-        with open(purchases_file) as f:
-            purchases = json.load(f)
-
-        # Check each player
+        # Check each player against its tracked cost basis in the store
         for player in my_team:
-            if player.id not in purchases:
-                # Player not tracked (bought manually or before tracking started)
+            purchase = self.learner.get_tracked_purchase(player.id)
+            if purchase is None:
+                # Not tracked (bought manually or before tracking started)
                 continue
-
-            purchase_data = purchases[player.id]
-            purchase_price = purchase_data["buy_price"]
+            purchase_price = int(purchase["buy_price"])
             current_market_value = player.market_value
 
             # Check if purchased below market value
@@ -163,18 +153,7 @@ class LeagueComplianceChecker:
                     console.print(f"[green]✓ {issue.player_name} listed for sale[/green]")
                     sold_count += 1
 
-                    # Remove from purchase tracking
-                    import json
-                    from pathlib import Path
-
-                    purchases_file = Path("logs") / "tracked_purchases.json"
-                    if purchases_file.exists():
-                        with open(purchases_file) as f:
-                            purchases = json.load(f)
-                        if issue.player_id in purchases:
-                            del purchases[issue.player_id]
-                            with open(purchases_file, "w") as f:
-                                json.dump(purchases, f, indent=2)
+                    self.learner.delete_tracked_purchase(issue.player_id)
 
                 except Exception as e:
                     console.print(f"[red]✗ Failed to sell {issue.player_name}: {e}[/red]")

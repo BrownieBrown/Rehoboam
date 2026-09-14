@@ -60,3 +60,29 @@ def test_resolve_dsn_raises_when_unset(monkeypatch, tmp_path):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(StoreUnconfigured):
         resolve_dsn()
+
+
+def test_ensure_ready_is_a_no_op_on_a_migrated_database(store_dsn):
+    from rehoboam.store import ensure_ready
+
+    ensure_ready(store_dsn)  # must not raise, must not print
+
+
+def test_ensure_ready_applies_migrations_to_a_blank_database(blank_dsn):
+    from rehoboam.store import SCHEMA, connect, ensure_ready
+
+    ensure_ready(blank_dsn)
+    with connect(blank_dsn) as conn:
+        n = conn.execute(
+            "select count(*) as n from information_schema.tables where table_schema = %s",
+            (SCHEMA,),
+        ).fetchone()["n"]
+    assert n >= 26
+
+
+def test_ensure_ready_without_database_url_is_a_hard_error(monkeypatch):
+    from rehoboam.store import StoreUnconfigured, ensure_ready
+
+    monkeypatch.setenv("DATABASE_URL", "")
+    with pytest.raises(StoreUnconfigured):
+        ensure_ready()

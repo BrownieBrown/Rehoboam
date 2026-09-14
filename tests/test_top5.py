@@ -153,18 +153,18 @@ class TestSettling:
 
         return [SimpleNamespace(id=p, last_name=p.title()) for p in ("spike", "star", "solid")]
 
-    def _learner(self, tmp_path):
+    def _learner(self, store_dsn):
         from rehoboam.bid_learner import BidLearner
 
-        return BidLearner(db_path=tmp_path / "b.db")
+        return BidLearner(dsn=store_dsn)
 
-    def test_it_sells_the_least_damaging_eligible_player(self, tmp_path):
+    def test_it_sells_the_least_damaging_eligible_player(self, store_dsn):
         from types import SimpleNamespace
 
         from rehoboam.top5 import settle
 
         api = self._api(_standings(("me", 900), ("a", 800)), {"spike": 120, "star": 90})
-        learner = self._learner(tmp_path)
+        learner = self._learner(store_dsn)
         sale = settle(
             api=api,
             league=SimpleNamespace(id="L"),
@@ -177,13 +177,13 @@ class TestSettling:
         assert sale.chosen == "spike"
         api.sell_player_instant.assert_called_once()
 
-    def test_a_second_run_for_the_same_matchday_sells_nothing(self, tmp_path):
+    def test_a_second_run_for_the_same_matchday_sells_nothing(self, store_dsn):
         """A re-run must not compound the obligation."""
         from types import SimpleNamespace
 
         from rehoboam.top5 import settle
 
-        learner = self._learner(tmp_path)
+        learner = self._learner(store_dsn)
         args = {
             "league": SimpleNamespace(id="L"),
             "learner": learner,
@@ -197,7 +197,7 @@ class TestSettling:
         assert settle(api=api2, **args) is None
         api2.sell_player_instant.assert_not_called()
 
-    def test_a_dry_run_decides_but_does_not_sell(self, tmp_path):
+    def test_a_dry_run_decides_but_does_not_sell(self, store_dsn):
         from types import SimpleNamespace
 
         from rehoboam.top5 import settle
@@ -206,7 +206,7 @@ class TestSettling:
         sale = settle(
             api=api,
             league=SimpleNamespace(id="L"),
-            learner=self._learner(tmp_path),
+            learner=self._learner(store_dsn),
             squad=self._squad(),
             forward_ep={"spike": 12.0},
             matchday=1,
@@ -215,7 +215,7 @@ class TestSettling:
         assert sale is not None
         api.sell_player_instant.assert_not_called()
 
-    def test_finishing_outside_the_top_five_sells_nothing(self, tmp_path):
+    def test_finishing_outside_the_top_five_sells_nothing(self, store_dsn):
         from types import SimpleNamespace
 
         from rehoboam.top5 import settle
@@ -226,7 +226,7 @@ class TestSettling:
             settle(
                 api=api,
                 league=SimpleNamespace(id="L"),
-                learner=self._learner(tmp_path),
+                learner=self._learner(store_dsn),
                 squad=self._squad(),
                 forward_ep={"spike": 12.0},
                 matchday=1,
@@ -235,7 +235,7 @@ class TestSettling:
         )
         api.sell_player_instant.assert_not_called()
 
-    def test_a_player_who_did_not_play_is_not_in_the_pool(self, tmp_path):
+    def test_a_player_who_did_not_play_is_not_in_the_pool(self, store_dsn):
         """An unused sub has no matchday score to be 'best' at."""
         from types import SimpleNamespace
 
@@ -245,7 +245,7 @@ class TestSettling:
         sale = settle(
             api=api,
             league=SimpleNamespace(id="L"),
-            learner=self._learner(tmp_path),
+            learner=self._learner(store_dsn),
             squad=self._squad(),
             forward_ep={"spike": 1.0, "star": 95.0},
             matchday=1,

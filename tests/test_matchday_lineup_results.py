@@ -8,20 +8,12 @@ but not lineup-level totals.
 """
 
 import json
-import sqlite3
 
-import pytest
-
-from rehoboam.bid_learner import BidLearner
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
+from rehoboam.store import connect
 
 
 class TestRecordMatchdayLineupResult:
-    def test_round_trip_one_row(self, learner):
+    def test_round_trip_one_row(self, learner, store_dsn):
         ok = learner.record_matchday_lineup_result(
             league_id="L1",
             day_number=32,
@@ -33,17 +25,17 @@ class TestRecordMatchdayLineupResult:
         )
         assert ok is True
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
                 "SELECT league_id, day_number, matchday_date, total_points, "
                 "lineup_player_ids, lineup_count, snapshot_at "
-                "FROM matchday_lineup_results"
+                "FROM rehoboam.matchday_lineup_results"
             ).fetchone()
-        assert row[0] == "L1"
-        assert row[1] == 32
-        assert row[2] == "2026-05-02T13:30:00Z"
-        assert row[3] == 749
-        assert json.loads(row[4]) == [
+        assert row["league_id"] == "L1"
+        assert row["day_number"] == 32
+        assert row["matchday_date"] == "2026-05-02T13:30:00Z"
+        assert row["total_points"] == 749
+        assert json.loads(row["lineup_player_ids"]) == [
             "1",
             "2",
             "3",
@@ -56,10 +48,10 @@ class TestRecordMatchdayLineupResult:
             "10",
             "11",
         ]
-        assert row[5] == 11
-        assert row[6] == 1_700_000_000.0
+        assert row["lineup_count"] == 11
+        assert row["snapshot_at"] == 1_700_000_000.0
 
-    def test_default_timestamp_is_now(self, learner):
+    def test_default_timestamp_is_now(self, learner, store_dsn):
         learner.record_matchday_lineup_result(
             league_id="L1",
             day_number=1,
@@ -68,11 +60,13 @@ class TestRecordMatchdayLineupResult:
             lineup_player_ids=["a"] * 11,
             lineup_count=11,
         )
-        with sqlite3.connect(learner.db_path) as conn:
-            ts = conn.execute("SELECT snapshot_at FROM matchday_lineup_results").fetchone()[0]
-        assert ts > 1_767_225_600  # > 2026-01-01 sentinel
+        with connect(store_dsn) as conn:
+            row = conn.execute(
+                "SELECT snapshot_at FROM rehoboam.matchday_lineup_results"
+            ).fetchone()
+        assert row["snapshot_at"] > 1_767_225_600  # > 2026-01-01 sentinel
 
-    def test_collision_returns_false_and_preserves_first(self, learner):
+    def test_collision_returns_false_and_preserves_first(self, learner, store_dsn):
         # PK is (league_id, day_number) — second call with same key is a no-op.
         first = learner.record_matchday_lineup_result(
             league_id="L1",
@@ -95,13 +89,13 @@ class TestRecordMatchdayLineupResult:
         assert first is True
         assert second is False
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
-                "SELECT total_points, snapshot_at FROM matchday_lineup_results"
+                "SELECT total_points, snapshot_at FROM rehoboam.matchday_lineup_results"
             ).fetchone()
-        assert row == (749, 100.0)  # first preserved
+        assert (row["total_points"], row["snapshot_at"]) == (749, 100.0)  # first preserved
 
-    def test_lineup_count_below_eleven_is_recorded(self, learner):
+    def test_lineup_count_below_eleven_is_recorded(self, learner, store_dsn):
         # If the bot took a -100 penalty (empty lineup slot) the row still
         # records, with lineup_count < 11 as the canonical signal.
         ok = learner.record_matchday_lineup_result(
@@ -113,13 +107,13 @@ class TestRecordMatchdayLineupResult:
             lineup_count=10,
         )
         assert ok is True
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
-                "SELECT lineup_count, total_points FROM matchday_lineup_results"
+                "SELECT lineup_count, total_points FROM rehoboam.matchday_lineup_results"
             ).fetchone()
-        assert row == (10, 520)
+        assert (row["lineup_count"], row["total_points"]) == (10, 520)
 
-    def test_player_ids_coerced_to_str(self, learner):
+    def test_player_ids_coerced_to_str(self, learner, store_dsn):
         # Trader builds the list with int IDs sometimes; the writer normalizes
         # so JSON round-trips as a list of strings.
         learner.record_matchday_lineup_result(
@@ -130,11 +124,11 @@ class TestRecordMatchdayLineupResult:
             lineup_player_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],  # type: ignore[list-item]
             lineup_count=11,
         )
-        with sqlite3.connect(learner.db_path) as conn:
-            ids_json = conn.execute(
-                "SELECT lineup_player_ids FROM matchday_lineup_results"
-            ).fetchone()[0]
-        assert json.loads(ids_json) == [
+        with connect(store_dsn) as conn:
+            row = conn.execute(
+                "SELECT lineup_player_ids FROM rehoboam.matchday_lineup_results"
+            ).fetchone()
+        assert json.loads(row["lineup_player_ids"]) == [
             "1",
             "2",
             "3",

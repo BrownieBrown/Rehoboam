@@ -14,7 +14,6 @@ from dataclasses import dataclass
 
 import pytest
 
-from rehoboam.bid_learner import BidLearner
 from rehoboam.learning.tracker import LearningTracker
 
 # ---------------------------------------------------------------------------
@@ -35,11 +34,6 @@ class FakeScore:
     player_id: str
     expected_points: float
     position: str
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
 
 
 @pytest.fixture

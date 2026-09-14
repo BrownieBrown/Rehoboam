@@ -10,8 +10,9 @@
 #      pre-season because an empty market never reaches the branch.
 #   3. Did the session finish cleanly?
 #
-# Read-only against Azure except for `fetch-azure-state`, which pulls the prod
-# blobs into ./logs (preserving local work as .local-bak). Safe to run any time
+# Read-only against Azure and against the store: it only queries
+# team_value_history, buy_decisions and auction_outcomes in Supabase Postgres,
+# the same tables the live session writes to directly. Safe to run any time
 # EXCEPT the minutes around 08:00/20:00 UTC when the Function itself writes.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -23,49 +24,61 @@ az functionapp config appsettings list -g rg-rehoboam -n func-rehoboam \
   --query "[?name=='DRY_RUN' || name=='AGGRESSIVE'].{n:name,v:value}" -o tsv 2>/dev/null
 
 echo
-echo "=== pulling prod state ==="
-uv run rehoboam fetch-azure-state 2>&1 | tail -3
-
-echo
 echo "=== what the session did ==="
 uv run python - <<'PY'
-import sqlite3, datetime as dt
-c = sqlite3.connect("file:logs/bid_learning.db?mode=ro", uri=True)
+import datetime as dt
 
-def one(q, d=None):
+from rehoboam.store import connect
+
+
+def one(conn, q, params=(), d=None):
     try:
-        r = c.execute(q).fetchone()
-        return r[0] if r and r[0] is not None else d
+        r = conn.execute(q, params).fetchone()
+        if not r:
+            return d
+        v = next(iter(r.values()))
+        return v if v is not None else d
     except Exception:
         return d
 
-tv = c.execute("""select snapshot_at, team_value, budget from team_value_history
-                  order by snapshot_at desc limit 1""").fetchone() \
-     if one("select count(*) from sqlite_master where name='team_value_history'") else None
 
-n_dec = one("select count(*) from buy_decisions", 0)
-n_auc = one("select count(*) from auction_outcomes", 0)
-n_win = one("select count(*) from auction_outcomes where winning_bid is not null", 0)
+with connect() as conn:
+    tv = conn.execute(
+        """select snapshot_at, team_value, budget from rehoboam.team_value_history
+           order by snapshot_at desc limit 1"""
+    ).fetchone()
 
-print(f"buy_decisions rows      : {n_dec}   <-- MUST be > 0 after a live session with listings")
-print(f"auction_outcomes rows   : {n_auc}  (winners resolved: {n_win})")
-if tv:
-    when = dt.datetime.fromtimestamp(tv[0], dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"team value {tv[1]:>14,}  budget {tv[2]:>14,}   as of {when}")
-    if tv[2] is not None and tv[2] < 0:
-        print("  *** NEGATIVE BUDGET -- the whole matchday scores ZERO if this holds at kickoff ***")
+    n_dec = one(conn, "select count(*) as n from rehoboam.buy_decisions", d=0)
+    n_auc = one(conn, "select count(*) as n from rehoboam.auction_outcomes", d=0)
+    n_win = one(
+        conn,
+        "select count(*) as n from rehoboam.auction_outcomes where winning_bid is not null",
+        d=0,
+    )
 
-print("\nmost recent declines, with reasons:")
-try:
-    rows = list(c.execute("""select player_name, reason, marginal_ep_gain, budget_ceiling
-                             from buy_decisions order by timestamp desc limit 10"""))
-    for n, why, gain, ceil in rows:
-        g = f"{gain:+.1f}" if gain is not None else "  n/a"
-        print(f"   {str(n)[:22]:<22} {why:<22} ep {g}  ceiling {ceil or 0:,}")
-    if not rows:
-        print("   (none — expected before the market opens, a RED FLAG after it has)")
-except Exception as e:
-    print("   buy_decisions unreadable:", e)
+    print(f"buy_decisions rows      : {n_dec}   <-- MUST be > 0 after a live session with listings")
+    print(f"auction_outcomes rows   : {n_auc}  (winners resolved: {n_win})")
+    if tv:
+        when = dt.datetime.fromtimestamp(tv["snapshot_at"], dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
+        print(f"team value {tv['team_value']:>14,}  budget {tv['budget']:>14,}   as of {when}")
+        if tv["budget"] is not None and tv["budget"] < 0:
+            print("  *** NEGATIVE BUDGET -- the whole matchday scores ZERO if this holds at kickoff ***")
+
+    print("\nmost recent declines, with reasons:")
+    try:
+        rows = conn.execute(
+            """select player_name, reason, marginal_ep_gain, budget_ceiling
+               from rehoboam.buy_decisions order by "timestamp" desc limit 10"""
+        ).fetchall()
+        for row in rows:
+            gain = row["marginal_ep_gain"]
+            g = f"{gain:+.1f}" if gain is not None else "  n/a"
+            name = str(row["player_name"])[:22]
+            print(f"   {name:<22} {row['reason']:<22} ep {g}  ceiling {row['budget_ceiling'] or 0:,}")
+        if not rows:
+            print("   (none — expected before the market opens, a RED FLAG after it has)")
+    except Exception as e:
+        print("   buy_decisions unreadable:", e)
 PY
 
 echo

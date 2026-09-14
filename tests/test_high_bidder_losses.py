@@ -17,11 +17,9 @@ so that is where it is now raised.
 """
 
 import logging
-import sqlite3
 
-import pytest
-
-from rehoboam.bid_learner import AuctionOutcome, BidLearner
+from rehoboam.bid_learner import AuctionOutcome
+from rehoboam.store import connect
 
 LEAGUE = "1933872"
 THEM = "1907519"
@@ -31,11 +29,6 @@ BUY = 1
 # three-day attribution window resolve_auction_winners uses.
 AUCTION_TS = 1_787_385_600.0
 TRANSFER_DT = "2026-08-22T14:00:00Z"
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
 
 
 def _lost_auction(learner, player_id, name, our_bid, *, won=False):
@@ -152,15 +145,15 @@ class TestTheAlarmFires:
 
         assert not [r for r in caplog.records if "high bidder" in r.message.lower()]
 
-    def test_resolution_still_returns_the_filled_count(self, learner):
+    def test_resolution_still_returns_the_filled_count(self, learner, store_dsn):
         """The alarm must not change what the method is for."""
         _lost_auction(learner, "rohr", "Maximilian Rohr", 12_305_344)
         _transfer(learner, "rohr", "Maximilian Rohr", 10_621_111)
 
         assert learner.resolve_auction_winners() == 1
 
-        with sqlite3.connect(learner.db_path) as conn:
+        with connect(store_dsn) as conn:
             row = conn.execute(
-                "SELECT winning_bid, winner_user_id FROM auction_outcomes"
+                "SELECT winning_bid, winner_user_id FROM rehoboam.auction_outcomes"
             ).fetchone()
-        assert row == (10_621_111, THEM)
+        assert (row["winning_bid"], row["winner_user_id"]) == (10_621_111, THEM)

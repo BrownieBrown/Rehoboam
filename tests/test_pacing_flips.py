@@ -37,7 +37,10 @@ def settings(monkeypatch) -> Settings:
 
 @pytest.fixture
 def trader(tmp_path, settings, monkeypatch) -> AutoTrader:
-    monkeypatch.chdir(tmp_path)  # BidLearner/ActivityFeedLearner default to ./logs
+    # BidLearner/ActivityFeedLearner take a store DSN now, not a file path,
+    # so this chdir isolates nothing of theirs; kept harmless in case a
+    # future setup_logging() call in this path writes ./logs/rehoboam.log.
+    monkeypatch.chdir(tmp_path)
     api = MagicMock()
     t = AutoTrader(api=api, settings=settings, dry_run=True)
     t.learner = Mock()

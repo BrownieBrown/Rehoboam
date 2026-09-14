@@ -553,6 +553,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    database_admin_url: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Connection string of the postgres admin role, used only by `rehoboam migrate` "
+            "and `rehoboam db-bootstrap` (DDL and grants). Empty falls back to DATABASE_URL. "
+            "Never logged. Env: DATABASE_ADMIN_URL."
+        ),
+    )
+
     # Telegram approval gate
     telegram_bot_token: str = Field(
         default="",
@@ -603,28 +613,3 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get application settings"""
     return Settings()
-
-
-class AzureBlobSettings(BaseSettings):
-    """Azure Blob Storage settings — used by both the Azure Function and the
-    `rehoboam fetch-azure-state` / `push-azure-state` CLI commands.
-
-    Kept separate from `Settings` so debugging commands don't require
-    KICKBASE credentials to be present in `.env`.
-    """
-
-    model_config = SettingsConfigDict(
-        env_file=find_env_file(),
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
-    azure_storage_connection_string: str | None = Field(
-        default=None,
-        description="Azure Blob Storage connection string (set in .env or app settings)",
-    )
-    blob_container: str = Field(
-        default="rehoboam-data",
-        description="Container holding the persisted SQLite databases",
-    )

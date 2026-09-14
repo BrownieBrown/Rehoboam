@@ -51,8 +51,10 @@ def connect(dsn: str | None = None) -> Iterator[psycopg.Connection]:
     ``conn.commit()`` first (the idiom ``applied_versions`` uses, for exactly
     this reason) or open ``conn.transaction()`` before any other statement on
     the connection. ``import_sqlite`` and ``migrate`` both work around this.
-    Turning on ``autocommit`` would remove the trap; that is a PR B2 decision
-    and is deliberately not taken here.
+    ``autocommit`` stays off: each learner method is one unit of work, so an
+    implicit transaction per ``with self.connection()`` block — committed
+    whole on success, rolled back whole on failure — is the wanted semantics,
+    not an accident to route around.
     """
     with psycopg.connect(
         resolve_dsn(dsn),
@@ -61,3 +63,25 @@ def connect(dsn: str | None = None) -> Iterator[psycopg.Connection]:
         connect_timeout=15,
     ) as conn:
         yield conn
+
+
+def ensure_ready(dsn: str | None = None) -> None:
+    """Fail at startup, not mid-session.
+
+    Connects and applies any unapplied migration. Under the bot role that is
+    a check: `migrate()` issues DDL only for what is missing, so an
+    up-to-date database costs one SELECT, and a migration file the role
+    cannot apply raises PermissionError naming it — the deploy order is
+    "operator applies migrations as postgres, then code ships", and a session
+    that would run against a half-migrated schema must not start. Raises
+    StoreUnconfigured when DATABASE_URL is unset and psycopg.OperationalError
+    when the server is unreachable; neither is caught here on purpose.
+    """
+    import logging
+
+    from rehoboam.store.migrate import migrate
+
+    with connect(dsn) as conn:
+        applied = migrate(conn)
+    if applied:
+        logging.getLogger(__name__).info("store: applied %s", ", ".join(applied))

@@ -11,13 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rehoboam.bid_learner import BidLearner
 from rehoboam.learning.tracker import LearningTracker
-
-
-@pytest.fixture
-def learner(tmp_path):
-    return BidLearner(db_path=tmp_path / "bid_learning.db")
 
 
 @pytest.fixture
