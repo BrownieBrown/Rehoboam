@@ -299,5 +299,5 @@ jobs:
           Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
           The deployed function app is now behind \`main\`. Deploy manually with
-          \`bash deploy/deploy.sh code trading\`, or re-run this workflow from the
+          \`bash deploy/deploy.sh code\`, or re-run this workflow from the
           Actions tab once the cause is fixed." || true

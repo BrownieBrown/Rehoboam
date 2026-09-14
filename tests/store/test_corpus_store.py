@@ -120,6 +120,38 @@ def test_players_needing_any_refresh_orders_by_the_stalest_kind(store_dsn):
     assert out == [("c", ["status", "performance", "mv"]), ("a", ["performance"])]
 
 
+def test_session_pins_one_connection_and_each_connection_block_commits_independently(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "a", "b")
+    with store.session():
+        store.mark_fetched("a", status=True)  # its own top-level transaction, commits now
+        try:
+            with store.connection() as conn:
+                conn.execute(
+                    "INSERT INTO rehoboam.sweep_progress (player_id, status_fetched_at) "
+                    "VALUES ('b', 1.0) "
+                    "ON CONFLICT (player_id) DO UPDATE SET status_fetched_at = excluded.status_fetched_at"
+                )
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        # b's write rolled back with the exception it raised after; a's earlier,
+        # already-committed write on the same pinned connection is unaffected.
+        assert store.players_needing_fetch("status") == ["b"]
+    assert store.players_needing_fetch("status") == ["b"]
+
+
+def test_players_needing_fetch_works_inside_and_outside_a_session(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "a")
+    assert store.players_needing_fetch("status") == ["a"]
+    with store.session():
+        assert store.players_needing_fetch("status") == ["a"]
+        store.mark_fetched("a", status=True)
+        assert store.players_needing_fetch("status") == []
+    assert store.players_needing_fetch("status") == []
+
+
 def test_players_needing_any_refresh_applies_per_kind_windows(store_dsn):
     store = CorpusStore(dsn=store_dsn)
     _universe(store, "a")
@@ -133,3 +165,34 @@ def test_players_needing_any_refresh_applies_per_kind_windows(store_dsn):
         {"status": 5_000.0, "performance": 5_000.0, "mv": 500.0}
     )
     assert out == [("a", ["status", "performance"])]
+
+
+def test_players_needing_any_refresh_restricts_to_the_given_player_ids(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    # "b" is in the universe (e.g. a departed player from the historical corpus)
+    # but not in this run's live squad ids, and must be excluded entirely.
+    _universe(store, "a", "b")
+    out = store.players_needing_any_refresh({"status": 5_000.0}, player_ids=["a"])
+    assert [pid for pid, _ in out] == ["a"]
+
+
+def test_players_needing_any_refresh_orders_by_the_stalest_stale_kind_only(store_dsn):
+    """A fresh kind's own fetched_at must not enter the sort comparison at all --
+    only ignoring it when computing `stale_kinds` (already covered above) isn't
+    enough if `least()` still folds every kind's raw value into the ORDER BY.
+
+    "x" is stale on status only; its (fresh) mv reading is a large, irrelevant
+    number. "y" is stale on mv only; its (fresh) status reading is even larger
+    still. x's real (status) staleness value is the smaller of the two real
+    values, so x must come first -- and would not, if the fresh mv/status
+    readings above were allowed to leak into either player's sort key.
+    """
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "x", "y")
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "insert into rehoboam.sweep_progress (player_id, status_fetched_at, mv_fetched_at) "
+            "values ('x', 1.0, 150.0), ('y', 999.0, 95.0)"
+        )
+    out = store.players_needing_any_refresh({"status": 50.0, "mv": 100.0})
+    assert [pid for pid, _ in out] == ["x", "y"]

@@ -181,6 +181,27 @@ def test_a_failing_player_is_counted_and_the_pass_continues(store_dsn):
     assert store.players_needing_fetch("status") == ["a"]  # not marked, retried next run
 
 
+def test_a_failing_store_write_is_counted_and_leaves_the_player_unmarked(store_dsn):
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a"]), Clock()
+    store.record_match_history = MagicMock(side_effect=RuntimeError("boom"))
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
+        throttle_seconds=0,
+        today=DAY,
+    )
+    assert stats.failed == 1
+    assert stats.performance_fetched == 0  # the write failed, not just the fetch
+    assert stats.status_written == 1 and stats.mv_fetched == 1  # the other kinds still ran
+    assert stats.stopped_by is None
+    assert store.players_needing_fetch("performance") == ["a"]  # not marked, retried next run
+
+
 def test_mv_refreshes_on_its_own_wider_window(store_dsn):
     store, client, clock = CorpusStore(dsn=store_dsn), _client(["a"]), Clock()
     store.upsert_players([{"player_id": "a", "position": "Forward"}])

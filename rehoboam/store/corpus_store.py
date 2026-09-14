@@ -8,6 +8,7 @@ is where the league-wide data lands from now on (spec §2).
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from datetime import date
 from typing import Any
 
@@ -26,8 +27,36 @@ class CorpusStore:
 
     def __init__(self, dsn: str | None = None):
         self.dsn = dsn
+        self._pinned = None
+
+    @contextmanager
+    def session(self):
+        """Pin one connection for a whole run.
+
+        Each method still runs as its own top-level transaction (autocommit on,
+        `conn.transaction()` per call), so a crash mid-run keeps every write that
+        already committed — but the TLS + SCRAM handshake happens once, not
+        twice per kind per player.
+        """
+        from rehoboam.store import connect
+
+        with connect(self.dsn) as conn:
+            conn.autocommit = True
+            self._pinned = conn
+            try:
+                yield conn
+            finally:
+                self._pinned = None
+
+    @contextmanager
+    def _pinned_transaction(self):
+        with self._pinned.transaction():
+            yield self._pinned
 
     def connection(self):
+        if self._pinned is not None:
+            return self._pinned_transaction()
+
         from rehoboam.store import connect
 
         return connect(self.dsn)
@@ -200,9 +229,15 @@ class CorpusStore:
         mv: bool = False,
         transfers: bool = False,
         status: bool = False,
+        at: float | None = None,
     ) -> None:
-        """Record progress so an interrupted run resumes where it stopped."""
-        now = time.time()
+        """Record progress so an interrupted run resumes where it stopped.
+
+        ``at`` defaults to wall-clock ``time.time()``; ``run_ingestion`` passes
+        ``budget.now()`` instead so a test's fake clock, not the real one,
+        determines what counts as stale on the run's next pass.
+        """
+        now = at if at is not None else time.time()
         wanted = [
             col
             for kind, col in _PROGRESS_COLUMNS.items()
@@ -276,15 +311,26 @@ class CorpusStore:
         return [r["player_id"] for r in rows]
 
     def players_needing_any_refresh(
-        self, older_than: dict[str, float]
+        self, older_than: dict[str, float], *, player_ids: list[str] | None = None
     ) -> list[tuple[str, list[str]]]:
-        """Players with at least one stale kind, stalest player first.
+        """Players with at least one stale kind, ordered by their stalest STALE kind.
 
-        A player's staleness is the oldest of its relevant fetch times, never
-        fetched counting as oldest, so a budgeted run that stops mid-list
-        resumes next time with exactly the players it did not reach. Each
-        kind carries its own window: MV series change slowly and refresh
-        weekly, status and performance daily.
+        A player's sort key is the oldest of only its *stale* fetch times —
+        ``least(case when ... end, ...)`` rather than ``least(coalesce(...))``,
+        because Postgres ``least`` ignores NULLs: a fresh kind's ``case``
+        evaluates to NULL and drops out of the comparison instead of pulling
+        the player forward with a fabricated 0. Never fetched still counts as
+        oldest. A budgeted run that stops mid-list resumes next time with
+        exactly the players it did not reach. Each kind carries its own
+        window: MV series change slowly and refresh weekly, status and
+        performance daily.
+
+        ``player_ids``, when given, restricts to that set — ``player_universe``
+        also holds players no longer in any live squad (the historical
+        corpus), and a refresh pass has no reason to spend budget on them.
+        Applied as a filter on top of the already-ordered inner query rather
+        than folded into its WHERE, so it changes which rows survive, not how
+        the survivors are ranked against each other.
         """
         kinds = [k for k in ("status", "performance", "mv") if k in older_than]
         if not kinds:
@@ -292,17 +338,25 @@ class CorpusStore:
         cols = [_PROGRESS_COLUMNS[k] for k in kinds]
         select_cols = ", ".join(f"s.{c}" for c in cols)
         stale_clause = " OR ".join(f"s.{c} IS NULL OR s.{c} < %s" for c in cols)
-        least = ", ".join(f"coalesce(s.{c}, 0)" for c in cols)
+        order_terms = ", ".join(
+            f"case when s.{c} is null or s.{c} < %s then coalesce(s.{c}, 0) end" for c in cols
+        )
+        params: list[Any] = [older_than[k] for k in kinds] + [older_than[k] for k in kinds]
+        player_filter = " WHERE t.player_id = ANY(%s)" if player_ids is not None else ""
+        if player_ids is not None:
+            params.append([str(p) for p in player_ids])
         with self.connection() as conn:
             rows = conn.execute(
                 f"""
-                SELECT u.player_id, {select_cols}
-                FROM rehoboam.player_universe u
-                LEFT JOIN rehoboam.sweep_progress s ON s.player_id = u.player_id
-                WHERE {stale_clause}
-                ORDER BY least({least}) ASC, u.player_id
+                SELECT * FROM (
+                    SELECT u.player_id, {select_cols}
+                    FROM rehoboam.player_universe u
+                    LEFT JOIN rehoboam.sweep_progress s ON s.player_id = u.player_id
+                    WHERE {stale_clause}
+                    ORDER BY least({order_terms}) ASC, u.player_id
+                ) t{player_filter}
                 """,
-                [older_than[k] for k in kinds],
+                params,
             ).fetchall()
         out: list[tuple[str, list[str]]] = []
         for r in rows:

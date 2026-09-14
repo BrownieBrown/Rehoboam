@@ -387,6 +387,7 @@ def ingest_cmd(
     deadline_seconds: float | None = typer.Option(None, "--deadline-seconds"),
     max_requests: int | None = typer.Option(None, "--max-requests"),
     throttle: float = typer.Option(0.25, "--throttle", help="Seconds between requests."),
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
 ):
     """One budgeted ingestion pass — what func-rehoboam-external runs twice a day."""
     import time
@@ -395,7 +396,7 @@ def ingest_cmd(
     from .store.corpus_store import CorpusStore
 
     _ensure_store()
-    api, settings, league = _login_and_get_league(0)
+    api, settings, league = _login_and_get_league(league_index)
     budget = IngestBudget(
         deadline=time.time() + (deadline_seconds or settings.ingest_deadline_seconds),
         max_requests=max_requests or settings.ingest_max_requests,
@@ -423,6 +424,31 @@ def ingest_cmd(
         table.add_row(name, str(getattr(stats, name)))
     table.add_row("stopped_by", stats.stopped_by or "—")
     table.add_row("duration_s", f"{stats.duration_s:.0f}")
+    console.print(table)
+
+
+@app.command("export")
+def export_cmd():
+    """One-off weekly export — every store table as gzip CSV in the Blob container."""
+    import os
+    from datetime import date
+
+    from .store import connect
+    from .store.export import blob_uploader, export_tables
+
+    _ensure_store()
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    if not conn_str:
+        console.print("[red]AZURE_STORAGE_CONNECTION_STRING is not set[/red]")
+        raise typer.Exit(code=1)
+    container = os.getenv("BLOB_CONTAINER", "rehoboam-data")
+    with connect() as conn:
+        sizes = export_tables(conn, blob_uploader(conn_str, container), day=date.today())
+    table = Table(title="Export")
+    table.add_column("Table")
+    table.add_column("Bytes", justify="right")
+    for name, size in sizes.items():
+        table.add_row(name, str(size))
     console.print(table)
 
 

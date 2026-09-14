@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS sweep_progress (
     player_id             TEXT PRIMARY KEY,
     performance_fetched_at REAL,
     mv_fetched_at          REAL,
-    transfers_fetched_at   REAL
+    transfers_fetched_at   REAL,
+    status_fetched_at      REAL
 );
 
 -- Real per-transaction transfer prices (REH-55), the only local source of a
@@ -148,6 +149,8 @@ class TrainingCorpus:
         sweep_columns = {row[1] for row in conn.execute("PRAGMA table_info(sweep_progress)")}
         if "transfers_fetched_at" not in sweep_columns:
             conn.execute("ALTER TABLE sweep_progress ADD COLUMN transfers_fetched_at REAL")
+        if "status_fetched_at" not in sweep_columns:
+            conn.execute("ALTER TABLE sweep_progress ADD COLUMN status_fetched_at REAL")
 
     def upsert_players(self, players: list[dict[str, Any]]) -> int:
         """Insert or update universe rows. Returns rows written."""

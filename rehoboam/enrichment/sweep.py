@@ -1,9 +1,10 @@
 """League-wide corpus sweep — the long pole of week 1.
 
 Enumerates every selectable player in the league and pulls per-match
-performance plus the full market-value series into ``TrainingCorpus``. Around
-a thousand requests, so it is throttled, resumable, and tolerant of individual
-failures.
+performance plus the full market-value series into whatever ``CorpusWriter``
+it's given — the store in production, the offline tools' SQLite
+``TrainingCorpus`` in their tests. Around a thousand requests, so it is
+throttled, resumable, and tolerant of individual failures.
 
 Resumability is the important property: ``sweep_progress`` is only marked
 after a successful write, so an interrupted or partially-failed run picks up

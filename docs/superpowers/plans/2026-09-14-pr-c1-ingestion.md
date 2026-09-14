@@ -1782,7 +1782,7 @@ ______________________________________________________________________
 
 ### Task 8: Interleave the three kinds per player (ruled after the first live pass)
 
-**Why:** the first live pass (2026-09-14, 462 players) wrote 435 status rows in 480 s and stopped on the deadline before a single performance or MV fetch: the league player-details endpoint costs about one second per request. With per-kind passes, every run spends its whole budget on status and performance/MV starve forever. Processing *players* stalest-first, fetching every stale kind for each before moving on, spreads the budget across kinds; a stopped run resumes with the next stalest player, and MV series (one request per player, changes slowly) refresh weekly rather than daily.
+**Why:** the first live pass (2026-09-14, 462 players) wrote 435 status rows in 480 s and stopped on the deadline before a single performance or MV fetch: the cost was two fresh pooler connections per kind (TLS + SCRAM), not the endpoint — Task 8's interleave fixes the starvation, the final fix wave's pinned connection fixes the rate. With per-kind passes, every run spends its whole budget on status and performance/MV starve forever. Processing *players* stalest-first, fetching every stale kind for each before moving on, spreads the budget across kinds; a stopped run resumes with the next stalest player, and MV series (one request per player, changes slowly) refresh weekly rather than daily.
 
 **Files:**
 

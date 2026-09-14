@@ -18,6 +18,28 @@ from psycopg import sql
 from rehoboam.store import SCHEMA
 
 
+def blob_uploader(connection_string: str, container: str) -> Callable[[str, bytes], None]:
+    """An ``upload(name, data)`` callable against one Blob container.
+
+    The Function app and the ``rehoboam export`` CLI command both need this;
+    living here instead of in the Function app means the CLI command doesn't
+    import an Azure Functions module to get it. ``azure.storage.blob``
+    imports inside the function, same reason every heavy import in this
+    codebase does: importable without the dependency installed unless
+    actually exporting.
+    """
+    from azure.storage.blob import BlobServiceClient
+
+    client = BlobServiceClient.from_connection_string(connection_string).get_container_client(
+        container
+    )
+
+    def upload(name: str, data: bytes) -> None:
+        client.upload_blob(name=name, data=data, overwrite=True)
+
+    return upload
+
+
 def store_tables(conn: psycopg.Connection) -> list[str]:
     rows = conn.execute(
         "select table_name from information_schema.tables "

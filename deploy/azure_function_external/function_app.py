@@ -61,32 +61,22 @@ def ingest(timer: func.TimerRequest):
         logging.error(f"Ingestion failed: {e}", exc_info=True)
 
 
-def _blob_uploader():
-    """The container the SQLite era synced to; now it holds the weekly exports."""
-    from azure.storage.blob import BlobServiceClient
-
-    conn_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
-    container = os.getenv("BLOB_CONTAINER", "rehoboam-data")
-    client = BlobServiceClient.from_connection_string(conn_str).get_container_client(container)
-
-    def upload(name: str, data: bytes) -> None:
-        client.upload_blob(name=name, data=data, overwrite=True)
-
-    return upload
-
-
 # Sunday 03:00 UTC, when nothing else runs.
 @app.timer_trigger(schedule="0 0 3 * * 0", arg_name="timer", run_on_startup=False)
 def weekly_export(timer: func.TimerRequest):
     from rehoboam.store import connect, ensure_ready
-    from rehoboam.store.export import export_tables
+    from rehoboam.store.export import blob_uploader, export_tables
 
     _prepare()
     logging.info("export-start")
     try:
         ensure_ready()
+        upload = blob_uploader(
+            os.environ["AZURE_STORAGE_CONNECTION_STRING"],
+            os.getenv("BLOB_CONTAINER", "rehoboam-data"),
+        )
         with connect() as conn:
-            sizes = export_tables(conn, _blob_uploader(), day=datetime.now(tz=timezone.utc).date())
+            sizes = export_tables(conn, upload, day=datetime.now(tz=timezone.utc).date())
         logging.info("export-end tables=%d bytes=%d", len(sizes), sum(sizes.values()))
     except Exception as e:
         logging.error(f"Export failed: {e}", exc_info=True)

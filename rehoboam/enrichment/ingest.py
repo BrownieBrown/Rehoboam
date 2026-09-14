@@ -102,55 +102,61 @@ def run_ingestion(
     day = today or datetime.now(tz=timezone.utc).date()
     api = _counting_client(client, budget)
     try:
-        rows = fetch_universe(api, league_id, throttle_seconds=throttle_seconds)
-        stats.universe_size = len(rows)
-        store.upsert_players(rows)
-        team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
+        # One pooler connection (TLS + SCRAM) for the whole run instead of one
+        # per store call — that handshake, not the Kickbase endpoints, was
+        # where the per-request time went.
+        with store.session():
+            rows = fetch_universe(api, league_id, throttle_seconds=throttle_seconds)
+            stats.universe_size = len(rows)
+            store.upsert_players(rows)
+            team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
 
-        now = budget.now()
-        windows = {
-            "status": now - stale_after_seconds,
-            "performance": now - stale_after_seconds,
-            "mv": now - mv_stale_after_seconds,
-        }
-        fetchers = {
-            "status": (
-                lambda pid: api.get_player_details(league_id=league_id, player_id=pid),
-                lambda pid, d: store.record_status_daily(pid, day, d, budget.now()),
-                "status_written",
-            ),
-            "performance": (
-                lambda pid: api.get_competition_player_performance(player_id=pid),
-                lambda pid, p: store.record_match_history(pid, team_by_id.get(pid), p),
-                "performance_fetched",
-            ),
-            "mv": (
-                lambda pid: api.get_player_market_value_history_v2(
-                    player_id=pid, timeframe=timeframe_days
+            now = budget.now()
+            windows = {
+                "status": now - stale_after_seconds,
+                "performance": now - stale_after_seconds,
+                "mv": now - mv_stale_after_seconds,
+            }
+            fetchers = {
+                "status": (
+                    lambda pid: api.get_player_details(league_id=league_id, player_id=pid),
+                    lambda pid, d: store.record_status_daily(pid, day, d, budget.now()),
+                    "status_written",
                 ),
-                lambda pid, h: store.record_mv_series(pid, h),
-                "mv_fetched",
-            ),
-        }
-        # Progress lives on `stats` directly, not a return value: a
-        # BudgetExhausted unwind must not lose what this player already
-        # wrote, and the tests require the counts to survive a stop.
-        for pid, stale_kinds in store.players_needing_any_refresh(windows):
-            for kind in stale_kinds:
-                fetch, write, attr = fetchers[kind]
-                try:
-                    payload = fetch(pid)
-                except BudgetExhausted:
-                    raise
-                except Exception as e:
-                    stats.failed += 1
-                    logger.warning("ingest %s failed for %s: %s", kind, pid, e)
-                else:
-                    write(pid, payload)
-                    store.mark_fetched(pid, **{kind: True})
-                    setattr(stats, attr, getattr(stats, attr) + 1)
-                if throttle_seconds:
-                    time.sleep(throttle_seconds)
+                "performance": (
+                    lambda pid: api.get_competition_player_performance(player_id=pid),
+                    lambda pid, p: store.record_match_history(pid, team_by_id.get(pid), p),
+                    "performance_fetched",
+                ),
+                "mv": (
+                    lambda pid: api.get_player_market_value_history_v2(
+                        player_id=pid, timeframe=timeframe_days
+                    ),
+                    lambda pid, h: store.record_mv_series(pid, h),
+                    "mv_fetched",
+                ),
+            }
+            # Progress lives on `stats` directly, not a return value: a
+            # BudgetExhausted unwind must not lose what this player already
+            # wrote, and the tests require the counts to survive a stop.
+            for pid, stale_kinds in store.players_needing_any_refresh(
+                windows, player_ids=list(team_by_id)
+            ):
+                for kind in stale_kinds:
+                    fetch, write, attr = fetchers[kind]
+                    try:
+                        payload = fetch(pid)
+                        write(pid, payload)
+                        store.mark_fetched(pid, at=budget.now(), **{kind: True})
+                    except BudgetExhausted:
+                        raise
+                    except Exception as e:
+                        stats.failed += 1
+                        logger.warning("ingest %s failed for %s: %s", kind, pid, e)
+                    else:
+                        setattr(stats, attr, getattr(stats, attr) + 1)
+                    if throttle_seconds:
+                        time.sleep(throttle_seconds)
     except BudgetExhausted as stop:
         stats.stopped_by = stop.reason
     stats.requests = budget.requests
