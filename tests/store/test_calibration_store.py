@@ -165,3 +165,220 @@ def test_write_predictions_upserts_on_session_and_player(store_dsn):
         "4": 0.1,
     }
     assert got["owned"] is True
+
+
+from rehoboam.services.calibration import CalRow, build_report  # noqa: E402
+from rehoboam.services.session_facts import IntegrityFailure, SessionFacts  # noqa: E402
+from rehoboam.store.session_store import SessionStore  # noqa: E402
+
+KICKOFF = 1_789_756_200.0  # 2026-09-18 18:30 UTC
+
+
+def _pred(session, pid, at, **over):
+    row = {
+        "session_id": session,
+        "player_id": pid,
+        "season": "2026/2027",
+        "day_number": 4,
+        "kickoff": KICKOFF,
+        "predicted_at": at,
+        "predicted_ep": 40.0,
+        "p_status": {1: 0.1, 3: 0.2, 4: 0.1, 5: 0.6},
+        "rate": 60.0,
+        "prev_status": 5,
+        "live_status": 0,
+        "position": "Midfielder",
+        "team_id": "1",
+        "owned": False,
+        "listed": False,
+        "in_best_11": False,
+        "live_ep": None,
+        "data_grade": "A",
+        "app": "function",
+        "dry_run": False,
+        "backfill": False,
+    }
+    row.update(over)
+    return row
+
+
+def test_last_prediction_before_kickoff_per_player(store_dsn):
+    store = CalibrationStore(dsn=store_dsn)
+    store.write_predictions(
+        [
+            _pred("s1", "a", KICKOFF - 7200, predicted_ep=30.0),
+            _pred("s2", "a", KICKOFF - 60, predicted_ep=35.0),
+            _pred("s3", "a", KICKOFF + 60, predicted_ep=99.0),  # after kickoff: ignored
+            _pred("bf", "a", KICKOFF - 1, predicted_ep=11.0, backfill=True),
+            _pred("s2", "b", KICKOFF - 60, predicted_ep=20.0, day_number=5),  # other matchday
+        ]
+    )
+    got = store.last_predictions_before(
+        season="2026/2027", day_number=4, kickoff=KICKOFF, backfill=False
+    )
+    assert set(got) == {"a"} and got["a"]["predicted_ep"] == 35.0 and got["a"]["session_id"] == "s2"
+    bf = store.last_predictions_before(
+        season="2026/2027", day_number=4, kickoff=KICKOFF, backfill=True
+    )
+    assert bf["a"]["predicted_ep"] == 11.0
+
+
+def test_fielded_eleven_comes_from_the_last_real_session(store_dsn):
+    store = CalibrationStore(dsn=store_dsn)
+    store.write_predictions(
+        [
+            _pred("dry", "a", KICKOFF - 30, dry_run=True, owned=True, in_best_11=True),
+            _pred("real", "a", KICKOFF - 60, owned=True, in_best_11=True),
+            _pred("real", "b", KICKOFF - 60, owned=True, in_best_11=False),
+            _pred("older", "c", KICKOFF - 7200, owned=True, in_best_11=True),
+        ]
+    )
+    assert store.fielded_eleven_before(season="2026/2027", day_number=4, kickoff=KICKOFF) == {"a"}
+
+
+def test_actuals_join_the_universe(store_dsn):
+    _seed(store_dsn)
+    store = CalibrationStore(dsn=store_dsn)
+    rows = store.actuals_for(season="2026/2027", day_number=1)
+    assert {r["player_id"] for r in rows} == {"a", "b"}
+    a = next(r for r in rows if r["player_id"] == "a")
+    assert (a["points"], a["status"], a["position"], a["name"]) == (
+        80,
+        5,
+        "Midfielder",
+        "A",
+    )
+
+
+def test_history_before_is_strict(store_dsn):
+    _seed(store_dsn)
+    hist = CalibrationStore(dsn=store_dsn).history_before(before_iso="2026-08-29T13:30:00Z")
+    assert [m["day_number"] for m in hist["a"]] == [1] and hist["b"][0]["points"] == 12
+
+
+def test_players_needing_final_rows(store_dsn):
+    corpus = _seed(store_dsn)
+    corpus.mark_fetched("a", at=1_000.0, performance=True)  # before the whistle
+    corpus.mark_fetched("b", at=9_999.0, performance=True)  # after
+    store = CalibrationStore(dsn=store_dsn)
+    assert store.players_needing_final_rows(season="2026/2027", day_number=1, whistle=5_000.0) == [
+        "a"
+    ]
+    assert store.players_needing_final_rows(season="2026/2027", day_number=1, whistle=500.0) == []
+
+
+def test_write_and_read_a_report(store_dsn):
+    store = CalibrationStore(dsn=store_dsn)
+    rows = [
+        CalRow("a", "Midfielder", 50.0, 40.0, 30.0, 44.0, True, True, 0),
+        CalRow("b", "Forward", 0.0, None, 10.0, None, False, False, None),
+    ]
+    report = build_report(rows, n_stale_rows=2)
+    gate = {"passes": False, "consecutive_ok": 0}
+    store.write_calibration(
+        season="2026/2027",
+        day_number=4,
+        backfill=False,
+        rows=[
+            {
+                "player_id": "a",
+                "session_id": "s2",
+                "predicted_ep": 40.0,
+                "live_ep": 44.0,
+                "baseline_ep": 30.0,
+                "actual_points": 50,
+                "minutes": 90,
+                "status": 5,
+                "position": "Midfielder",
+                "team_id": "1",
+                "owned": True,
+                "in_best_11": True,
+                "prev_status": 5,
+                "live_status": 0,
+            },
+            {
+                "player_id": "b",
+                "session_id": None,
+                "predicted_ep": None,
+                "live_ep": None,
+                "baseline_ep": 10.0,
+                "actual_points": 0,
+                "minutes": 0,
+                "status": 1,
+                "position": "Forward",
+                "team_id": "2",
+                "owned": False,
+                "in_best_11": False,
+                "prev_status": None,
+                "live_status": None,
+            },
+        ],
+        report=report,
+        gate=gate,
+        computed_at=123.0,
+    )
+    got = store.report_for("2026/2027", 4)
+    assert got["n"] == 1 and got["n_unpredicted"] == 1 and got["n_stale_rows"] == 2
+    assert got["gate"] == gate and got["telegram_sent"] is False
+    assert got["by_position"]["Midfielder"]["n"] == 1
+    assert store.report_for("2026/2027", 4, backfill=True) is None
+    store.mark_telegram_sent("2026/2027", 4)
+    assert store.report_for("2026/2027", 4)["telegram_sent"] is True
+    # Re-writing the same matchday replaces, never duplicates.
+    store.write_calibration(
+        season="2026/2027",
+        day_number=4,
+        backfill=False,
+        rows=[],
+        report=build_report([]),
+        gate=gate,
+        computed_at=124.0,
+    )
+    assert store.report_for("2026/2027", 4)["n"] == 0
+    with store.connection() as conn:
+        n = conn.execute("SELECT count(*) AS n FROM rehoboam.calibration_rows").fetchone()["n"]
+    assert n == 0
+
+
+def test_recent_reports_are_oldest_first_and_real_only(store_dsn):
+    store = CalibrationStore(dsn=store_dsn)
+    for day, bf in ((5, False), (4, False), (3, True)):
+        store.write_calibration(
+            season="2026/2027",
+            day_number=day,
+            backfill=bf,
+            rows=[],
+            report=build_report([]),
+            gate=None,
+            computed_at=1.0,
+        )
+    assert [r["day_number"] for r in store.recent_reports("2026/2027")] == [4, 5]
+
+
+def test_last_integrity_failure_ignores_dry_runs(store_dsn):
+    sessions = SessionStore(dsn=store_dsn)
+    sessions.record(
+        SessionFacts(
+            session_id="d",
+            app="cli",
+            mode="full",
+            dry_run=True,
+            started_at=1.0,
+            duration_s=1.0,
+        )
+    )
+    sessions.record(
+        SessionFacts(
+            session_id="r",
+            app="function",
+            mode="lineup_only",
+            dry_run=False,
+            started_at=1.0,
+            duration_s=1.0,
+        )
+    )
+    sessions.record_failures("d", [IntegrityFailure("I2", "x")], at=900.0)
+    store = CalibrationStore(dsn=store_dsn)
+    assert store.last_integrity_failure_at() is None
+    sessions.record_failures("r", [IntegrityFailure("I2", "x")], at=800.0)
+    assert store.last_integrity_failure_at() == 800.0

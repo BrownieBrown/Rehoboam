@@ -140,3 +140,205 @@ class CalibrationStore:
                 values,
             )
         return len(rows)
+
+    def last_predictions_before(
+        self, *, season: str, day_number: int, kickoff: float, backfill: bool
+    ) -> dict[str, dict[str, Any]]:
+        """Per player, the newest prediction for this matchday made before `kickoff`."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT ON (player_id) * FROM rehoboam.predictions "
+                "WHERE season = %s AND day_number = %s AND predicted_at < %s AND backfill = %s "
+                "ORDER BY player_id, predicted_at DESC",
+                (season, day_number, kickoff, backfill),
+            ).fetchall()
+        return {r["player_id"]: dict(r) for r in rows}
+
+    def fielded_eleven_before(self, *, season: str, day_number: int, kickoff: float) -> set[str]:
+        """The `in_best_11` owned players of the newest non-dry-run session before kickoff."""
+        with self.connection() as conn:
+            session = conn.execute(
+                "SELECT session_id FROM rehoboam.predictions "
+                "WHERE season = %s AND day_number = %s AND predicted_at < %s "
+                "AND dry_run = false AND backfill = false "
+                "ORDER BY predicted_at DESC LIMIT 1",
+                (season, day_number, kickoff),
+            ).fetchone()
+            if not session:
+                return set()
+            rows = conn.execute(
+                "SELECT player_id FROM rehoboam.predictions "
+                "WHERE session_id = %s AND owned AND in_best_11",
+                (session["session_id"],),
+            ).fetchall()
+        return {r["player_id"] for r in rows}
+
+    def actuals_for(self, *, season: str, day_number: int) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT h.player_id, h.points, h.minutes, h.status, h.team_id, u.position, "
+                "COALESCE(u.last_name, h.player_id) AS name "
+                "FROM rehoboam.player_match_history h "
+                "JOIN rehoboam.player_universe u ON u.player_id = h.player_id "
+                "WHERE h.season = %s AND h.day_number = %s AND u.position IS NOT NULL "
+                "ORDER BY h.player_id",
+                (season, day_number),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def history_before(self, *, before_iso: str) -> dict[str, list[dict[str, Any]]]:
+        """Every match row dated strictly before `before_iso`, per player, oldest first."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT player_id, season, day_number, match_date, points, minutes, status "
+                "FROM rehoboam.player_match_history WHERE match_date < %s "
+                "ORDER BY player_id, season, day_number",
+                (before_iso,),
+            ).fetchall()
+        out: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            out.setdefault(r["player_id"], []).append(dict(r))
+        return out
+
+    def players_needing_final_rows(
+        self, *, season: str, day_number: int, whistle: float
+    ) -> list[str]:
+        """Players with a row for this matchday whose performance was last fetched
+        before `whistle`."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT h.player_id FROM rehoboam.player_match_history h "
+                "LEFT JOIN rehoboam.sweep_progress p ON p.player_id = h.player_id "
+                "WHERE h.season = %s AND h.day_number = %s "
+                "AND (p.performance_fetched_at IS NULL OR p.performance_fetched_at < %s) "
+                "ORDER BY h.player_id",
+                (season, day_number, whistle),
+            ).fetchall()
+        return [r["player_id"] for r in rows]
+
+    def write_calibration(
+        self,
+        *,
+        season: str,
+        day_number: int,
+        backfill: bool,
+        rows: list[dict[str, Any]],
+        report,
+        gate: dict[str, Any] | None,
+        computed_at: float,
+    ) -> None:
+        """Replace this matchday's rows and report in one transaction."""
+        r = report.as_row()
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM rehoboam.calibration_rows "
+                "WHERE season = %s AND day_number = %s AND backfill = %s",
+                (season, day_number, backfill),
+            )
+            cur.executemany(
+                "INSERT INTO rehoboam.calibration_rows (season, day_number, player_id, backfill, "
+                "session_id, predicted_ep, live_ep, baseline_ep, actual_points, minutes, status, "
+                "position, team_id, owned, in_best_11, prev_status, live_status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                [
+                    (
+                        season,
+                        day_number,
+                        x["player_id"],
+                        backfill,
+                        x["session_id"],
+                        x["predicted_ep"],
+                        x["live_ep"],
+                        x["baseline_ep"],
+                        x["actual_points"],
+                        x["minutes"],
+                        x["status"],
+                        x["position"],
+                        x["team_id"],
+                        x["owned"],
+                        x["in_best_11"],
+                        x["prev_status"],
+                        x["live_status"],
+                    )
+                    for x in rows
+                ],
+            )
+            cur.execute(
+                "INSERT INTO rehoboam.calibration_reports (season, day_number, backfill, "
+                "computed_at, n, n_unpredicted, n_stale_rows, mae, bias, spearman, "
+                "baseline_spearman, top11_regret, baseline_top11_regret, squad_regret, "
+                "live_spearman, live_n, by_position, by_status, worst, gate, telegram_sent) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                "%s, %s, false) "
+                "ON CONFLICT (season, day_number, backfill) DO UPDATE SET "
+                "computed_at = excluded.computed_at, n = excluded.n, "
+                "n_unpredicted = excluded.n_unpredicted, n_stale_rows = excluded.n_stale_rows, "
+                "mae = excluded.mae, bias = excluded.bias, spearman = excluded.spearman, "
+                "baseline_spearman = excluded.baseline_spearman, "
+                "top11_regret = excluded.top11_regret, "
+                "baseline_top11_regret = excluded.baseline_top11_regret, "
+                "squad_regret = excluded.squad_regret, live_spearman = excluded.live_spearman, "
+                "live_n = excluded.live_n, by_position = excluded.by_position, "
+                "by_status = excluded.by_status, worst = excluded.worst, gate = excluded.gate, "
+                "telegram_sent = false",
+                (
+                    season,
+                    day_number,
+                    backfill,
+                    computed_at,
+                    r["n"],
+                    r["n_unpredicted"],
+                    r["n_stale_rows"],
+                    r["mae"],
+                    r["bias"],
+                    r["spearman"],
+                    r["baseline_spearman"],
+                    r["top11_regret"],
+                    r["baseline_top11_regret"],
+                    r["squad_regret"],
+                    r["live_spearman"],
+                    r["live_n"],
+                    Jsonb(r["by_position"]),
+                    Jsonb(r["by_status"]),
+                    Jsonb(r["worst"]),
+                    Jsonb(gate) if gate is not None else None,
+                ),
+            )
+
+    def report_for(
+        self, season: str, day_number: int, *, backfill: bool = False
+    ) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM rehoboam.calibration_reports "
+                "WHERE season = %s AND day_number = %s AND backfill = %s",
+                (season, day_number, backfill),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def recent_reports(self, season: str, *, backfill: bool = False) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM rehoboam.calibration_reports "
+                "WHERE season = %s AND backfill = %s ORDER BY day_number",
+                (season, backfill),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_telegram_sent(self, season: str, day_number: int) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE rehoboam.calibration_reports SET telegram_sent = true "
+                "WHERE season = %s AND day_number = %s AND backfill = false",
+                (season, day_number),
+            )
+
+    def last_integrity_failure_at(self) -> float | None:
+        """Newest integrity failure from a non-dry-run session (the gate's clean window)."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(f.created_at) AS at FROM rehoboam.integrity_failures f "
+                "JOIN rehoboam.session_facts s ON s.session_id = f.session_id "
+                "WHERE s.dry_run = 0"
+            ).fetchone()
+        return float(row["at"]) if row and row["at"] is not None else None
