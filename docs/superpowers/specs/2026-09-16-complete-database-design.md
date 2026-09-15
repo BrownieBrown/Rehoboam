@@ -38,23 +38,30 @@ Plus three columns Base XI cannot have: `predicted_ep` (next matchday),
 `p_start` (from `predictions.p_status`), and `fair_value_gap` (points per
 million against the position's regression, the number behind their MW-Graph).
 
-## What Kickbase exposes (survey 2026-09-15, facts)
+## What Kickbase exposes (surveyed 2026-09-15, probed live the same evening)
 
-- **Market** `GET /v4/leagues/{lid}/market`: one call, every listing — player
-  id, ask (`prc`), market value, seller user id (`u.i`; absent means Kickbase
-  sells), offer count (`ofc`), our own offer (`uop`/`uoid`), listed-at (`dt`).
-  Rival bid amounts are never visible. No expiry field is parsed anywhere;
-  whether one exists is a probe-first item (Kickbase listings expire after a
-  fixed window; if the payload carries it, store it, else derive from `dt`).
-- **Ownership** `GET /v4/leagues/{lid}/managers/{mid}/squad`: one call per
-  manager, same player shape as our squad. `/ranking` lists the managers.
-  `/managers/{mid}/transfer?start=N` pages of 25, newest first, whole season
-  reachable. `/players/{pid}/transferHistory` is the per-player chain back to
-  2021\. The activity feed carries names only.
+- **Market** `GET /v4/leagues/{lid}/market`: one call, every listing (48 on
+  2026-09-15). Top level: `it[]`, `day`, `nps`, `tv`, `dt`. Per listing:
+  `i` player id, `tid` club, `pos`, `st` status, `prob` lineup probability,
+  `mv` market value, `mvt` value trend, `prc` ask, `ofc` offer count, `dt`
+  listed-at, **`exs` seconds until expiry** (present on 22 of 48 listings —
+  the manager-listed ones; Kickbase's own listings carry none), `u` seller,
+  `uop`/`uoid`/`ofs[]` our own offer, `isn`, `iposl`, `p`, `ap`. Rival bid
+  amounts are never visible.
+- **Ownership** `GET /v4/leagues/{lid}/ranking` lists the managers (14 in
+  PUMARUDEL, one inactive with team value 0): `i`, `n`, `tv`, `sp`, `spl`,
+  `mdp`, `mdpl`, `lp`, `pa`. `GET /v4/leagues/{lid}/managers/{mid}/squad`
+  works for every manager: `it[]` with `pi` player id, `pn`, `tid`, `pos`,
+  `st`, `mv`, `mvgl` (gain/loss since purchase), `prc`, `mvt`, `iotm` (is on
+  the market), `lst`, `lo`. `/managers/{mid}/transfer?start=N` pages of 25,
+  newest first, whole season reachable. `/players/{pid}/transferHistory` is
+  the per-player chain back to 2021. The activity feed carries names only.
 - **Fixtures** `GET /v4/competitions/1/matchdays`: every match of the season
-  with match id, kickoff, clubs, goals, status. `GET /v4/competitions/1/table`
-  the league table. `GET /v4/leagues/{lid}/teams/{tid}/teamprofile` the club
-  name, place and record.
+  with `mi` match id, `dt` kickoff, `t1`/`t2`, `t1g`/`t2g` goals, `st`
+  status. `GET /v4/competitions/1/table` rows: `tid`, `tn` name, `cpl` place,
+  `pcpl` previous place, `cp` points, `mc` matches, `gd` goal difference,
+  `sp`. `GET /v4/leagues/{lid}/teams/{tid}/teamprofile`: `tid`, `tn`, `ts`,
+  `pl` place, `tw`/`td`/`tl`, `tv`, `it[]` the club's players.
 - **Per-match events** (goals, assists, cards): not in the performance
   payload. Season totals `g`/`a` sit on the player page; the unprobed
   `/v4/matches/{id}/details` and `/v4/live/eventtypes` are the only plausible
@@ -77,13 +84,15 @@ create table rehoboam.market_listings (
     snapshot_at   double precision not null,   -- epoch of the fetch
     player_id     text not null,
     ask           bigint not null,             -- prc
-    market_value  bigint,
-    seller_id     text,                        -- null = Kickbase
+    market_value  bigint,                      -- mv
+    mv_trend      integer,                     -- mvt
+    seller_id     text,                        -- u.i; null = Kickbase
     offer_count   integer,                     -- ofc
     our_bid       bigint,                      -- uop when uoid is ours
     listed_at     double precision,            -- dt
-    expires_at    double precision,            -- probe-first; null when unknown
-    status        integer,                     -- st at listing time
+    expires_at    double precision,            -- snapshot_at + exs; null when absent
+    status        integer,                     -- st
+    lineup_probability integer,                -- prob
     source        text not null,               -- session | ingest
     primary key (snapshot_at, player_id)
 );
@@ -100,8 +109,10 @@ create table rehoboam.managers (
 create table rehoboam.manager_squads (
     snapshot_at   double precision not null,
     manager_id    text not null,
-    player_id     text not null,
-    market_value  bigint,
+    player_id     text not null,               -- pi
+    market_value  bigint,                      -- mv
+    gain_loss     bigint,                      -- mvgl (market value minus purchase price)
+    on_market     boolean,                     -- iotm
     source        text not null,               -- session | ingest
     primary key (snapshot_at, manager_id, player_id)
 );
@@ -113,36 +124,35 @@ create table rehoboam.fixtures (
     season        text not null,
     day_number    integer not null,
     kickoff       double precision not null,   -- dt
-    home_team_id  text not null,
-    away_team_id  text not null,
-    home_goals    integer,
-    away_goals    integer,
+    home_team_id  text not null,               -- t1
+    away_team_id  text not null,               -- t2
+    home_goals    integer,                     -- t1g
+    away_goals    integer,                     -- t2g
     status        integer not null,            -- st: 0 not started, 2 finished, other in progress
     updated_at    double precision not null
 );
 create index on rehoboam.fixtures (season, day_number);
 
 create table rehoboam.league_table (
-    season      text not null,
-    day_number  integer not null,
-    team_id     text not null,
-    place       integer not null,
-    played      integer, won integer, drawn integer, lost integer,
-    goals_for   integer, goals_against integer, points integer,
-    updated_at  double precision not null,
+    season          text not null,
+    day_number      integer not null,
+    team_id         text not null,
+    place           integer not null,          -- cpl
+    previous_place  integer,                   -- pcpl
+    points          integer,                   -- cp
+    played          integer,                   -- mc
+    goal_difference integer,                   -- gd
+    updated_at      double precision not null,
     primary key (season, day_number, team_id)
 );
 
 create table rehoboam.teams (
     team_id     text primary key,
-    name        text not null,
-    short_name  text,
+    name        text not null,                 -- tn
+    short_name  text,                          -- ts
     updated_at  double precision not null
 );
 ```
-
-Column names for `league_table` and `teams` beyond `team_id`/`name`/`place`
-are probe-first; the migration ships with what the probe confirms.
 
 ### The view
 
@@ -157,17 +167,18 @@ else a `market_listings` row in the newest market snapshot → `market`; else
 
 ### Writers
 
-- `enrichment/rows.py` gains pure builders: `market_listing_rows(payload, snapshot_at, our_user_id)`, `manager_squad_rows(manager_id, payload, snapshot_at)`, `fixture_rows(schedule_payload, season)`, `league_table_rows( payload, season, day_number)`, `team_row(profile_payload)`.
+- `enrichment/rows.py` gains pure builders: `market_listing_rows(payload, snapshot_at, our_user_id)`, `manager_squad_rows(manager_id, payload, snapshot_at)`, `manager_rows(ranking_payload, league_id, our_user_id)`,
+  `fixture_rows(schedule_payload, season)`, `league_table_rows(payload, season, day_number)`, `team_row(profile_payload)`.
 - `store/league_store.py`: `LeagueStore(dsn=None)` with `write_listings`,
   `write_squads`, `upsert_managers`, `upsert_fixtures`, `write_table`,
-  `upsert_teams`, `latest_market(...)`, `owner_of(player_ids)`, one
-  transaction per call, bulk inserts.
-- **Session** (`auto_trader.py`, step 2a, best-effort): `_write_league_state( ctx)` writes the market listings from `ep_result["market_players"]` (the
-  `MarketPlayer` objects carry ask, seller, offer count, listed-at — verified
-  in the plan against `MarketPlayer.from_dict`) and the manager squads from the
-  competitor squads `Trader` already fetched (kept on `ep_result` as
-  `competitor_squads: dict[manager_id, list[player]]`, a new key). Our own
-  squad is written under our manager id with `is_self`.
+  `upsert_teams`, `latest_market()`, `owner_of(player_ids)`, one transaction
+  per call, bulk inserts.
+- **Session** (`auto_trader.py`, step 2a, best-effort): `_write_league_state( ctx)` writes the market listings from the raw market payload `Trader` keeps
+  on `ep_result["market_payload"]` (a new key; the parsed `MarketPlayer` drops
+  `exs`, `mvt`, `prob`) and the manager squads from the competitor squads
+  `Trader` already fetched (`ep_result["competitor_squads"]`, a new key:
+  manager id → raw `it[]`). Our own squad is written under our manager id with
+  `is_self`.
 - **Ingest** (`enrichment/ingest.py`, before the per-player loop): market (1
   call), ranking (1), every manager's squad (~13), the newest transfer page per
   manager (~13, into the existing `manager_transfers`), schedule (already
@@ -182,17 +193,17 @@ else a `market_listings` row in the newest market snapshot → `market`; else
 
 `rehoboam players [--position] [--owner] [--sort col]` prints the view as a
 Rich table; `rehoboam market` prints the newest market snapshot with our
-prediction per listing.
+prediction per listing and the time to expiry.
 
 ### Tests
 
 Pure builders in the `test_safety_gate` style (every field, missing keys,
-Kickbase-as-seller, our own offer); `tests/store/test_league_store.py` on the
-real PostgreSQL (upserts idempotent, `owner_of` precedence, view columns and
-the previous-season logic on seeded seasons); ingest wiring (request counts,
-budget accounting, a failing manager call does not stop the loop); session
-wiring (listings and squads written from the context, no extra API call —
-asserted on a counting client).
+Kickbase-as-seller, absent `exs`, our own offer); `tests/store/test_league_store.py`
+on the real PostgreSQL (upserts idempotent, `owner_of` precedence, view
+columns and the previous-season logic on seeded seasons); ingest wiring
+(request counts, budget accounting, a failing manager call does not stop the
+loop); session wiring (listings and squads written from the context, no extra
+API call — asserted on a counting client).
 
 ### Verification before merge
 
@@ -230,6 +241,5 @@ them.
   transfers (`league_transfers`).
 - KI-Trend is not replicated; predicted points replace it and a market-value
   forecast is a later spec.
-- `expires_at`, `league_table` and `teams` field names are probe-first.
 - Order: G1 (one PR), G2 after its probe, G3 as a CLI backfill. The Base XI
   style dashboard is a separate PR on top of `player_table`.
