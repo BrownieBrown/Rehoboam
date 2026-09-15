@@ -59,6 +59,7 @@ create table if not exists rehoboam.calibration_reports (
     bias                  double precision,
     spearman              double precision,
     baseline_spearman     double precision,
+    spearman_played       double precision,
     top11_regret          double precision,
     baseline_top11_regret double precision,
     squad_regret          double precision,

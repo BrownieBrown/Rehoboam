@@ -223,7 +223,7 @@ def test_last_prediction_before_kickoff_per_player(store_dsn):
     assert bf["a"]["predicted_ep"] == 11.0
 
 
-def test_fielded_eleven_comes_from_the_last_real_session(store_dsn):
+def test_squad_before_comes_from_the_last_real_session(store_dsn):
     store = CalibrationStore(dsn=store_dsn)
     store.write_predictions(
         [
@@ -233,7 +233,10 @@ def test_fielded_eleven_comes_from_the_last_real_session(store_dsn):
             _pred("older", "c", KICKOFF - 7200, owned=True, in_best_11=True),
         ]
     )
-    assert store.fielded_eleven_before(season="2026/2027", day_number=4, kickoff=KICKOFF) == {"a"}
+    assert store.squad_before(season="2026/2027", day_number=4, kickoff=KICKOFF) == (
+        {"a", "b"},
+        {"a"},
+    )
 
 
 def test_actuals_join_the_universe(store_dsn):
@@ -251,20 +254,46 @@ def test_actuals_join_the_universe(store_dsn):
 
 
 def test_history_before_is_strict(store_dsn):
-    _seed(store_dsn)
-    hist = CalibrationStore(dsn=store_dsn).history_before(before_iso="2026-08-29T13:30:00Z")
+    corpus = _seed(store_dsn)
+    corpus.record_match_history("c", "3", _perf([_match(1, "2026-08-22T13:30:00Z", 5, 99)]))
+    hist = CalibrationStore(dsn=store_dsn).history_before(
+        before_iso="2026-08-29T13:30:00Z", player_ids=["a", "b"]
+    )
     assert [m["day_number"] for m in hist["a"]] == [1] and hist["b"][0]["points"] == 12
+    assert "c" not in hist  # not in player_ids: excluded even though he has history
 
 
 def test_players_needing_final_rows(store_dsn):
     corpus = _seed(store_dsn)
+    corpus.record_status_daily(
+        "b", date(2026, 9, 15), {"st": 0, "prob": 1, "mv": 3_000_000, "tid": "2"}, 1_789_500_000.0
+    )
     corpus.mark_fetched("a", at=1_000.0, performance=True)  # before the whistle
     corpus.mark_fetched("b", at=9_999.0, performance=True)  # after
     store = CalibrationStore(dsn=store_dsn)
+    assert store.players_needing_final_rows(
+        season="2026/2027", day_number=1, whistle=5_000.0, live_since=0.0
+    ) == ["a"]
+    assert (
+        store.players_needing_final_rows(
+            season="2026/2027", day_number=1, whistle=500.0, live_since=0.0
+        )
+        == []
+    )
+    # live_since above both players' status fetch stamps: neither is in the live universe.
+    assert (
+        store.players_needing_final_rows(
+            season="2026/2027", day_number=1, whistle=5_000.0, live_since=1_789_500_000.0 + 1
+        )
+        == []
+    )
+    # live_since=None: every pre-whistle player, regardless of status rows -- even
+    # one with none at all.
+    with store.connection() as conn:
+        conn.execute("DELETE FROM rehoboam.player_status_daily WHERE player_id = 'a'")
     assert store.players_needing_final_rows(season="2026/2027", day_number=1, whistle=5_000.0) == [
         "a"
     ]
-    assert store.players_needing_final_rows(season="2026/2027", day_number=1, whistle=500.0) == []
 
 
 def test_write_and_read_a_report(store_dsn):
@@ -353,6 +382,49 @@ def test_recent_reports_are_oldest_first_and_real_only(store_dsn):
             computed_at=1.0,
         )
     assert [r["day_number"] for r in store.recent_reports("2026/2027")] == [4, 5]
+
+
+def test_delete_report_clears_rows_and_report_leaving_the_real_one(store_dsn):
+    store = CalibrationStore(dsn=store_dsn)
+    for bf in (False, True):
+        store.write_calibration(
+            season="2026/2027",
+            day_number=4,
+            backfill=bf,
+            rows=[
+                {
+                    "player_id": "a",
+                    "session_id": "s1",
+                    "predicted_ep": 10.0,
+                    "live_ep": None,
+                    "baseline_ep": 5.0,
+                    "actual_points": 10,
+                    "minutes": 90,
+                    "status": 5,
+                    "position": "Midfielder",
+                    "team_id": "1",
+                    "owned": False,
+                    "in_best_11": False,
+                    "prev_status": None,
+                    "live_status": None,
+                }
+            ],
+            report=build_report(
+                [CalRow("a", "Midfielder", 10.0, 10.0, 5.0, None, False, False, 5)]
+            ),
+            gate=None,
+            computed_at=1.0,
+        )
+    store.delete_report("2026/2027", 4, backfill=True)
+    assert store.report_for("2026/2027", 4, backfill=True) is None
+    assert store.report_for("2026/2027", 4) is not None
+    with store.connection() as conn:
+        n = conn.execute(
+            "SELECT count(*) AS n FROM rehoboam.calibration_rows "
+            "WHERE season = %s AND day_number = 4 AND backfill = true",
+            ("2026/2027",),
+        ).fetchone()["n"]
+    assert n == 0
 
 
 def test_last_integrity_failure_ignores_dry_runs(store_dsn):

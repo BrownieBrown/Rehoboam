@@ -154,8 +154,12 @@ class CalibrationStore:
             ).fetchall()
         return {r["player_id"]: dict(r) for r in rows}
 
-    def fielded_eleven_before(self, *, season: str, day_number: int, kickoff: float) -> set[str]:
-        """The `in_best_11` owned players of the newest non-dry-run session before kickoff."""
+    def squad_before(
+        self, *, season: str, day_number: int, kickoff: float
+    ) -> tuple[set[str], set[str]]:
+        """`(owned_ids, fielded_ids)` from the newest non-dry-run, non-backfill session
+        before kickoff — the same session for both, so `owned` and the fielded eleven
+        can never come from two different sessions."""
         with self.connection() as conn:
             session = conn.execute(
                 "SELECT session_id FROM rehoboam.predictions "
@@ -165,13 +169,15 @@ class CalibrationStore:
                 (season, day_number, kickoff),
             ).fetchone()
             if not session:
-                return set()
+                return set(), set()
             rows = conn.execute(
-                "SELECT player_id FROM rehoboam.predictions "
-                "WHERE session_id = %s AND owned AND in_best_11",
+                "SELECT player_id, in_best_11 FROM rehoboam.predictions "
+                "WHERE session_id = %s AND owned",
                 (session["session_id"],),
             ).fetchall()
-        return {r["player_id"] for r in rows}
+        owned_ids = {r["player_id"] for r in rows}
+        fielded_ids = {r["player_id"] for r in rows if r["in_best_11"]}
+        return owned_ids, fielded_ids
 
     def actuals_for(self, *, season: str, day_number: int) -> list[dict[str, Any]]:
         with self.connection() as conn:
@@ -186,14 +192,20 @@ class CalibrationStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def history_before(self, *, before_iso: str) -> dict[str, list[dict[str, Any]]]:
-        """Every match row dated strictly before `before_iso`, per player, oldest first."""
+    def history_before(
+        self, *, before_iso: str, player_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Every match row dated strictly before `before_iso`, per player, oldest first —
+        restricted to `player_ids` (the players a caller actually needs)."""
+        if not player_ids:
+            return {}
         with self.connection() as conn:
             rows = conn.execute(
                 "SELECT player_id, season, day_number, match_date, points, minutes, status "
-                "FROM rehoboam.player_match_history WHERE match_date < %s "
+                "FROM rehoboam.player_match_history "
+                "WHERE match_date < %s AND player_id = ANY(%s) "
                 "ORDER BY player_id, season, day_number",
-                (before_iso,),
+                (before_iso, player_ids),
             ).fetchall()
         out: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
@@ -201,19 +213,36 @@ class CalibrationStore:
         return out
 
     def players_needing_final_rows(
-        self, *, season: str, day_number: int, whistle: float
+        self, *, season: str, day_number: int, whistle: float, live_since: float | None = None
     ) -> list[str]:
         """Players with a row for this matchday whose performance was last fetched
-        before `whistle`."""
-        with self.connection() as conn:
-            rows = conn.execute(
+        before `whistle` — every pre-whistle player when `live_since` is None; with
+        `live_since` given, only the ones whose status has ALSO been fetched since
+        then (the live, still-refetchable subset — anyone else has left the live
+        universe and can never be refetched, so he cannot hold the report back,
+        even though his stale row still counts and is excluded from the report)."""
+        if live_since is None:
+            query = (
                 "SELECT h.player_id FROM rehoboam.player_match_history h "
                 "LEFT JOIN rehoboam.sweep_progress p ON p.player_id = h.player_id "
                 "WHERE h.season = %s AND h.day_number = %s "
                 "AND (p.performance_fetched_at IS NULL OR p.performance_fetched_at < %s) "
-                "ORDER BY h.player_id",
-                (season, day_number, whistle),
-            ).fetchall()
+                "ORDER BY h.player_id"
+            )
+            params = (season, day_number, whistle)
+        else:
+            query = (
+                "SELECT h.player_id FROM rehoboam.player_match_history h "
+                "LEFT JOIN rehoboam.sweep_progress p ON p.player_id = h.player_id "
+                "WHERE h.season = %s AND h.day_number = %s "
+                "AND (p.performance_fetched_at IS NULL OR p.performance_fetched_at < %s) "
+                "AND EXISTS (SELECT 1 FROM rehoboam.player_status_daily s "
+                "WHERE s.player_id = h.player_id AND s.fetched_at >= %s) "
+                "ORDER BY h.player_id"
+            )
+            params = (season, day_number, whistle, live_since)
+        with self.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
         return [r["player_id"] for r in rows]
 
     def write_calibration(
@@ -226,6 +255,7 @@ class CalibrationStore:
         report,
         gate: dict[str, Any] | None,
         computed_at: float,
+        telegram_sent: bool = False,
     ) -> None:
         """Replace this matchday's rows and report in one transaction."""
         r = report.as_row()
@@ -266,21 +296,23 @@ class CalibrationStore:
             cur.execute(
                 "INSERT INTO rehoboam.calibration_reports (season, day_number, backfill, "
                 "computed_at, n, n_unpredicted, n_stale_rows, mae, bias, spearman, "
-                "baseline_spearman, top11_regret, baseline_top11_regret, squad_regret, "
-                "live_spearman, live_n, by_position, by_status, worst, gate, telegram_sent) "
+                "baseline_spearman, spearman_played, top11_regret, baseline_top11_regret, "
+                "squad_regret, live_spearman, live_n, by_position, by_status, worst, gate, "
+                "telegram_sent) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                "%s, %s, false) "
+                "%s, %s, %s, %s) "
                 "ON CONFLICT (season, day_number, backfill) DO UPDATE SET "
                 "computed_at = excluded.computed_at, n = excluded.n, "
                 "n_unpredicted = excluded.n_unpredicted, n_stale_rows = excluded.n_stale_rows, "
                 "mae = excluded.mae, bias = excluded.bias, spearman = excluded.spearman, "
                 "baseline_spearman = excluded.baseline_spearman, "
+                "spearman_played = excluded.spearman_played, "
                 "top11_regret = excluded.top11_regret, "
                 "baseline_top11_regret = excluded.baseline_top11_regret, "
                 "squad_regret = excluded.squad_regret, live_spearman = excluded.live_spearman, "
                 "live_n = excluded.live_n, by_position = excluded.by_position, "
                 "by_status = excluded.by_status, worst = excluded.worst, gate = excluded.gate, "
-                "telegram_sent = false",
+                "telegram_sent = excluded.telegram_sent",
                 (
                     season,
                     day_number,
@@ -293,6 +325,7 @@ class CalibrationStore:
                     r["bias"],
                     r["spearman"],
                     r["baseline_spearman"],
+                    r["spearman_played"],
                     r["top11_regret"],
                     r["baseline_top11_regret"],
                     r["squad_regret"],
@@ -302,6 +335,7 @@ class CalibrationStore:
                     Jsonb(r["by_status"]),
                     Jsonb(r["worst"]),
                     Jsonb(gate) if gate is not None else None,
+                    telegram_sent,
                 ),
             )
 
@@ -324,6 +358,21 @@ class CalibrationStore:
                 (season, backfill),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_report(self, season: str, day_number: int, *, backfill: bool = False) -> None:
+        """Drop this matchday's rows and report in one transaction (a backfill re-run
+        rebuilds them from scratch rather than layering on top of a stale report)."""
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM rehoboam.calibration_rows "
+                "WHERE season = %s AND day_number = %s AND backfill = %s",
+                (season, day_number, backfill),
+            )
+            cur.execute(
+                "DELETE FROM rehoboam.calibration_reports "
+                "WHERE season = %s AND day_number = %s AND backfill = %s",
+                (season, day_number, backfill),
+            )
 
     def mark_telegram_sent(self, season: str, day_number: int) -> None:
         with self.connection() as conn:

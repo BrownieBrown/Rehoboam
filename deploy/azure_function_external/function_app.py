@@ -72,7 +72,7 @@ def ingest(timer: func.TimerRequest):
             logging.warning("calibration: pre-ingest step failed", exc_info=True)
 
         budget = IngestBudget(
-            deadline=time.time() + settings.ingest_deadline_seconds,
+            deadline=started_at + settings.ingest_deadline_seconds,
             max_requests=settings.ingest_max_requests,
         )
         stats = run_ingestion(

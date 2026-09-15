@@ -548,14 +548,19 @@ def calibrate_cmd(
         from .kickoff import finished_matchdays
 
         for md in finished_matchdays(schedule):
+            whistle = md.last_kickoff.timestamp() + 3 * 3600
             stale = store.players_needing_final_rows(
+                season=season, day_number=md.day_number, whistle=whistle
+            )
+            blocking = store.players_needing_final_rows(
                 season=season,
                 day_number=md.day_number,
-                whistle=md.last_kickoff.timestamp() + 3 * 3600,
+                whistle=whistle,
+                live_since=now - 48 * 3600,
             )
             existing = store.report_for(season, md.day_number)
             console.print(
-                f"MD{md.day_number}: finished, stale rows {len(stale)}, "
+                f"MD{md.day_number}: finished, stale rows {len(stale)}, blocking {len(blocking)}, "
                 f"report {'exists' if existing else 'missing'} (dry run, nothing written)"
             )
         return
@@ -569,6 +574,7 @@ def calibrate_cmd(
             max_status_age_days=get_settings().max_status_age_days,
         )
         console.print(f"backfill MD{backfill_day}: {n} predictions written")
+        store.delete_report(season, backfill_day, backfill=True)
         outcome = run_calibration(
             store,
             schedule,
@@ -611,6 +617,7 @@ def _print_report(report, outcome) -> None:
         "bias",
         "spearman",
         "baseline_spearman",
+        "spearman_played",
         "top11_regret",
         "baseline_top11_regret",
         "squad_regret",

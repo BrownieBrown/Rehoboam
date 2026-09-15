@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from rehoboam.enrichment.calibrate import (
@@ -19,6 +19,11 @@ MD1_FIRST = "2026-08-22T18:30:00Z"
 MD1_LAST = "2026-08-23T15:30:00Z"
 KICK1 = datetime(2026, 8, 22, 18, 30, tzinfo=timezone.utc).timestamp()
 LAST1 = datetime(2026, 8, 23, 15, 30, tzinfo=timezone.utc).timestamp()
+# Status freshness is independent of how stale the performance fetch is: ingest
+# refreshes status far more often than it re-confirms a final score, so a player's
+# status row stays comfortably inside any test's 48h live_since window unless a
+# test explicitly deletes it (simulating him leaving the live universe).
+STATUS_FETCHED_AT = LAST1 + 1000 * 3600
 SCHEDULE = {
     "it": [
         {"day": 1, "it": [{"dt": MD1_FIRST, "st": 2}, {"dt": MD1_LAST, "st": 2}]},
@@ -81,6 +86,9 @@ def _seed(dsn, *, fetched_at):
             ),
         )
         corpus.mark_fetched(p["player_id"], at=fetched_at, performance=True)
+        corpus.record_status_daily(
+            p["player_id"], date(2026, 8, 23), {"st": 0, "prob": 1}, STATUS_FETCHED_AT
+        )
     return corpus, [p["player_id"] for p in players]
 
 
@@ -254,3 +262,75 @@ def test_a_resent_report_carries_player_names(store_dsn):
         )
     text = send.call_args.args[2]
     assert "P" in text.split("worst:")[1]  # last names are P<id>, not bare ids
+
+
+def test_a_finished_matchday_without_predictions_is_settled_silently(store_dsn):
+    corpus, ids = _seed(store_dsn, fetched_at=LAST1 + 4 * 3600)
+    store = CalibrationStore(dsn=store_dsn)
+    with patch("rehoboam.enrichment.calibrate.send_message") as send:
+        outcome = run_calibration(
+            store, SCHEDULE, season=SEASON, now=LAST1 + 5 * 3600, telegram=("tok", "chat")
+        )
+    assert outcome.settled == [1]
+    assert outcome.reported == []
+    assert send.call_count == 0
+    report = store.report_for(SEASON, 1)
+    assert report["n"] == 0
+    assert report["telegram_sent"] is True
+    # A second run settles nothing more and reports nothing: the matchday is done.
+    second = run_calibration(
+        store, SCHEDULE, season=SEASON, now=LAST1 + 6 * 3600, telegram=("tok", "chat")
+    )
+    assert second.reported == [] and second.settled == []
+
+
+def test_a_calibration_failure_sends_one_line(store_dsn):
+    corpus, ids = _seed(store_dsn, fetched_at=LAST1 + 4 * 3600)
+    store = _predict(store_dsn, ids, at=KICK1 - 60)
+    with patch("rehoboam.enrichment.calibrate.build_report", side_effect=RuntimeError("boom")):
+        with patch("rehoboam.enrichment.calibrate.send_message") as send:
+            outcome = run_calibration(
+                store, SCHEDULE, season=SEASON, now=LAST1 + 5 * 3600, telegram=("tok", "chat")
+            )
+    assert outcome.error.startswith("RuntimeError: boom")
+    assert send.call_args.args[2].startswith("Rehoboam calibration failed")
+
+
+def test_a_departed_player_does_not_hold_the_report_back(store_dsn):
+    corpus, ids = _seed(store_dsn, fetched_at=LAST1 + 4 * 3600)
+    store = _predict(store_dsn, ids, at=KICK1 - 60)
+    corpus.mark_fetched(ids[0], at=LAST1 - 3600, performance=True)
+    with store.connection() as conn:
+        conn.execute("DELETE FROM rehoboam.player_status_daily WHERE player_id = %s", (ids[0],))
+    now = LAST1 + 5 * 3600
+    # Without the live-universe check he would block the report until the 72h
+    # cap (like test_waits_for_rows_fetched_before_the_whistle): he doesn't -- but
+    # his pre-whistle row is still stale, excluded from the report, and counted.
+    outcome = run_calibration(store, SCHEDULE, season=SEASON, now=now)
+    assert outcome.reported == [1] and outcome.waiting == {}
+    assert store.report_for(SEASON, 1)["n_stale_rows"] == 1
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT player_id FROM rehoboam.calibration_rows "
+            "WHERE season = %s AND day_number = 1",
+            (SEASON,),
+        ).fetchall()
+    assert ids[0] not in {r["player_id"] for r in rows}
+
+
+def test_stale_rows_are_excluded_from_the_actuals(store_dsn):
+    corpus, ids = _seed(store_dsn, fetched_at=LAST1 - 3600)
+    store = _predict(store_dsn, ids, at=KICK1 - 60)
+    now = LAST1 + 3 * 3600 + 72 * 3600 + 1
+    outcome = run_calibration(store, SCHEDULE, season=SEASON, now=now)
+    assert outcome.reported == [1]
+    report = store.report_for(SEASON, 1)
+    assert report["n_stale_rows"] == len(ids)
+    assert report["n"] == 0
+    with store.connection() as conn:
+        n = conn.execute(
+            "SELECT count(*) AS n FROM rehoboam.calibration_rows "
+            "WHERE season = %s AND day_number = 1",
+            (SEASON,),
+        ).fetchone()["n"]
+    assert n == 0

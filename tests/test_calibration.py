@@ -196,6 +196,33 @@ class TestBuildReport:
         r = build_report(rows)
         assert r.live_n == 2 and r.live_spearman == pytest.approx(1.0)
 
+    def test_regret_ignores_players_without_a_prediction(self):
+        rows = _league()
+        top_fw = max((r for r in rows if r.position == "Forward"), key=lambda r: r.actual)
+        rows = [
+            (
+                _row(r.player_id, r.actual, None, position=r.position, baseline=r.baseline)
+                if r is top_fw
+                else r
+            )
+            for r in rows
+        ]
+        filtered = [r for r in rows if r.predicted is not None]
+        full = build_report(rows)
+        only_predicted = build_report(filtered)
+        assert full.top11_regret == only_predicted.top11_regret
+        assert full.baseline_top11_regret == only_predicted.baseline_top11_regret
+
+    def test_spearman_played_ignores_players_who_did_not_play(self):
+        rows = [
+            CalRow("a", "Midfielder", 10.0, 10.0, 10.0, None, False, False, 0, played=True),
+            CalRow("b", "Midfielder", 20.0, 20.0, 20.0, None, False, False, 0, played=True),
+            CalRow("c", "Midfielder", 30.0, -100.0, 30.0, None, False, False, 0, played=False),
+        ]
+        r = build_report(rows)
+        assert r.spearman_played == pytest.approx(1.0)
+        assert r.spearman < 1.0
+
 
 def _report(**over) -> CalibrationReport:
     base = build_report(_league())

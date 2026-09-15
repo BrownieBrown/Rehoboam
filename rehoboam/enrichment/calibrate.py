@@ -38,6 +38,7 @@ MAX_WAIT_FOR_ROWS_S = 72 * 3600
 class CalibrationOutcome:
     reported: list[int] = field(default_factory=list)
     waiting: dict[int, int] = field(default_factory=dict)
+    settled: list[int] = field(default_factory=list)
     error: str | None = None
 
 
@@ -58,13 +59,14 @@ def _unreported(
     backfill: bool,
     only_day: int | None,
 ) -> list[FinishedMatchday]:
+    existing = {r["day_number"] for r in store.recent_reports(season, backfill=backfill)}
     out = []
     for md in finished_matchdays(schedule):
         if only_day is not None and md.day_number != only_day:
             continue
         if now < _whistle(md):
             continue
-        if store.report_for(season, md.day_number, backfill=backfill) is not None:
+        if md.day_number in existing:
             continue
         out.append(md)
     return out
@@ -78,38 +80,49 @@ def prepare_refresh(
     `{day_number: players cleared}`."""
     cleared: dict[int, int] = {}
     for md in _unreported(store, schedule, season=season, now=now, backfill=False, only_day=None):
-        stale = store.players_needing_final_rows(
-            season=season, day_number=md.day_number, whistle=_whistle(md)
+        blocking = store.players_needing_final_rows(
+            season=season,
+            day_number=md.day_number,
+            whistle=_whistle(md),
+            live_since=now - 48 * 3600,
         )
-        if stale:
-            corpus.clear_performance_fetched(stale)
-            cleared[md.day_number] = len(stale)
+        if blocking:
+            corpus.clear_performance_fetched(blocking)
+            cleared[md.day_number] = len(blocking)
     return cleared
 
 
 def _rows_for(
-    store: CalibrationStore, md: FinishedMatchday, *, season: str, backfill: bool
+    store: CalibrationStore,
+    md: FinishedMatchday,
+    *,
+    season: str,
+    backfill: bool,
+    preds: dict[str, dict],
+    stale: set[str],
 ) -> tuple[list[CalRow], list[dict], dict[str, str]]:
     kickoff = md.first_kickoff.timestamp()
     actuals = store.actuals_for(season=season, day_number=md.day_number)
-    preds = store.last_predictions_before(
-        season=season, day_number=md.day_number, kickoff=kickoff, backfill=backfill
-    )
-    fielded = (
-        set()
+    owned_ids, fielded_ids = (
+        (set(), set())
         if backfill
-        else store.fielded_eleven_before(season=season, day_number=md.day_number, kickoff=kickoff)
+        else store.squad_before(season=season, day_number=md.day_number, kickoff=kickoff)
     )
-    history = store.history_before(before_iso=_iso(kickoff))
+    history = store.history_before(
+        before_iso=_iso(kickoff), player_ids=[a["player_id"] for a in actuals]
+    )
     cal_rows: list[CalRow] = []
     db_rows: list[dict] = []
     names: dict[str, str] = {}
     for a in actuals:
         pid = a["player_id"]
+        if pid in stale:
+            continue
         p = preds.get(pid)
         baseline = season_average_baseline(history.get(pid, []))
         names[pid] = a["name"]
-        owned = bool(p and p["owned"])
+        owned = pid in owned_ids
+        in_best_11 = pid in fielded_ids
         cal_rows.append(
             CalRow(
                 player_id=pid,
@@ -119,8 +132,9 @@ def _rows_for(
                 baseline=float(baseline),
                 live=float(p["live_ep"]) if p and p["live_ep"] is not None else None,
                 owned=owned,
-                in_best_11=pid in fielded,
+                in_best_11=in_best_11,
                 live_status=p["live_status"] if p else None,
+                played=int(a["minutes"]) > 0,
             )
         )
         db_rows.append(
@@ -136,7 +150,7 @@ def _rows_for(
                 "position": a["position"],
                 "team_id": a["team_id"],
                 "owned": owned,
-                "in_best_11": pid in fielded,
+                "in_best_11": in_best_11,
                 "prev_status": p["prev_status"] if p else None,
                 "live_status": p["live_status"] if p else None,
             }
@@ -171,7 +185,7 @@ def _resend_unsent(
     skip: set[int],
 ) -> None:
     for r in store.recent_reports(season):
-        if r["telegram_sent"] or r["day_number"] in skip:
+        if r["telegram_sent"] or r["n"] == 0 or r["day_number"] in skip:
             continue
         keys = set(CalibrationReport.__dataclass_fields__)
         report = CalibrationReport(**{k: r[k] for k in keys})
@@ -218,18 +232,55 @@ def run_calibration(
             only_day=only_day,
         ):
             whistle = _whistle(md)
+            # `stale`: every pre-whistle row — excluded from the report and counted,
+            # whether or not the player can ever be refetched. `blocking`: the subset
+            # still in the live universe — only these are worth waiting for or clearing.
             stale = store.players_needing_final_rows(
                 season=season, day_number=md.day_number, whistle=whistle
             )
-            if stale and now < whistle + max_wait_s:
-                outcome.waiting[md.day_number] = len(stale)
+            blocking = store.players_needing_final_rows(
+                season=season,
+                day_number=md.day_number,
+                whistle=whistle,
+                live_since=now - 48 * 3600,
+            )
+            if blocking and now < whistle + max_wait_s:
+                outcome.waiting[md.day_number] = len(blocking)
                 logger.info(
                     "calibration: MD%d waiting for %d final rows",
                     md.day_number,
-                    len(stale),
+                    len(blocking),
                 )
                 continue
-            cal_rows, db_rows, names = _rows_for(store, md, season=season, backfill=backfill)
+            preds = store.last_predictions_before(
+                season=season,
+                day_number=md.day_number,
+                kickoff=md.first_kickoff.timestamp(),
+                backfill=backfill,
+            )
+            if not preds:
+                # Finished before this code existed (or the sessions never ran):
+                # record an empty report so the matchday is settled once, never
+                # send it, and keep it out of the gate (item 3 of the review).
+                store.write_calibration(
+                    season=season,
+                    day_number=md.day_number,
+                    backfill=backfill,
+                    rows=[],
+                    report=build_report([]),
+                    gate=None,
+                    computed_at=now,
+                    telegram_sent=True,
+                )
+                outcome.settled.append(md.day_number)
+                logger.info(
+                    "calibration: MD%d has no predictions before kickoff; settled empty",
+                    md.day_number,
+                )
+                continue
+            cal_rows, db_rows, names = _rows_for(
+                store, md, season=season, backfill=backfill, preds=preds, stale=set(stale)
+            )
             report = build_report(cal_rows, n_stale_rows=len(stale))
             gate = None
             if not backfill:
@@ -237,7 +288,7 @@ def run_calibration(
                 earlier = [
                     CalibrationReport(**{k: r[k] for k in keys})
                     for r in store.recent_reports(season)
-                    if r["day_number"] < md.day_number
+                    if r["day_number"] < md.day_number and r["n"] > 0
                 ]
                 gate = gate_verdict(
                     earlier + [report],
@@ -289,6 +340,12 @@ def run_calibration(
     except Exception as e:
         logger.exception("calibration failed")
         outcome.error = f"{type(e).__name__}: {e}"[:500]
+        if telegram:
+            try:
+                token, chat_id = telegram
+                send_message(token, chat_id, f"Rehoboam calibration failed: {outcome.error}")
+            except Exception:
+                logger.warning("calibration: failure notification failed to send", exc_info=True)
     return outcome
 
 

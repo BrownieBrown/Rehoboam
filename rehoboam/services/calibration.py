@@ -30,6 +30,7 @@ class CalRow:
     owned: bool
     in_best_11: bool
     live_status: int | None
+    played: bool = True
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class CalibrationReport:
     bias: float | None
     spearman: float | None
     baseline_spearman: float | None
+    spearman_played: float | None
     top11_regret: float | None
     baseline_top11_regret: float | None
     squad_regret: float | None
@@ -136,8 +138,9 @@ def build_report(rows: list[CalRow], *, n_stale_rows: int = 0) -> CalibrationRep
         bias=_bias(predicted),
         spearman=_spearman(predicted, lambda r: r.predicted),
         baseline_spearman=_spearman(predicted, lambda r: r.baseline),
-        top11_regret=_league_regret(rows, lambda r: r.predicted),
-        baseline_top11_regret=_league_regret(rows, lambda r: r.baseline),
+        spearman_played=_spearman([r for r in predicted if r.played], lambda r: r.predicted),
+        top11_regret=_league_regret(predicted, lambda r: r.predicted),
+        baseline_top11_regret=_league_regret(predicted, lambda r: r.baseline),
         squad_regret=_squad_regret(rows),
         live_spearman=_spearman(live_rows, lambda r: r.live),
         live_n=len(live_rows),
@@ -228,7 +231,8 @@ def render_calibration_message(
         f"n={report.n} (unpredicted {report.n_unpredicted})  mae "
         f"{_fmt(report.mae, 1)}  bias {_fmt(report.bias, 1)}",
         f"spearman {_fmt(report.spearman)} (baseline "
-        f"{_fmt(report.baseline_spearman)})  top11 regret "
+        f"{_fmt(report.baseline_spearman)}, played-only "
+        f"{_fmt(report.spearman_played)})  top11 regret "
         f"{_fmt(report.top11_regret, 0)} (baseline "
         f"{_fmt(report.baseline_top11_regret, 0)})",
         f"squad regret {_fmt(report.squad_regret, 0)}  live-path spearman "
