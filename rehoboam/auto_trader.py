@@ -66,6 +66,7 @@ def _build_buy_gate(
     free_slots: int,
     marginal_ep_gain: float | None,
     released_player_id: str | None = None,
+    session_refusal: str | None = None,
 ) -> BuyGate:
     """The safety gate for one autonomous candidate (REH-100).
 
@@ -81,6 +82,11 @@ def _build_buy_gate(
     ``released_player_id`` is the trade-pair sell. That player is about to
     leave the squad, so counting him toward the club limit would block the
     legal case of selling a club-mate to buy a better one from the same club.
+
+    ``session_refusal`` is PR D's I3 (deficit not covered), set once for the
+    whole session on `ctx` rather than measured per candidate. Callers pass
+    it through except the emergency fill, which never does — an empty
+    lineup slot is -100 points, worse than the deficit I3 guards against.
     """
     from .services.bid_ceiling import tier_for_marginal_gain
 
@@ -115,6 +121,7 @@ def _build_buy_gate(
         # path may commit.
         total_worth=_total_worth(ctx),
         max_single_buy_pct=settings.max_single_buy_pct_of_worth,
+        session_refusal=session_refusal,
     )
 
 
@@ -335,6 +342,10 @@ class EPSessionContext:
     team_value: int
     flip_budget: int
     executed_trade_count: int = 0
+    #: PR D's integrity rule I3 (budget minus open offers not covered): set
+    #: once per session (Task 5), then reported by every non-emergency buy
+    #: gate for the rest of the session. None means no session-wide refusal.
+    session_refusal: str | None = None
 
 
 class AutoTrader:
@@ -1296,6 +1307,7 @@ class AutoTrader:
                         free_slots=1,
                         marginal_ep_gain=obj.ep_gain,
                         released_player_id=obj.sell_player.id,
+                        session_refusal=getattr(ctx, "session_refusal", None),
                     ),
                 )
                 results.append(buy_result)
@@ -1375,6 +1387,7 @@ class AutoTrader:
                         spendable_budget=int(ctx.flip_budget),
                         free_slots=available_slots,
                         marginal_ep_gain=None,
+                        session_refusal=getattr(ctx, "session_refusal", None),
                     ),
                 )
                 results.append(result)
@@ -1413,6 +1426,7 @@ class AutoTrader:
             free_slots=1,
             marginal_ep_gain=pair.ep_gain,
             released_player_id=pair.sell_player.id,
+            session_refusal=getattr(ctx, "session_refusal", None),
         )
         verdict = gate.check(player_id=pair.buy_player.id, bid=int(pair.recommended_bid))
         return None if verdict.ok else "; ".join(verdict.reasons)
@@ -1603,6 +1617,9 @@ class AutoTrader:
                 # would have used it to pre-flight a buy with no room.
                 free_slots=min(slots_short - proposed, SQUAD_CAP - len(fresh_squad)),
                 marginal_ep_gain=rec.marginal_ep_gain,
+                # No `session_refusal`: this is the emergency fill, and an
+                # empty lineup slot is -100 points — worse than the deficit
+                # PR D's I3 guards against, so this path is exempt from it.
             )
             verdict = gate.check(player_id=rec.player.id, bid=bid)
             if not verdict.ok:
