@@ -129,48 +129,38 @@ class TestBuildReport:
             "position": "Midfielder",
         }
 
-    def test_squad_regret_needs_a_fielded_eleven(self):
+    def test_squad_regret_is_the_points_left_on_the_bench(self):
         rows = _league()
         assert build_report(rows).squad_regret is None
         by_pos = {}
         for r in rows:
             by_pos.setdefault(r.position, []).append(r)
-        # A legal 15: 2 GK, 5 DEF, 5 MID, 3 FW; the fielded eleven is a 4-4-2 that
-        # benches the best defender, so the regret is exactly his lead over the
-        # fifth defender.
+        # Twelve owned: a legal 4-4-2 eleven plus one benched defender.
         owned = (
-            by_pos["Goalkeeper"][:2]
+            by_pos["Goalkeeper"][:1]
             + by_pos["Defender"][:5]
-            + by_pos["Midfielder"][:5]
-            + by_pos["Forward"][:3]
-        )
-        fielded = (
-            [by_pos["Goalkeeper"][0]]
-            + by_pos["Defender"][1:5]
             + by_pos["Midfielder"][:4]
             + by_pos["Forward"][:2]
         )
-        chosen = {r.player_id for r in fielded}
+        benched = by_pos["Defender"][0]
+        fielded_ids = {r.player_id for r in owned if r is not benched}
         owned_ids = {r.player_id for r in owned}
-        rows = [
-            (
-                _row(
-                    r.player_id,
-                    r.actual,
-                    r.predicted,
-                    position=r.position,
-                    baseline=r.baseline,
-                    owned=True,
-                    in_best_11=r.player_id in chosen,
-                )
-                if r.player_id in owned_ids
-                else r
+
+        # Every owned player scored 50 except the benched defender, who scored 62:
+        # whatever formation the hindsight eleven takes, fielding him is worth +12.
+        def _owned_row(r):
+            return _row(
+                r.player_id,
+                62.0 if r is benched else 50.0,
+                r.predicted,
+                position=r.position,
+                baseline=r.baseline,
+                owned=True,
+                in_best_11=r.player_id in fielded_ids,
             )
-            for r in rows
-        ]
-        r = build_report(rows)
-        expected = by_pos["Defender"][0].actual - by_pos["Defender"][4].actual
-        assert r.squad_regret == pytest.approx(expected)
+
+        rows = [_owned_row(r) if r.player_id in owned_ids else r for r in rows]
+        assert build_report(rows).squad_regret == pytest.approx(12.0)
 
     def test_live_spearman_over_rows_with_a_live_ep(self):
         rows = [
