@@ -572,8 +572,17 @@ class Settings(BaseSettings):
             "Env: INGEST_STALE_AFTER_HOURS."
         ),
     )
+    ingest_status_stale_after_hours: float = Field(
+        default=10.0,
+        description=(
+            "Status (injury + lineup probability) refreshes when older than this. 10 h "
+            "means both daily runs (05:00 and 17:00 UTC) re-read every player, so each "
+            "trading session sees a reading at most three hours old. "
+            "Env: INGEST_STATUS_STALE_AFTER_HOURS."
+        ),
+    )
     ingest_deadline_seconds: float = Field(
-        default=480.0,
+        default=540.0,
         description="Ingestion stops cleanly after this many seconds (the Function has 600). "
         "Env: INGEST_DEADLINE_SECONDS.",
     )
