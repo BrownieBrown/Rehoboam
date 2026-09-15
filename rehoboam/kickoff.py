@@ -38,33 +38,85 @@ def _parse_match_date(value) -> datetime | None:
     return None
 
 
+@dataclass(frozen=True)
+class NextFixture:
+    day_number: int | None
+    at: datetime
+
+
+@dataclass(frozen=True)
+class FinishedMatchday:
+    day_number: int
+    first_kickoff: datetime
+    last_kickoff: datetime
+
+
+def _day_groups(payload) -> list[tuple[int | None, list[dict]]]:
+    """`(day, fixtures)` per matchday group; tolerant of every missing key."""
+    if not isinstance(payload, dict):
+        return []
+    out: list[tuple[int | None, list[dict]]] = []
+    for group in payload.get("it") or []:
+        if not isinstance(group, dict):
+            continue
+        day = group.get("day")
+        fixtures = [f for f in (group.get("it") or []) if isinstance(f, dict)]
+        out.append((int(day) if isinstance(day, int) else None, fixtures))
+    return out
+
+
+def next_fixture_from_matchdays(payload: dict, now: datetime) -> NextFixture | None:
+    """Earliest not-yet-started fixture, with the matchday number of its group.
+
+    `st == 0` means not started; anything else (2 observed live, presumably
+    also covering in-progress states) is excluded so a fixture already
+    underway or finished never gets reported as "next". Tolerant of missing
+    keys and unparseable dates -- a schema drift here should degrade to "the
+    schedule has nothing to say", not raise.
+    """
+    best: NextFixture | None = None
+    for day, fixtures in _day_groups(payload):
+        for fixture in fixtures:
+            if fixture.get("st") != 0:
+                continue
+            parsed = _parse_match_date(fixture.get("dt"))
+            if parsed is None or parsed <= now:
+                continue
+            if best is None or parsed < best.at:
+                best = NextFixture(day_number=day, at=parsed)
+    return best
+
+
 def next_kickoff_from_matchdays(payload: dict, now: datetime) -> datetime | None:
     """Earliest not-yet-started fixture in the competition schedule.
 
     `payload["it"]` is a list of matchday groups, each with its own `it` list
-    of fixtures. `st == 0` means not started; anything else (2 observed live,
-    presumably also covering in-progress states) is excluded so a fixture
-    already underway or finished never gets reported as "next". Tolerant of
-    missing keys and unparseable dates -- a schema drift here should degrade
-    to "the schedule has nothing to say", not raise.
+    of fixtures. Delegates to `next_fixture_from_matchdays` and drops the
+    matchday number -- kept for callers that only ever needed the timestamp.
     """
-    if not isinstance(payload, dict):
-        return None
+    nf = next_fixture_from_matchdays(payload, now)
+    return nf.at if nf else None
 
-    candidates: list[datetime] = []
-    for day_group in payload.get("it") or []:
-        if not isinstance(day_group, dict):
+
+def finished_matchdays(payload) -> list[FinishedMatchday]:
+    """Matchday groups whose every fixture has `st == 2`, oldest first.
+
+    A group with no fixtures, an unparseable date or a missing day number is
+    not finished -- it is unknown, and unknown never triggers a report.
+    """
+    out: list[FinishedMatchday] = []
+    for day, fixtures in _day_groups(payload):
+        if day is None or not fixtures:
             continue
-        for fixture in day_group.get("it") or []:
-            if not isinstance(fixture, dict):
-                continue
-            if fixture.get("st") != 0:
-                continue
-            parsed = _parse_match_date(fixture.get("dt"))
-            if parsed is not None and parsed > now:
-                candidates.append(parsed)
-
-    return min(candidates) if candidates else None
+        if any(f.get("st") != 2 for f in fixtures):
+            continue
+        dates = [_parse_match_date(f.get("dt")) for f in fixtures]
+        if any(d is None for d in dates):
+            continue
+        out.append(
+            FinishedMatchday(day_number=day, first_kickoff=min(dates), last_kickoff=max(dates))
+        )
+    return sorted(out, key=lambda m: m.day_number)
 
 
 def fixtures_from_myeleven(payload: dict) -> list[datetime]:
@@ -108,10 +160,13 @@ class NextKickoff:
     `source` is `"schedule"`, `"myeleven"` or `"none"`. `cross_check` is
     whatever the *other* source answered (None when that source had
     nothing), kept around so a disagreement is visible rather than silently
-    picking one number.
+    picking one number. `day_number` is the schedule's matchday number for
+    `at` -- only the schedule carries it, so it's None whenever `source` is
+    `"myeleven"` or `"none"`.
     """
 
     at: datetime | None
     source: str
     cross_check: datetime | None
     matchday_in_progress: bool
+    day_number: int | None = None

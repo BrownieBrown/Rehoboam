@@ -31,7 +31,7 @@ from .bidding_strategy import (
 from .config import INSTANT_SELL_PCT, Settings
 from .formation import can_fill_starting_eleven
 from .kickbase_client import League
-from .kickoff import NextKickoff, fixtures_from_myeleven, next_kickoff_from_matchdays
+from .kickoff import NextKickoff, fixtures_from_myeleven, next_fixture_from_matchdays
 from .matchup_analyzer import MatchupAnalyzer
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
@@ -167,9 +167,11 @@ class Trader:
         now = now or datetime.now(tz=timezone.utc)
 
         schedule_at: datetime | None = None
+        schedule_fixture = None
         try:
             schedule_payload = self.api.get_competition_matchdays()
-            schedule_at = next_kickoff_from_matchdays(schedule_payload, now)
+            schedule_fixture = next_fixture_from_matchdays(schedule_payload, now)
+            schedule_at = schedule_fixture.at if schedule_fixture else None
         except Exception:
             logger.warning("next-kickoff: schedule fetch/parse failed", exc_info=True)
 
@@ -213,7 +215,11 @@ class Trader:
                 logger.warning("next-kickoff sources disagree by %.0f h", disagreement_hours)
 
         return NextKickoff(
-            at=at, source=source, cross_check=cross_check, matchday_in_progress=in_progress
+            at=at,
+            source=source,
+            cross_check=cross_check,
+            matchday_in_progress=in_progress,
+            day_number=schedule_fixture.day_number if source == "schedule" else None,
         )
 
     def get_days_until_match(self, league, *, now: datetime | None = None) -> int | None:
