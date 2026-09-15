@@ -110,3 +110,18 @@ def test_store_commands_fail_cleanly_when_database_url_is_unset(monkeypatch, tmp
     assert result.exit_code == 1
     assert "DATABASE_URL" in result.output
     assert "Traceback" not in result.output
+
+
+def test_calibrate_dry_run_reports_nothing_written(store_dsn, monkeypatch):
+    from unittest.mock import patch
+
+    schedule = {"it": [{"day": 1, "it": [{"dt": "2026-08-22T18:30:00Z", "st": 2}]}]}
+    api = type(
+        "Api",
+        (),
+        {"get_competition_matchdays": lambda self, competition_id="1": schedule},
+    )()
+    with patch("rehoboam.cli._login_and_get_league", return_value=(api, None, None)):
+        result = runner.invoke(app, ["calibrate", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "no season" in result.output or "dry run" in result.output

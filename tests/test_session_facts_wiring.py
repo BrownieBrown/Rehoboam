@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +23,8 @@ from rehoboam.kickbase_client import Player
 from rehoboam.kickoff import NextKickoff
 from rehoboam.learning.tracker import CostBasisReconciliation
 from rehoboam.services.session_facts import SessionFacts
+from rehoboam.store.calibration_store import CalibrationStore
+from rehoboam.store.corpus_store import CorpusStore
 from rehoboam.store.session_store import SessionStore
 
 LEAGUE = SimpleNamespace(id="1933872", name="PUMARUDEL")
@@ -206,14 +208,14 @@ def test_no_failures_means_no_message(store_dsn, ctx_factory):
     # the 48h I6 window). Cost basis and predictions are mocked directly
     # rather than seeded through the real tables: `reconcile_squad_cost_basis`
     # would otherwise report all 11 fresh-fixture players as missing a basis
-    # (I4), and `snapshot_predictions`'s return value — not the fixture's
-    # `squad_scores`, which step 2a re-derives independently of
-    # `_build_session_context` — is what `_facts.predictions_written` ends up
-    # holding, since step 2a runs after the patched builder and overwrites it.
+    # (I4), and `_write_league_predictions`'s return value -- the league
+    # write, not the legacy `snapshot_predictions` -- is what
+    # `_facts.predictions_written` ends up holding, since step 2a runs after
+    # the patched builder and overwrites it.
     trader.tracker.reconcile_squad_cost_basis = lambda *a, **k: CostBasisReconciliation(
         recovered=0, still_missing=[]
     )
-    trader.tracker.snapshot_predictions = lambda *a, **k: 1
+    trader._write_league_predictions = lambda *a, **k: 1
 
     nk = NextKickoff(
         at=datetime.now(tz=timezone.utc) + timedelta(days=3),
@@ -304,3 +306,135 @@ def test_pipeline_failure_exit_still_records_and_logs_session_end(store_dsn, cap
     row = SessionStore(dsn=store_dsn).facts(session.session_id)
     assert row["errors"] >= 1 and "boom" in row["error_text"]
     assert any(m.startswith("session-end") for m in caplog.messages)
+
+
+def _seed_league(dsn, *, fetched_at):
+    """Three scorable players (one owned, one listed, one neither) and one stale."""
+    corpus = CorpusStore(dsn=dsn)
+    corpus.upsert_players(
+        [
+            {
+                "player_id": pid,
+                "first_name": None,
+                "last_name": pid,
+                "position": pos,
+                "team_id": "1",
+                "market_value": 1_000_000,
+                "average_points": 30.0,
+            }
+            for pid, pos in (
+                ("gk", "Goalkeeper"),
+                ("lst", "Forward"),
+                ("x", "Midfielder"),
+                ("stale", "Defender"),
+            )
+        ]
+    )
+    perf = {
+        "it": [
+            {
+                "ti": "2026/2027",
+                "ph": [
+                    {
+                        "day": 1,
+                        "md": "2026-08-22T13:30:00Z",
+                        "st": 5,
+                        "p": 40,
+                        "mp": "90",
+                    }
+                ],
+            }
+        ]
+    }
+    for pid in ("gk", "lst", "x", "stale"):
+        corpus.record_match_history(pid, "1", perf)
+        corpus.record_status_daily(
+            pid,
+            date.today(),
+            {"st": 0, "prob": 1},
+            fetched_at - (10 * 86400 if pid == "stale" else 0),
+        )
+    return corpus
+
+
+def test_a_session_writes_one_prediction_per_fresh_player(store_dsn, ctx_factory):
+    _seed_league(store_dsn, fetched_at=time.time())
+    trader = _trader(store_dsn, _legal_squad())
+    ctx = ctx_factory()
+    ctx.ep_result["market_players"] = {"lst": object()}
+    ctx.ep_result["lineup_map"] = {p.id: 10.0 for p in ctx.squad}
+    ctx.ep_result["squad_scores"] = [SimpleNamespace(player_id="gk", expected_points=33.3)]
+    nk = NextKickoff(
+        at=datetime.now(tz=timezone.utc) + timedelta(days=3),
+        source="schedule",
+        cross_check=None,
+        matchday_in_progress=False,
+        day_number=4,
+    )
+
+    def _build(league):
+        trader._next_kickoff = nk
+        trader._facts_from_context(ctx, nk)
+        return ctx
+
+    with patch.object(AutoTrader, "_build_session_context", side_effect=_build):
+        session = trader.run_full_session(LEAGUE)
+    with CalibrationStore(dsn=store_dsn).connection() as conn:
+        rows = {
+            r["player_id"]: r
+            for r in conn.execute(
+                "SELECT * FROM rehoboam.predictions WHERE session_id = %s",
+                (session.session_id,),
+            ).fetchall()
+        }
+    assert set(rows) == {"gk", "lst", "x"}  # `stale` has a 10-day-old status row
+    assert rows["gk"]["owned"] and rows["gk"]["in_best_11"] and rows["gk"]["live_ep"] == 33.3
+    assert rows["lst"]["listed"] and not rows["lst"]["owned"] and rows["lst"]["live_ep"] is None
+    assert rows["x"]["day_number"] == 4 and rows["x"]["app"] == "cli" and rows["x"]["dry_run"]
+    assert rows["x"]["backfill"] is False and rows["x"]["season"] == "2026/2027"
+    assert SessionStore(dsn=store_dsn).facts(session.session_id)["predictions_written"] == 3
+
+
+def test_no_matchday_number_means_no_predictions_and_i5_fails(store_dsn, ctx_factory):
+    _seed_league(store_dsn, fetched_at=time.time())
+    trader = _trader(store_dsn, _legal_squad())
+    nk = NextKickoff(
+        at=datetime.now(tz=timezone.utc) + timedelta(days=3),
+        source="myeleven",
+        cross_check=None,
+        matchday_in_progress=False,
+    )
+
+    def _build(league):
+        trader._next_kickoff = nk
+        ctx = ctx_factory()
+        trader._facts_from_context(ctx, nk)
+        return ctx
+
+    with patch.object(AutoTrader, "_build_session_context", side_effect=_build):
+        session = trader.run_full_session(LEAGUE)
+    assert "I5" in [f.rule for f in session.integrity_failures]
+    assert SessionStore(dsn=store_dsn).facts(session.session_id)["predictions_written"] == 0
+
+
+def test_a_store_failure_while_predicting_never_stops_the_session(store_dsn, ctx_factory):
+    trader = _trader(store_dsn, _legal_squad())
+    trader._calibration_store = CalibrationStore(dsn="postgresql://nobody@127.0.0.1:1/nope")
+    nk = NextKickoff(
+        at=datetime.now(tz=timezone.utc) + timedelta(days=3),
+        source="schedule",
+        cross_check=None,
+        matchday_in_progress=False,
+        day_number=4,
+    )
+
+    def _build(league):
+        trader._next_kickoff = nk
+        ctx = ctx_factory()
+        trader._facts_from_context(ctx, nk)
+        return ctx
+
+    with patch.object(AutoTrader, "_build_session_context", side_effect=_build):
+        session = trader.run_full_session(LEAGUE)
+    assert session.session_id
+    assert SessionStore(dsn=store_dsn).facts(session.session_id)["predictions_written"] == 0
