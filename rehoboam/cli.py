@@ -134,6 +134,7 @@ def auto(
         max_trades_per_session=max_trades,
         max_daily_spend=max_spend,
         dry_run=dry_run,
+        app_name="cli",
     )
 
     session = auto_trader.run_full_session(league)
@@ -194,6 +195,7 @@ def status(
         max_trades_per_session=settings.auto_max_trades_normal,
         max_daily_spend=50_000_000,
         dry_run=True,
+        app_name="cli",
     )
     auto_trader.run_full_session(league)
 

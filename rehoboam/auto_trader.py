@@ -4,15 +4,19 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from rich.console import Console
 
 from .config import INSTANT_SELL_PCT
+from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
+from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
 from .services.safety_gate import BuyGate, club_counts
+from .services.session_facts import IntegrityFailure, SessionFacts
+from .store.session_store import SessionStore
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -31,6 +35,8 @@ class AutoTradeSession:
     total_earned: int
     net_change: int
     lineup: list[tuple[str, float, str | None]] = field(default_factory=list)
+    session_id: str = ""
+    integrity_failures: list = field(default_factory=list)
 
 
 @dataclass
@@ -358,6 +364,8 @@ class AutoTrader:
         max_trades_per_session: int = 5,  # Increased from 3 for more competitiveness
         max_daily_spend: int = 50_000_000,  # 50M max per day
         dry_run: bool = False,
+        app_name: str = "cli",
+        session_store: SessionStore | None = None,
     ):
         """
         Args:
@@ -366,12 +374,20 @@ class AutoTrader:
             max_trades_per_session: Max trades per run (safety limit)
             max_daily_spend: Max money to spend per day (safety limit)
             dry_run: If True, simulate but don't execute
+            app_name: Who is running this session ("cli" | "function") — stamped
+                onto every session-facts row so I7 (ingest freshness) can tell
+                this app's own runs apart from the ingest app's.
+            session_store: Where session facts land. Defaults to a lazily
+                connected `SessionStore()` so callers that never pass one still
+                work; tests inject one pinned to a throwaway database.
         """
         self.api = api
         self.settings = settings
         self.max_trades_per_session = max_trades_per_session
         self.max_daily_spend = max_daily_spend
         self.dry_run = dry_run
+        self.app_name = app_name
+        self._session_store = session_store or SessionStore()
 
         # Daily tracking
         self.daily_spend = 0
@@ -387,6 +403,11 @@ class AutoTrader:
         # and sent once by `_send_proposal_overview`.
         self._session_proposals: list = []
         self._session_batch_id: str = ""
+        # None until a session starts (`run_full_session`) or a caller drives
+        # `_build_session_context` directly (tests) — every write site guards
+        # with `getattr(self, "_facts", None)` so a facts-less caller never
+        # crashes on what is, deliberately, a best-effort diagnostic layer.
+        self._facts: SessionFacts | None = None
         self.activity_feed_learner = ActivityFeedLearner()
         self.tracker = LearningTracker(self.learner)
 
@@ -490,12 +511,16 @@ class AutoTrader:
             activity_feed_learner=self.activity_feed_learner,
         )
 
-        # Fetch matchday timing
-        days = trader.get_days_until_match(league)
-        # Set as a side effect of the call above, so the flag costs no second
-        # /myeleven fetch. Absent (None) whenever that fetch failed.
-        in_progress = bool(getattr(trader, "_last_matchday_in_progress", False))
-        phase = self._get_matchday_phase(days, matchday_in_progress=in_progress)
+        # Fetch matchday timing via `next_kickoff` directly (Task 5), not
+        # `get_days_until_match` -- that method just calls `next_kickoff`
+        # itself, and calling it here too would be a second /myeleven fetch
+        # for the same answer. The `NextKickoff` this produces also feeds
+        # `self._facts` below, so the phase decision and the facts row are
+        # guaranteed to agree on what "next kickoff" meant for this session.
+        now = datetime.now(tz=timezone.utc)
+        nk = trader.next_kickoff(league, now=now)
+        days = max((nk.at - now).days, 0) if nk.at is not None else None
+        phase = self._get_matchday_phase(days, matchday_in_progress=nk.matchday_in_progress)
 
         console.print(f"[cyan]📅 {phase.reason}[/cyan]")
 
@@ -529,7 +554,7 @@ class AutoTrader:
             len(my_bids),
         )
 
-        return EPSessionContext(
+        ctx = EPSessionContext(
             ep_result=ep_result,
             matchday_phase=phase,
             my_bids=my_bids,
@@ -539,6 +564,155 @@ class AutoTrader:
             team_value=team_value,
             flip_budget=flip_budget,
         )
+
+        # A caller that drives this method directly (tests, mainly) without
+        # going through `run_full_session` first still gets a facts object to
+        # fill in below -- `run_full_session` itself already created the real
+        # one at Step 0, so this only ever fires for that direct-call case.
+        if self._facts is None:
+            self._facts = SessionFacts(
+                session_id=self._session_batch_id,
+                app=self.app_name,
+                mode=self.settings.trading_mode,
+                dry_run=self.dry_run,
+                started_at=time.time(),
+            )
+        try:
+            self._facts_from_context(ctx, nk)
+        except Exception:
+            logger.warning("facts: could not fill session facts from context", exc_info=True)
+
+        return ctx
+
+    def _facts_from_context(self, ctx: EPSessionContext, nk) -> None:
+        """Fill `self._facts` from a built context and its `NextKickoff`.
+
+        Split out from `_build_session_context` so a test that patches that
+        method wholesale can still populate facts the same way the real
+        builder does, by calling this directly with its own context and
+        kickoff answer (Task 5).
+
+        `open_offers_manual` exists because a bid the bot itself placed is
+        already accounted for in the phase/gate logic that placed it --
+        what integrity needs to see is money committed *outside* that,
+        i.e. bids Marco placed by hand that `get_pending_bids` (the bot's
+        own bid ledger) has no row for.
+        """
+        from .formation import get_position_counts
+
+        counts = get_position_counts(ctx.squad)
+        self._facts.phase = ctx.matchday_phase.phase
+        self._facts.next_kickoff = nk.at.timestamp() if nk.at is not None else None
+        self._facts.next_kickoff_source = nk.source
+        self._facts.squad_gk = counts["Goalkeeper"]
+        self._facts.squad_def = counts["Defender"]
+        self._facts.squad_mid = counts["Midfielder"]
+        self._facts.squad_fw = counts["Forward"]
+        self._facts.budget = int(ctx.current_budget)
+        self._facts.sellable_value = sum(int(p.market_value) for p in ctx.squad)
+        self._facts.open_offers_total = sum(int(b.user_offer_price or 0) for b in ctx.my_bids)
+
+        bot_placed_ids: set[str] = set()
+        try:
+            bot_placed_ids = {str(row["player_id"]) for row in self.learner.get_pending_bids()}
+        except Exception:
+            logger.warning("facts: could not read pending-bid provenance", exc_info=True)
+        self._facts.open_offers_manual = sum(
+            int(b.user_offer_price or 0) for b in ctx.my_bids if str(b.id) not in bot_placed_ids
+        )
+
+        # I3 as a session-wide buy refusal (consumed by the safety gate) is
+        # `full`-mode only -- `lineup_only` never bids on anything but the
+        # emergency fill, which is exempt, so refusing new offers there would
+        # refuse nothing real. The end-of-session I3 integrity rule is
+        # unconditional; it just reports, it never gates.
+        if self.settings.trading_mode == "full":
+            ok, detail = i3_budget_covered(
+                budget=self._facts.budget,
+                open_offers_total=self._facts.open_offers_total,
+                sellable_value=self._facts.sellable_value,
+            )
+            if not ok:
+                ctx.session_refusal = f"I3: {detail}"
+                logger.warning("session-refusal I3 %s", detail)
+
+    def _finish_facts(self, errors: list[str], start_time: float, phase: str) -> list:
+        """Close out session facts at any exit: record, check, alert, board.
+
+        Called from all three of `run_full_session`'s exits -- the normal
+        return, `_finish_lineup_only`, and the pipeline-failure `except` --
+        so a run that dies mid-pipeline gets the same treatment as one that
+        finishes cleanly. That symmetry is the point of writing the early
+        row at Step 0: a session that never reaches here still left evidence,
+        and one that does reach here always gets exactly one row update, one
+        integrity check, and at most one Telegram message.
+
+        `phase` is the caller's own answer for what phase this session ended
+        in -- not read back off `self._facts`, because the pipeline-failure
+        exit has no context to read it from and needs to stamp `"unknown"`
+        instead. Never raises: each side effect (store write, the check
+        itself, the alert) is its own try/except, so one failing --
+        Postgres unreachable, Telegram down -- cannot take out the others or
+        the session that called this.
+        """
+        facts = getattr(self, "_facts", None)
+        if facts is None:
+            return []
+
+        facts.duration_s = time.time() - start_time
+        facts.errors = len(errors)
+        facts.error_text = "; ".join(errors)[:2000]
+        facts.phase = phase
+
+        try:
+            self._session_store.record(facts)
+        except Exception:
+            logger.warning("session-facts: could not record final row", exc_info=True)
+
+        failures: list[IntegrityFailure] = []
+        try:
+            failures = check_integrity(
+                facts,
+                now=time.time(),
+                last_ingest_completed_at=self._session_store.last_ingest_completed_at(),
+            )
+        except Exception:
+            logger.warning("integrity: check_integrity failed", exc_info=True)
+
+        if failures:
+            try:
+                self._session_store.record_failures(facts.session_id, failures)
+            except Exception:
+                logger.warning("integrity: could not record failures", exc_info=True)
+
+        try:
+            if failures:
+                for failure in failures:
+                    console.print(f"[red]Integrity: {failure.rule} {failure.detail}[/red]")
+            else:
+                console.print("[green]Integrity: all seven rules pass[/green]")
+        except Exception:
+            logger.warning("integrity: could not print the board", exc_info=True)
+
+        if failures and self.settings.telegram_bot_token and self.settings.telegram_chat_id:
+            try:
+                lines = "\n".join(f"• {f.rule} {f.detail}" for f in failures)
+                text = (
+                    f"Rehoboam integrity — {self.app_name} {self.settings.trading_mode} "
+                    f"session {facts.session_id}\n{lines}"
+                )
+                send_message(self.settings.telegram_bot_token, self.settings.telegram_chat_id, text)
+            except Exception:
+                logger.warning("integrity: telegram alert failed", exc_info=True)
+
+        if failures:
+            logger.warning(
+                "integrity-failures n=%d rules=%s",
+                len(failures),
+                ",".join(f.rule for f in failures),
+            )
+
+        return failures
 
     def _record_decline(self, player, reason: str, *, ep_gain=None, ceiling=None) -> None:
         """Best-effort record of a candidate the bot evaluated and did not bid on.
@@ -2044,6 +2218,21 @@ class AutoTrader:
         self._session_proposals = []
         self._session_batch_id = uuid.uuid4().hex[:12]
 
+        # Task 5: an early row, written before anything that could fail. A
+        # session that dies later still leaves this behind -- the whole
+        # reason `record` upserts rather than inserts once at the end.
+        self._facts = SessionFacts(
+            session_id=self._session_batch_id,
+            app=self.app_name,
+            mode=self.settings.trading_mode,
+            dry_run=self.dry_run,
+            started_at=start_time,
+        )
+        try:
+            self._session_store.record(self._facts)
+        except Exception:
+            logger.warning("session-facts: could not record start row", exc_info=True)
+
         logger.info(
             "session-start league=%s mode=%s dry_run=%s max_trades=%d max_spend=%d",
             getattr(league, "name", league.id),
@@ -2112,7 +2301,8 @@ class AutoTrader:
             try:
                 my_id = getattr(getattr(self.api, "user", None), "id", None)
                 if my_id:
-                    self.tracker.reconcile_squad_cost_basis(squad, manager_id=str(my_id))
+                    rec = self.tracker.reconcile_squad_cost_basis(squad, manager_id=str(my_id))
+                    self._facts.cost_basis_missing = len(rec.still_missing)
             except Exception:  # pragma: no cover - defensive
                 logger.exception("cost-basis reconciliation failed (non-fatal)")
             # Execute any deferred sell plans from bids we won (buy-first-sell-after).
@@ -2156,6 +2346,17 @@ class AutoTrader:
             logger.exception("EP pipeline failed — falling back to lineup-only")
             # Fall back to just setting lineup
             lineup = self._set_optimal_lineup(league, errors) or []
+            # "unknown" because this exit never learned a phase -- the EP
+            # pipeline call that would have told us is exactly what failed.
+            # Today this exit logs no session-end at all, which is why prod
+            # telemetry has no trace of a pipeline failure ever happening.
+            integrity_failures = self._finish_facts(errors, start_time, "unknown")
+            logger.info(
+                "session-end duration=%.1fs mode=%s phase=unknown errors=%d",
+                time.time() - start_time,
+                self.settings.trading_mode,
+                len(errors),
+            )
             return AutoTradeSession(
                 start_time=start_time,
                 end_time=time.time(),
@@ -2166,6 +2367,8 @@ class AutoTrader:
                 total_earned=0,
                 net_change=0,
                 lineup=lineup,
+                session_id=self._session_batch_id,
+                integrity_failures=integrity_failures,
             )
 
         # Step 2a: Matchday self-calibration (REH-20).
@@ -2203,11 +2406,12 @@ class AutoTrader:
                 pid
                 for pid, _ep in sorted(lineup_map.items(), key=lambda kv: kv[1], reverse=True)[:11]
             }
-            self.tracker.snapshot_predictions(
+            written = self.tracker.snapshot_predictions(
                 league_id=league.id,
                 squad_scores=squad_scores,
                 best_11_ids=best_11,
             )
+            self._facts.predictions_written = int(written)
         except Exception:
             logger.exception("snapshot_predictions failed (non-fatal)")
         try:
@@ -2259,6 +2463,17 @@ class AutoTrader:
                 error_msg = f"Emergency squad fill failed: {e!s}"
                 console.print(f"[red]{error_msg}[/red]")
                 errors.append(error_msg)
+
+        # Fetched fresh rather than reusing `fresh_squad` above, which the
+        # fill (if it ran) has just changed. Runs whether or not there was an
+        # emergency: I2 needs to know the squad ended up fieldable either way.
+        try:
+            from .formation import fieldability
+
+            fb = fieldability(self.api.get_squad(league))
+            self._facts.fieldable_count = 11 if fb.ok else 11 - fb.purchases
+        except Exception:
+            logger.warning("facts: could not compute fieldable_count", exc_info=True)
 
         # Two reasons to stop after the lineup: the match is imminent, or the
         # bot is in lineup_only mode (spec 2026-09-11 §5). The emergency fill
@@ -2391,6 +2606,8 @@ class AutoTrader:
             len(errors),
         )
 
+        integrity_failures = self._finish_facts(errors, start_time, ctx.matchday_phase.phase)
+
         return AutoTradeSession(
             start_time=start_time,
             end_time=end_time,
@@ -2401,6 +2618,8 @@ class AutoTrader:
             total_earned=total_earned,
             net_change=net_change,
             lineup=lineup,
+            session_id=self._session_batch_id,
+            integrity_failures=integrity_failures,
         )
 
     def _finish_lineup_only(
@@ -2452,6 +2671,7 @@ class AutoTrader:
             len(errors),
             reason,
         )
+        integrity_failures = self._finish_facts(errors, start_time, ctx.matchday_phase.phase)
         return AutoTradeSession(
             start_time=start_time,
             end_time=end_time,
@@ -2462,6 +2682,8 @@ class AutoTrader:
             total_earned=total_earned,
             net_change=total_earned - total_spent,
             lineup=lineup,
+            session_id=self._session_batch_id,
+            integrity_failures=integrity_failures,
         )
 
     def _set_optimal_lineup(
@@ -2492,6 +2714,12 @@ class AutoTrader:
 
         console.print("\n[bold cyan]📋 Setting Optimal Lineup[/bold cyan]")
 
+        # None for a caller that never started a session through
+        # `run_full_session` or `_build_session_context` -- several tests
+        # drive this method directly. `facts` stays None in that case and
+        # every write below is a no-op.
+        facts = getattr(self, "_facts", None)
+
         try:
             squad = self.api.get_squad(league)
             if not squad or len(squad) < 11:
@@ -2504,6 +2732,8 @@ class AutoTrader:
                 console.print(f"[yellow]{msg} — not submitted[/yellow]")
                 logger.error("lineup-illegal %s", msg)
                 errors.append(msg)
+                if facts is not None:
+                    facts.lineup_result = "illegal"
                 return []
 
             # Build ep_scores from the pipeline when available; fall back to a
@@ -2535,9 +2765,13 @@ class AutoTrader:
                 console.print(f"[red]{msg}[/red]")
                 logger.error("lineup-illegal %s", msg)
                 errors.append(msg)
+                if facts is not None:
+                    facts.lineup_result = "illegal"
                 return []
             ordered = order_for_lineup(best_eleven)
             formation = get_formation_string(ordered)
+            if facts is not None:
+                facts.legal_formation = formation
             player_ids = [p.id for p in ordered]
 
             names = [
@@ -2557,16 +2791,22 @@ class AutoTrader:
 
             if self.dry_run:
                 console.print("[yellow]DRY RUN - Lineup not applied[/yellow]")
+                if facts is not None:
+                    facts.lineup_result = "dry_run"
                 return lineup_summary
 
             self.api.set_lineup(league, formation, player_ids)
             console.print("[green]✓ Lineup set successfully[/green]")
+            if facts is not None:
+                facts.lineup_result = "set"
             return lineup_summary
 
         except Exception as e:
             error_msg = f"Set lineup error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
             errors.append(error_msg)
+            if facts is not None:
+                facts.lineup_result = "failed"
             return []
 
     def _fallback_expected_points(self, league, player) -> float:
