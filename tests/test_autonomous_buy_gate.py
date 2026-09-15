@@ -110,7 +110,9 @@ class _ProposalSpy:
     def __init__(self):
         self.calls: list[tuple[str, int]] = []
 
-    def __call__(self, league, rec, ctx, *, bid=None, auto_approve_at=None):
+    def __call__(
+        self, league, rec, ctx, *, bid=None, auto_approve_at=None, waive_trend_floor=False
+    ):
         self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
         return True
 

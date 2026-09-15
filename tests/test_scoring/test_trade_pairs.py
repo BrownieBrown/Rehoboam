@@ -41,13 +41,15 @@ def _make_score(player_id, ep, position="Midfielder", price=5_000_000):
     )
 
 
-def _make_player(player_id, position, price=5_000_000):
+def _make_player(player_id, position, price=5_000_000, team_id=None):
+    # One club per player unless a test says otherwise: Kickbase allows three
+    # per club, and a squad of fifteen "t1" players would block every buy.
     return MarketPlayer(
         id=player_id,
         first_name="Test",
         last_name=player_id,
         position=position,
-        team_id="t1",
+        team_id=team_id or f"club-{player_id}",
         team_name="Test FC",
         price=price,
         market_value=price,

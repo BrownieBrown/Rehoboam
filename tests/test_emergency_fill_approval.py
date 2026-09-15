@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,13 +32,13 @@ LEAGUE = SimpleNamespace(id="1933872", name="PUMARUDEL")
 HOUR = 3600.0
 
 
-def _player(pid, position="Defender"):
+def _player(pid, position="Defender", team_id="1"):
     return Player(
         id=pid,
         first_name="F",
         last_name=f"P{pid}",
         position=position,
-        team_id="1",
+        team_id=team_id,
         team_name="T",
         market_value=1_000_000,
         points=0,
@@ -46,13 +46,13 @@ def _player(pid, position="Defender"):
     )
 
 
-def _market_player(pid, price, position="Forward"):
+def _market_player(pid, price, position="Forward", team_id="7"):
     return MarketPlayer(
         id=pid,
         first_name="F",
         last_name=f"M{pid}",
         position=position,
-        team_id="7",
+        team_id=team_id,
         team_name="",
         price=price,
         market_value=price,
@@ -62,8 +62,8 @@ def _market_player(pid, price, position="Forward"):
     )
 
 
-def _rec(pid, price, ep_gain, position="Forward"):
-    player = _market_player(pid, price, position)
+def _rec(pid, price, ep_gain, position="Forward", team_id="7"):
+    player = _market_player(pid, price, position, team_id)
     return SimpleNamespace(
         player=player,
         recommended_bid=price,
@@ -134,6 +134,75 @@ class TestTheFillProposesRatherThanBuying:
             trader._run_emergency_squad_fill(
                 league=LEAGUE, ctx=_ctx(recs, 50_000_000), fresh_squad=squad, slots_short=1
             )
+
+
+def _ten_short_one_forward(team_ids=("1",) * 9):
+    """GK 1, DEF 4, MID 4, FW 1: one short, a forward closes it (4-4-2)."""
+    ids = list(team_ids)
+    return (
+        [_player("gk0", "Goalkeeper", ids[0])]
+        + [_player(f"d{i}", "Defender", ids[1 + i]) for i in range(4)]
+        + [_player(f"m{i}", "Midfielder", ids[5 + i]) for i in range(4)]
+        + [_player("f0", "Forward")]
+    )
+
+
+class TestTheFillIgnoresProfitRules:
+    """On 2026-09-15 the fill picked Baack for the empty slot and then refused
+    to propose him because his market value was down 40% in 7 days — a rule
+    written for profit buys. The slot stayed empty at -100. The same board
+    listed Henrichs first, with three Leipzig players already held, so the
+    gate would have refused him and the basket's pick was wasted."""
+
+    def test_a_falling_player_is_still_proposed_in_an_emergency(self, trader):
+        recs = [_rec("f1", 5_000_000, 60.0)]
+        with patch.object(AutoTrader, "_propose_buy", return_value=True) as propose:
+            trader._run_emergency_squad_fill(
+                league=LEAGUE,
+                ctx=_ctx(recs, 50_000_000),
+                fresh_squad=_ten_short_one_forward(),
+                slots_short=1,
+            )
+        assert propose.called
+        assert propose.call_args.kwargs.get("waive_trend_floor") is True
+
+    def test_propose_buy_waives_the_floor_only_when_asked(self, trader):
+        trader.dry_run = True  # returns before the store and Telegram are touched
+        rec = _rec("f1", 5_000_000, 60.0)
+        ctx = _ctx([rec], 50_000_000)
+        falling = MagicMock()
+        falling.return_value.trend_service.get_trend.return_value.trend_7d_pct = -40.3
+        with patch("rehoboam.trader.Trader", falling):
+            assert trader._propose_buy(LEAGUE, rec, ctx) is False
+            assert trader._propose_buy(LEAGUE, rec, ctx, waive_trend_floor=True) is True
+        risks = [r for line in trader._session_proposals for r in line.risks]
+        assert any("proposed anyway" in r for r in risks), risks
+
+    def test_a_club_at_its_limit_is_skipped_for_the_next_candidate(self, trader):
+        squad = _ten_short_one_forward(("7", "7", "7", "1", "1", "1", "1", "1", "1"))
+        recs = [
+            _rec("blocked", 4_000_000, 90.0, team_id="7"),
+            _rec("ok", 5_000_000, 60.0, team_id="8"),
+        ]
+        with patch.object(AutoTrader, "_propose_buy", return_value=True) as propose:
+            trader._run_emergency_squad_fill(
+                league=LEAGUE, ctx=_ctx(recs, 50_000_000), fresh_squad=squad, slots_short=1
+            )
+        assert [c.args[1].player.id for c in propose.call_args_list] == ["ok"]
+
+    def test_open_bids_count_toward_the_club_limit(self, trader):
+        squad = _ten_short_one_forward(("7", "7", "1", "1", "1", "1", "1", "1", "1"))
+        recs = [
+            _rec("blocked", 4_000_000, 90.0, team_id="7"),
+            _rec("ok", 5_000_000, 60.0, team_id="8"),
+        ]
+        ctx = _ctx(recs, 50_000_000)
+        ctx.my_bids = [_market_player("pending", 1_000_000, team_id="7")]
+        with patch.object(AutoTrader, "_propose_buy", return_value=True) as propose:
+            trader._run_emergency_squad_fill(
+                league=LEAGUE, ctx=ctx, fresh_squad=squad, slots_short=1
+            )
+        assert [c.args[1].player.id for c in propose.call_args_list] == ["ok"]
 
 
 class TestTheBackstopIsTimeBased:
