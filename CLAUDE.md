@@ -146,7 +146,7 @@ only for the SQLite-era files — nothing produces new ones.
 
 **Trading System** (`trader.py`, `auto_trader.py`):
 
-- `Trader`: Per-call EP pipeline (`get_ep_recommendations`, `get_ep_recommendations_with_trends`, `find_profit_opportunities`) — stateless, takes a league per call.
+- `Trader`: Per-call EP pipeline (`get_ep_recommendations`, `get_ep_recommendations_with_trends`, `find_profit_opportunities`) — stateless, takes a league per call. `next_kickoff` — schedule first, `/myeleven` cross-check.
 - `AutoTrader`: Session orchestrator. `run_full_session(league)` is the single entry point used by both the CLI `auto` command and the Azure Function timer trigger.
 
 **EP Scoring Pipeline** (`scoring/models.py`, `scoring/v2/adapter.py`, `scoring/collector.py`, `scoring/decision.py`):
@@ -185,6 +185,7 @@ only for the SQLite-era files — nothing produces new ones.
 - Tests under `tests/store/` run against a real PostgreSQL (`pytest-postgresql`: local `postgresql@17` binaries, or CI's service container via `TEST_PG_HOST`); they skip with a message when neither exists locally, and hard-fail when `CI` is set so a green CI can never mean "never ran". On macOS: `brew install postgresql@17`; if `initdb` cannot find its share files (a keg-only install), symlink `share/postgresql@17` and `lib/postgresql@17` from the keg into `/opt/homebrew/opt/postgresql@17/`.
 - PR B2 (2026-09-13): `BidLearner`, `ActivityFeedLearner` and `ValueHistoryCache` are Postgres clients; the Function app and the `auto`/`status` commands call `store.ensure_ready()` first and refuse to run without a migrated store; the blob sync is gone. Tests share one PostgreSQL: `store_dsn` is a fresh migrated database, and an autouse fixture pins `DATABASE_URL` so no test can reach the real project.
 - **Ingestion (PR C1, 2026-09-14)**: `func-rehoboam-external` runs `enrichment/ingest.run_ingestion` twice a day into `store/corpus_store.CorpusStore` — universe, `player_status_daily` (status + lineup probability per player per day), match history, MV series — stalest player first, every stale kind for that player (status before every session via `INGEST_STATUS_STALE_AFTER_HOURS`=10, performance daily, MV weekly), within `INGEST_DEADLINE_SECONDS` / `INGEST_MAX_REQUESTS`, and exports every table as gzip CSV to the Blob container on Sunday 03:00 UTC (`store/export.py`). The trading session still fetches per player; PR C2 switches it to read the store first.
+- **Session facts + integrity (PR D, 2026-09-15)**: every run of either app writes `rehoboam.session_facts` (`store/session_store.py`); the trading session ends with `services/integrity.check_integrity` (I1–I7, pure), failures go to `integrity_failures`, the board, and one Telegram message per session when any rule fails; the next kickoff comes from `/v4/competitions/1/matchdays` (`kickoff.py`, `Trader.next_kickoff`) with `/myeleven` as the cross-check; in `full` mode a failing I3 sets `EPSessionContext.session_refusal`, which the buy gate reports and the emergency fill ignores.
 
 ### Roster-Aware Recommendations
 
@@ -218,7 +219,7 @@ Key data classes:
 1. Step 2 — session context build: `Trader.get_ep_recommendations_with_trends(league)` fetches squad + market + ranking + per-player performance/MV-history, scores everyone, ranks buys + trade pairs by marginal EP gain.
 1. Step 2a — learning snapshots: `LearningTracker.reconcile_finished_matchdays` (REH-20), `snapshot_predictions` (REH-20), `record_team_value_snapshot` (REH-23), `record_player_mv_snapshot` (REH-26). `Trader` itself writes `record_league_rank_snapshot` (REH-24) + `record_matchday_lineup_result` (REH-25) inside its existing /ranking try block.
 1. Steps 3-7 — lineup / matchday-locked / sell phase / squad optimization / unified trade phase. Bids placed via `api.buy_player`, sells via `api.sell_player_instant` or `api.sell_player`.
-1. Step 8 — `_set_optimal_lineup` finalizes the starting 11.
+1. Step 8 — `_set_optimal_lineup` finalizes the starting 11, and `_finish_facts` records the session and runs the integrity check.
 
 ## Configuration
 
