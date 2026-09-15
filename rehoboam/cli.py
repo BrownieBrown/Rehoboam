@@ -529,7 +529,7 @@ def calibrate_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Compute, write nothing, send nothing."),
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
 ):
-    """Turn finished matchdays into calibration rows and a report — what the ingestion app does after each run."""
+    """Turn finished matchdays into calibration rows and a report (what the ingestion app does)."""
     import time
 
     from .enrichment.calibrate import backfill_predictions, run_calibration

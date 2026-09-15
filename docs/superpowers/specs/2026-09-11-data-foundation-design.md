@@ -352,7 +352,7 @@ result visible; it does not claim to deliver M3 on its own.
 | B   | `rehoboam/store/`, migrations, learner rewrite, `api_cache`, `import-sqlite`, cut-over, Blob sync deleted, CLAUDE.md updated | `DATABASE_URL` on both apps; import run once |
 | C   | ingestion app, corpus tables, backoff, weekly COPY export                                                                    | external app deployed                        |
 | D   | `session_facts`, `integrity`, Telegram alert, competition-schedule kickoff                                                   | none                                         |
-| E   | league-wide predictions, `calibration_rows`, reports, gate message                                                           | none                                         |
+| E   | league-wide predictions, `calibration_rows`, reports, gate message                                                           | none — shipped 2026-09-15 (PR E)             |
 | F   | `corpus-pull`, legacy calibration writers deleted, `value_tracking` and `market_prices` removed                              | none                                         |
 
 A ships first and alone. B and C follow together. D and E follow. F lands

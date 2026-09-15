@@ -81,6 +81,8 @@ uv run rehoboam migrate                      # Apply store migrations to DATABAS
 uv run rehoboam db-bootstrap                 # Create the rehoboam_bot role + grants (once per project)
 uv run rehoboam import-sqlite                # Copy logs/*.db into the store; safe to re-run
 uv run rehoboam corpus-pull                  # Materialise the corpus + the replay's learning tables into logs/*.db for replay/backtest
+uv run rehoboam calibrate            # Report finished matchdays (what func-rehoboam-external does after each ingest)
+uv run rehoboam calibrate --backfill-day 3   # Leak-free predictions + report for a finished matchday, kept apart from the gate
 
 # Code quality
 uv run black rehoboam/                        # Format code
@@ -186,6 +188,7 @@ only for the SQLite-era files — nothing produces new ones.
 - PR B2 (2026-09-13): `BidLearner`, `ActivityFeedLearner` and `ValueHistoryCache` are Postgres clients; the Function app and the `auto`/`status` commands call `store.ensure_ready()` first and refuse to run without a migrated store; the blob sync is gone. Tests share one PostgreSQL: `store_dsn` is a fresh migrated database, and an autouse fixture pins `DATABASE_URL` so no test can reach the real project.
 - **Ingestion (PR C1, 2026-09-14)**: `func-rehoboam-external` runs `enrichment/ingest.run_ingestion` twice a day into `store/corpus_store.CorpusStore` — universe, `player_status_daily` (status + lineup probability per player per day), match history, MV series — stalest player first, every stale kind for that player (status before every session via `INGEST_STATUS_STALE_AFTER_HOURS`=10, performance daily, MV weekly), within `INGEST_DEADLINE_SECONDS` / `INGEST_MAX_REQUESTS`, and exports every table as gzip CSV to the Blob container on Sunday 03:00 UTC (`store/export.py`). The trading session still fetches per player; PR C2 switches it to read the store first.
 - **Session facts + integrity (PR D, 2026-09-15)**: every run of either app writes `rehoboam.session_facts` (`store/session_store.py`); the trading session ends with `services/integrity.check_integrity` (I1–I7, pure), failures go to `integrity_failures`, the board, and one Telegram message per session when any rule fails; the next kickoff comes from `/v4/competitions/1/matchdays` (`kickoff.py`, `Trader.next_kickoff`) with `/myeleven` as the cross-check; in `full` mode a failing I3 sets `EPSessionContext.session_refusal`, which the buy gate reports and the emergency fill ignores.
+- **League-wide calibration (PR E, 2026-09-15)**: every session writes `rehoboam.predictions` for every live player from store rows (`scoring/store_scorer.py`, the same `compose_ep` as the live path; squad/market keep the API path and record `live_ep` beside it); the ingestion run clears fetch stamps for finished matchdays, re-reads them, and writes `calibration_rows` + one `calibration_reports` row per matchday (`enrichment/calibrate.py`, metrics in `services/calibration.py`, baseline scored on the same rows) with the gate verdict in `gate` and one Telegram message; the gate is a verdict — trading resumes by changing `TRADING_MODE`. `predicted_eps`/`matchday_outcomes`/`reconcile_finished_matchdays` stay until PR F.
 
 ### Roster-Aware Recommendations
 
@@ -217,7 +220,7 @@ Key data classes:
 1. Azure Function timer (or `rehoboam auto` CLI) invokes `AutoTrader.run_full_session(league)`.
 1. Step 1 — auction resolution: `LearningTracker.resolve_auctions` reconciles pending bids into won/lost rows in `auction_outcomes`; deferred sell plans execute.
 1. Step 2 — session context build: `Trader.get_ep_recommendations_with_trends(league)` fetches squad + market + ranking + per-player performance/MV-history, scores everyone, ranks buys + trade pairs by marginal EP gain.
-1. Step 2a — learning snapshots: `LearningTracker.reconcile_finished_matchdays` (REH-20), `snapshot_predictions` (REH-20), `record_team_value_snapshot` (REH-23), `record_player_mv_snapshot` (REH-26). `Trader` itself writes `record_league_rank_snapshot` (REH-24) + `record_matchday_lineup_result` (REH-25) inside its existing /ranking try block.
+1. Step 2a — learning snapshots: `LearningTracker.reconcile_finished_matchdays` (REH-20), `snapshot_predictions` (REH-20, until PR F) and `_write_league_predictions` (PR E; feeds `predictions_written` and rule I5), `record_team_value_snapshot` (REH-23), `record_player_mv_snapshot` (REH-26). `Trader` itself writes `record_league_rank_snapshot` (REH-24) + `record_matchday_lineup_result` (REH-25) inside its existing /ranking try block.
 1. Steps 3-7 — lineup / matchday-locked / sell phase / squad optimization / unified trade phase. Bids placed via `api.buy_player`, sells via `api.sell_player_instant` or `api.sell_player`.
 1. Step 8 — `_set_optimal_lineup` finalizes the starting 11, and `_finish_facts` records the session and runs the integrity check.
 
@@ -243,6 +246,7 @@ Module-level constants in `config.py`:
 - Tests use mock credentials (`KICKBASE_EMAIL=test@example.com`)
 - CI runs on Python 3.10, 3.11, 3.12
 - Test markers: `slow`, `integration`
+- `tests/test_scoring_v2/test_store_scorer.py` asserts the store scorer equals `score_player_v2` on the same history — keep it green when touching either.
 
 ## Lessons Learned & Development History
 
