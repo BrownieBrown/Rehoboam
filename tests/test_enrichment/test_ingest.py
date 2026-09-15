@@ -226,3 +226,32 @@ def test_mv_refreshes_on_its_own_wider_window(store_dsn):
     assert stats.status_written == 1
     assert stats.performance_fetched == 1
     assert stats.mv_fetched == 0
+
+
+def test_status_refreshes_on_its_own_shorter_window(store_dsn):
+    """Status is the cheap kind and the one a session needs fresh: a run three
+    hours before a session must re-read it even though performance is fresh."""
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a"]), Clock()
+    store.upsert_players([{"player_id": "a", "position": "Forward"}])
+    store.mark_fetched("a", status=True, performance=True, mv=True)
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "update rehoboam.sweep_progress set status_fetched_at = %s, "
+            "performance_fetched_at = %s, mv_fetched_at = %s where player_id = 'a'",
+            (clock.t - 50_000, clock.t - 50_000, clock.t - 50_000),  # ~14 h ago
+        )
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=200_000,
+        status_stale_after_seconds=36_000,
+        throttle_seconds=0,
+        today=DAY,
+    )
+    assert stats.status_written == 1
+    assert stats.performance_fetched == 0
+    assert stats.mv_fetched == 0

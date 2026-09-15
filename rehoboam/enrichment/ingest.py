@@ -94,6 +94,7 @@ def run_ingestion(
     budget: IngestBudget,
     stale_after_seconds: float,
     mv_stale_after_seconds: float,
+    status_stale_after_seconds: float | None = None,
     throttle_seconds: float = 0.25,
     timeframe_days: int = 365,
     today: date | None = None,
@@ -112,8 +113,17 @@ def run_ingestion(
             team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
 
             now = budget.now()
+            # Status is one cheap request per player and the reading a trading
+            # session needs fresh, so it gets its own, shorter window: a run
+            # three hours before a session re-reads it even when performance
+            # (daily) and MV (weekly) are still fresh.
+            status_window = (
+                status_stale_after_seconds
+                if status_stale_after_seconds is not None
+                else stale_after_seconds
+            )
             windows = {
-                "status": now - stale_after_seconds,
+                "status": now - status_window,
                 "performance": now - stale_after_seconds,
                 "mv": now - mv_stale_after_seconds,
             }

@@ -56,6 +56,7 @@ def ingest(timer: func.TimerRequest):
             budget=budget,
             stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
             mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
+            status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
         )
     except Exception as e:
         logging.error(f"Ingestion failed: {e}", exc_info=True)

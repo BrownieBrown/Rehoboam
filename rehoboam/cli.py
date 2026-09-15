@@ -408,6 +408,7 @@ def ingest_cmd(
         budget=budget,
         stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
         mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
+        status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
         throttle_seconds=throttle,
     )
     table = Table(title="Ingestion")
