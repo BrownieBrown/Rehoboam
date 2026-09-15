@@ -163,14 +163,22 @@ def _send(
 
 
 def _resend_unsent(
-    store: CalibrationStore, *, season: str, now: float, telegram: tuple[str, str]
+    store: CalibrationStore,
+    *,
+    season: str,
+    now: float,
+    telegram: tuple[str, str],
+    skip: set[int],
 ) -> None:
     for r in store.recent_reports(season):
-        if r["telegram_sent"]:
+        if r["telegram_sent"] or r["day_number"] in skip:
             continue
         keys = set(CalibrationReport.__dataclass_fields__)
         report = CalibrationReport(**{k: r[k] for k in keys})
-        names = {w["player_id"]: w["player_id"] for w in report.worst}
+        names = {
+            a["player_id"]: a["name"]
+            for a in store.actuals_for(season=season, day_number=r["day_number"])
+        }
         text = render_calibration_message(
             report,
             season=season,
@@ -271,10 +279,16 @@ def run_calibration(
                     telegram=telegram,
                 )
         if telegram and not backfill:
-            _resend_unsent(store, season=season, now=now, telegram=telegram)
+            _resend_unsent(
+                store,
+                season=season,
+                now=now,
+                telegram=telegram,
+                skip=set(outcome.reported),
+            )
     except Exception as e:
         logger.exception("calibration failed")
-        outcome.error = str(e)[:500]
+        outcome.error = f"{type(e).__name__}: {e}"[:500]
     return outcome
 
 
@@ -298,6 +312,7 @@ def backfill_predictions(
         raise ValueError(f"matchday {day_number} is not finished in the schedule")
     kickoff = md.first_kickoff.timestamp()
     availability, rate, _meta = load_coefficients()
+    # 400 days: enough history for prev_status (60-day window) and the played-share prior.
     since_iso = _iso(kickoff - 400 * 86400)
     players = store.stored_players(
         since_iso=since_iso,

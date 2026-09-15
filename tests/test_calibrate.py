@@ -229,3 +229,28 @@ def test_backfill_scores_before_kickoff_and_reports_apart(store_dsn):
     assert outcome.reported == [1] and send.call_count == 0
     assert store.report_for(SEASON, 1, backfill=True)["n"] == len(ids)
     assert store.report_for(SEASON, 1) is None
+
+
+def test_a_failed_send_is_not_retried_in_the_same_run(store_dsn):
+    corpus, ids = _seed(store_dsn, fetched_at=LAST1 + 4 * 3600)
+    store = _predict(store_dsn, ids, at=KICK1 - 60)
+    with patch("rehoboam.enrichment.calibrate.send_message", return_value=False) as send:
+        run_calibration(
+            store, SCHEDULE, season=SEASON, now=LAST1 + 5 * 3600, telegram=("tok", "chat")
+        )
+    assert send.call_count == 1
+
+
+def test_a_resent_report_carries_player_names(store_dsn):
+    corpus, ids = _seed(store_dsn, fetched_at=LAST1 + 4 * 3600)
+    store = _predict(store_dsn, ids, at=KICK1 - 60)
+    with patch("rehoboam.enrichment.calibrate.send_message", return_value=False):
+        run_calibration(
+            store, SCHEDULE, season=SEASON, now=LAST1 + 5 * 3600, telegram=("tok", "chat")
+        )
+    with patch("rehoboam.enrichment.calibrate.send_message", return_value=True) as send:
+        run_calibration(
+            store, SCHEDULE, season=SEASON, now=LAST1 + 6 * 3600, telegram=("tok", "chat")
+        )
+    text = send.call_args.args[2]
+    assert "P" in text.split("worst:")[1]  # last names are P<id>, not bare ids
