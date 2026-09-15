@@ -993,7 +993,14 @@ class AutoTrader:
             )
 
     def _propose_buy(
-        self, league, rec, ctx, *, bid: int | None = None, auto_approve_at: float | None = None
+        self,
+        league,
+        rec,
+        ctx,
+        *,
+        bid: int | None = None,
+        auto_approve_at: float | None = None,
+        waive_trend_floor: bool = False,
     ) -> bool:
         """Record and send a proposal instead of buying. True if recorded.
 
@@ -1030,7 +1037,8 @@ class AutoTrader:
         except Exception:
             logger.debug("proposal: no trend for %s", player.id, exc_info=True)
 
-        if _is_too_falling_to_propose(trend, self.settings):
+        too_falling = _is_too_falling_to_propose(trend, self.settings)
+        if too_falling and not waive_trend_floor:
             console.print(
                 f"[dim]Skip {player.last_name} — market value falling " f"{trend:.1f}%/7d[/dim]"
             )
@@ -1043,6 +1051,19 @@ class AutoTrader:
             return False
 
         risks: list[str] = []
+        if too_falling:
+            # The emergency fill asks anyway: an empty slot is -100 every
+            # matchday, which outranks a sliding market value (2026-09-15,
+            # Baack at -40%/7d was the only affordable body and was skipped).
+            logger.info(
+                "proposal-trend-waived player=%s trend=%.1f%% (empty slot outranks the floor)",
+                player.id,
+                trend,
+            )
+            risks.append(
+                f"Market value falling {trend:.1f}%/7d — proposed anyway: an empty slot "
+                "is -100 every matchday."
+            )
         if getattr(rec.score, "data_quality", None) and rec.score.data_quality.grade != "A":
             risks.append(
                 f"Data quality {rec.score.data_quality.grade} — no fitted history, "
@@ -1819,7 +1840,13 @@ class AutoTrader:
         # leftover as overbid afterwards. The old greedy walk ignored the
         # penalty entirely and bought 3 of 4 on 2026-08-31, missing the fourth
         # by 1,168,502 of overbid it had already committed elsewhere.
+        from .config import MAX_PLAYERS_PER_CLUB
         from .services.emergency_basket import EmergencyCandidate, select_emergency_basket
+
+        # League rule: three per club, open bids included. A candidate the gate
+        # would refuse must not take the basket's pick — on 2026-09-15 Henrichs
+        # did, with three Leipzig players already held, and the slot stayed empty.
+        club_held = club_counts(list(fresh_squad or []) + list(ctx.my_bids or []))
 
         by_id: dict[str, object] = {}
         candidates: list[EmergencyCandidate] = []
@@ -1841,6 +1868,20 @@ class AutoTrader:
                 continue
             if self._is_wash_trade(rec.player.id):
                 console.print(f"[dim]Skip {rec.player.last_name} — wash-trade block[/dim]")
+                continue
+            club = str(getattr(rec.player, "team_id", "") or "")
+            if club and club_held.get(club, 0) >= MAX_PLAYERS_PER_CLUB:
+                console.print(
+                    f"[dim]Skip {rec.player.last_name} — already hold "
+                    f"{club_held[club]} from club {club}[/dim]"
+                )
+                logger.info(
+                    "emergency-skip player=%s club=%s held=%d limit=%d",
+                    rec.player.id,
+                    club,
+                    club_held[club],
+                    MAX_PLAYERS_PER_CLUB,
+                )
                 continue
             # Only plain in-budget candidates — sell plans add execution risk
             # at kickoff that the emergency path explicitly avoids. The
@@ -1952,7 +1993,9 @@ class AutoTrader:
                 )
                 continue
 
-            if self._propose_buy(league, rec, ctx, bid=bid, auto_approve_at=deadline):
+            if self._propose_buy(
+                league, rec, ctx, bid=bid, auto_approve_at=deadline, waive_trend_floor=True
+            ):
                 proposed += 1
                 proposed_positions.append(rec.player.position)
                 # Reserve the money against the rest of this basket, so four

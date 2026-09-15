@@ -7,9 +7,15 @@ builds sell plans to fund purchases, and ranks squad players by expendability.
 
 import logging
 
-from rehoboam.config import INSTANT_SELL_PCT, MAX_LINEUP_PROB_FOR_BUY, POSITION_MINIMUMS
+from rehoboam.config import (
+    INSTANT_SELL_PCT,
+    MAX_LINEUP_PROB_FOR_BUY,
+    MAX_PLAYERS_PER_CLUB,
+    POSITION_MINIMUMS,
+)
 from rehoboam.formation import _POSITION_MAX_STARTERS, select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
+from rehoboam.services.safety_gate import club_counts
 
 from .models import (
     BuyRecommendation,
@@ -308,11 +314,28 @@ class DecisionEngine:
         skip_lineup_prob = 0
         skip_declining_minutes = 0
         skip_marginal_gain = 0
+        skip_club_limit = 0
+        club_held = club_counts(squad_list)
 
         recs: list[BuyRecommendation] = []
         for ps in market_scores:
             player = market_players.get(ps.player_id)
             if not player:
+                continue
+
+            # League rule: at most three players per club. The safety gate
+            # refuses a fourth at buy time; refusing him here keeps him out of
+            # the board and the emergency basket in the first place.
+            club = str(getattr(player, "team_id", "") or "")
+            if club and club_held.get(club, 0) >= MAX_PLAYERS_PER_CLUB:
+                skip_club_limit += 1
+                logger.debug(
+                    "buy-skip %s: club %s already at %d (max %d)",
+                    player.last_name,
+                    club,
+                    club_held[club],
+                    MAX_PLAYERS_PER_CLUB,
+                )
                 continue
 
             # Filter by minimum EP threshold
@@ -557,7 +580,7 @@ class DecisionEngine:
             "recommend_buys: %d candidates considered, %d viable, returning top %d "
             "(emergency=%s, budget=%d, min_ep=%.1f, min_upgrade=%.1f) | "
             "skipped: ep_floor=%d target_bar=%d lineup_prob=%d declining_minutes=%d "
-            "marginal_gain=%d",
+            "marginal_gain=%d club_limit=%d",
             len(market_scores),
             len(final_recs),
             len(top),
@@ -570,6 +593,7 @@ class DecisionEngine:
             skip_lineup_prob,
             skip_declining_minutes,
             skip_marginal_gain,
+            skip_club_limit,
         )
         for rec in top:
             logger.info(
