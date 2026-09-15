@@ -4,11 +4,12 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from rich.console import Console
 
 from .config import INSTANT_SELL_PCT
+from .kickoff import NextKickoff
 from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
 from .services.integrity import check_integrity, i3_budget_covered
@@ -16,10 +17,15 @@ from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
 from .services.safety_gate import BuyGate, club_counts
 from .services.session_facts import IntegrityFailure, SessionFacts
+from .store.calibration_store import CalibrationStore
 from .store.session_store import SessionStore
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+#: PR E: a league prediction needs a live status younger than this; older rows
+#: are skipped and counted rather than scored as if they were fresh.
+PREDICTION_STATUS_MAX_AGE_S = 48 * 3600
 
 
 @dataclass
@@ -366,6 +372,7 @@ class AutoTrader:
         dry_run: bool = False,
         app_name: str = "cli",
         session_store: SessionStore | None = None,
+        calibration_store: CalibrationStore | None = None,
     ):
         """
         Args:
@@ -380,6 +387,8 @@ class AutoTrader:
             session_store: Where session facts land. Defaults to a lazily
                 connected `SessionStore()` so callers that never pass one still
                 work; tests inject one pinned to a throwaway database.
+            calibration_store: Where league-wide predictions land (PR E). Defaults
+                to a lazily connected `CalibrationStore()`, same reasoning.
         """
         self.api = api
         self.settings = settings
@@ -388,6 +397,8 @@ class AutoTrader:
         self.dry_run = dry_run
         self.app_name = app_name
         self._session_store = session_store or SessionStore()
+        self._calibration_store = calibration_store or CalibrationStore()
+        self._next_kickoff: NextKickoff | None = None
 
         # Daily tracking
         self.daily_spend = 0
@@ -519,6 +530,7 @@ class AutoTrader:
         # guaranteed to agree on what "next kickoff" meant for this session.
         now = datetime.now(tz=timezone.utc)
         nk = trader.next_kickoff(league, now=now)
+        self._next_kickoff = nk
         days = max((nk.at - now).days, 0) if nk.at is not None else None
         phase = self._get_matchday_phase(days, matchday_in_progress=nk.matchday_in_progress)
 
@@ -640,6 +652,95 @@ class AutoTrader:
             if not ok:
                 ctx.session_refusal = f"I3: {detail}"
                 logger.warning("session-refusal I3 %s", detail)
+
+    def _write_league_predictions(self, ctx: EPSessionContext, nk: NextKickoff | None) -> int:
+        """PR E §1: score every live player from store rows and write `predictions`.
+
+        Returns the number of rows written; 0 with a logged reason when the
+        matchday is unknown, so rule I5 fails for the right cause. Everything
+        here reads the store and the already-built context — no API call.
+        """
+        from .formation import select_best_eleven
+        from .scoring.store_scorer import score_stored
+        from .scoring.v2.coefficients import load_coefficients
+
+        if nk is None or nk.at is None or nk.day_number is None:
+            logger.info(
+                "predictions: skipped, matchday unknown (source=%s)",
+                getattr(nk, "source", "none"),
+            )
+            return 0
+        now = datetime.now(tz=timezone.utc)
+        store = self._calibration_store
+        season = store.current_season()
+        if season is None:
+            logger.info("predictions: skipped, corpus has no season")
+            return 0
+        availability, rate, _meta = load_coefficients()
+        since_iso = (now - timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        players = store.stored_players(since_iso=since_iso, status_day=now.date())
+        fresh_after = now.timestamp() - PREDICTION_STATUS_MAX_AGE_S
+
+        owned = {p.id for p in ctx.squad}
+        listed = set((ctx.ep_result.get("market_players") or {}).keys())
+        lineup_map = ctx.ep_result.get("lineup_map") or {}
+        best_11 = {p.id for p in select_best_eleven(ctx.squad, lineup_map)} if lineup_map else set()
+        live_ep = {
+            s.player_id: float(s.expected_points) for s in ctx.ep_result.get("squad_scores") or []
+        }
+        live_ep.update(
+            {
+                pid: float(s.expected_points)
+                for pid, s in (ctx.ep_result.get("market_scores") or {}).items()
+            }
+        )
+
+        rows: list[dict] = []
+        skipped_stale = 0
+        for p in players:
+            if p.status_fetched_at is None or p.status_fetched_at < fresh_after:
+                skipped_stale += 1
+                continue
+            pred = score_stored(
+                p,
+                now=now,
+                max_status_age_days=self.settings.max_status_age_days,
+                availability=availability,
+                rate=rate,
+            )
+            rows.append(
+                {
+                    "session_id": self._session_batch_id,
+                    "player_id": p.player_id,
+                    "season": season,
+                    "day_number": nk.day_number,
+                    "kickoff": nk.at.timestamp(),
+                    "predicted_at": now.timestamp(),
+                    "predicted_ep": pred.predicted_ep,
+                    "p_status": pred.p_status,
+                    "rate": pred.rate,
+                    "prev_status": pred.prev_status,
+                    "live_status": p.live_status,
+                    "position": p.position,
+                    "team_id": p.team_id,
+                    "owned": p.player_id in owned,
+                    "listed": p.player_id in listed,
+                    "in_best_11": p.player_id in best_11,
+                    "live_ep": live_ep.get(p.player_id),
+                    "data_grade": pred.data_grade,
+                    "app": self.app_name,
+                    "dry_run": bool(self.dry_run),
+                    "backfill": False,
+                }
+            )
+        written = store.write_predictions(rows)
+        logger.info(
+            "predictions written=%d skipped_stale=%d matchday=%s",
+            written,
+            skipped_stale,
+            nk.day_number,
+        )
+        return written
 
     def _finish_facts(self, errors: list[str], start_time: float, phase: str, league) -> list:
         """Close out session facts at any exit: record, check, alert, board.
@@ -2455,14 +2556,24 @@ class AutoTrader:
                 pid
                 for pid, _ep in sorted(lineup_map.items(), key=lambda kv: kv[1], reverse=True)[:11]
             }
-            written = self.tracker.snapshot_predictions(
+            self.tracker.snapshot_predictions(
                 league_id=league.id,
                 squad_scores=squad_scores,
                 best_11_ids=best_11,
             )
-            self._facts.predictions_written = int(written)
         except Exception:
             logger.exception("snapshot_predictions failed (non-fatal)")
+
+        # PR E §1: score every live player from store rows and write
+        # `rehoboam.predictions`. Best-effort and store-only -- no API call --
+        # so a store outage or a missing matchday never stops the session; it
+        # only leaves I5 (no predictions written) to report why.
+        try:
+            league_written = self._write_league_predictions(ctx, self._next_kickoff)
+        except Exception:
+            logger.exception("league predictions failed (non-fatal)")
+            league_written = 0
+        self._facts.predictions_written = int(league_written)
         try:
             # REH-23: persist the team_value/budget snapshot the bot already
             # fetched in _build_session_context. Provides the longitudinal
