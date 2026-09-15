@@ -15,6 +15,7 @@ from datetime import date
 import psycopg
 from psycopg import sql
 
+from rehoboam.services.session_facts import SessionFacts
 from rehoboam.store import SCHEMA
 
 
@@ -72,3 +73,19 @@ def export_tables(
         upload(f"exports/{day.isoformat()}/{table}.csv.gz", data)
         sizes[table] = len(data)
     return sizes
+
+
+def facts_for_export(
+    sizes: dict[str, int], *, app: str, session_id: str, started_at: float, duration_s: float
+) -> SessionFacts:
+    """The row a completed export run leaves behind -- table count and total
+    bytes uploaded, summarized rather than one row per table."""
+    return SessionFacts(
+        session_id=session_id,
+        app=app,
+        mode="export",
+        started_at=started_at,
+        duration_s=duration_s,
+        errors=0,
+        extra={"tables": len(sizes), "bytes": sum(sizes.values())},
+    )

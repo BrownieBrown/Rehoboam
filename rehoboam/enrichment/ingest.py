@@ -18,10 +18,11 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 
 from rehoboam.enrichment.sweep import fetch_universe
+from rehoboam.services.session_facts import SessionFacts
 from rehoboam.store.corpus_store import CorpusStore
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,24 @@ class IngestStats:
     stopped_by: str | None = None
     started_at: float = field(default_factory=time.time)
     duration_s: float = 0.0
+
+
+def facts_for_ingest(stats: IngestStats, *, app: str, session_id: str) -> SessionFacts:
+    """The row a completed ingest run leaves for rule I7.
+
+    A per-player failure (`stats.failed`) is not a run failure -- the run
+    itself reached its end, so `errors` stays 0 and the failure count rides
+    along in `extra` instead, where it's visible without gating I7 on it.
+    """
+    return SessionFacts(
+        session_id=session_id,
+        app=app,
+        mode="ingest",
+        started_at=stats.started_at,
+        duration_s=stats.duration_s,
+        errors=0,
+        extra=asdict(stats),
+    )
 
 
 def _counting_client(client, budget: IngestBudget):

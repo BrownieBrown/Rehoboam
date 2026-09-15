@@ -5,12 +5,47 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock
 
-from rehoboam.enrichment.ingest import IngestBudget, run_ingestion
+from rehoboam.enrichment.ingest import IngestBudget, IngestStats, facts_for_ingest, run_ingestion
 from rehoboam.store import connect
 from rehoboam.store.corpus_store import CorpusStore
 
 LEAGUE = "L"
 DAY = date(2026, 9, 14)
+
+
+def test_facts_for_ingest_maps_stats_into_extra_and_zeroes_errors():
+    """A per-player failure (`stats.failed`) is not a run failure -- it rides
+    along in `extra` but `errors` stays 0 because the run itself completed."""
+    stats = IngestStats(
+        universe_size=500,
+        status_written=480,
+        performance_fetched=120,
+        mv_fetched=60,
+        failed=3,
+        requests=663,
+        stopped_by="deadline",
+        started_at=1_700_000.0,
+        duration_s=210.5,
+    )
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.session_id == "abc123"
+    assert facts.app == "external"
+    assert facts.mode == "ingest"
+    assert facts.started_at == 1_700_000.0
+    assert facts.duration_s == 210.5
+    assert facts.errors == 0
+    assert facts.error_text == ""
+    assert facts.extra == {
+        "universe_size": 500,
+        "status_written": 480,
+        "performance_fetched": 120,
+        "mv_fetched": 60,
+        "failed": 3,
+        "requests": 663,
+        "stopped_by": "deadline",
+        "started_at": 1_700_000.0,
+        "duration_s": 210.5,
+    }
 
 
 def _client(ids: list[str]) -> MagicMock:

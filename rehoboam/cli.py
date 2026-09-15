@@ -393,26 +393,53 @@ def ingest_cmd(
 ):
     """One budgeted ingestion pass — what func-rehoboam-external runs twice a day."""
     import time
+    import uuid
 
-    from .enrichment.ingest import IngestBudget, run_ingestion
+    from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from .services.session_facts import SessionFacts
     from .store.corpus_store import CorpusStore
+    from .store.session_store import SessionStore
 
     _ensure_store()
-    api, settings, league = _login_and_get_league(league_index)
-    budget = IngestBudget(
-        deadline=time.time() + (deadline_seconds or settings.ingest_deadline_seconds),
-        max_requests=max_requests or settings.ingest_max_requests,
-    )
-    stats = run_ingestion(
-        api.client,
-        CorpusStore(),
-        league_id=league.id,
-        budget=budget,
-        stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
-        mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
-        status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
-        throttle_seconds=throttle,
-    )
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    try:
+        api, settings, league = _login_and_get_league(league_index)
+        budget = IngestBudget(
+            deadline=time.time() + (deadline_seconds or settings.ingest_deadline_seconds),
+            max_requests=max_requests or settings.ingest_max_requests,
+        )
+        stats = run_ingestion(
+            api.client,
+            CorpusStore(),
+            league_id=league.id,
+            budget=budget,
+            stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
+            mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
+            status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
+            throttle_seconds=throttle,
+        )
+    except Exception as e:
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="cli",
+                    mode="ingest",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logger.error("session_facts write failed", exc_info=True)
+        raise
+    try:
+        SessionStore().record(facts_for_ingest(stats, app="cli", session_id=session_id))
+    except Exception:
+        logger.error("session_facts write failed", exc_info=True)
+
     table = Table(title="Ingestion")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
@@ -434,10 +461,14 @@ def ingest_cmd(
 def export_cmd():
     """One-off weekly export — every store table as gzip CSV in the Blob container."""
     import os
+    import time
+    import uuid
     from datetime import date
 
+    from .services.session_facts import SessionFacts
     from .store import connect
-    from .store.export import blob_uploader, export_tables
+    from .store.export import blob_uploader, export_tables, facts_for_export
+    from .store.session_store import SessionStore
 
     _ensure_store()
     conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
@@ -445,8 +476,40 @@ def export_cmd():
         console.print("[red]AZURE_STORAGE_CONNECTION_STRING is not set[/red]")
         raise typer.Exit(code=1)
     container = os.getenv("BLOB_CONTAINER", "rehoboam-data")
-    with connect() as conn:
-        sizes = export_tables(conn, blob_uploader(conn_str, container), day=date.today())
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    try:
+        with connect() as conn:
+            sizes = export_tables(conn, blob_uploader(conn_str, container), day=date.today())
+    except Exception as e:
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="cli",
+                    mode="export",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logger.error("session_facts write failed", exc_info=True)
+        raise
+    try:
+        SessionStore().record(
+            facts_for_export(
+                sizes,
+                app="cli",
+                session_id=session_id,
+                started_at=started_at,
+                duration_s=time.time() - started_at,
+            )
+        )
+    except Exception:
+        logger.error("session_facts write failed", exc_info=True)
+
     table = Table(title="Export")
     table.add_column("Table")
     table.add_column("Bytes", justify="right")
