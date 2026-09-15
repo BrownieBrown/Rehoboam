@@ -252,6 +252,62 @@ class TestComplianceRebid:
         assert (adjusted, canceled) == (0, 1)
 
 
+def test_a_session_refusal_blocks_plain_buys_but_not_the_emergency_fill(trader, api):
+    """PR D's I3 stops new offers session-wide, but never the emergency fill.
+
+    An empty lineup slot is -100 points regardless of budget deficit, so the
+    emergency fill's gate is built without `session_refusal` — REH-114's
+    proposal flow (`_propose_buy`) must still record the pick. The trade-pair
+    pre-flight, by contrast, is a plain buy candidate and must see the same
+    I3 reason `check_buy` reports for any other refusal.
+    """
+    session_refusal = "I3: deficit EUR 1,000 not covered"
+
+    # Plain buy: the trade-pair pre-flight, priced clean (no ceiling/budget
+    # issue of its own) so I3 is the only reason it can be refused for.
+    sell = _player("sell", price=3_000_000, team_id="club-sell")
+    buy = _player("buy", price=3_000_000, team_id="club-buy")
+    pair = SimpleNamespace(
+        sell_player=sell,
+        buy_player=buy,
+        recommended_bid=3_000_000,
+        ep_gain=10.0,
+        sell_is_starter=False,
+        metadata={},
+    )
+    ctx = _ctx([], current_budget=50_000_000, market={buy.id: buy})
+    ctx.session_refusal = session_refusal
+
+    refused = trader._trade_pair_preflight(pair, ctx)
+    assert refused is not None
+    assert refused.startswith("I3:")
+    assert api.buy_player.call_count == 0
+
+    # Emergency fill: same session, same refusal on `ctx` — but this path is
+    # exempt, so the candidate must still be proposed.
+    clean = _player("clean", price=4_000_000, team_id="club-clean")
+    squad = (
+        [_player("gk0", "Goalkeeper", team_id="club-gk")]
+        + [_player(f"d{i}", "Defender", team_id=f"club-d{i}") for i in range(4)]
+        + [_player(f"m{i}", "Midfielder", team_id=f"club-m{i}") for i in range(4)]
+        + [_player("fwd0", "Forward", team_id="club-fwd")]
+    )
+    fill_ctx = _ctx(
+        [_rec(clean, bid=4_000_000, ep_gain=5.0)],
+        current_budget=50_000_000,
+        squad=squad,
+    )
+    fill_ctx.session_refusal = session_refusal
+
+    trader._propose_buy = spy = _ProposalSpy()
+    results = trader._run_emergency_squad_fill(
+        league=SimpleNamespace(id="L"), ctx=fill_ctx, fresh_squad=squad, slots_short=1
+    )
+
+    assert spy.ids == ["clean"], "the emergency fill's gate must not carry the session refusal"
+    assert any(r.success for r in results)
+
+
 def test_gate_refusal_is_logged_at_error(trader, api, caplog):
     """A refusal is money not spent — it must be visible in the log."""
     from tests.conftest import permissive_buy_gate

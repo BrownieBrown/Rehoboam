@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,12 +30,16 @@ def _prepare() -> None:
 def ingest(timer: func.TimerRequest):
     from rehoboam.api import KickbaseAPI
     from rehoboam.config import get_settings
-    from rehoboam.enrichment.ingest import IngestBudget, run_ingestion
+    from rehoboam.enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from rehoboam.services.session_facts import SessionFacts
     from rehoboam.store import ensure_ready
     from rehoboam.store.corpus_store import CorpusStore
+    from rehoboam.store.session_store import SessionStore
 
     _prepare()
     logging.info("ingestion-start")
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
     try:
         ensure_ready()
         settings = get_settings()
@@ -49,7 +54,7 @@ def ingest(timer: func.TimerRequest):
             deadline=time.time() + settings.ingest_deadline_seconds,
             max_requests=settings.ingest_max_requests,
         )
-        run_ingestion(
+        stats = run_ingestion(
             api.client,
             CorpusStore(),
             league_id=league.id,
@@ -58,18 +63,40 @@ def ingest(timer: func.TimerRequest):
             mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
             status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
         )
+        try:
+            SessionStore().record(facts_for_ingest(stats, app="external", session_id=session_id))
+        except Exception:
+            logging.error("session_facts write failed", exc_info=True)
     except Exception as e:
         logging.error(f"Ingestion failed: {e}", exc_info=True)
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="external",
+                    mode="ingest",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logging.error("session_facts write failed", exc_info=True)
 
 
 # Sunday 03:00 UTC, when nothing else runs.
 @app.timer_trigger(schedule="0 0 3 * * 0", arg_name="timer", run_on_startup=False)
 def weekly_export(timer: func.TimerRequest):
+    from rehoboam.services.session_facts import SessionFacts
     from rehoboam.store import connect, ensure_ready
-    from rehoboam.store.export import blob_uploader, export_tables
+    from rehoboam.store.export import blob_uploader, export_tables, facts_for_export
+    from rehoboam.store.session_store import SessionStore
 
     _prepare()
     logging.info("export-start")
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
     try:
         ensure_ready()
         upload = blob_uploader(
@@ -79,5 +106,31 @@ def weekly_export(timer: func.TimerRequest):
         with connect() as conn:
             sizes = export_tables(conn, upload, day=datetime.now(tz=timezone.utc).date())
         logging.info("export-end tables=%d bytes=%d", len(sizes), sum(sizes.values()))
+        try:
+            SessionStore().record(
+                facts_for_export(
+                    sizes,
+                    app="external",
+                    session_id=session_id,
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                )
+            )
+        except Exception:
+            logging.error("session_facts write failed", exc_info=True)
     except Exception as e:
         logging.error(f"Export failed: {e}", exc_info=True)
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="external",
+                    mode="export",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logging.error("session_facts write failed", exc_info=True)

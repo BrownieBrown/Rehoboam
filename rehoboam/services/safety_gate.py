@@ -57,6 +57,7 @@ def check_buy(
     max_players_per_club: int = MAX_PLAYERS_PER_CLUB,
     total_worth: int | None = None,
     max_single_buy_pct: float | None = None,
+    session_refusal: str | None = None,
 ) -> GateResult:
     """Is this buy allowed to execute?
 
@@ -64,6 +65,11 @@ def check_buy(
     made against. An id outside it never reaches ``api.buy_player``: a forged
     webhook callback, or a stale proposal naming a player who has since left
     the market, must not be able to spend money.
+
+    ``session_refusal`` carries a session-wide reason (PR D's integrity rule
+    I3: budget minus open offers not covered) set once for the whole session
+    rather than computed per player. It is reported exactly like any other
+    reason — appended last, so existing per-player reasons keep their order.
     """
     reasons: list[str] = []
 
@@ -132,6 +138,9 @@ def check_buy(
                 f"EUR {total_worth:,}) — grow team value, selling will not raise it"
             )
 
+    if session_refusal:
+        reasons.append(session_refusal)
+
     return GateResult(ok=not reasons, reasons=reasons)
 
 
@@ -172,6 +181,11 @@ class BuyGate:
     #: it (REH-118). None disables the check rather than failing the buy.
     total_worth: int | None = None
     max_single_buy_pct: float | None = None
+    #: PR D's integrity rule I3, set once per session rather than per player.
+    #: None everywhere except the emergency fill, which is deliberately never
+    #: given this — an empty lineup slot is -100 points, worse than the
+    #: deficit I3 guards against.
+    session_refusal: str | None = None
 
     def check(self, *, player_id: str, bid: int) -> GateResult:
         """Run the gate for this player at this price."""
@@ -188,4 +202,5 @@ class BuyGate:
             squad_club_counts=self.squad_club_counts,
             total_worth=self.total_worth,
             max_single_buy_pct=self.max_single_buy_pct,
+            session_refusal=self.session_refusal,
         )

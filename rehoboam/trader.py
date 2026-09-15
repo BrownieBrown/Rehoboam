@@ -31,6 +31,7 @@ from .bidding_strategy import (
 from .config import INSTANT_SELL_PCT, Settings
 from .formation import can_fill_starting_eleven
 from .kickbase_client import League
+from .kickoff import NextKickoff, fixtures_from_myeleven, next_kickoff_from_matchdays
 from .matchup_analyzer import MatchupAnalyzer
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
@@ -106,24 +107,6 @@ def matchday_in_progress(
     return any(cutoff <= f < now for f in fixtures)
 
 
-def _parse_match_date(value) -> datetime | None:
-    """Parse a Kickbase match date from either an epoch number or an ISO string.
-
-    Returns None for anything unparseable so callers can keep collecting
-    candidates instead of aborting on one bad entry.
-    """
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        if isinstance(value, int | float):
-            return datetime.fromtimestamp(value, tz=timezone.utc)
-        if isinstance(value, str):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, OSError, OverflowError):
-        return None
-    return None
-
-
 class Trader:
     """EP-first orchestrator for the auto trading pipeline."""
 
@@ -162,78 +145,97 @@ class Trader:
     # Matchday timing
     # ------------------------------------------------------------------
 
-    def get_days_until_match(self, league) -> int | None:
+    def next_kickoff(self, league, *, now: datetime | None = None) -> NextKickoff:
+        """The next kickoff, schedule-first with `/myeleven` as the cross-check.
+
+        The competition schedule (`get_competition_matchdays`) lists the
+        whole season's fixtures and never blanks out between matchdays, so
+        it is the primary source. `/myeleven` only carries fixtures for
+        players currently on our squad -- it can go empty (new season, squad
+        rebuilt after a position was sold off) even though the schedule
+        knows perfectly well when the next round kicks off -- so it is kept
+        as a fallback when the schedule is unreachable, and always as a
+        cross-check either way.
+
+        Each source is fetched in its own try/except: a failure there means
+        that source contributes nothing, it does not take the other source
+        down with it. `matchday_in_progress` is read from `/myeleven`'s
+        fixtures exactly as before this method existed -- the schedule lists
+        every fixture in the competition, not just ours, so it cannot answer
+        "has OUR round started" the way `/myeleven` can.
+        """
+        now = now or datetime.now(tz=timezone.utc)
+
+        schedule_at: datetime | None = None
+        try:
+            schedule_payload = self.api.get_competition_matchdays()
+            schedule_at = next_kickoff_from_matchdays(schedule_payload, now)
+        except Exception:
+            logger.warning("next-kickoff: schedule fetch/parse failed", exc_info=True)
+
+        myeleven_fixtures: list[datetime] = []
+        myeleven_fetched = False
+        try:
+            starting_eleven = self.api.get_starting_eleven(league)
+            if not isinstance(starting_eleven, dict):
+                logger.warning(
+                    "next-match: unexpected /myeleven payload type=%s",
+                    type(starting_eleven).__name__,
+                )
+            else:
+                myeleven_fetched = True
+                myeleven_fixtures = fixtures_from_myeleven(starting_eleven)
+        except Exception:
+            logger.warning("next-match: /myeleven fetch failed", exc_info=True)
+
+        upcoming_myeleven = [d for d in myeleven_fixtures if d >= now]
+        myeleven_at = min(upcoming_myeleven) if upcoming_myeleven else None
+        if myeleven_fetched and myeleven_at is None:
+            logger.warning(
+                "next-match: no upcoming fixture found in /myeleven "
+                "(parsed=%d date(s)) - the cross-check has nothing to offer",
+                len(myeleven_fixtures),
+            )
+
+        if schedule_at is not None:
+            at, source, cross_check = schedule_at, "schedule", myeleven_at
+        elif myeleven_at is not None:
+            at, source, cross_check = myeleven_at, "myeleven", None
+        else:
+            at, source, cross_check = None, "none", None
+
+        in_progress = matchday_in_progress(myeleven_fixtures, now)
+
+        logger.info("next-kickoff at=%s source=%s cross_check=%s", at, source, cross_check)
+        if schedule_at is not None and myeleven_at is not None:
+            disagreement_hours = abs((schedule_at - myeleven_at).total_seconds()) / 3600
+            if disagreement_hours > 24:
+                logger.warning("next-kickoff sources disagree by %.0f h", disagreement_hours)
+
+        return NextKickoff(
+            at=at, source=source, cross_check=cross_check, matchday_in_progress=in_progress
+        )
+
+    def get_days_until_match(self, league, *, now: datetime | None = None) -> int | None:
         """Return days until the next match, or None if genuinely unknown.
 
         Uses timezone-aware datetime comparison to avoid the naive/aware
         TypeError that silently broke matchday-phase detection in early
         revisions of this code.
 
-        Kickbase has moved this value between aliases across seasons. Up to
-        2025/26 it was a single ``nm``/``nextMatch``; as of 2026/27 the
-        /myeleven response carries no such key and the fixture date is
-        instead attached per player under ``md``, split across ``lp`` (the
-        set lineup) and ``nlp`` (everyone else). Both shapes are read,
-        newest first, and a shape we cannot read at all is logged rather than
-        swallowed -- returning None here disables both the matchday "locked"
-        phase and the budget-at-kickoff guard, so a silent None is expensive.
+        Delegates to `next_kickoff`, which reads the competition schedule
+        first and falls back to `/myeleven` -- see that method for why. This
+        method keeps its own return contract (days, floored at 0, or None
+        when neither source has an answer) and its side effect
+        (`self._last_matchday_in_progress`) so every existing caller stays
+        unchanged.
         """
-        try:
-            starting_eleven = self.api.get_starting_eleven(league)
-        except Exception:
-            logger.warning("next-match: /myeleven fetch failed", exc_info=True)
+        now = now or datetime.now(tz=timezone.utc)
+        nk = self.next_kickoff(league, now=now)
+        self._last_matchday_in_progress = nk.matchday_in_progress
+        if nk.at is None:
             return None
-
-        if not isinstance(starting_eleven, dict):
-            logger.warning(
-                "next-match: unexpected /myeleven payload type=%s",
-                type(starting_eleven).__name__,
-            )
-            return None
-
-        now = datetime.now(tz=timezone.utc)
-        candidates: list[datetime] = []
-
-        # Legacy single-value aliases (pre-2026/27).
-        legacy = starting_eleven.get("nm") or starting_eleven.get("nextMatch")
-        parsed = _parse_match_date(legacy)
-        if parsed is not None:
-            candidates.append(parsed)
-
-        # 2026/27 shape: one fixture date per player, under "md".
-        # lp[] is the set lineup, nlp[] the players outside it -- read BOTH.
-        # Before a lineup is set lp[] is empty and nlp[] holds the whole squad;
-        # afterwards the starters move to lp[], and reading only nlp[] would
-        # time the guard off the bench's fixtures.
-        for key in ("lp", "nlp"):
-            for entry in starting_eleven.get(key) or []:
-                if isinstance(entry, dict):
-                    parsed = _parse_match_date(entry.get("md"))
-                    if parsed is not None:
-                        candidates.append(parsed)
-
-        self._last_matchday_in_progress = matchday_in_progress(candidates, now)
-
-        upcoming = [d for d in candidates if d >= now]
-        if not upcoming:
-            logger.warning(
-                "next-match: no upcoming fixture found in /myeleven "
-                "(keys=%s, parsed=%d date(s)) - matchday phase detection and "
-                "the budget-at-kickoff guard are both disabled",
-                sorted(starting_eleven.keys()),
-                len(candidates),
-            )
-            return None
-
-        # Budget must be non-negative at the FIRST kickoff among our players,
-        # so the earliest upcoming fixture is the one that binds.
-        next_match_date = min(upcoming)
-        logger.debug(
-            "next-match: %s (from %d candidate date(s))",
-            next_match_date.isoformat(),
-            len(candidates),
-        )
-        return max((next_match_date - now).days, 0)
+        return max((nk.at - now).days, 0)
 
     # ------------------------------------------------------------------
     # EP pipeline

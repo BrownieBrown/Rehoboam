@@ -230,6 +230,7 @@ def trading_session(timer: func.TimerRequest):
             max_trades_per_session=max_trades,
             max_daily_spend=max_spend,
             dry_run=dry_run,
+            app_name="function",
         )
 
         session = trader.run_full_session(league)

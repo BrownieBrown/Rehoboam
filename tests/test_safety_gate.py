@@ -158,3 +158,13 @@ class TestClubLimit:
         r = check_buy(**self._kwargs(club_id="40", squad_club_counts={"40": 3}))
         reason = next(x for x in r.reasons if "club limit" in x)
         assert "40" in reason and "3" in reason
+
+
+def test_session_refusal_is_reported_like_any_other_reason():
+    from tests.conftest import permissive_buy_gate
+
+    gate = permissive_buy_gate("p1", session_refusal="I3: deficit EUR 1,000 not covered")
+    verdict = gate.check(player_id="p1", bid=1_000)
+    assert not verdict.ok
+    assert any(r.startswith("I3:") for r in verdict.reasons)
+    assert permissive_buy_gate("p1").check(player_id="p1", bid=1_000).ok

@@ -5,12 +5,77 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock
 
-from rehoboam.enrichment.ingest import IngestBudget, run_ingestion
+from rehoboam.enrichment.ingest import IngestBudget, IngestStats, facts_for_ingest, run_ingestion
 from rehoboam.store import connect
 from rehoboam.store.corpus_store import CorpusStore
 
 LEAGUE = "L"
 DAY = date(2026, 9, 14)
+
+
+def test_facts_for_ingest_maps_stats_into_extra_and_zeroes_errors():
+    """A per-player failure (`stats.failed`) is not a run failure -- it rides
+    along in `extra` but `errors` stays 0 because the run itself completed."""
+    stats = IngestStats(
+        universe_size=500,
+        status_written=480,
+        performance_fetched=120,
+        mv_fetched=60,
+        failed=3,
+        requests=663,
+        stopped_by="deadline",
+        started_at=1_700_000.0,
+        duration_s=210.5,
+    )
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.session_id == "abc123"
+    assert facts.app == "external"
+    assert facts.mode == "ingest"
+    assert facts.started_at == 1_700_000.0
+    assert facts.duration_s == 210.5
+    assert facts.errors == 0
+    assert facts.error_text == ""
+    assert facts.extra == {
+        "universe_size": 500,
+        "status_written": 480,
+        "performance_fetched": 120,
+        "mv_fetched": 60,
+        "failed": 3,
+        "requests": 663,
+        "stopped_by": "deadline",
+        "started_at": 1_700_000.0,
+        "duration_s": 210.5,
+    }
+
+
+def test_facts_for_ingest_flags_a_run_that_wrote_nothing():
+    """Every player failed and none of the write counters moved -- unlike the
+    test above, there is no evidence the run did anything, so I7 must not
+    read this as a completed ingest."""
+    stats = IngestStats(universe_size=5, failed=5, started_at=1_700_000.0, duration_s=1.0)
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.errors == 1
+    assert facts.error_text == "5 player(s) failed, nothing written"
+
+
+def test_facts_for_ingest_any_write_at_all_is_not_an_error():
+    """Some players failed, but at least one write landed -- the run made
+    progress, so it still counts toward I7 even with failures in `extra`."""
+    stats = IngestStats(
+        universe_size=5, status_written=1, failed=5, started_at=1_700_000.0, duration_s=1.0
+    )
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.errors == 0
+    assert facts.error_text == ""
+
+
+def test_facts_for_ingest_nothing_stale_is_not_an_error():
+    """A universe with nothing stale to fetch: every counter is 0, including
+    `failed` -- that's a clean no-op run, not a failure."""
+    stats = IngestStats(universe_size=5, started_at=1_700_000.0, duration_s=1.0)
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.errors == 0
+    assert facts.error_text == ""
 
 
 def _client(ids: list[str]) -> MagicMock:
