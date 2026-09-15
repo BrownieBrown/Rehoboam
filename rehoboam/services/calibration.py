@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from rehoboam.backtest.metrics import spearman
-from rehoboam.formation import select_best_eleven
+from rehoboam.formation import is_legal_formation, select_best_eleven
 
 GATE_REQUIRED_REPORTS = 3
 GATE_REQUIRED_CLEAN_DAYS = 7
@@ -83,7 +83,7 @@ def _best_total(rows: list[CalRow], key) -> float | None:
     candidates = [r for r in rows if key(r) is not None]
     squad = [SimpleNamespace(id=r.player_id, position=r.position) for r in candidates]
     eleven = select_best_eleven(squad, {r.player_id: key(r) for r in candidates})
-    if len(eleven) < 11:
+    if len(eleven) < 11 or not is_legal_formation(eleven):
         return None
     actual = {r.player_id: r.actual for r in candidates}
     return sum(actual[p.id] for p in eleven)
@@ -127,7 +127,7 @@ def build_report(rows: list[CalRow], *, n_stale_rows: int = 0) -> CalibrationRep
     for status in sorted({r.live_status for r in predicted}, key=lambda s: (s is None, s)):
         by_status[str(status)] = _bucket([r for r in predicted if r.live_status == status])
     worst = sorted(predicted, key=lambda r: abs(r.predicted - r.actual), reverse=True)[:3]
-    live_rows = [r for r in predicted if r.live is not None]
+    live_rows = [r for r in rows if r.live is not None]
     return CalibrationReport(
         n=len(predicted),
         n_unpredicted=len(rows) - len(predicted),

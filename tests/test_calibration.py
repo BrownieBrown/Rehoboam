@@ -175,6 +175,27 @@ class TestBuildReport:
         r = build_report([])
         assert r.n == 0 and r.mae is None and r.spearman is None and r.worst == []
 
+    def test_a_squad_with_no_legal_eleven_has_no_regret(self):
+        # 1 GK, 3 DEF, 3 MID, 6 FW: eleven bodies, but no Kickbase formation fits.
+        rows = []
+        pid = 0
+        for pos, n in (
+            ("Goalkeeper", 1),
+            ("Defender", 3),
+            ("Midfielder", 3),
+            ("Forward", 6),
+        ):
+            for _ in range(n):
+                pid += 1
+                rows.append(_row(str(pid), 50 - pid, 50 - pid, position=pos))
+        r = build_report(rows)
+        assert r.top11_regret is None and r.baseline_top11_regret is None
+
+    def test_live_spearman_counts_rows_without_a_prediction(self):
+        rows = [_row("a", 10, None, live=11.0), _row("b", 20, 18, live=19.0)]
+        r = build_report(rows)
+        assert r.live_n == 2 and r.live_spearman == pytest.approx(1.0)
+
 
 def _report(**over) -> CalibrationReport:
     base = build_report(_league())
