@@ -66,9 +66,14 @@ def test_failures_are_recorded_per_session(store_dsn):
     assert store.failures("nope") == []
 
 
-def test_last_ingest_completed_at_ignores_failed_runs_and_other_apps(store_dsn):
+def test_last_ingest_completed_at_ignores_failed_runs_and_other_modes(store_dsn):
     store = SessionStore(dsn=store_dsn)
-    store.record(_facts(session_id="t1", app="function", started_at=5_000.0, duration_s=10.0))
+    # Not filtered by `app` -- a manual `rehoboam ingest` catch-up (app
+    # "cli") counts the same as the scheduled external one, so the row
+    # excluded here is excluded by `mode`, not by `app`.
+    store.record(
+        _facts(session_id="t1", app="external", mode="export", started_at=5_000.0, duration_s=10.0)
+    )
     store.record(
         _facts(
             session_id="i1",
@@ -106,3 +111,13 @@ def test_extra_is_stored_as_json(store_dsn):
         )
     )
     assert store.facts("i1")["extra"] == {"status_written": 462}
+
+
+def test_extra_none_round_trips_as_sql_null(store_dsn):
+    """`extra=None` must go over the wire as SQL NULL, not the JSON value
+    `null` -- Jsonb(None) would serialize to the latter, and `facts()`
+    would then read back a JSON null instead of Python `None`."""
+    store = SessionStore(dsn=store_dsn)
+    store.record(_facts(session_id="i1", extra=None))
+    row = store.facts("i1")
+    assert row["extra"] is None

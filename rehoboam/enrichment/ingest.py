@@ -74,17 +74,27 @@ class IngestStats:
 def facts_for_ingest(stats: IngestStats, *, app: str, session_id: str) -> SessionFacts:
     """The row a completed ingest run leaves for rule I7.
 
-    A per-player failure (`stats.failed`) is not a run failure -- the run
-    itself reached its end, so `errors` stays 0 and the failure count rides
-    along in `extra` instead, where it's visible without gating I7 on it.
+    A per-player failure (`stats.failed`) is not a run failure on its own --
+    the run itself reached its end, so `errors` stays 0 and the failure
+    count rides along in `extra` instead, where it's visible without gating
+    I7 on it. The exception is a run that failed on every player and wrote
+    nothing at all: with none of the write counters above zero, `extra`
+    would be the only evidence anything went wrong, and I7 would read this
+    row as a completed ingest with nothing to show for it.
     """
+    wrote_nothing = stats.failed and not (
+        stats.status_written or stats.performance_fetched or stats.mv_fetched
+    )
+    errors = 1 if wrote_nothing else 0
+    error_text = f"{stats.failed} player(s) failed, nothing written" if wrote_nothing else ""
     return SessionFacts(
         session_id=session_id,
         app=app,
         mode="ingest",
         started_at=stats.started_at,
         duration_s=stats.duration_s,
-        errors=0,
+        errors=errors,
+        error_text=error_text,
         extra=asdict(stats),
     )
 

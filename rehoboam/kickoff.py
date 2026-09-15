@@ -1,6 +1,6 @@
 """The next kickoff: the competition schedule first, `/myeleven` as the cross-check.
 
-Probed live 2026-09-15: `/config`'s competition-matchdays endpoint returns
+Probed live 2026-09-15: `GET /v4/competitions/1/matchdays` returns
 `{day, it: [ {day, mdln, it: [ {dt, st, mi, t1, t2, ...} ]} ]}` and, unlike
 `/myeleven`, never blanks out between matchdays -- it lists the whole
 schedule, future rounds included, with `st == 0` marking a fixture that

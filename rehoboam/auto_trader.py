@@ -596,7 +596,9 @@ class AutoTrader:
         already accounted for in the phase/gate logic that placed it --
         what integrity needs to see is money committed *outside* that,
         i.e. bids Marco placed by hand that `get_pending_bids` (the bot's
-        own bid ledger) has no row for.
+        own bid ledger) has no row for. If that read fails, every open bid
+        counts as manual (fail toward reporting exposure, not hiding it) --
+        no integrity rule reads the field today, so nothing gates on it.
         """
         from .formation import get_position_counts
 
@@ -609,6 +611,9 @@ class AutoTrader:
         self._facts.squad_mid = counts["Midfielder"]
         self._facts.squad_fw = counts["Forward"]
         self._facts.budget = int(ctx.current_budget)
+        # Upper bound: this sums full market value, but a real instant sell
+        # pays out INSTANT_SELL_PCT of it (`config.py`) -- 1.0 today, so the
+        # sum is exact for now. Scale by it here if that constant ever drops.
         self._facts.sellable_value = sum(int(p.market_value) for p in ctx.squad)
         self._facts.open_offers_total = sum(int(b.user_offer_price or 0) for b in ctx.my_bids)
 
@@ -636,7 +641,7 @@ class AutoTrader:
                 ctx.session_refusal = f"I3: {detail}"
                 logger.warning("session-refusal I3 %s", detail)
 
-    def _finish_facts(self, errors: list[str], start_time: float, phase: str) -> list:
+    def _finish_facts(self, errors: list[str], start_time: float, phase: str, league) -> list:
         """Close out session facts at any exit: record, check, alert, board.
 
         Called from all three of `run_full_session`'s exits -- the normal
@@ -650,8 +655,8 @@ class AutoTrader:
         `phase` is the caller's own answer for what phase this session ended
         in -- not read back off `self._facts`, because the pipeline-failure
         exit has no context to read it from and needs to stamp `"unknown"`
-        instead. Never raises: each side effect (store write, the check
-        itself, the alert) is its own try/except, so one failing --
+        instead. Never raises: each side effect (store write, the refresh,
+        the check itself, the alert) is its own try/except, so one failing --
         Postgres unreachable, Telegram down -- cannot take out the others or
         the session that called this.
         """
@@ -664,20 +669,54 @@ class AutoTrader:
         facts.error_text = "; ".join(errors)[:2000]
         facts.phase = phase
 
+        # The pre-flight I3 refusal in `_facts_from_context` reads budget and
+        # open offers as they stood before the session spent anything -- that
+        # is deliberate, it is a pre-flight. The end-of-session I3 rule below
+        # is a report, not a gate, and must reflect what the session actually
+        # left behind, so refresh both from the live API one more time.
+        try:
+            facts.budget = int(self.api.get_team_info(league)["budget"])
+            facts.open_offers_total = int(
+                sum(p.user_offer_price for p in self.api.get_my_bids(league))
+            )
+        except Exception:
+            logger.warning("facts: could not refresh budget/open_offers for I3", exc_info=True)
+
         try:
             self._session_store.record(facts)
         except Exception:
             logger.warning("session-facts: could not record final row", exc_info=True)
+
+        # `last_ingest_completed_at` gets its own try/except, separate from
+        # `check_integrity` below: the old code read it inside that same try,
+        # so a store outage skipped the whole check and printed "all seven
+        # rules pass" -- a false green precisely when the store is the thing
+        # that's down. Falling back to None instead lets I7 fail naturally
+        # ("ingestion last completed never"); the "(store unreachable)" tag
+        # is stitched onto that failure below so the detail says why.
+        store_unreachable = False
+        last_ingest_completed_at = None
+        try:
+            last_ingest_completed_at = self._session_store.last_ingest_completed_at()
+        except Exception:
+            store_unreachable = True
+            logger.warning("integrity: could not read last_ingest_completed_at", exc_info=True)
 
         failures: list[IntegrityFailure] = []
         try:
             failures = check_integrity(
                 facts,
                 now=time.time(),
-                last_ingest_completed_at=self._session_store.last_ingest_completed_at(),
+                last_ingest_completed_at=last_ingest_completed_at,
             )
         except Exception:
             logger.warning("integrity: check_integrity failed", exc_info=True)
+
+        if store_unreachable:
+            failures = [
+                IntegrityFailure(f.rule, f"{f.detail} (store unreachable)") if f.rule == "I7" else f
+                for f in failures
+            ]
 
         if failures:
             try:
@@ -694,13 +733,23 @@ class AutoTrader:
         except Exception:
             logger.warning("integrity: could not print the board", exc_info=True)
 
-        if failures and self.settings.telegram_bot_token and self.settings.telegram_chat_id:
+        # Dry runs mirror `_send_proposal_overview`: preview locally, never
+        # page. Recording the row and the failures above still happens --
+        # only the outbound alert is gated on `dry_run`.
+        if (
+            failures
+            and not self.dry_run
+            and self.settings.telegram_bot_token
+            and self.settings.telegram_chat_id
+        ):
             try:
                 lines = "\n".join(f"• {f.rule} {f.detail}" for f in failures)
                 text = (
                     f"Rehoboam integrity — {self.app_name} {self.settings.trading_mode} "
                     f"session {facts.session_id}\n{lines}"
                 )
+                if facts.errors > 0:
+                    text += f"\nErrors: {facts.error_text[:300]}"
                 send_message(self.settings.telegram_bot_token, self.settings.telegram_chat_id, text)
             except Exception:
                 logger.warning("integrity: telegram alert failed", exc_info=True)
@@ -2350,7 +2399,7 @@ class AutoTrader:
             # pipeline call that would have told us is exactly what failed.
             # Today this exit logs no session-end at all, which is why prod
             # telemetry has no trace of a pipeline failure ever happening.
-            integrity_failures = self._finish_facts(errors, start_time, "unknown")
+            integrity_failures = self._finish_facts(errors, start_time, "unknown", league)
             logger.info(
                 "session-end duration=%.1fs mode=%s phase=unknown errors=%d",
                 time.time() - start_time,
@@ -2464,13 +2513,15 @@ class AutoTrader:
                 console.print(f"[red]{error_msg}[/red]")
                 errors.append(error_msg)
 
-        # Fetched fresh rather than reusing `fresh_squad` above, which the
-        # fill (if it ran) has just changed. Runs whether or not there was an
-        # emergency: I2 needs to know the squad ended up fieldable either way.
+        # Reuses `fresh_squad` rather than re-fetching: the fill (if it ran)
+        # placed bids, not squad changes -- a won auction only lands on the
+        # squad once the bid resolves, next session. Runs whether or not
+        # there was an emergency: I2 needs to know the squad ended up
+        # fieldable either way.
         try:
             from .formation import fieldability
 
-            fb = fieldability(self.api.get_squad(league))
+            fb = fieldability(fresh_squad)
             self._facts.fieldable_count = 11 if fb.ok else 11 - fb.purchases
         except Exception:
             logger.warning("facts: could not compute fieldable_count", exc_info=True)
@@ -2606,7 +2657,9 @@ class AutoTrader:
             len(errors),
         )
 
-        integrity_failures = self._finish_facts(errors, start_time, ctx.matchday_phase.phase)
+        integrity_failures = self._finish_facts(
+            errors, start_time, ctx.matchday_phase.phase, league
+        )
 
         return AutoTradeSession(
             start_time=start_time,
@@ -2671,7 +2724,9 @@ class AutoTrader:
             len(errors),
             reason,
         )
-        integrity_failures = self._finish_facts(errors, start_time, ctx.matchday_phase.phase)
+        integrity_failures = self._finish_facts(
+            errors, start_time, ctx.matchday_phase.phase, league
+        )
         return AutoTradeSession(
             start_time=start_time,
             end_time=end_time,

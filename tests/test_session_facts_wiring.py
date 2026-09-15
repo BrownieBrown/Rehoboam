@@ -174,7 +174,9 @@ def test_lineup_only_i3_failure_only_alerts(store_dsn):
 
 
 def test_failures_are_recorded_and_sent_once(store_dsn, ctx_factory):
-    trader = _trader(store_dsn, _legal_squad(), telegram=True)
+    # dry_run=False -- a dry run stays quiet on Telegram (Task 2 below), and
+    # this test is specifically about the alert being sent.
+    trader = _trader(store_dsn, _legal_squad(), telegram=True, dry_run=False)
     with (
         patch.object(AutoTrader, "_build_session_context", return_value=ctx_factory()),
         patch("rehoboam.auto_trader.send_message", return_value=True) as send,
@@ -231,6 +233,65 @@ def test_no_failures_means_no_message(store_dsn, ctx_factory):
     ):
         session = trader.run_full_session(LEAGUE)
     assert session.integrity_failures == [] and send.call_count == 0
+
+
+def test_check_integrity_still_runs_when_the_store_is_unreachable(store_dsn, ctx_factory):
+    """A store outage must not look like a clean bill of health: I7 has to
+    fail (on "never", since the read is what failed) rather than the whole
+    check being skipped because it shared a try with the failing read."""
+    trader = _trader(store_dsn, _legal_squad())
+    with (
+        patch.object(AutoTrader, "_build_session_context", return_value=ctx_factory()),
+        patch.object(SessionStore, "last_ingest_completed_at", side_effect=RuntimeError("down")),
+    ):
+        session = trader.run_full_session(LEAGUE)
+    i7 = next(f for f in session.integrity_failures if f.rule == "I7")
+    assert "store unreachable" in i7.detail
+    # record_failures itself did not raise (only last_ingest_completed_at
+    # did), so the failure still made it to the store, not just memory.
+    rows = SessionStore(dsn=store_dsn).failures(session.session_id)
+    assert any(r["rule"] == "I7" and "store unreachable" in r["detail"] for r in rows)
+
+
+def test_dry_run_does_not_page_telegram(store_dsn, ctx_factory):
+    trader = _trader(store_dsn, _legal_squad(), telegram=True, dry_run=True)
+    with (
+        patch.object(AutoTrader, "_build_session_context", return_value=ctx_factory()),
+        patch("rehoboam.auto_trader.send_message", return_value=True) as send,
+    ):
+        session = trader.run_full_session(LEAGUE)
+    assert session.integrity_failures  # I7 fails on a fresh database
+    assert send.call_count == 0
+
+
+def test_non_dry_run_pages_telegram_once(store_dsn, ctx_factory):
+    trader = _trader(store_dsn, _legal_squad(), telegram=True, dry_run=False)
+    with (
+        patch.object(AutoTrader, "_build_session_context", return_value=ctx_factory()),
+        patch("rehoboam.auto_trader.send_message", return_value=True) as send,
+    ):
+        session = trader.run_full_session(LEAGUE)
+    assert session.integrity_failures
+    assert send.call_count == 1
+
+
+def test_finish_facts_refreshes_budget_from_a_fresh_team_info_call(store_dsn):
+    """I3's pre-flight refusal (in `_facts_from_context`) reads budget as it
+    stood before the session spent anything -- deliberately. The end-of-
+    session I3 report is not a gate, and must reflect what the session
+    actually left behind, so `_finish_facts` re-reads it."""
+    trader = _trader(store_dsn, _legal_squad(), mode="full")
+    with patch(
+        "rehoboam.trader.Trader.get_ep_recommendations_with_trends",
+        return_value={"squad_scores": [], "lineup_map": {}, "market_players": {}},
+    ):
+        ctx = trader._build_session_context(LEAGUE)
+    assert trader._facts.budget == 5_868_658
+    trader.api.get_team_info = lambda league: {"budget": 1_234_567, "team_value": 1}
+    trader._finish_facts([], time.time(), ctx.matchday_phase.phase, LEAGUE)
+    assert trader._facts.budget == 1_234_567
+    row = SessionStore(dsn=store_dsn).facts(trader._session_batch_id)
+    assert row["budget"] == 1_234_567
 
 
 def test_pipeline_failure_exit_still_records_and_logs_session_end(store_dsn, caplog):

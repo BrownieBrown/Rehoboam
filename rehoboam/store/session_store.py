@@ -59,8 +59,11 @@ class SessionStore:
         placeholders = ", ".join(["%s"] * len(_COLUMNS))
         updates = ", ".join(f"{c} = excluded.{c}" for c in _COLUMNS if c != "session_id")
         with self.connection() as conn:
+            # nosec B608 -- the f-strings interpolate only `cols`/`placeholders`/
+            # `updates`, all built from the `_COLUMNS` constant above, never
+            # from `facts`; every actual value goes through the `%s` params.
             conn.execute(
-                f"INSERT INTO rehoboam.session_facts ({cols}) VALUES ({placeholders}) "
+                f"INSERT INTO rehoboam.session_facts ({cols}) VALUES ({placeholders}) "  # nosec B608
                 f"ON CONFLICT (session_id) DO UPDATE SET {updates}",
                 [row[c] for c in _COLUMNS],
             )
@@ -84,11 +87,16 @@ class SessionStore:
         return len(failures)
 
     def last_ingest_completed_at(self) -> float | None:
-        """When the ingestion app last finished a run without errors (rule I7)."""
+        """When ingestion last finished a run without errors (rule I7).
+
+        Not filtered by `app`: a manual `rehoboam ingest` catch-up run from
+        the CLI counts the same as the scheduled external one -- I7 only
+        cares that ingestion happened, not which process ran it.
+        """
         with self.connection() as conn:
             row = conn.execute(
                 "SELECT MAX(started_at + duration_s) AS at FROM rehoboam.session_facts "
-                "WHERE app = 'external' AND mode = 'ingest' AND errors = 0"
+                "WHERE mode = 'ingest' AND errors = 0"
             ).fetchone()
         return float(row["at"]) if row and row["at"] is not None else None
 

@@ -48,6 +48,36 @@ def test_facts_for_ingest_maps_stats_into_extra_and_zeroes_errors():
     }
 
 
+def test_facts_for_ingest_flags_a_run_that_wrote_nothing():
+    """Every player failed and none of the write counters moved -- unlike the
+    test above, there is no evidence the run did anything, so I7 must not
+    read this as a completed ingest."""
+    stats = IngestStats(universe_size=5, failed=5, started_at=1_700_000.0, duration_s=1.0)
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.errors == 1
+    assert facts.error_text == "5 player(s) failed, nothing written"
+
+
+def test_facts_for_ingest_any_write_at_all_is_not_an_error():
+    """Some players failed, but at least one write landed -- the run made
+    progress, so it still counts toward I7 even with failures in `extra`."""
+    stats = IngestStats(
+        universe_size=5, status_written=1, failed=5, started_at=1_700_000.0, duration_s=1.0
+    )
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.errors == 0
+    assert facts.error_text == ""
+
+
+def test_facts_for_ingest_nothing_stale_is_not_an_error():
+    """A universe with nothing stale to fetch: every counter is 0, including
+    `failed` -- that's a clean no-op run, not a failure."""
+    stats = IngestStats(universe_size=5, started_at=1_700_000.0, duration_s=1.0)
+    facts = facts_for_ingest(stats, app="external", session_id="abc123")
+    assert facts.errors == 0
+    assert facts.error_text == ""
+
+
 def _client(ids: list[str]) -> MagicMock:
     client = MagicMock()
     items = [{"pi": i, "n": i, "pos": 4, "tid": "3", "mv": 1, "ap": 1.0} for i in ids]
