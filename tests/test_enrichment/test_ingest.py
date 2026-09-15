@@ -320,3 +320,16 @@ def test_status_refreshes_on_its_own_shorter_window(store_dsn):
     assert stats.status_written == 1
     assert stats.performance_fetched == 0
     assert stats.mv_fetched == 0
+
+
+def test_facts_for_ingest_carries_the_calibration_outcome():
+    from rehoboam.enrichment.ingest import IngestStats, facts_for_ingest
+
+    facts = facts_for_ingest(
+        IngestStats(status_written=1),
+        app="external",
+        session_id="x",
+        calibration={"reported": [4], "waiting": {}, "error": None},
+    )
+    assert facts.extra["calibration"] == {"reported": [4], "waiting": {}, "error": None}
+    assert facts.errors == 0

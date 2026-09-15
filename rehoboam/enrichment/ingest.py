@@ -71,7 +71,13 @@ class IngestStats:
     duration_s: float = 0.0
 
 
-def facts_for_ingest(stats: IngestStats, *, app: str, session_id: str) -> SessionFacts:
+def facts_for_ingest(
+    stats: IngestStats,
+    *,
+    app: str,
+    session_id: str,
+    calibration: dict | None = None,
+) -> SessionFacts:
     """The row a completed ingest run leaves for rule I7.
 
     A per-player failure (`stats.failed`) is not a run failure on its own --
@@ -81,12 +87,19 @@ def facts_for_ingest(stats: IngestStats, *, app: str, session_id: str) -> Sessio
     nothing at all: with none of the write counters above zero, `extra`
     would be the only evidence anything went wrong, and I7 would read this
     row as a completed ingest with nothing to show for it.
+
+    `calibration`, when given, is the report step's `CalibrationOutcome` --
+    it never affects `errors`, since `run_calibration` catches its own
+    exceptions and reports them inside the outcome instead.
     """
     wrote_nothing = stats.failed and not (
         stats.status_written or stats.performance_fetched or stats.mv_fetched
     )
     errors = 1 if wrote_nothing else 0
     error_text = f"{stats.failed} player(s) failed, nothing written" if wrote_nothing else ""
+    extra = asdict(stats)
+    if calibration is not None:
+        extra["calibration"] = calibration
     return SessionFacts(
         session_id=session_id,
         app=app,
@@ -95,7 +108,7 @@ def facts_for_ingest(stats: IngestStats, *, app: str, session_id: str) -> Sessio
         duration_s=stats.duration_s,
         errors=errors,
         error_text=error_text,
-        extra=asdict(stats),
+        extra=extra,
     )
 
 

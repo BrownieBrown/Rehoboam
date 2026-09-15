@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,21 +51,59 @@ def ingest(timer: func.TimerRequest):
             logging.error("ingestion: no leagues found")
             return
         league = leagues[int(os.getenv("LEAGUE_INDEX", "0"))]
+
+        from rehoboam.enrichment.calibrate import prepare_refresh, run_calibration
+        from rehoboam.store.calibration_store import CalibrationStore
+
+        corpus = CorpusStore()
+        calibration_store = CalibrationStore()
+        schedule = None
+        season = None
+        try:
+            schedule = api.get_competition_matchdays()
+            season = calibration_store.current_season()
+            if season:
+                cleared = prepare_refresh(
+                    calibration_store, corpus, schedule, season=season, now=time.time()
+                )
+                if cleared:
+                    logging.info("calibration: cleared fetch stamps %s", cleared)
+        except Exception:
+            logging.warning("calibration: pre-ingest step failed", exc_info=True)
+
         budget = IngestBudget(
             deadline=time.time() + settings.ingest_deadline_seconds,
             max_requests=settings.ingest_max_requests,
         )
         stats = run_ingestion(
             api.client,
-            CorpusStore(),
+            corpus,
             league_id=league.id,
             budget=budget,
             stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
             mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
             status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
         )
+
+        calibration = None
+        if schedule is not None and season:
+            telegram = (
+                (settings.telegram_bot_token, settings.telegram_chat_id)
+                if settings.telegram_bot_token and settings.telegram_chat_id
+                else None
+            )
+            outcome = run_calibration(
+                calibration_store, schedule, season=season, now=time.time(), telegram=telegram
+            )
+            calibration = asdict(outcome)
+            logging.info("calibration-end %s", calibration)
+
         try:
-            SessionStore().record(facts_for_ingest(stats, app="external", session_id=session_id))
+            SessionStore().record(
+                facts_for_ingest(
+                    stats, app="external", session_id=session_id, calibration=calibration
+                )
+            )
         except Exception:
             logging.error("session_facts write failed", exc_info=True)
     except Exception as e:

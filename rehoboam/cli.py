@@ -518,6 +518,115 @@ def export_cmd():
     console.print(table)
 
 
+@app.command("calibrate")
+def calibrate_cmd(
+    day: int | None = typer.Option(None, "--day", help="Only this matchday."),
+    backfill_day: int | None = typer.Option(
+        None,
+        "--backfill-day",
+        help="Write leak-free predictions for a finished matchday, then report it apart.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Compute, write nothing, send nothing."),
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """Turn finished matchdays into calibration rows and a report — what the ingestion app does after each run."""
+    import time
+
+    from .enrichment.calibrate import backfill_predictions, run_calibration
+    from .store.calibration_store import CalibrationStore
+
+    _ensure_store()
+    api, settings, _league = _login_and_get_league(league_index)
+    schedule = api.get_competition_matchdays()
+    store = CalibrationStore()
+    season = store.current_season()
+    if not season:
+        console.print("[yellow]no season in the corpus yet — nothing to calibrate[/yellow]")
+        return
+    now = time.time()
+    if dry_run:
+        from .kickoff import finished_matchdays
+
+        for md in finished_matchdays(schedule):
+            stale = store.players_needing_final_rows(
+                season=season,
+                day_number=md.day_number,
+                whistle=md.last_kickoff.timestamp() + 3 * 3600,
+            )
+            existing = store.report_for(season, md.day_number)
+            console.print(
+                f"MD{md.day_number}: finished, stale rows {len(stale)}, "
+                f"report {'exists' if existing else 'missing'} (dry run, nothing written)"
+            )
+        return
+    if backfill_day is not None:
+        n = backfill_predictions(
+            store,
+            schedule,
+            season=season,
+            day_number=backfill_day,
+            now=now,
+            max_status_age_days=get_settings().max_status_age_days,
+        )
+        console.print(f"backfill MD{backfill_day}: {n} predictions written")
+        outcome = run_calibration(
+            store,
+            schedule,
+            season=season,
+            now=now,
+            backfill=True,
+            only_day=backfill_day,
+        )
+        _print_report(store.report_for(season, backfill_day, backfill=True), outcome)
+        return
+    telegram = (
+        (settings.telegram_bot_token, settings.telegram_chat_id)
+        if settings and settings.telegram_bot_token and settings.telegram_chat_id
+        else None
+    )
+    outcome = run_calibration(
+        store, schedule, season=season, now=now, only_day=day, telegram=telegram
+    )
+    for d in outcome.reported:
+        _print_report(store.report_for(season, d), outcome)
+    if outcome.waiting:
+        console.print(f"waiting for final rows: {outcome.waiting}")
+    if outcome.error:
+        console.print(f"[red]{outcome.error}[/red]")
+        raise typer.Exit(code=1)
+
+
+def _print_report(report, outcome) -> None:
+    if not report:
+        console.print(f"no report written ({outcome})")
+        return
+    table = Table(title=f"calibration MD{report['day_number']} {report['season']}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key in (
+        "n",
+        "n_unpredicted",
+        "n_stale_rows",
+        "mae",
+        "bias",
+        "spearman",
+        "baseline_spearman",
+        "top11_regret",
+        "baseline_top11_regret",
+        "squad_regret",
+        "live_spearman",
+        "live_n",
+    ):
+        v = report[key]
+        table.add_row(
+            key,
+            "n/a" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v)),
+        )
+    console.print(table)
+    console.print(f"worst: {report['worst']}")
+    console.print(f"gate: {report['gate']}")
+
+
 @app.command("backfill-flip-entry-context")
 def backfill_flip_entry_context():
     """Reconstruct what the market looked like when each closed flip was bought (REH-104).
