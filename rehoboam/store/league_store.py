@@ -71,6 +71,18 @@ def _upsert_sql(table: str, columns: tuple[str, ...], key: tuple[str, ...]) -> s
 
 
 class LeagueStore:
+    _TABLE_ORDER = {
+        "predicted_ep",
+        "points",
+        "avg_points",
+        "market_value",
+        "points_per_million",
+        "trend_24h_pct",
+        "trend_7d_pct",
+        "fair_value_gap",
+        "name",
+    }
+
     def __init__(self, dsn: str | None = None):
         self.dsn = dsn
 
@@ -182,3 +194,34 @@ class LeagueStore:
                 (epoch,),
             ).fetchall()
         return [r["team_id"] for r in rows]
+
+    def player_table(
+        self,
+        *,
+        position: str | None = None,
+        owner: str | None = None,
+        order_by: str = "predicted_ep",
+    ) -> list[dict[str, Any]]:
+        """The Base XI player table view, optionally filtered and ordered.
+
+        `order_by` is whitelisted against `_TABLE_ORDER`; the WHERE clause is
+        built from constant fragments only, values pass as `%s` parameters.
+        """
+        if order_by not in self._TABLE_ORDER:
+            raise ValueError(f"order_by must be one of {sorted(self._TABLE_ORDER)}")
+        clauses, params = [], []
+        if position:
+            clauses.append("position = %s")
+            params.append(position)
+        if owner:
+            clauses.append("owner = %s")
+            params.append(owner)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connection() as conn:
+            rows = conn.execute(
+                # nosec B608 -- `where` is built from constant fragments, `order_by` is whitelisted.
+                f"SELECT * FROM rehoboam.player_table {where} "  # nosec B608
+                f"ORDER BY {order_by} DESC NULLS LAST, player_id",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
