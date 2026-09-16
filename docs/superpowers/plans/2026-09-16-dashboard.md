@@ -2022,7 +2022,7 @@ export type SquadRow = {
   session_id: string; legal_formation: string | null; budget: number | null;
   sellable_value: number | null; next_kickoff: number | null; session_started_at: number;
   cost_basis_missing: number | null;
-  player_id: string; name: string | null; team: string | null; position: string;
+  player_id: string | null; name: string | null; team: string | null; position: string | null;
   market_value: number | null; points: number | null; avg_points: number | null;
   owner: string | null; predicted_ep: number | null; live_ep: number | null;
   in_best_11: boolean; p_start: number | null;
@@ -2034,6 +2034,16 @@ export async function squad(): Promise<SquadRow[]> {
     select * from rehoboam.web_squad
     order by in_best_11 desc, predicted_ep desc nulls last, player_id asc
   `;
+}
+
+/**
+ * `web_squad` left-joins the predictions, so a session that ran but recorded no
+ * roster comes back as ONE row whose `player_id` is null - the session facts
+ * survive, the players do not. Split the two before rendering.
+ */
+export function splitSquad(rows: SquadRow[]) {
+  const players = rows.filter((r) => r.player_id !== null);
+  return { session: rows[0] ?? null, players };
 }
 
 /** The integrity rules the newest real session raised, as rule + detail pairs. */
@@ -2102,7 +2112,13 @@ export function Formation({ formation, eleven }: { formation: string | null; ele
 1. The integrity block: `latestSessionRules()` mapped through `integritySentence(rule, detail)`, one line each with a leading bullet, inside `rounded-lg border border-border bg-surface p-4`. Render nothing when the list is empty.
 1. A `DataTable` of the whole squad with these columns: Player (name over club, align left), Pos (`Pill`), EP (`num(predicted_ep, 0)`, bold), P(start) (`Math.round(p_start * 100)%`), Market value (`money`), Cost basis (`money`), Gain/loss (`signed(gain_loss, 0)` coloured by tone), Pts (`num`), Avg (`num(avg_points, 1)`), In XI (`in_best_11 ? "yes" : "-"`). Bench rows get `opacity-60` - pass a `rowClass` prop through `DataTable` (add it: `rowClass?: (row: T) => string`).
 
-Empty case: when `squad()` returns nothing, render "No completed session has recorded a squad yet." in place of the formation and the table.
+Three cases, not two - `web_squad` left-joins the predictions, so distinguish them:
+
+- `rows.length === 0` - no non-dry-run session has ever run: render "No completed session has recorded a squad yet." in place of everything below the header.
+- one row with `player_id === null` - a session ran and its roster did not record: render the header (budget, sellable value, kickoff, formation) normally, then "The last session recorded no squad. Its predictions write failed or the squad was empty." in place of the formation figure and the table. This is the case the Task 1 review found and the reason that join is a LEFT join.
+- otherwise: the formation figure and the table, both built from `splitSquad(rows).players`.
+
+Use `splitSquad()` from `queries.ts` for all three - never index `rows[0]` for a player.
 
 `cost_basis` and `gain_loss` render `-` when null, never `0` - a zero would read as "bought for nothing", and two of our players genuinely have no recorded purchase.
 
