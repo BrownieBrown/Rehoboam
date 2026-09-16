@@ -4,7 +4,7 @@ import { safeNext } from "@/lib/safe-next";
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
-  const next = safeNext(request.nextUrl.searchParams.get("next"));
+  const next = safeNext(request.nextUrl.searchParams.get("next"), request.nextUrl.origin);
   if (code) {
     const supabase = await createServerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
