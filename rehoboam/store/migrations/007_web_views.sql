@@ -21,7 +21,12 @@ left join listed l on l.player_id = p.player_id;
 
 -- 2. Our squad as the newest real session saw it, with the eleven it chose.
 --    A dry run (a local `status`) must never redefine "the lineup", so the
---    session is the newest non-dry-run row from the trading app.
+--    session is the newest non-dry-run row from the trading app. Left join
+--    to `predictions`: it is written best-effort in step 2a, after
+--    `session_facts` already has a budget and formation, so a session whose
+--    roster write failed or wrote zero owned rows must still surface as one
+--    row (`player_id is null`), not an empty result the page can't tell
+--    apart from "no session has ever run".
 create or replace view rehoboam.web_squad as
 with latest as (
     select session_id, legal_formation, budget, sellable_value, next_kickoff,
@@ -40,7 +45,7 @@ select l.session_id, l.legal_formation, l.budget, l.sellable_value,
     tp.buy_price as cost_basis,
     case when tp.buy_price is not null then p.market_value - tp.buy_price end as gain_loss
 from latest l
-join rehoboam.predictions pr on pr.session_id = l.session_id and pr.owned
+left join rehoboam.predictions pr on pr.session_id = l.session_id and pr.owned
 left join rehoboam.web_players p on p.player_id = pr.player_id
 left join rehoboam.tracked_purchases tp on tp.player_id = pr.player_id;
 

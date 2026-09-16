@@ -314,6 +314,20 @@ def test_web_squad_carries_cost_basis_and_gain_when_the_purchase_is_known(store_
     assert row["gain_loss"] == 2_000_000
 
 
+def test_web_squad_survives_a_session_whose_roster_never_wrote(store_dsn):
+    # `session_facts` (step 8) can exist with no matching `predictions` rows
+    # (step 2a's best-effort write failed, or legitimately wrote nothing
+    # owned) -- an inner join here would make the whole view return zero
+    # rows, indistinguishable from "no session has ever run".
+    SessionStore(dsn=store_dsn).record(_facts("real", legal_formation="4-3-3", budget=1_725_739))
+    rows = _rows(store_dsn, "select * from rehoboam.web_squad")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["session_id"] == "real"
+    assert row["legal_formation"] == "4-3-3" and row["budget"] == 1_725_739
+    assert row["player_id"] is None
+
+
 def test_web_session_summary_flattens_an_ingest_run_and_its_rules(store_dsn):
     sessions = SessionStore(dsn=store_dsn)
     sessions.record(
