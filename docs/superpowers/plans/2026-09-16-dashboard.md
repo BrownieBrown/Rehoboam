@@ -990,7 +990,7 @@ ______________________________________________________________________
 
 - Consumes: nothing from earlier tasks except the project scaffold.
 
-- Produces: `requireSession(): Promise<Session>` from `web/src/lib/auth.ts` — every page calls it first; `createServerClient()` and `createMiddlewareClient(request, response)` from `web/src/lib/supabase.ts`.
+- Produces: `requireSession(): Promise<User>` from `web/src/lib/auth.ts` (Supabase's `User`, what `getUser()` returns — not a `Session`) — every page calls it first; `createServerClient()` and `createMiddlewareClient(request, response)` from `web/src/lib/supabase.ts`.
 
 - [ ] **Step 1: Write the Supabase clients**
 
@@ -1245,6 +1245,7 @@ ______________________________________________________________________
 - Create: `web/src/lib/format.ts`, `web/src/lib/format.test.ts`
 - Create: `web/src/lib/integrity.ts`, `web/src/lib/integrity.test.ts`
 - Create: `web/src/components/Sidebar.tsx`, `web/src/components/StatusHeader.tsx`, `web/src/components/DataTable.tsx`, `web/src/components/Pill.tsx`
+- Modify: `web/src/app/globals.css` (add `--color-on-accent: #14110a`), `web/src/app/login/page.tsx` (use it)
 - Create: `web/src/app/layout.tsx`, `web/src/app/error.tsx`
 - Create: `web/src/lib/queries.ts` (with the two shell queries only; Tasks 5–8 append to it)
 
@@ -1266,6 +1267,16 @@ ______________________________________________________________________
   - `<Pill tone="accent" | "muted" | "plain" | "gk" | "def" | "mid" | "fw">`.
   - `<Sidebar facts={ShellFacts} current={string} />` — the four entries and the kickoff card.
   - `<StatusHeader title={string} subtitle?={string} right?={React.ReactNode} />` — Task 7 relies on `subtitle`, Task 6 on `right`.
+
+- [ ] **Step 0: Tokenise the text colour that sits on the accent**
+
+`#14110a` is the near-black used for text on the amber accent. It already appears as an arbitrary value in `web/src/app/login/page.tsx` and this task's `Pill` would add a second copy, with the Players and Market owner pills to follow. Add it to the `@theme` block in `web/src/app/globals.css`, beside the other tokens:
+
+```css
+  --color-on-accent: #14110a;
+```
+
+Then replace `text-[#14110a]` with `text-on-accent` in `web/src/app/login/page.tsx`, and use `text-on-accent` in `Pill`'s `accent` tone below instead of the arbitrary value. After this step no `text-[#` remains anywhere under `web/src` — check with `grep -rn 'text-\[#' web/src`, which must print nothing.
 
 - [ ] **Step 1: Write the failing formatter tests**
 
@@ -1483,7 +1494,7 @@ Read `rehoboam/services/integrity.py` and correct any sentence whose meaning doe
 
 ```tsx
 const TONES: Record<string, string> = {
-  accent: "bg-accent text-[#14110a]",
+  accent: "bg-accent text-on-accent",
   muted: "text-muted",
   plain: "text-text-dim",
   gk: "bg-gk/15 text-gk",
