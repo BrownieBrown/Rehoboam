@@ -1334,7 +1334,7 @@ ______________________________________________________________________
   - `num(n: number | null, digits?: number): string`
   - `countdown(epochSeconds: number | null, now?: number): string` — `24.5 h`, `48 min`, `expired`, `—`.
   - `ago(epochSeconds: number | null, now?: number): string` — `08:01 UTC`, plus `3 h ago`.
-  - `POSITION = { Goalkeeper: {short: "GK", color: "gk"}, … }`
+  - `POSITION: Record<string, { short: string; token: string }>` — e.g. `Goalkeeper: { short: "GK", token: "gk" }`. The field is `token` because it names a design token (`gk`/`def`/`mid`/`fw`, which `Pill` maps to a colour), not a colour value. Tasks 5 and 7 read `POSITION[pos].token`.
   - `integritySentence(rule: string, detail: string): string` from `integrity.ts`.
   - `<DataTable columns={…} rows={…} sort={…} dir={…} basePath={…} query={…} />` — the sortable table every page uses.
   - `<Pill tone="accent" | "muted" | "plain" | "gk" | "def" | "mid" | "fw">`.
