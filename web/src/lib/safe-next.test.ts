@@ -3,14 +3,23 @@ import { safeNext } from "./safe-next";
 
 const ORIGIN = "https://dash.example";
 
+// The property that actually matters, checked the way the callback really
+// uses the value: it does its own `new URL(next, origin)`. Simulating that
+// second parse here is what would have caught round 3's miss — a bare
+// same-origin *path* can still be protocol-relative under a second parse;
+// only an already-absolute href is safe under re-parsing.
+function staysOnOrigin(next: string): boolean {
+  return new URL(next, ORIGIN).origin === ORIGIN;
+}
+
 describe("safeNext", () => {
-  it("passes through same-origin relative paths", () => {
-    expect(safeNext("/squad", ORIGIN)).toBe("/squad");
-    expect(safeNext("/market?expiring=6", ORIGIN)).toBe("/market?expiring=6");
-    expect(safeNext("/health#top", ORIGIN)).toBe("/health#top");
+  it("resolves same-origin relative paths to an absolute URL", () => {
+    expect(safeNext("/squad", ORIGIN)).toBe(`${ORIGIN}/squad`);
+    expect(safeNext("/market?expiring=6", ORIGIN)).toBe(`${ORIGIN}/market?expiring=6`);
+    expect(safeNext("/health#top", ORIGIN)).toBe(`${ORIGIN}/health#top`);
   });
 
-  it("rejects every hostile form and falls back to /", () => {
+  it("rejects every off-origin form and falls back to the origin root", () => {
     for (const raw of [
       "//evil.com",
       "https://evil.com",
@@ -26,17 +35,34 @@ describe("safeNext", () => {
       "/\t/evil.com",
       "/\n/evil.com",
     ]) {
-      expect(safeNext(raw, ORIGIN)).toBe("/");
-      // The property that actually matters: resolving the guarded value
-      // against ORIGIN must never leave ORIGIN. A string-prefix check alone
-      // doesn't prove this; resolving it the way the redirect will does.
-      expect(new URL(safeNext(raw, ORIGIN), ORIGIN).origin).toBe(ORIGIN);
+      expect(safeNext(raw, ORIGIN)).toBe(`${ORIGIN}/`);
+      expect(staysOnOrigin(safeNext(raw, ORIGIN))).toBe(true);
     }
   });
 
-  it("falls back to / for null, empty, and a bare (non-rooted) path", () => {
-    expect(safeNext(null, ORIGIN)).toBe("/");
-    expect(safeNext("", ORIGIN)).toBe("/");
-    expect(safeNext("squad", ORIGIN)).toBe("/");
+  it("resolves dot-segments same-origin without leaving a re-parseable protocol-relative path", () => {
+    // A single resolve collapses the ".." segment, leaving a same-origin URL
+    // whose *path* is "//evil.com" — protocol-relative on a second parse,
+    // which is exactly what the callback does. `url.origin` legitimately
+    // equals ORIGIN here (this is not a cross-origin input, unlike the
+    // group above), so safeNext does not fall back; the fix is that it
+    // returns the fully resolved href instead of a bare path, so there is
+    // nothing left to re-interpret on that second parse.
+    for (const raw of [
+      "/..//evil.com",
+      "/../..//evil.com",
+      "/./..//evil.com",
+      "/a/../..//evil.com",
+    ]) {
+      const result = safeNext(raw, ORIGIN);
+      expect(result.startsWith(ORIGIN)).toBe(true);
+      expect(staysOnOrigin(result)).toBe(true);
+    }
+  });
+
+  it("falls back to the origin root for null, empty, and a bare (non-rooted) path", () => {
+    expect(safeNext(null, ORIGIN)).toBe(`${ORIGIN}/`);
+    expect(safeNext("", ORIGIN)).toBe(`${ORIGIN}/`);
+    expect(safeNext("squad", ORIGIN)).toBe(`${ORIGIN}/`);
   });
 });

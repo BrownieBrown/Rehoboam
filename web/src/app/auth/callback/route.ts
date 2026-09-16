@@ -8,7 +8,9 @@ export async function GET(request: NextRequest) {
   if (code) {
     const supabase = await createServerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) return NextResponse.redirect(new URL(next, request.nextUrl.origin));
+    // `next` is already an absolute, resolved, same-origin URL string
+    // (safeNext's whole job), so no second `new URL()` parse here.
+    if (!error) return NextResponse.redirect(next);
   }
   return NextResponse.redirect(new URL("/login?error=link", request.nextUrl.origin));
 }
