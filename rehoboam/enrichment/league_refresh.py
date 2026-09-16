@@ -52,15 +52,17 @@ def run_league_refresh(
     stats = LeagueRefreshStats()
 
     def attempt(what, fn):
-        stats.requests += 1
         try:
-            return fn()
+            result = fn()
         except BudgetExhausted:
             raise
         except Exception as e:  # noqa: BLE001
+            stats.requests += 1
             stats.failed += 1
             logger.warning("league-refresh %s failed: %s", what, e)
             return None
+        stats.requests += 1
+        return result
 
     # Market: the client keeps the raw payload; the parsed list is not needed here.
     if attempt("market", lambda: client.get_market(league_id)) is not None:
@@ -71,6 +73,8 @@ def run_league_refresh(
                     payload, snapshot_at=now, our_user_id=our_user_id, source="ingest"
                 )
             )
+        else:
+            logger.warning("league-refresh market: no payload on the client")
 
     ranking = attempt("ranking", lambda: client.get_league_ranking(league_id))
     managers = manager_rows(

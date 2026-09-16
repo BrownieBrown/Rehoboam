@@ -160,16 +160,22 @@ def run_ingestion(
             store.upsert_players(rows)
 
             if league_store is not None and season:
-                league = run_league_refresh(
-                    api,
-                    league_store,
-                    learner,
-                    league_id=league_id,
-                    our_user_id=our_user_id or "",
-                    season=season,
-                    now=budget.now(),
-                )
-                stats.league = asdict(league)
+                try:
+                    league = run_league_refresh(
+                        api,
+                        league_store,
+                        learner,
+                        league_id=league_id,
+                        our_user_id=our_user_id or "",
+                        season=season,
+                        now=budget.now(),
+                    )
+                    stats.league = asdict(league)
+                except BudgetExhausted:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("league refresh failed (non-fatal)")
+                    stats.league = {"error": str(e)}
 
             team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
 
