@@ -12,6 +12,7 @@ class KickbaseAPI:
         self.client = KickbaseV4Client()
         self._user = None
         self._leagues: list[League] = []
+        self.last_market_payload: dict | None = None
 
     def login(self) -> bool:
         """Login to KICKBASE"""
@@ -33,7 +34,9 @@ class KickbaseAPI:
     def get_market(self, league: League) -> list[MarketPlayer]:
         """Get all players on the market"""
         try:
-            return self.client.get_market(league.id)
+            players = self.client.get_market(league.id)
+            self.last_market_payload = getattr(self.client, "last_market_payload", None)
+            return players
         except Exception as e:
             raise Exception(f"Failed to fetch market: {e}") from e
 

@@ -125,3 +125,96 @@ def test_calibrate_dry_run_reports_nothing_written(store_dsn, monkeypatch):
         result = runner.invoke(app, ["calibrate", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "no season" in result.output or "dry run" in result.output
+
+
+def test_players_prints_the_view(store_dsn):
+    from tests.store.test_player_table import _seed
+
+    _seed(store_dsn)
+    result = runner.invoke(app, ["players", "--position", "Midfielder"])
+    assert result.exit_code == 0, result.output
+    assert "Alpha" in result.output and "Rival" in result.output and "Club Seven" in result.output
+
+
+def test_players_bad_sort_prints_a_message_instead_of_a_traceback(store_dsn):
+    result = runner.invoke(app, ["players", "--sort", "nope"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "nope" in result.output or "order_by" in result.output
+
+
+def test_market_prints_the_newest_snapshot(store_dsn):
+    from rehoboam.store.league_store import LeagueStore
+
+    LeagueStore(dsn=store_dsn).write_listings(
+        [
+            {
+                "snapshot_at": 1.0,
+                "player_id": "a",
+                "ask": 5_000_000,
+                "market_value": 4_900_000,
+                "mv_trend": 1,
+                "seller_id": None,
+                "offer_count": 2,
+                "our_bid": None,
+                "listed_at": None,
+                "expires_at": 3601.0,
+                "status": 0,
+                "lineup_probability": 1,
+                "source": "ingest",
+            }
+        ]
+    )
+    result = runner.invoke(app, ["market"])
+    assert result.exit_code == 0, result.output
+    assert "5,000,000" in result.output and "Kickbase" in result.output
+
+
+def test_backfill_league_walks_every_page(store_dsn, monkeypatch):
+    from unittest.mock import patch
+
+    pages = {
+        0: {
+            "it": [
+                {
+                    "pi": str(i),
+                    "pn": "x",
+                    "tty": 1,
+                    "trp": 1,
+                    "dt": f"2026-08-{10 + i:02d}T10:00:00Z",
+                }
+                for i in range(25)
+            ]
+        },
+        25: {
+            "it": [
+                {
+                    "pi": "99",
+                    "pn": "y",
+                    "tty": 2,
+                    "trp": 2,
+                    "dt": "2026-08-01T10:00:00Z",
+                }
+            ]
+        },
+    }
+    api = type(
+        "Api",
+        (),
+        {
+            "user": type("U", (), {"id": "me"})(),
+            "get_league_ranking": lambda self, league: {
+                "us": [{"i": "me", "n": "Marco"}, {"i": "m2", "n": "Rival"}]
+            },
+            "get_manager_transfer_history": lambda self, league, mid, start=0: pages.get(
+                start, {"it": []}
+            ),
+        },
+    )()
+    league = type("L", (), {"id": "L"})()
+    with patch("rehoboam.cli._login_and_get_league", return_value=(api, None, league)):
+        result = runner.invoke(app, ["backfill-league"])
+    assert result.exit_code == 0, result.output
+    with connect(store_dsn) as conn:
+        n = conn.execute("SELECT count(*) AS n FROM rehoboam.manager_transfers").fetchone()["n"]
+    assert n == 52  # 26 per manager × 2 managers

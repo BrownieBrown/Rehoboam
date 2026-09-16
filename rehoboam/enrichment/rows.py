@@ -9,7 +9,7 @@ re-derived from field names.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from rehoboam.enrichment.corpus import _to_epoch
@@ -145,4 +145,189 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
         "market_value": _opt_int(details.get("mv")),
         "team_id": str(tid) if tid is not None else None,
         "fetched_at": float(fetched_at),
+    }
+
+
+def _iso_epoch(value) -> float | None:
+    """ISO `...Z` (or offset) string → epoch seconds; None when unparseable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def market_listing_rows(
+    payload: dict, *, snapshot_at: float, our_user_id: str, source: str
+) -> list[dict]:
+    """`GET /market` → one row per listing. `exs` is seconds until expiry and is
+    only present on manager-listed players; `uop` counts as our bid only when
+    `uoid` is our user id."""
+    rows: list[dict] = []
+    for item in (payload or {}).get("it") or []:
+        if not isinstance(item, dict) or not item.get("i"):
+            continue
+        ask = item.get("prc") or item.get("mv")
+        if not ask:
+            continue  # not actionable without a price
+        seller = item.get("u")
+        seller_id = str(seller.get("i")) if isinstance(seller, dict) and seller.get("i") else None
+        ours = bool(our_user_id) and str(item.get("uoid") or "") == str(our_user_id)
+        exs = item.get("exs")
+        rows.append(
+            {
+                "snapshot_at": snapshot_at,
+                "player_id": str(item["i"]),
+                "ask": int(ask),
+                "market_value": _opt_int(item.get("mv")),
+                "mv_trend": _opt_int(item.get("mvt")),
+                "seller_id": seller_id,
+                "offer_count": _opt_int(item.get("ofc")),
+                "our_bid": _opt_int(item.get("uop")) if ours else None,
+                "listed_at": _iso_epoch(item.get("dt")),
+                "expires_at": (snapshot_at + float(exs) if isinstance(exs, int | float) else None),
+                "status": _opt_int(item.get("st")),
+                "lineup_probability": _opt_int(item.get("prob")),
+                "source": source,
+            }
+        )
+    return rows
+
+
+def manager_squad_rows(
+    manager_id: str, items: list, *, snapshot_at: float, source: str
+) -> list[dict]:
+    """`/managers/{mid}/squad` `it[]` → rows (`pi` id, `mvgl` gain/loss, `iotm` on the
+    market)."""
+    rows: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("pi") or item.get("i")
+        if not pid:
+            continue
+        on_market = item.get("iotm")
+        rows.append(
+            {
+                "snapshot_at": snapshot_at,
+                "manager_id": str(manager_id),
+                "player_id": str(pid),
+                "market_value": _opt_int(item.get("mv")),
+                "gain_loss": _opt_int(item.get("mvgl")),
+                "on_market": bool(on_market) if on_market is not None else None,
+                "source": source,
+            }
+        )
+    return rows
+
+
+def own_squad_rows(
+    manager_id: str, players: list, *, snapshot_at: float, source: str
+) -> list[dict]:
+    """Our own squad from the session's `Player` objects (no gain/loss or market flag
+    there)."""
+    rows: list[dict] = []
+    for p in players or []:
+        pid = getattr(p, "id", None)
+        if not pid:
+            continue
+        rows.append(
+            {
+                "snapshot_at": snapshot_at,
+                "manager_id": str(manager_id),
+                "player_id": str(pid),
+                "market_value": _opt_int(getattr(p, "market_value", None)),
+                "gain_loss": None,
+                "on_market": None,
+                "source": source,
+            }
+        )
+    return rows
+
+
+def manager_rows(
+    ranking: dict, *, league_id: str, our_user_id: str, updated_at: float
+) -> list[dict]:
+    """`/ranking` `us[]` (older payloads: `it[]`) → managers."""
+    rows: list[dict] = []
+    for m in (ranking or {}).get("us") or (ranking or {}).get("it") or []:
+        if not isinstance(m, dict) or not m.get("i"):
+            continue
+        rows.append(
+            {
+                "manager_id": str(m["i"]),
+                "league_id": str(league_id),
+                "name": str(m.get("n") or m["i"]),
+                "is_self": str(m["i"]) == str(our_user_id),
+                "updated_at": updated_at,
+            }
+        )
+    return rows
+
+
+def fixture_rows(schedule: dict, *, season: str, updated_at: float) -> list[dict]:
+    """`/competitions/1/matchdays` → one row per fixture with a match id and a
+    parseable kickoff."""
+    rows: list[dict] = []
+    for group in (schedule or {}).get("it") or []:
+        if not isinstance(group, dict) or not isinstance(group.get("day"), int):
+            continue
+        for f in group.get("it") or []:
+            if not isinstance(f, dict) or not f.get("mi"):
+                continue
+            kickoff = _iso_epoch(f.get("dt"))
+            if kickoff is None or f.get("t1") is None or f.get("t2") is None:
+                continue
+            rows.append(
+                {
+                    "match_id": str(f["mi"]),
+                    "season": season,
+                    "day_number": int(group["day"]),
+                    "kickoff": kickoff,
+                    "home_team_id": str(f["t1"]),
+                    "away_team_id": str(f["t2"]),
+                    "home_goals": _opt_int(f.get("t1g")),
+                    "away_goals": _opt_int(f.get("t2g")),
+                    "status": int(f.get("st") or 0),
+                    "updated_at": updated_at,
+                }
+            )
+    return rows
+
+
+def league_table_rows(
+    table: dict, *, season: str, day_number: int, updated_at: float
+) -> list[dict]:
+    """`/competitions/1/table` `it[]` → rows (`cpl` place, `pcpl` previous, `cp`
+    points, `mc`, `gd`)."""
+    rows: list[dict] = []
+    for r in (table or {}).get("it") or []:
+        if not isinstance(r, dict) or not r.get("tid") or r.get("cpl") is None:
+            continue
+        rows.append(
+            {
+                "season": season,
+                "day_number": int(day_number),
+                "team_id": str(r["tid"]),
+                "place": int(r["cpl"]),
+                "previous_place": _opt_int(r.get("pcpl")),
+                "points": _opt_int(r.get("cp")),
+                "played": _opt_int(r.get("mc")),
+                "goal_difference": _opt_int(r.get("gd")),
+                "updated_at": updated_at,
+            }
+        )
+    return rows
+
+
+def team_row(profile: dict, *, updated_at: float) -> dict | None:
+    """`/teams/{tid}/teamprofile` → one `teams` row; None without an id."""
+    if not isinstance(profile, dict) or not profile.get("tid"):
+        return None
+    return {
+        "team_id": str(profile["tid"]),
+        "name": str(profile.get("tn") or profile["tid"]),
+        "short_name": str(profile["ts"]) if profile.get("ts") else None,
+        "updated_at": updated_at,
     }

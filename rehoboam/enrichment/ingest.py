@@ -21,19 +21,13 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 
+from rehoboam.enrichment.budget import BudgetExhausted
+from rehoboam.enrichment.league_refresh import run_league_refresh
 from rehoboam.enrichment.sweep import fetch_universe
 from rehoboam.services.session_facts import SessionFacts
 from rehoboam.store.corpus_store import CorpusStore
 
 logger = logging.getLogger(__name__)
-
-
-class BudgetExhausted(Exception):
-    """Raised by ``IngestBudget.spend`` between requests; never mid-write."""
-
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
 
 
 @dataclass
@@ -64,11 +58,13 @@ class IngestStats:
     status_written: int = 0
     performance_fetched: int = 0
     mv_fetched: int = 0
+    transfers_fetched: int = 0
     failed: int = 0
     requests: int = 0
     stopped_by: str | None = None
     started_at: float = field(default_factory=time.time)
     duration_s: float = 0.0
+    league: dict | None = None
 
 
 def facts_for_ingest(
@@ -93,7 +89,10 @@ def facts_for_ingest(
     exceptions and reports them inside the outcome instead.
     """
     wrote_nothing = stats.failed and not (
-        stats.status_written or stats.performance_fetched or stats.mv_fetched
+        stats.status_written
+        or stats.performance_fetched
+        or stats.mv_fetched
+        or stats.transfers_fetched
     )
     errors = 1 if wrote_nothing else 0
     error_text = f"{stats.failed} player(s) failed, nothing written" if wrote_nothing else ""
@@ -117,11 +116,13 @@ def _counting_client(client, budget: IngestBudget):
 
     class _Counting:
         def __getattr__(self, name):
-            fn = getattr(client, name)
+            attr = getattr(client, name)
+            if not callable(attr):
+                return attr
 
             def call(*a, **kw):
                 budget.spend()
-                return fn(*a, **kw)
+                return attr(*a, **kw)
 
             return call
 
@@ -137,9 +138,14 @@ def run_ingestion(
     stale_after_seconds: float,
     mv_stale_after_seconds: float,
     status_stale_after_seconds: float | None = None,
+    transfers_stale_after_seconds: float | None = None,
     throttle_seconds: float = 0.25,
     timeframe_days: int = 365,
     today: date | None = None,
+    league_store=None,
+    learner=None,
+    our_user_id: str | None = None,
+    season: str | None = None,
 ) -> IngestStats:
     stats = IngestStats(started_at=budget.now())
     day = today or datetime.now(tz=timezone.utc).date()
@@ -152,6 +158,25 @@ def run_ingestion(
             rows = fetch_universe(api, league_id, throttle_seconds=throttle_seconds)
             stats.universe_size = len(rows)
             store.upsert_players(rows)
+
+            if league_store is not None and season:
+                try:
+                    league = run_league_refresh(
+                        api,
+                        league_store,
+                        learner,
+                        league_id=league_id,
+                        our_user_id=our_user_id or "",
+                        season=season,
+                        now=budget.now(),
+                    )
+                    stats.league = asdict(league)
+                except BudgetExhausted:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("league refresh failed (non-fatal)")
+                    stats.league = {"error": str(e)}
+
             team_by_id = {r["player_id"]: r.get("team_id") for r in rows}
 
             now = budget.now()
@@ -188,6 +213,13 @@ def run_ingestion(
                     "mv_fetched",
                 ),
             }
+            if transfers_stale_after_seconds is not None:
+                windows["transfers"] = now - transfers_stale_after_seconds
+                fetchers["transfers"] = (
+                    lambda pid: api.get_player_transfer_history(league_id=league_id, player_id=pid),
+                    lambda pid, h: store.record_player_transfers(pid, h),
+                    "transfers_fetched",
+                )
             # Progress lives on `stats` directly, not a return value: a
             # BudgetExhausted unwind must not lose what this player already
             # wrote, and the tests require the counts to survive a stop.
@@ -214,12 +246,13 @@ def run_ingestion(
     stats.requests = budget.requests
     stats.duration_s = budget.now() - stats.started_at
     logger.info(
-        "ingestion-end universe=%d status=%d perf=%d mv=%d failed=%d requests=%d "
+        "ingestion-end universe=%d status=%d perf=%d mv=%d transfers=%d failed=%d requests=%d "
         "stopped_by=%s duration=%.0fs",
         stats.universe_size,
         stats.status_written,
         stats.performance_fetched,
         stats.mv_fetched,
+        stats.transfers_fetched,
         stats.failed,
         stats.requests,
         stats.stopped_by,

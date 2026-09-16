@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock
 
+from rehoboam.enrichment.budget import BudgetExhausted
 from rehoboam.enrichment.ingest import IngestBudget, IngestStats, facts_for_ingest, run_ingestion
 from rehoboam.store import connect
 from rehoboam.store.corpus_store import CorpusStore
+from rehoboam.store.league_store import LeagueStore
 
 LEAGUE = "L"
 DAY = date(2026, 9, 14)
@@ -40,11 +42,13 @@ def test_facts_for_ingest_maps_stats_into_extra_and_zeroes_errors():
         "status_written": 480,
         "performance_fetched": 120,
         "mv_fetched": 60,
+        "transfers_fetched": 0,
         "failed": 3,
         "requests": 663,
         "stopped_by": "deadline",
         "started_at": 1_700_000.0,
         "duration_s": 210.5,
+        "league": None,
     }
 
 
@@ -333,3 +337,169 @@ def test_facts_for_ingest_carries_the_calibration_outcome():
     )
     assert facts.extra["calibration"] == {"reported": [4], "waiting": {}, "error": None}
     assert facts.errors == 0
+
+
+def test_transfers_kind_is_scheduled_and_fetched_once_per_player(store_dsn):
+    """`transfers_stale_after_seconds`, when given, adds `transfers` as a stale
+    kind for a never-fetched player, and `run_ingestion` fetches + marks it."""
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a"]), Clock()
+    client.get_player_transfer_history.return_value = {"it": []}
+    store.upsert_players([{"player_id": "a", "position": "Forward"}])
+    assert store.players_needing_any_refresh({"transfers": clock.t}) == [("a", ["transfers"])]
+
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
+        transfers_stale_after_seconds=72_000,
+        throttle_seconds=0,
+        today=DAY,
+    )
+    assert stats.transfers_fetched == 1
+    client.get_player_transfer_history.assert_called_once_with(league_id=LEAGUE, player_id="a")
+    assert store.players_needing_any_refresh({"transfers": clock.t}) == []
+
+
+def test_a_league_refresh_failure_is_non_fatal_and_the_per_player_loop_still_runs(store_dsn):
+    """Critical #1: a store-write (or any non-budget) failure inside the league
+    refresh must not kill the whole ingestion run -- it lands on `stats.league`
+    as an error and the per-player loop proceeds exactly as if there were no
+    `league_store` at all."""
+
+    class _RaisingLeagueStore:
+        def write_listings(self, rows):
+            raise RuntimeError("boom: pooler drop")
+
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a", "b"]), Clock()
+    client.get_market = MagicMock(return_value=[])
+    client.last_market_payload = {"it": []}
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
+        throttle_seconds=0,
+        today=DAY,
+        league_store=_RaisingLeagueStore(),
+        learner=None,
+        our_user_id="me",
+        season="2026/2027",
+    )
+    assert stats.league == {"error": "boom: pooler drop"}
+    assert stats.stopped_by is None
+    # The per-player loop still ran to completion despite the league-refresh failure.
+    assert stats.status_written == 2
+    assert stats.performance_fetched == 2
+    assert stats.mv_fetched == 2
+
+
+def test_a_league_refresh_budget_exhaustion_still_stops_the_whole_run(store_dsn):
+    """`BudgetExhausted` from inside the league refresh must propagate past the
+    new non-fatal try/except (not be swallowed into `stats.league`), so the run
+    still stops the way every other `BudgetExhausted` does."""
+
+    class _BudgetExhaustedLeagueStore:
+        def write_listings(self, rows):
+            raise BudgetExhausted("cap")
+
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a", "b"]), Clock()
+    client.get_market = MagicMock(return_value=[])
+    client.last_market_payload = {"it": []}
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
+        throttle_seconds=0,
+        today=DAY,
+        league_store=_BudgetExhaustedLeagueStore(),
+        learner=None,
+        our_user_id="me",
+        season="2026/2027",
+    )
+    assert stats.stopped_by == "cap"
+    assert stats.league is None  # the exception propagated before this was ever assigned
+    assert stats.status_written == 0  # the run stopped at the league refresh
+
+
+class _FakeLowLevelClient:
+    """Shaped like the real client rather than a `MagicMock`: `last_market_payload`
+    is a plain instance attribute set as a side effect of `get_market`. Wrapping
+    this in `_counting_client` and reading the attribute back exercises
+    `__getattr__`'s non-callable pass-through branch end-to-end (Important #3) --
+    every other league-refresh test passes a bare `MagicMock` directly to
+    `run_league_refresh`, bypassing that wrapper entirely."""
+
+    def __init__(self):
+        self.last_market_payload = None
+
+    def get_lineup_selection(self, *, league_id, position, start, max_items):
+        return {"it": []}
+
+    def get_market(self, league_id):
+        self.last_market_payload = {
+            "it": [
+                {
+                    "i": "11",
+                    "tid": "7",
+                    "pos": 2,
+                    "prc": 1_000_000,
+                    "mv": 900_000,
+                    "dt": "2026-09-15T16:05:06Z",
+                }
+            ]
+        }
+        return []
+
+    def get_league_ranking(self, league_id):
+        return {}
+
+    def get_manager_squad(self, league_id, manager_id):
+        return {"it": []}
+
+    def get_manager_transfer_history(self, league_id, manager_id):
+        return {"it": []}
+
+    def get_competition_matchdays(self):
+        return {}
+
+    def get_competition_table(self):
+        return {}
+
+    def get_team_profile(self, league_id, team_id):
+        return {}
+
+
+def test_league_refresh_market_payload_reaches_the_store_through_the_counting_wrapper(store_dsn):
+    """The one untested seam between Task 4 (trader/client) and Task 6 (ingest):
+    `run_ingestion` wraps the client in `_counting_client` before handing it to
+    `run_league_refresh`, and `last_market_payload` must survive that wrapping."""
+    league_store = LeagueStore(dsn=store_dsn)
+    client, clock = _FakeLowLevelClient(), Clock()
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        CorpusStore(dsn=store_dsn),
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
+        throttle_seconds=0,
+        today=DAY,
+        league_store=league_store,
+        learner=None,
+        our_user_id="me",
+        season="2026/2027",
+    )
+    assert stats.league["listings"] == 1
+    assert [r["player_id"] for r in league_store.latest_market()] == ["11"]

@@ -30,11 +30,13 @@ def _prepare() -> None:
 @app.timer_trigger(schedule="0 0 5,17 * * *", arg_name="timer", run_on_startup=False)
 def ingest(timer: func.TimerRequest):
     from rehoboam.api import KickbaseAPI
+    from rehoboam.bid_learner import BidLearner
     from rehoboam.config import get_settings
     from rehoboam.enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
     from rehoboam.services.session_facts import SessionFacts
     from rehoboam.store import ensure_ready
     from rehoboam.store.corpus_store import CorpusStore
+    from rehoboam.store.league_store import LeagueStore
     from rehoboam.store.session_store import SessionStore
 
     _prepare()
@@ -83,6 +85,11 @@ def ingest(timer: func.TimerRequest):
             stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
             mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
             status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
+            transfers_stale_after_seconds=settings.ingest_transfers_stale_after_hours * 3600.0,
+            league_store=LeagueStore(),
+            learner=BidLearner(),
+            our_user_id=str(api.user.id),
+            season=season,
         )
 
         calibration = None

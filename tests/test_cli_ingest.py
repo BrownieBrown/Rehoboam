@@ -49,8 +49,9 @@ def test_ingest_records_a_session_facts_row(monkeypatch, store_dsn):
         ingest_stale_after_hours=24.0,
         ingest_mv_stale_after_hours=168.0,
         ingest_status_stale_after_hours=3.0,
+        ingest_transfers_stale_after_hours=168.0,
     )
-    fake_api = SimpleNamespace(client=object())
+    fake_api = SimpleNamespace(client=object(), user=SimpleNamespace(id="u1"))
     monkeypatch.setattr(
         "rehoboam.cli._login_and_get_league",
         lambda league_index: (fake_api, fake_settings, fake_league),
@@ -111,8 +112,9 @@ def test_a_session_facts_row_exists_via_sessionstore_facts(monkeypatch, store_ds
         ingest_stale_after_hours=24.0,
         ingest_mv_stale_after_hours=168.0,
         ingest_status_stale_after_hours=3.0,
+        ingest_transfers_stale_after_hours=168.0,
     )
-    fake_api = SimpleNamespace(client=object())
+    fake_api = SimpleNamespace(client=object(), user=SimpleNamespace(id="u1"))
     monkeypatch.setattr(
         "rehoboam.cli._login_and_get_league",
         lambda league_index: (fake_api, fake_settings, fake_league),

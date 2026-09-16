@@ -335,7 +335,7 @@ class CorpusStore:
         survive an outer filter, so restricting rows and ordering them both
         have to happen on this query's own, outermost ORDER BY.
         """
-        kinds = [k for k in ("status", "performance", "mv") if k in older_than]
+        kinds = [k for k in ("status", "performance", "mv", "transfers") if k in older_than]
         if not kinds:
             return []
         cols = [_PROGRESS_COLUMNS[k] for k in kinds]

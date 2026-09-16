@@ -395,9 +395,12 @@ def ingest_cmd(
     import time
     import uuid
 
+    from .bid_learner import BidLearner
     from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
     from .services.session_facts import SessionFacts
+    from .store.calibration_store import CalibrationStore
     from .store.corpus_store import CorpusStore
+    from .store.league_store import LeagueStore
     from .store.session_store import SessionStore
 
     _ensure_store()
@@ -417,7 +420,12 @@ def ingest_cmd(
             stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
             mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
             status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
+            transfers_stale_after_seconds=settings.ingest_transfers_stale_after_hours * 3600.0,
             throttle_seconds=throttle,
+            league_store=LeagueStore(),
+            learner=BidLearner(),
+            our_user_id=str(api.user.id),
+            season=CalibrationStore().current_season(),
         )
     except Exception as e:
         try:
@@ -448,6 +456,7 @@ def ingest_cmd(
         "status_written",
         "performance_fetched",
         "mv_fetched",
+        "transfers_fetched",
         "failed",
         "requests",
     ):
@@ -632,6 +641,180 @@ def _print_report(report, outcome) -> None:
     console.print(table)
     console.print(f"worst: {report['worst']}")
     console.print(f"gate: {report['gate']}")
+
+
+@app.command("players")
+def players_cmd(
+    position: str | None = typer.Option(
+        None, "--position", help="Goalkeeper|Defender|Midfielder|Forward"
+    ),
+    owner: str | None = typer.Option(None, "--owner", help="Manager name, 'market' or 'Kickbase'."),
+    sort: str = typer.Option("predicted_ep", "--sort", help="Column to sort by (descending)."),
+    limit: int = typer.Option(60, "--limit"),
+):
+    """Base XI's player table from the store, with our predicted points beside it."""
+    from .store.league_store import LeagueStore
+
+    _ensure_store()
+    try:
+        rows = LeagueStore().player_table(position=position, owner=owner, order_by=sort)[:limit]
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    table = Table(title=f"players ({len(rows)})")
+    cols = [
+        ("name", "Name"),
+        ("team", "Team"),
+        ("position", "Pos"),
+        ("market_value", "MW"),
+        ("trend_24h_pct", "24h%"),
+        ("trend_7d_pct", "7d%"),
+        ("points", "Pts"),
+        ("avg_points", "Ø"),
+        ("median_points", "Med"),
+        ("points_per_million", "Pts/M"),
+        ("points_prev", "Pts-1"),
+        ("avg_points_prev", "Ø-1"),
+        ("appearances", "Eins"),
+        ("appearances_prev", "Eins-1"),
+        ("starts", "S11"),
+        ("starts_prev", "S11-1"),
+        ("owner", "Besitzer"),
+        ("predicted_ep", "EP"),
+        ("p_start", "P(start)"),
+        ("fair_value_gap", "Fair"),
+    ]
+    for _key, label in cols:
+        table.add_column(
+            label,
+            justify="right" if label not in ("Name", "Team", "Pos", "Besitzer") else "left",
+        )
+    for r in rows:
+        table.add_row(*[_cell(r[key]) for key, _label in cols])
+    _print_wide(table)
+
+
+def _cell(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:,.2f}" if abs(value) < 100 else f"{value:,.0f}"
+    if isinstance(value, int) and abs(value) >= 10_000:
+        return f"{value:,}"
+    return str(value)
+
+
+def _print_wide(table: Table) -> None:
+    """Print a many-column table without Rich's 80-column default.
+
+    `Console()` reports width=80 whenever stdout isn't a real terminal —
+    piped, redirected to a file, or `CliRunner` in tests — and a `Table`
+    with this many columns shrinks every one of them to fit, silently
+    ellipsizing cell content rather than erroring. `Console.print(width=…)`
+    can't override that: it's clamped to `min(width, self.width)`, so a
+    fresh, wider `Console` on the same file is the only way out. A real
+    terminal keeps its own detected width.
+    """
+    out = console if console.is_terminal else Console(file=console.file, width=200)
+    out.print(table)
+
+
+@app.command("market")
+def market_cmd():
+    """The newest market snapshot with our prediction per listing and the time to expiry."""
+    import time
+
+    from .store.league_store import LeagueStore
+
+    _ensure_store()
+    league = LeagueStore()
+    listings = league.latest_market()
+    if not listings:
+        console.print("[yellow]no market snapshot in the store yet[/yellow]")
+        return
+    owners = league.owner_of([r["player_id"] for r in listings])
+    names = {
+        r["player_id"]: (r["name"], r["team"], r["position"], r["predicted_ep"])
+        for r in league.player_table()
+    }
+    now = time.time()
+    snapshot_time = time.strftime("%Y-%m-%d %H:%M", time.gmtime(listings[0]["snapshot_at"]))
+    table = Table(title=f"market snapshot {snapshot_time} UTC")
+    for label in ("Name", "Team", "Pos", "Ask", "MW", "Seller", "Offers", "Expires in", "EP"):
+        table.add_column(
+            label,
+            justify="left" if label in ("Name", "Team", "Pos", "Seller") else "right",
+        )
+    for r in listings:
+        name, team, pos, ep = names.get(r["player_id"], (r["player_id"], None, None, None))
+        seller = owners.get(r["player_id"]) if r["seller_id"] else "Kickbase"
+        expires = f"{(r['expires_at'] - now) / 3600:.1f} h" if r["expires_at"] else "—"
+        table.add_row(
+            str(name),
+            _cell(team),
+            _cell(pos),
+            f"{r['ask']:,}",
+            _cell(r["market_value"]),
+            str(seller or r["seller_id"]),
+            _cell(r["offer_count"]),
+            expires,
+            _cell(ep),
+        )
+    _print_wide(table)
+
+
+@app.command("backfill-league")
+def backfill_league_cmd(
+    league_index: int = typer.Option(0, "--league", "-l"),
+    max_pages: int = typer.Option(
+        40, "--max-pages", help="Safety cap per manager (25 transfers each)."
+    ),
+):
+    """Every manager's transfer history into manager_transfers (once; safe to re-run)."""
+    import time
+
+    from .bid_learner import BidLearner
+    from .enrichment.rows import manager_rows
+    from .store.league_store import LeagueStore
+
+    _ensure_store()
+    api, _settings, league = _login_and_get_league(league_index)
+    ranking = api.get_league_ranking(league)
+    managers = manager_rows(
+        ranking,
+        league_id=str(league.id),
+        our_user_id=str(api.user.id),
+        updated_at=time.time(),
+    )
+    LeagueStore().upsert_managers(managers)
+    learner = BidLearner()
+    total = 0
+    for m in managers:
+        start = 0
+        for _ in range(max_pages):
+            page = api.get_manager_transfer_history(league, m["manager_id"], start=start)
+            items = (page or {}).get("it") or []
+            rows = [
+                {
+                    "league_id": str(league.id),
+                    "manager_id": m["manager_id"],
+                    "transfer_dt": t["dt"],
+                    "player_id": str(t["pi"]),
+                    "player_name": t.get("pn", ""),
+                    "transfer_type": t.get("tty"),
+                    "transfer_price": t.get("trp"),
+                }
+                for t in items
+                if t.get("pi") and t.get("dt")
+            ]
+            if rows:
+                learner.record_manager_transfers(rows)
+                total += len(rows)
+            if len(items) < 25:
+                break
+            start += 25
+        console.print(f"{m['name']}: history read")
+    console.print(f"manager_transfers: {total} rows written")
 
 
 @app.command("backfill-flip-entry-context")

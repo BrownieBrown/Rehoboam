@@ -438,3 +438,65 @@ def test_a_store_failure_while_predicting_never_stops_the_session(store_dsn, ctx
         session = trader.run_full_session(LEAGUE)
     assert session.session_id
     assert SessionStore(dsn=store_dsn).facts(session.session_id)["predictions_written"] == 0
+
+
+from rehoboam.store.league_store import LeagueStore  # noqa: E402
+
+RAW_MARKET = {
+    "it": [
+        {
+            "i": "lst",
+            "tid": "8",
+            "pos": 4,
+            "prc": 3_000_000,
+            "mv": 2_900_000,
+            "exs": 500,
+            "dt": "2026-09-15T16:05:06Z",
+            "u": {"i": "m2"},
+        }
+    ]
+}
+RANKING = {"us": [{"i": "3616202", "n": "Marco"}, {"i": "m2", "n": "Rival"}]}
+
+
+def test_a_session_writes_listings_managers_and_squads(store_dsn, ctx_factory):
+    trader = _trader(store_dsn, _legal_squad())
+    ctx = ctx_factory()
+    ctx.ep_result.update(
+        {
+            "market_payload": RAW_MARKET,
+            "ranking_payload": RANKING,
+            "competitor_squads": {"m2": [{"pi": "r1", "mv": 5, "mvgl": 1, "iotm": False}]},
+        }
+    )
+    with patch.object(AutoTrader, "_build_session_context", return_value=ctx):
+        session = trader.run_full_session(LEAGUE)
+    league = LeagueStore(dsn=store_dsn)
+    assert [r["player_id"] for r in league.latest_market()] == ["lst"]
+    assert (
+        league.latest_market()[0]["seller_id"] == "m2"
+        and league.latest_market()[0]["source"] == "session"
+    )
+    owners = league.owner_of(["r1", "gk", "lst"])
+    assert owners == {"r1": "Rival", "gk": "Marco", "lst": "market"}
+    facts = SessionStore(dsn=store_dsn).facts(session.session_id)
+    assert facts["extra"]["league_state"] == {
+        "listings": 1,
+        "managers": 2,
+        "squads": 12,
+    }
+
+
+def test_missing_market_and_ranking_still_writes_our_own_squad(store_dsn, ctx_factory):
+    """No market/ranking payload on `ctx` (both absent): the listings and managers
+    writes are skipped, but our own squad still comes from `ctx.squad` and gets
+    written. That is harmless per-manager after the owner-resolution fix (Important
+    #2) -- a lone own-squad snapshot no longer blanks any other manager's ownership,
+    since readers now resolve the newest snapshot per manager, not globally."""
+    trader = _trader(store_dsn, _legal_squad())
+    with patch.object(AutoTrader, "_build_session_context", return_value=ctx_factory()):
+        session = trader.run_full_session(LEAGUE)
+    assert LeagueStore(dsn=store_dsn).latest_market() == []
+    facts = SessionStore(dsn=store_dsn).facts(session.session_id)
+    assert facts["errors"] == 0
+    assert facts["extra"]["league_state"] == {"listings": 0, "managers": 0, "squads": 11}
