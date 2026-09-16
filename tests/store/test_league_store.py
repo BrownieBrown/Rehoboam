@@ -73,10 +73,13 @@ def test_owner_precedence_manager_then_market_then_kickbase(store_dsn):
         ]
     )
     store.write_squads([_squad_row("m1", "a"), _squad_row("m2", "b")])
-    store.write_squads([_squad_row("m2", "c", snapshot_at=T0 + 60)])  # newest snapshot wins
+    store.write_squads([_squad_row("m2", "c", snapshot_at=T0 + 60)])  # m2's own newest wins
     store.write_listings([_listing("d")])
-    assert store.owner_of(["a", "b", "c", "d", "e"]) == {"c": "Rival", "d": "market"}
-    # `a`/`b` were in the older snapshot only; `e` is nowhere: both absent => "Kickbase" for callers
+    assert store.owner_of(["a", "b", "c", "d", "e"]) == {"a": "Marco", "c": "Rival", "d": "market"}
+    # Newest is resolved per manager: m1's only snapshot (T0, "a") still stands even
+    # though m2 has since written a newer one; "b" was m2's *older* snapshot, superseded
+    # by their own "c" -- so "b" is absent now, not blanked league-wide. `e` is nowhere:
+    # both absent => "Kickbase" for callers.
 
 
 def test_upsert_managers_updates_the_name(store_dsn):

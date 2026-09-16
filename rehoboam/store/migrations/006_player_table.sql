@@ -31,11 +31,16 @@ hist as (
     left join prev p on true
     group by h.player_id
 ),
+squad_newest as (
+    select manager_id, max(snapshot_at) as at
+    from rehoboam.manager_squads
+    group by manager_id
+),
 owner as (
     select s.player_id, m.name
     from rehoboam.manager_squads s
+    join squad_newest n on n.manager_id = s.manager_id and n.at = s.snapshot_at
     join rehoboam.managers m on m.manager_id = s.manager_id
-    where s.snapshot_at = (select max(snapshot_at) from rehoboam.manager_squads)
 ),
 listed as (
     select player_id from rehoboam.market_listings
@@ -47,13 +52,29 @@ pred as (
     where backfill = false
     order by player_id, predicted_at desc
 ),
-mv_1d as (
+mv_1d_status as (
+    -- Daily series: nearly every player gets a row every day (status is
+    -- refreshed on a 10h window), so this is a genuine 24h reference point.
+    select distinct on (player_id) player_id, market_value
+    from rehoboam.player_status_daily
+    where market_value is not null and day <= current_date - 1
+    order by player_id, day desc
+),
+mv_7d_status as (
+    select distinct on (player_id) player_id, market_value
+    from rehoboam.player_status_daily
+    where market_value is not null and day <= current_date - 7
+    order by player_id, day desc
+),
+mv_1d_series as (
+    -- Fallback only: mv_series refreshes weekly per player, so its newest
+    -- point before the cutoff can be several days older than the label says.
     select distinct on (player_id) player_id, market_value
     from rehoboam.mv_series
     where snapshot_at <= extract(epoch from now()) - 86400
     order by player_id, snapshot_at desc
 ),
-mv_7d as (
+mv_7d_series as (
     select distinct on (player_id) player_id, market_value
     from rehoboam.mv_series
     where snapshot_at <= extract(epoch from now()) - 7 * 86400
@@ -70,8 +91,8 @@ base as (
         coalesce(o.name, case when l.player_id is not null then 'market' else 'Kickbase' end) as owner,
         pr.predicted_ep,
         (pr.p_status ->> '5')::double precision as p_start,
-        d1.market_value as mv_1d,
-        d7.market_value as mv_7d
+        coalesce(d1s.market_value, d1e.market_value) as mv_1d,
+        coalesce(d7s.market_value, d7e.market_value) as mv_7d
     from rehoboam.player_universe u
     left join rehoboam.teams t on t.team_id = u.team_id
     left join mv_now n on n.player_id = u.player_id
@@ -79,8 +100,10 @@ base as (
     left join owner o on o.player_id = u.player_id
     left join listed l on l.player_id = u.player_id
     left join pred pr on pr.player_id = u.player_id
-    left join mv_1d d1 on d1.player_id = u.player_id
-    left join mv_7d d7 on d7.player_id = u.player_id
+    left join mv_1d_status d1s on d1s.player_id = u.player_id
+    left join mv_1d_series d1e on d1e.player_id = u.player_id
+    left join mv_7d_status d7s on d7s.player_id = u.player_id
+    left join mv_7d_series d7e on d7e.player_id = u.player_id
     where u.position is not null
 ),
 fair as (

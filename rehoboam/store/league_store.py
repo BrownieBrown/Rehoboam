@@ -159,17 +159,23 @@ class LeagueStore:
         return [dict(r) for r in rows]
 
     def owner_of(self, player_ids: list[str]) -> dict[str, str]:
-        """Manager name from the newest squad snapshot, else 'market' from the newest
-        market snapshot. Players in neither are absent (callers read 'Kickbase')."""
+        """Manager name from each manager's own newest squad snapshot, else 'market'
+        from the newest market snapshot. Players in neither are absent (callers read
+        'Kickbase'). Newest is resolved per manager, not globally, so one manager's
+        stale or missing snapshot cannot blank another manager's ownership."""
         ids = [str(p) for p in player_ids]
         if not ids:
             return {}
         with self.connection() as conn:
             owned = conn.execute(
+                "WITH newest AS ("
+                "  SELECT manager_id, MAX(snapshot_at) AS at"
+                "  FROM rehoboam.manager_squads GROUP BY manager_id"
+                ") "
                 "SELECT s.player_id, m.name FROM rehoboam.manager_squads s "
+                "JOIN newest n ON n.manager_id = s.manager_id AND n.at = s.snapshot_at "
                 "JOIN rehoboam.managers m ON m.manager_id = s.manager_id "
-                "WHERE s.snapshot_at = (SELECT MAX(snapshot_at) FROM rehoboam.manager_squads) "
-                "AND s.player_id = ANY(%s)",
+                "WHERE s.player_id = ANY(%s)",
                 (ids,),
             ).fetchall()
             listed = conn.execute(

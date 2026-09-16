@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, timedelta
 
 from rehoboam.store.calibration_store import CalibrationStore
 from rehoboam.store.corpus_store import CorpusStore
@@ -51,6 +51,17 @@ def _seed(dsn):
                 "market_value": 2_000_000,
                 "average_points": 10.0,
             },
+            {
+                # No player_status_daily rows at all -- exercises the mv_series
+                # fallback for trend_24h_pct/trend_7d_pct (Important #4).
+                "player_id": "c",
+                "first_name": None,
+                "last_name": "Gamma",
+                "position": "Forward",
+                "team_id": "9",
+                "market_value": 12_000_000,
+                "average_points": 0.0,
+            },
         ]
     )
     corpus.record_match_history(
@@ -80,6 +91,18 @@ def _seed(dsn):
     corpus.record_match_history("b", "8", _perf([("2026/2027", [_m(1, 5, 10)])]))
     corpus.record_status_daily(
         "a", date.today(), {"st": 0, "prob": 1, "mv": 12_000_000, "tid": "7"}, NOW
+    )
+    corpus.record_status_daily(
+        "a",
+        date.today() - timedelta(days=1),
+        {"st": 0, "prob": 1, "mv": 11_000_000, "tid": "7"},
+        NOW - 86400,
+    )
+    corpus.record_status_daily(
+        "a",
+        date.today() - timedelta(days=7),
+        {"st": 0, "prob": 1, "mv": 10_000_000, "tid": "7"},
+        NOW - 7 * 86400,
     )
     league = LeagueStore(dsn=dsn)
     league.upsert_teams(
@@ -112,7 +135,7 @@ def _seed(dsn):
     with corpus.connection() as conn:
         conn.execute(
             "INSERT INTO rehoboam.mv_series (player_id, snapshot_at, market_value) VALUES "
-            "('a', %s, 10000000), ('a', %s, 11000000)",
+            "('c', %s, 10000000), ('c', %s, 11000000)",
             (NOW - 8 * 86400, NOW - 86400 - 60),
         )
     CalibrationStore(dsn=dsn).write_predictions(
@@ -191,11 +214,16 @@ def test_the_numbers(store_dsn):
     assert float(a["avg_points"]) == 50.0 and float(a["median_points"]) == 50.0
     assert a["points_prev"] == 100 and a["appearances_prev"] == 1 and a["starts_prev"] == 1
     assert round(float(a["points_per_million"]), 2) == round(100 / 12.0, 2)
+    # trend_24h/7d for "a" come from player_status_daily rows (Important #4), not mv_series.
     assert round(float(a["trend_24h_pct"]), 1) == round(100 * (12 - 11) / 11, 1)
     assert round(float(a["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
     assert a["owner"] == "Rival" and float(a["predicted_ep"]) == 61.5 and float(a["p_start"]) == 0.7
     assert b["owner"] == "Kickbase" and b["team"] is None and b["points_prev"] is None
     assert b["predicted_ep"] is None and b["trend_24h_pct"] is None
+    # "c" has no player_status_daily rows at all: trend falls back to mv_series.
+    c = rows["c"]
+    assert round(float(c["trend_24h_pct"]), 1) == round(100 * (12 - 11) / 11, 1)
+    assert round(float(c["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
 
 
 def test_filters_and_order(store_dsn):
