@@ -209,9 +209,15 @@ select season, day_number, backfill, computed_at, n, n_unpredicted, n_stale_rows
 from rehoboam.calibration_reports;
 ```
 
-- [ ] **Step 2: Bump the simulated-migration filename in `tests/store/test_migrate.py`**
+- [ ] **Step 2: Teach `tests/store/test_migrate.py` about migration 007**
 
-That test writes a fake migration file to prove the runner applies new files. It currently names it `007_...`, which would now collide with a real migration. Find the constant and change `007` to `008`. Run `.venv/bin/pytest tests/store/test_migrate.py -q` before and after; it must pass both times.
+That file asserts three things a new migration changes. `_tables()` reads `information_schema.tables`, which in PostgreSQL **includes views** — that is why `player_table` is already in `EXPECTED_TABLES`. So:
+
+1. `test_migrate_creates_every_table_in_the_rehoboam_schema`: add `"007_web_views.sql"` to the expected `applied` list, after `"006_player_table.sql"`.
+1. `test_migrate_is_idempotent`: change `applied_versions(conn) == {1, 2, 3, 4, 5, 6}` to `{1, 2, 3, 4, 5, 6, 7}`.
+1. `EXPECTED_TABLES` (top of the file): add the six view names — `web_players`, `web_squad`, `web_session_summary`, `web_market`, `web_ownership`, `web_calibration`.
+
+Run `.venv/bin/pytest tests/store/test_migrate.py -q` after Step 1: it must pass. If it fails on the relation set, you missed a view name.
 
 - [ ] **Step 3: Write the failing tests**
 
@@ -224,7 +230,8 @@ from __future__ import annotations
 
 import time
 
-from rehoboam.services.session_facts import SessionFacts
+from rehoboam.services.calibration import CalibrationReport
+from rehoboam.services.session_facts import IntegrityFailure, SessionFacts
 from rehoboam.store import connect
 from rehoboam.store.calibration_store import CalibrationStore
 from rehoboam.store.corpus_store import CorpusStore
@@ -478,7 +485,7 @@ def test_web_market_calls_an_unowned_listing_kickbase(store_dsn):
     assert row["seller"] == "Kickbase" and row["is_ours"] is False
 
 
-def _facts(session_id, *, app="function", dry_run=0, started_at=NOW, **kw):
+def _facts(session_id, *, app="function", dry_run=False, started_at=NOW, **kw):
     return SessionFacts(
         session_id=session_id,
         app=app,
@@ -522,7 +529,7 @@ def test_web_squad_uses_the_newest_real_session_not_a_dry_run(store_dsn):
     sessions.record(
         _facts("real", started_at=NOW, legal_formation="4-3-3", budget=1_725_739)
     )
-    sessions.record(_facts("dry", app="cli", dry_run=1, started_at=NOW + 600))
+    sessions.record(_facts("dry", app="cli", dry_run=True, started_at=NOW + 600))
     calib.write_predictions([_prediction("real", "a"), _prediction("dry", "b")])
     rows = _rows(store_dsn, "select * from rehoboam.web_squad")
     assert [r["player_id"] for r in rows] == ["a"]
@@ -576,7 +583,7 @@ def test_web_session_summary_flattens_an_ingest_run_and_its_rules(store_dsn):
     )
     sessions.record(_facts("sess1", extra={"league_state": {"squads": 158}}))
     sessions.record_failures(
-        "sess1", [("I4", "2 owned player(s) without a cost basis")]
+        "sess1", [IntegrityFailure("I4", "2 owned player(s) without a cost basis")]
     )
     rows = {
         r["session_id"]: r
@@ -595,12 +602,9 @@ def test_web_session_summary_flattens_an_ingest_run_and_its_rules(store_dsn):
 
 
 def test_web_calibration_keeps_an_empty_settled_report(store_dsn):
-    calib = CalibrationStore(dsn=store_dsn)
-    calib.write_calibration(
-        season=SEASON,
-        day_number=1,
-        backfill=False,
-        computed_at=NOW,
+    # `write_calibration` takes the report object, not loose metrics: it calls
+    # `report.as_row()` and writes rows + report in one transaction.
+    empty = CalibrationReport(
         n=0,
         n_unpredicted=0,
         n_stale_rows=0,
@@ -614,10 +618,15 @@ def test_web_calibration_keeps_an_empty_settled_report(store_dsn):
         squad_regret=None,
         live_spearman=None,
         live_n=0,
-        by_position={},
-        by_status={},
-        worst=[],
+    )
+    CalibrationStore(dsn=store_dsn).write_calibration(
+        season=SEASON,
+        day_number=1,
+        backfill=False,
+        rows=[],
+        report=empty,
         gate=None,
+        computed_at=NOW,
     )
     rows = _rows(store_dsn, "select * from rehoboam.web_calibration")
     assert len(rows) == 1
@@ -625,7 +634,7 @@ def test_web_calibration_keeps_an_empty_settled_report(store_dsn):
     assert rows[0]["backfill"] is False
 ```
 
-`SessionStore.record_failures` and `CalibrationStore.write_calibration` take the argument shapes shown; if a signature differs, read the store module and adapt the call — never change the store to fit the test.
+These call shapes were verified against the store on 2026-09-16: `SessionStore.record_failures(session_id, [IntegrityFailure(rule, detail)])`, `CalibrationStore.write_calibration(season=, day_number=, backfill=, rows=, report=CalibrationReport(...), gate=, computed_at=)`, and `SessionFacts.dry_run` is a **bool**. If a signature has moved since, read the store module and adapt the call — never change the store to fit the test.
 
 - [ ] **Step 4: Run the tests to verify they fail**
 
