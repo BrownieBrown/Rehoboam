@@ -13,6 +13,19 @@ describe("money", () => {
   it("shows an em dash for nothing", () => {
     expect(money(null)).toBe("—");
   });
+  it("uses the same minus sign as signed/signedPct on a negative value, not a hyphen", () => {
+    expect(money(-500000).startsWith("−")).toBe(true);
+    expect(money(-500000).charCodeAt(0)).toBe("−".charCodeAt(0));
+  });
+  it("keeps exact separators on a negative value", () => {
+    expect(money(-500000)).toBe("−500,000");
+  });
+  it("shows zero with no sign", () => {
+    expect(money(0)).toBe("0");
+  });
+  it("leaves a positive value unchanged", () => {
+    expect(money(65089670)).toBe("65,089,670");
+  });
 });
 
 describe("signedPct", () => {

@@ -5,9 +5,16 @@ const MINUS = "−";
 
 const groups = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
-/** Exact euros with thousands separators. Never abbreviated — a standing rule. */
+/**
+ * Exact euros with thousands separators. Never abbreviated — a standing rule.
+ * A negative value (budget is the one that matters: going negative at
+ * kickoff zeroes the whole matchday) uses the same U+2212 minus sign as
+ * `signed`/`signedPct`, not `Intl`'s default ASCII hyphen-minus — one page,
+ * one glyph for "negative".
+ */
 export function money(n: number | null | undefined): string {
   if (n === null || n === undefined) return DASH;
+  if (n < 0) return `${MINUS}${groups.format(-n)}`;
   return groups.format(n);
 }
 

@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { sql } from "./db";
 
 // Tasks 5-8 append their own query functions to this file; this task owns
@@ -17,8 +18,15 @@ export type ShellFacts = {
 /**
  * The sidebar and header need these on every route, including the login page
  * where there is no session — so this never throws; a failure renders dashes.
+ *
+ * `cache()` (not `fetch` memoization — `sql` is a raw Postgres client, so
+ * Next's automatic per-request dedupe never applies to it) means the
+ * layout's call and StatusHeader's call, within one render, share a single
+ * execution: two round trips instead of four, and the sidebar's kickoff
+ * card and the header's count line can no longer read two different
+ * moments of the store.
  */
-export async function shellFacts(): Promise<ShellFacts> {
+export const shellFacts = cache(async (): Promise<ShellFacts> => {
   const empty: ShellFacts = {
     players: null,
     lastSessionAt: null,
@@ -61,4 +69,4 @@ export async function shellFacts(): Promise<ShellFacts> {
     console.error("shellFacts failed", error);
     return empty;
   }
-}
+});
