@@ -1181,14 +1181,26 @@ import { createServerClient } from "@/lib/supabase";
  * turn a successful sign-in into an open redirect. Only a single-slash relative
  * path is allowed through; everything else falls back to the root.
  */
-function safeNext(raw: string | null): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
-  return raw;
+function safeNext(raw: string | null, origin: string): string {
+  // A prefix check alone is NOT enough, and this was measured, not guessed:
+  // the URL parser normalises a backslash to a slash for http(s) and strips
+  // tab/newline entirely, so "/\\evil.com" and "/<TAB>/evil.com" both start
+  // with a single "/" and still resolve to https://evil.com. The only
+  // trustworthy test is to resolve with the SAME parser the redirect uses and
+  // compare origins.
+  if (!raw || !raw.startsWith("/")) return "/";
+  try {
+    const url = new URL(raw, origin);
+    if (url.origin !== origin) return "/";
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return "/";
+  }
 }
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
-  const next = safeNext(request.nextUrl.searchParams.get("next"));
+  const next = safeNext(request.nextUrl.searchParams.get("next"), request.nextUrl.origin);
   if (code) {
     const supabase = await createServerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
@@ -1227,22 +1239,38 @@ Add a second test file, `web/src/lib/safe-next.test.ts`, for the redirect guard 
 import { describe, expect, it } from "vitest";
 import { safeNext } from "./safe-next";
 
+const ORIGIN = "https://dash.example";
+
 describe("safeNext", () => {
   it("keeps a relative path", () => {
-    expect(safeNext("/squad")).toBe("/squad");
-    expect(safeNext("/market?expiring=6")).toBe("/market?expiring=6");
+    expect(safeNext("/squad", ORIGIN)).toBe("/squad");
+    expect(safeNext("/market?expiring=6", ORIGIN)).toBe("/market?expiring=6");
   });
 
   it("refuses anything that could leave this origin", () => {
-    for (const hostile of ["//evil.com", "https://evil.com", "http://evil.com", "///evil.com"]) {
-      expect(safeNext(hostile)).toBe("/");
+    // Every one of these was verified to reach https://evil.com through
+    // `new URL(raw, origin)` when the guard was only a prefix check.
+    const hostile = [
+      "//evil.com",
+      "https://evil.com",
+      "http://evil.com",
+      "///evil.com",
+      String.raw`/\evil.com`,
+      String.raw`/\/evil.com`,
+      String.raw`/\evil.com/path`,
+      "/\t/evil.com",
+      "javascript:alert(1)",
+    ];
+    for (const raw of hostile) {
+      expect(safeNext(raw, ORIGIN)).toBe("/");
+      expect(new URL(safeNext(raw, ORIGIN), ORIGIN).origin).toBe(ORIGIN);
     }
   });
 
   it("falls back to the root for nothing and for garbage", () => {
-    expect(safeNext(null)).toBe("/");
-    expect(safeNext("")).toBe("/");
-    expect(safeNext("squad")).toBe("/");
+    expect(safeNext(null, ORIGIN)).toBe("/");
+    expect(safeNext("", ORIGIN)).toBe("/");
+    expect(safeNext("squad", ORIGIN)).toBe("/");
   });
 });
 ```
