@@ -794,7 +794,12 @@ class AutoTrader:
             )
         if squad_rows:
             counts["squads"] = store.write_squads(squad_rows)
-        logger.info("league-state listings=%d managers=%d squads=%d", *counts.values())
+        logger.info(
+            "league-state listings=%d managers=%d squads=%d",
+            counts["listings"],
+            counts["managers"],
+            counts["squads"],
+        )
         return counts
 
     def _finish_facts(self, errors: list[str], start_time: float, phase: str, league) -> list:

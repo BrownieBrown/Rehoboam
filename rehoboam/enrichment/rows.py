@@ -168,15 +168,18 @@ def market_listing_rows(
     for item in (payload or {}).get("it") or []:
         if not isinstance(item, dict) or not item.get("i"):
             continue
+        ask = item.get("prc") or item.get("mv")
+        if not ask:
+            continue  # not actionable without a price
         seller = item.get("u")
         seller_id = str(seller.get("i")) if isinstance(seller, dict) and seller.get("i") else None
-        ours = str(item.get("uoid") or "") == str(our_user_id)
+        ours = bool(our_user_id) and str(item.get("uoid") or "") == str(our_user_id)
         exs = item.get("exs")
         rows.append(
             {
                 "snapshot_at": snapshot_at,
                 "player_id": str(item["i"]),
-                "ask": int(item.get("prc") or item.get("mv") or 0),
+                "ask": int(ask),
                 "market_value": _opt_int(item.get("mv")),
                 "mv_trend": _opt_int(item.get("mvt")),
                 "seller_id": seller_id,

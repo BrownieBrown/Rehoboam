@@ -656,7 +656,11 @@ def players_cmd(
     from .store.league_store import LeagueStore
 
     _ensure_store()
-    rows = LeagueStore().player_table(position=position, owner=owner, order_by=sort)[:limit]
+    try:
+        rows = LeagueStore().player_table(position=position, owner=owner, order_by=sort)[:limit]
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     table = Table(title=f"players ({len(rows)})")
     cols = [
         ("name", "Name"),

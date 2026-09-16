@@ -487,10 +487,16 @@ def test_a_session_writes_listings_managers_and_squads(store_dsn, ctx_factory):
     }
 
 
-def test_missing_payloads_write_nothing_and_do_not_fail(store_dsn, ctx_factory):
+def test_missing_market_and_ranking_still_writes_our_own_squad(store_dsn, ctx_factory):
+    """No market/ranking payload on `ctx` (both absent): the listings and managers
+    writes are skipped, but our own squad still comes from `ctx.squad` and gets
+    written. That is harmless per-manager after the owner-resolution fix (Important
+    #2) -- a lone own-squad snapshot no longer blanks any other manager's ownership,
+    since readers now resolve the newest snapshot per manager, not globally."""
     trader = _trader(store_dsn, _legal_squad())
     with patch.object(AutoTrader, "_build_session_context", return_value=ctx_factory()):
         session = trader.run_full_session(LEAGUE)
     assert LeagueStore(dsn=store_dsn).latest_market() == []
     facts = SessionStore(dsn=store_dsn).facts(session.session_id)
     assert facts["errors"] == 0
+    assert facts["extra"]["league_state"] == {"listings": 0, "managers": 0, "squads": 11}

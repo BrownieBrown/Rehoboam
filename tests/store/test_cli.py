@@ -136,6 +136,13 @@ def test_players_prints_the_view(store_dsn):
     assert "Alpha" in result.output and "Rival" in result.output and "Club Seven" in result.output
 
 
+def test_players_bad_sort_prints_a_message_instead_of_a_traceback(store_dsn):
+    result = runner.invoke(app, ["players", "--sort", "nope"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "nope" in result.output or "order_by" in result.output
+
+
 def test_market_prints_the_newest_snapshot(store_dsn):
     from rehoboam.store.league_store import LeagueStore
 

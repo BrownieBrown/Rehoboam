@@ -81,6 +81,26 @@ def test_our_bid_only_when_the_offer_holder_is_us():
     assert rows[0]["our_bid"] is None
 
 
+def test_ours_is_false_without_a_user_id_even_if_uop_is_present():
+    """An empty `our_user_id` (what the ingest passes for `None`) must not mark
+    every listing without a `uoid` as ours."""
+    payload = {"it": [dict(MARKET["it"][1], uop=999)]}
+    rows = market_listing_rows(payload, snapshot_at=T0, our_user_id="", source="session")
+    assert rows[0]["our_bid"] is None
+
+
+def test_ask_falls_back_to_mv_without_prc():
+    payload = {"it": [dict(MARKET["it"][1], prc=None)]}
+    rows = market_listing_rows(payload, snapshot_at=T0, our_user_id="3616202", source="session")
+    assert rows[0]["ask"] == 6_832_673  # mv
+
+
+def test_a_listing_with_neither_prc_nor_mv_is_dropped():
+    payload = {"it": [dict(MARKET["it"][1], prc=None, mv=None)]}
+    rows = market_listing_rows(payload, snapshot_at=T0, our_user_id="3616202", source="session")
+    assert rows == []
+
+
 def test_manager_squad_rows():
     items = [
         {"pi": "11", "mv": 5_000_000, "mvgl": 250_000, "iotm": True, "pn": "X"},
