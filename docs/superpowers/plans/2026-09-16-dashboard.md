@@ -1175,9 +1175,20 @@ export default function LoginPage() {
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 
+/**
+ * `next` comes from the query string, so it is attacker-controlled. `new URL()`
+ * resolves "//evil.com" and "https://evil.com" to a FOREIGN origin, which would
+ * turn a successful sign-in into an open redirect. Only a single-slash relative
+ * path is allowed through; everything else falls back to the root.
+ */
+function safeNext(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+  return raw;
+}
+
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
-  const next = request.nextUrl.searchParams.get("next") ?? "/";
+  const next = safeNext(request.nextUrl.searchParams.get("next"));
   if (code) {
     const supabase = await createServerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
@@ -1209,6 +1220,34 @@ describe("isPublicPath", () => {
   });
 });
 ```
+
+Add a second test file, `web/src/lib/safe-next.test.ts`, for the redirect guard — an open redirect here would turn a real sign-in into a handoff to an attacker's site:
+
+```typescript
+import { describe, expect, it } from "vitest";
+import { safeNext } from "./safe-next";
+
+describe("safeNext", () => {
+  it("keeps a relative path", () => {
+    expect(safeNext("/squad")).toBe("/squad");
+    expect(safeNext("/market?expiring=6")).toBe("/market?expiring=6");
+  });
+
+  it("refuses anything that could leave this origin", () => {
+    for (const hostile of ["//evil.com", "https://evil.com", "http://evil.com", "///evil.com"]) {
+      expect(safeNext(hostile)).toBe("/");
+    }
+  });
+
+  it("falls back to the root for nothing and for garbage", () => {
+    expect(safeNext(null)).toBe("/");
+    expect(safeNext("")).toBe("/");
+    expect(safeNext("squad")).toBe("/");
+  });
+});
+```
+
+Put `safeNext` in its own module `web/src/lib/safe-next.ts` so the route imports it and the test can reach it without loading Next's request machinery.
 
 Run it, watch it fail, then extract the list into `web/src/lib/auth-paths.ts`:
 
