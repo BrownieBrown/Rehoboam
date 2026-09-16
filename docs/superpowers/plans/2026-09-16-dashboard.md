@@ -857,13 +857,23 @@ describe("dsn", () => {
 });
 ```
 
-`web/vitest.config.ts`:
+`web/vitest.config.ts` — two settings beyond the obvious, both discovered by running it:
 
 ```typescript
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  test: { environment: "node", include: ["src/**/*.test.ts"] },
+  // `import "server-only"` resolves only under Next's react-server condition;
+  // without it every module that guards itself that way throws in a unit test.
+  resolve: { conditions: ["react-server"] },
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
+    // `db.ts` builds its client at module scope, so importing it needs *a*
+    // URL. This one is never connected to: `postgres()` opens no socket until
+    // a query runs, and no unit test runs one.
+    env: { DATABASE_URL: "postgresql://test:test@localhost:5432/test" },
+  },
 });
 ```
 
