@@ -1188,13 +1188,19 @@ function safeNext(raw: string | null, origin: string): string {
   // with a single "/" and still resolve to https://evil.com. The only
   // trustworthy test is to resolve with the SAME parser the redirect uses and
   // compare origins.
-  if (!raw || !raw.startsWith("/")) return "/";
+  const fallback = `${origin}/`;
+  if (!raw || !raw.startsWith("/")) return fallback;
   try {
     const url = new URL(raw, origin);
-    if (url.origin !== origin) return "/";
-    return url.pathname + url.search + url.hash;
+    if (url.origin !== origin) return fallback;
+    // Return the RESOLVED ABSOLUTE url, never a path. Measured: "/..//evil.com"
+    // resolves once to origin dash.example with pathname "//evil.com", which
+    // passes the origin check — and then the caller parses that path a second
+    // time, where "//evil.com" is protocol-relative and lands on evil.com.
+    // Handing back an absolute same-origin href makes the second parse a no-op.
+    return url.href;
   } catch {
-    return "/";
+    return fallback;
   }
 }
 
