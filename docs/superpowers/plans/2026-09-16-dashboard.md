@@ -990,7 +990,7 @@ ______________________________________________________________________
 
 - Consumes: nothing from earlier tasks except the project scaffold.
 
-- Produces: `requireSession(): Promise<User>` from `web/src/lib/auth.ts` (Supabase's `User`, what `getUser()` returns — not a `Session`) — every page calls it first; `createServerClient()` and `createMiddlewareClient(request, response)` from `web/src/lib/supabase.ts`.
+- Produces: `safeNext(raw: string | null, origin: string): string` from `web/src/lib/safe-next.ts` — returns a fully resolved **absolute** same-origin URL, never a path, so a caller cannot re-parse it into an off-origin redirect. **Any future code that redirects to a user-supplied destination must go through it**, including the `next` the middleware writes if it is ever wired through the login form into `emailRedirectTo`. `requireSession(): Promise<User>` from `web/src/lib/auth.ts` (Supabase's `User`, what `getUser()` returns — not a `Session`) — every page calls it first; `createServerClient()` and `createMiddlewareClient(request, response)` from `web/src/lib/supabase.ts`.
 
 - [ ] **Step 1: Write the Supabase clients**
 
@@ -2752,7 +2752,7 @@ ______________________________________________________________________
 These need Marco's credentials or touch production; an implementer never does them.
 
 1. Apply migration 007 to production as admin (through `store.migrate.migrate` with the Settings admin DSN, as for 004-006), then confirm the six views answer: `select count(*) from rehoboam.web_players` and friends.
-1. Create the Supabase Auth user: Authentication → Users → add Marco's address; then Providers → Email, disable sign-ups; Site URL and redirect URLs set to the Vercel production domain and `https://*-<project>.vercel.app/auth/callback` for previews.
+1. Create the Supabase Auth user: Authentication → Users → add Marco's address; then Providers → Email, disable sign-ups; Site URL and redirect URLs set to the Vercel production domain and `https://*-<project>.vercel.app/auth/callback` for previews. **The redirect allowlist is a security control, not configuration**: `emailRedirectTo` is built from the incoming request's `Origin` header, and Supabase honouring only allowlisted destinations is what stops a forged `Origin` from pointing the magic link somewhere else. Keep the list tight — the production domain and the preview pattern, nothing wider.
 1. `vercel login`, then `vercel link` from `web/`, set the three environment variables for Production and Preview, and deploy.
 1. Sign in, walk the four pages, and compare the Players table against `rehoboam players` and the squad against `rehoboam status`.
 1. Open the PR, merge, let CI run; Vercel deploys production from `main`.
