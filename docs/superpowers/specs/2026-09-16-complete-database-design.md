@@ -71,7 +71,7 @@ million against the position's regression, the number behind their MW-Graph).
   by id (details for position); the current universe is enumerated via
   `/lineup/selection` per position (453–462 players). → G3.
 
-## G1: market, ownership, fixtures, the table view
+## G1: market, ownership, fixtures, the table view — shipped 2026-09-16
 
 **No new API call in the trading session.** The session already fetches the
 market and every manager's squad to build its context; it writes what it
