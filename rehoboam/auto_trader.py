@@ -18,6 +18,7 @@ from .services.pacing import available_squad_slots
 from .services.safety_gate import BuyGate, club_counts
 from .services.session_facts import IntegrityFailure, SessionFacts
 from .store.calibration_store import CalibrationStore
+from .store.league_store import LeagueStore
 from .store.session_store import SessionStore
 
 console = Console()
@@ -373,6 +374,7 @@ class AutoTrader:
         app_name: str = "cli",
         session_store: SessionStore | None = None,
         calibration_store: CalibrationStore | None = None,
+        league_store: LeagueStore | None = None,
     ):
         """
         Args:
@@ -389,6 +391,9 @@ class AutoTrader:
                 work; tests inject one pinned to a throwaway database.
             calibration_store: Where league-wide predictions land (PR E). Defaults
                 to a lazily connected `CalibrationStore()`, same reasoning.
+            league_store: Where the market, the managers and every squad the
+                session fetched land (PR G1). Defaults to a lazily connected
+                `LeagueStore()`, same reasoning.
         """
         self.api = api
         self.settings = settings
@@ -398,6 +403,7 @@ class AutoTrader:
         self.app_name = app_name
         self._session_store = session_store or SessionStore()
         self._calibration_store = calibration_store or CalibrationStore()
+        self._league_store = league_store or LeagueStore()
         self._next_kickoff: NextKickoff | None = None
 
         # Daily tracking
@@ -741,6 +747,55 @@ class AutoTrader:
             nk.day_number,
         )
         return written
+
+    def _write_league_state(self, ctx: EPSessionContext, league) -> dict[str, int]:
+        """G1: persist the market, the managers and every squad the session already fetched.
+
+        No API call here: `Trader` keeps the raw market payload, the ranking and
+        the competitor squads on `ep_result`; our own squad is `ctx.squad`.
+        """
+        from .enrichment.rows import (
+            manager_rows,
+            manager_squad_rows,
+            market_listing_rows,
+            own_squad_rows,
+        )
+
+        snapshot_at = time.time()
+        my_id = str(getattr(getattr(self.api, "user", None), "id", "") or "")
+        store = self._league_store
+        counts = {"listings": 0, "managers": 0, "squads": 0}
+
+        ranking = ctx.ep_result.get("ranking_payload")
+        if ranking:
+            counts["managers"] = store.upsert_managers(
+                manager_rows(
+                    ranking,
+                    league_id=str(league.id),
+                    our_user_id=my_id,
+                    updated_at=snapshot_at,
+                )
+            )
+        market = ctx.ep_result.get("market_payload")
+        if market:
+            counts["listings"] = store.write_listings(
+                market_listing_rows(
+                    market, snapshot_at=snapshot_at, our_user_id=my_id, source="session"
+                )
+            )
+        squad_rows: list[dict] = []
+        for mgr_id, items in (ctx.ep_result.get("competitor_squads") or {}).items():
+            squad_rows += manager_squad_rows(
+                str(mgr_id), items, snapshot_at=snapshot_at, source="session"
+            )
+        if my_id and ctx.squad:
+            squad_rows += own_squad_rows(
+                my_id, ctx.squad, snapshot_at=snapshot_at, source="session"
+            )
+        if squad_rows:
+            counts["squads"] = store.write_squads(squad_rows)
+        logger.info("league-state listings=%d managers=%d squads=%d", *counts.values())
+        return counts
 
     def _finish_facts(self, errors: list[str], start_time: float, phase: str, league) -> list:
         """Close out session facts at any exit: record, check, alert, board.
@@ -2617,6 +2672,16 @@ class AutoTrader:
             logger.exception("league predictions failed (non-fatal)")
             league_written = 0
         self._facts.predictions_written = int(league_written)
+
+        # G1: the market, the managers and every squad the session already
+        # fetched -- no new API call, best-effort like everything else here.
+        try:
+            counts = self._write_league_state(ctx, league)
+            extra = dict(self._facts.extra or {})
+            extra["league_state"] = counts
+            self._facts.extra = extra
+        except Exception:
+            logger.exception("league state write failed (non-fatal)")
         try:
             # REH-23: persist the team_value/budget snapshot the bot already
             # fetched in _build_session_context. Provides the longitudinal
