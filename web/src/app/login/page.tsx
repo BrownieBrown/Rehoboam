@@ -21,7 +21,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={pending}
-          className="h-10 w-full rounded-md bg-accent text-sm font-semibold text-[#14110a] disabled:opacity-60"
+          className="h-10 w-full rounded-md bg-accent text-sm font-semibold text-on-accent disabled:opacity-60"
         >
           {pending ? "Sending…" : "Send the link"}
         </button>
