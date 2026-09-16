@@ -77,7 +77,7 @@ million against the position's regression, the number behind their MW-Graph).
 market and every manager's squad to build its context; it writes what it
 fetched. The ingestion app adds about 35 requests per run to its ~940.
 
-### Tables (migration `005_complete_database.sql`)
+### Tables (migration `005_league_state.sql`)
 
 ```sql
 create table rehoboam.market_listings (
