@@ -395,9 +395,12 @@ def ingest_cmd(
     import time
     import uuid
 
+    from .bid_learner import BidLearner
     from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
     from .services.session_facts import SessionFacts
+    from .store.calibration_store import CalibrationStore
     from .store.corpus_store import CorpusStore
+    from .store.league_store import LeagueStore
     from .store.session_store import SessionStore
 
     _ensure_store()
@@ -417,7 +420,12 @@ def ingest_cmd(
             stale_after_seconds=settings.ingest_stale_after_hours * 3600.0,
             mv_stale_after_seconds=settings.ingest_mv_stale_after_hours * 3600.0,
             status_stale_after_seconds=settings.ingest_status_stale_after_hours * 3600.0,
+            transfers_stale_after_seconds=settings.ingest_transfers_stale_after_hours * 3600.0,
             throttle_seconds=throttle,
+            league_store=LeagueStore(),
+            learner=BidLearner(),
+            our_user_id=str(api.user.id),
+            season=CalibrationStore().current_season(),
         )
     except Exception as e:
         try:
@@ -448,6 +456,7 @@ def ingest_cmd(
         "status_written",
         "performance_fetched",
         "mv_fetched",
+        "transfers_fetched",
         "failed",
         "requests",
     ):

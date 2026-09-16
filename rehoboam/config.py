@@ -600,6 +600,13 @@ class Settings(BaseSettings):
             "cost one request per player). Env: INGEST_MV_STALE_AFTER_HOURS."
         ),
     )
+    ingest_transfers_stale_after_hours: float = Field(
+        default=168.0,
+        description=(
+            "Per-player transfer history refresh window (weekly). "
+            "Env: INGEST_TRANSFERS_STALE_AFTER_HOURS."
+        ),
+    )
 
     # Telegram approval gate
     telegram_bot_token: str = Field(

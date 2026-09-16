@@ -40,11 +40,13 @@ def test_facts_for_ingest_maps_stats_into_extra_and_zeroes_errors():
         "status_written": 480,
         "performance_fetched": 120,
         "mv_fetched": 60,
+        "transfers_fetched": 0,
         "failed": 3,
         "requests": 663,
         "stopped_by": "deadline",
         "started_at": 1_700_000.0,
         "duration_s": 210.5,
+        "league": None,
     }
 
 
@@ -333,3 +335,28 @@ def test_facts_for_ingest_carries_the_calibration_outcome():
     )
     assert facts.extra["calibration"] == {"reported": [4], "waiting": {}, "error": None}
     assert facts.errors == 0
+
+
+def test_transfers_kind_is_scheduled_and_fetched_once_per_player(store_dsn):
+    """`transfers_stale_after_seconds`, when given, adds `transfers` as a stale
+    kind for a never-fetched player, and `run_ingestion` fetches + marks it."""
+    store, client, clock = CorpusStore(dsn=store_dsn), _client(["a"]), Clock()
+    client.get_player_transfer_history.return_value = {"it": []}
+    store.upsert_players([{"player_id": "a", "position": "Forward"}])
+    assert store.players_needing_any_refresh({"transfers": clock.t}) == [("a", ["transfers"])]
+
+    budget = IngestBudget(deadline=clock.t + 480, max_requests=1_500, now=clock)
+    stats = run_ingestion(
+        client,
+        store,
+        league_id=LEAGUE,
+        budget=budget,
+        stale_after_seconds=72_000,
+        mv_stale_after_seconds=72_000,
+        transfers_stale_after_seconds=72_000,
+        throttle_seconds=0,
+        today=DAY,
+    )
+    assert stats.transfers_fetched == 1
+    client.get_player_transfer_history.assert_called_once_with(league_id=LEAGUE, player_id="a")
+    assert store.players_needing_any_refresh({"transfers": clock.t}) == []
