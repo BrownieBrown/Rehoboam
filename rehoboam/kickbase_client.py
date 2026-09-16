@@ -188,6 +188,7 @@ class KickbaseV4Client:
         self.refresh_tkn: str | None = None
         self.user: User | None = None
         self.leagues: list[League] = []
+        self.last_market_payload: dict | None = None
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -270,6 +271,7 @@ class KickbaseV4Client:
 
         if response.status_code == 200:
             data = response.json()
+            self.last_market_payload = data
             players_data = data.get("it", [])  # Players are in 'it' not 'pl'
             return [MarketPlayer.from_dict(p) for p in players_data]
         else:

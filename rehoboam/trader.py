@@ -330,6 +330,7 @@ class Trader:
             console.print(f"[bold red]⚠ FORMATION EMERGENCY — {emergency_reason}[/bold red]")
 
         market_players_list = self.api.get_market(league)
+        market_payload = getattr(self.api, "last_market_payload", None)
         kickbase_market = [p for p in market_players_list if p.is_kickbase_seller()]
 
         team_info = self.api.get_team_info(league)
@@ -411,8 +412,11 @@ class Trader:
         # IDs to drive squad scouting; REH-24 also persists the rank/points/
         # team_value fields so we can measure goals 3, 4, 5 over time.
         competitor_player_ids: set[str] = set()
+        ranking_payload: dict | None = None
+        competitor_squads: dict[str, list] = {}
         try:
             ranking = self.api.get_league_ranking(league)
+            ranking_payload = ranking
             managers = ranking.get("it", ranking.get("us", []))
             # `day` may legitimately be None (pre-season) or absent. int(None)
             # would raise inside the outer try/except and lose the
@@ -450,6 +454,7 @@ class Trader:
                 if mgr_id != my_id:
                     try:
                         mgr_squad = self.api.get_manager_squad(league, mgr_id)
+                        competitor_squads[str(mgr_id)] = list(mgr_squad.get("it", []) or [])
                         for p in mgr_squad.get("it", []):
                             pid = p.get("i", p.get("id", ""))
                             if pid:
@@ -806,6 +811,11 @@ class Trader:
             # `mdst`, `md`); piggybacking on the EP pipeline's existing
             # fetch avoids a second round-trip.
             "squad_performance": squad_performance,
+            # G1 Task 4: raw payloads the session already fetched, so the
+            # store can persist them without a second API call.
+            "market_payload": market_payload,
+            "ranking_payload": ranking_payload,
+            "competitor_squads": competitor_squads,
         }
 
     def get_ep_recommendations_with_trends(self, league) -> dict:
