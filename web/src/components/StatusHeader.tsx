@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ago } from "@/lib/format";
+import { ago, DASH } from "@/lib/format";
 import { shellFacts } from "@/lib/queries";
 
 /**
@@ -18,12 +18,14 @@ function nextSessionLabel(now: Date = new Date()): string {
 async function defaultSubtitle(): Promise<string> {
   const facts = await shellFacts();
   const players = facts.players !== null ? `${facts.players} players` : "player count unknown";
-  const updated =
-    facts.lastSessionAt !== null
-      ? // ago() also names the distance ("3 h ago"); the header only wants the clock time.
-        `store updated ${ago(facts.lastSessionAt).split(" · ")[0]}`
-      : "store has not run yet";
-  return `${players} · ${updated} · next session ${nextSessionLabel()}`;
+  // The start of the newest live trading session, not the store's last write:
+  // the ingestion app also writes at 05:00 and 17:00 UTC. A dash when there is
+  // no such session or the store did not answer; `shellFacts` cannot tell the
+  // two apart. ago() also names the distance ("3 h ago"); the header only
+  // wants the clock time, and the sidebar warns when the session is stale.
+  const last =
+    facts.lastSessionAt !== null ? ago(facts.lastSessionAt).split(" · ")[0] : DASH;
+  return `${players} · last session ${last} · next session ${nextSessionLabel()}`;
 }
 
 /** The title, the count line (or a page's own `subtitle`), and an optional right slot. */

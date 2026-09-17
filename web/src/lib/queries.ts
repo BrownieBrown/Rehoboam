@@ -1,6 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import { sql } from "./db";
+import { PAGE_SIZE } from "./paging";
 
 // Tasks 5-8 append their own query functions to this file; this task owns
 // only the two shell queries every page needs regardless of which page it is.
@@ -92,6 +93,8 @@ export type PlayerRow = {
   p_start: number | null;
   fair_value_gap: number | null;
   listed: boolean;
+  /** Every row the filters match, counted in the same statement as this page. */
+  total: number;
 };
 
 export const PLAYER_SORTS = [
@@ -127,38 +130,73 @@ export async function clubs(): Promise<string[]> {
   return rows.map((r) => r.team);
 }
 
-export async function players(opts: {
-  sort: string;
-  dir: "asc" | "desc";
+export type PlayerFilter = {
   position?: string;
   owner?: "mine" | "free";
   club?: string;
   q?: string;
-  limit?: number;
-}): Promise<PlayerRow[]> {
-  // "mine" needs our manager name; when there is none, the filter matches nothing.
-  const mine = opts.owner === "mine" ? ((await selfName()) ?? "") : null;
-  const free = opts.owner === "free";
-  const like = opts.q ? `%${opts.q}%` : null;
+};
+
+/** "mine" needs our manager name; when there is none, the filter matches nothing. */
+async function ownerFilter(owner: PlayerFilter["owner"]): Promise<string | null> {
+  return owner === "mine" ? ((await selfName()) ?? "") : null;
+}
+
+/**
+ * The one WHERE clause the table and its count share. Synchronous on purpose:
+ * a postgres.js fragment is a thenable, and returning one from an async
+ * function would run it as a query of its own.
+ */
+function playerWhere(f: PlayerFilter, mine: string | null) {
+  const like = f.q ? `%${f.q}%` : null;
   // Same truthy guard as `like` above: the club filter is driven by a plain
   // GET <select>, and its "All clubs" option submits `club=` (empty string,
   // not absent) - `?? null` alone would turn that into `team = ''`, which
   // matches nothing, silently breaking the reset-to-all-clubs path.
-  const club = opts.club ? opts.club : null;
+  const club = f.club ? f.club : null;
+  // A free agent is a player no manager's newest squad snapshot holds.
+  // `player_table.owner` says 'market' for one that is in the newest listing
+  // snapshot and 'Kickbase' for one that is not; both are free agents.
+  const free = f.owner === "free";
+  return sql`
+    where (${f.position ?? null}::text is null or position = ${f.position ?? null})
+      and (${club}::text is null or team = ${club})
+      and (${like}::text is null or name ilike ${like} or team ilike ${like})
+      and (${mine}::text is null or owner = ${mine})
+      and (${free} = false or owner in ('Kickbase', 'market'))
+  `;
+}
+
+/** How many players the filters match. Used to hold a page number past the end on the last page. */
+export async function playerCount(f: PlayerFilter): Promise<number> {
+  const mine = await ownerFilter(f.owner);
+  const [{ count }] = await sql<{ count: number }[]>`
+    select count(*)::int as count from rehoboam.web_players ${playerWhere(f, mine)}
+  `;
+  return count;
+}
+
+/**
+ * One page of the filtered table. `offset` comes from `pageOffset()` and is a
+ * bound parameter. Each row carries `total`, the filtered count from this same
+ * statement (the window runs before LIMIT/OFFSET), so "of N" always counts
+ * what these pages list.
+ */
+export async function players(
+  opts: PlayerFilter & { sort: string; dir: "asc" | "desc"; offset: number },
+): Promise<PlayerRow[]> {
+  const mine = await ownerFilter(opts.owner);
   // sql.unsafe(opts.sort) is safe ONLY because every caller runs opts.sort
   // through sortKey() against its own allow-list first (see sort.ts) - a
   // sort column is an identifier, not a value, so it can never be a bound
   // parameter. Never pass a raw search param to it.
   return sql<PlayerRow[]>`
-    select * from rehoboam.web_players
-    where (${opts.position ?? null}::text is null or position = ${opts.position ?? null})
-      and (${club}::text is null or team = ${club})
-      and (${like}::text is null or name ilike ${like} or team ilike ${like})
-      and (${mine}::text is null or owner = ${mine})
-      and (${free} = false or owner = 'Kickbase')
+    select *, count(*) over ()::int as total
+    from rehoboam.web_players
+    ${playerWhere(opts, mine)}
     order by ${sql.unsafe(opts.sort)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
              player_id asc
-    limit ${opts.limit ?? 50}
+    limit ${PAGE_SIZE} offset ${opts.offset}
   `;
 }
 
@@ -251,16 +289,14 @@ export const MARKET_SORTS = [
   "fair_value_gap",
 ];
 
-export async function market(opts: {
-  sort: string;
-  dir: "asc" | "desc";
-  expiringHours?: number;
-}): Promise<MarketRow[]> {
-  const cutoff = opts.expiringHours ? Date.now() / 1000 + opts.expiringHours * 3600 : null;
+/**
+ * Every listing in the newest snapshot, sorted. Unfiltered on purpose: the
+ * page narrows it with `expiringWithin`, so the snapshot time and the total
+ * come from the same rows even when the filter matches nothing.
+ */
+export async function market(opts: { sort: string; dir: "asc" | "desc" }): Promise<MarketRow[]> {
   return sql<MarketRow[]>`
     select * from rehoboam.web_market
-    where (${cutoff}::double precision is null
-           or (expires_at is not null and expires_at <= ${cutoff}))
     order by ${sql.unsafe(opts.sort)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
              player_id asc
   `;
@@ -275,7 +311,11 @@ export type ManagerRow = {
   top: string[];
 };
 
-/** One row per manager, from each manager's own newest squad snapshot. */
+/**
+ * One row per manager, from each manager's own newest squad snapshot. `top`
+ * holds at most three names and only players that have a predicted score, so
+ * it is empty rather than padded when a manager's players have none.
+ */
 export async function managers(): Promise<ManagerRow[]> {
   return sql<ManagerRow[]>`
     with ranked as (
@@ -288,7 +328,8 @@ export async function managers(): Promise<ManagerRow[]> {
     select manager_id, manager, is_self,
         count(*)::int as squad_size,
         sum(market_value)::bigint as team_value,
-        array_remove(array_agg(case when rank <= 3 then player_name end
+        array_remove(array_agg(case when rank <= 3 and predicted_ep is not null
+                                    then player_name end
                                order by rank), null) as top
     from ranked
     group by manager_id, manager, is_self

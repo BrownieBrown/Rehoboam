@@ -298,6 +298,22 @@ def test_web_squad_uses_the_newest_real_session_not_a_dry_run(store_dsn):
     assert rows[0]["cost_basis"] is None and rows[0]["gain_loss"] is None
 
 
+def test_web_squad_ignores_a_live_cli_session(store_dsn):
+    # `rehoboam auto` writes app='cli' even when it trades for real; only the
+    # Azure Function's session is "the" session the squad page shows.
+    _players(store_dsn)
+    sessions = SessionStore(dsn=store_dsn)
+    calib = CalibrationStore(dsn=store_dsn)
+    sessions.record(_facts("real", started_at=NOW, legal_formation="4-3-3"))
+    sessions.record(
+        _facts("cli_live", app="cli", dry_run=False, started_at=NOW + 600, legal_formation="3-4-3")
+    )
+    calib.write_predictions([_prediction("real", "a"), _prediction("cli_live", "b")])
+    rows = _rows(store_dsn, "select * from rehoboam.web_squad")
+    assert [r["player_id"] for r in rows] == ["a"]
+    assert rows[0]["session_id"] == "real" and rows[0]["legal_formation"] == "4-3-3"
+
+
 def test_web_squad_carries_cost_basis_and_gain_when_the_purchase_is_known(store_dsn):
     _players(store_dsn)
     SessionStore(dsn=store_dsn).record(_facts("real", legal_formation="4-3-3"))

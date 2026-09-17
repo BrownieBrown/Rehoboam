@@ -82,7 +82,7 @@ describe("gateSentence", () => {
     };
     const text = gateSentence(gate);
     expect(text).toBe(
-      "Gate passed: 3 of 3 consecutive reports beat the baseline, and 7.0 of 7 days free of integrity failures. Trading can resume.",
+      "Gate passed: 3 of 3 consecutive reports beat the baseline, and 7.0 of 7 days free of integrity failures. Trading may be switched back on (`TRADING_MODE`).",
     );
     expect(text).not.toMatch(FORBIDDEN);
   });
@@ -135,7 +135,7 @@ describe("emptyReportSentence", () => {
   };
 
   it("a live row with a null gate: no predictions existed before this kickoff", () => {
-    const text = emptyReportSentence({ backfill: false, gate: null, n_stale_rows: 0 });
+    const text = emptyReportSentence({ backfill: false, gate: null, n_stale_rows: 0, n_unpredicted: 0 });
     expect(text).toBe(
       "Settled with no predictions — this matchday finished before the bot was writing them.",
     );
@@ -143,28 +143,50 @@ describe("emptyReportSentence", () => {
   });
 
   it("a live row with a gate and stale rows: predictions existed but nothing could be scored", () => {
-    const text = emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 45 });
+    const text = emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 45, n_unpredicted: 0 });
     expect(text).toBe("No row could be scored — all 45 were stale.");
     expect(text).not.toMatch(FORBIDDEN);
   });
 
   it("a live row with a gate and no stale rows: nothing to score, and it wasn't staleness", () => {
-    const text = emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 0 });
+    const text = emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 0, n_unpredicted: 0 });
     expect(text).toBe("No row could be scored.");
     expect(text).not.toMatch(FORBIDDEN);
   });
 
   it("a backfill row with stale rows: backfill never carries a gate, but the reason is still staleness", () => {
-    const text = emptyReportSentence({ backfill: true, gate: null, n_stale_rows: 12 });
+    const text = emptyReportSentence({ backfill: true, gate: null, n_stale_rows: 12, n_unpredicted: 0 });
     expect(text).toBe("No row could be scored — all 12 were stale.");
     expect(text).not.toMatch(FORBIDDEN);
   });
 
+  it("fresh rows with no prediction are named, so 'all stale' is never claimed over them", () => {
+    expect(
+      emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 1, n_unpredicted: 3 }),
+    ).toBe("No row could be scored — 3 rows had no prediction, and 1 was stale.");
+    expect(
+      emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 4, n_unpredicted: 1 }),
+    ).toBe("No row could be scored — 1 row had no prediction, and 4 were stale.");
+    expect(
+      emptyReportSentence({ backfill: true, gate: null, n_stale_rows: 0, n_unpredicted: 2 }),
+    ).toBe("No row could be scored — 2 rows had no prediction.");
+    for (const n_stale_rows of [0, 1, 2]) {
+      const text = emptyReportSentence({
+        backfill: false,
+        gate: someGate,
+        n_stale_rows,
+        n_unpredicted: 5,
+      });
+      expect(text).not.toMatch(/only row|all \d+/);
+      expect(text).not.toMatch(FORBIDDEN);
+    }
+  });
+
   it("singular versus plural stale count", () => {
-    expect(emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 1 })).toBe(
-      "No row could be scored — all 1 was stale.",
+    expect(emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 1, n_unpredicted: 0 })).toBe(
+      "No row could be scored — the only row was stale.",
     );
-    expect(emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 2 })).toBe(
+    expect(emptyReportSentence({ backfill: false, gate: someGate, n_stale_rows: 2, n_unpredicted: 0 })).toBe(
       "No row could be scored — all 2 were stale.",
     );
   });

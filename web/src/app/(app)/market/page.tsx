@@ -5,6 +5,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
 import { ago, countdown, DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
+import { expiringWithin, listingsLine } from "@/lib/expiry";
 import Link from "next/link";
 
 const TONE: Record<Tone, string> = {
@@ -24,10 +25,8 @@ export default async function MarketPage({
   const dir = sortDir(params.dir);
   const expiring = params.expiring === "6" ? 6 : undefined;
 
-  const [rows, managerRows] = await Promise.all([
-    market({ sort, dir, expiringHours: expiring }),
-    managers(),
-  ]);
+  const [listings, managerRows] = await Promise.all([market({ sort, dir }), managers()]);
+  const rows = expiring ? expiringWithin(listings, expiring, Date.now() / 1000) : listings;
 
   const columns: Column<MarketRow>[] = [
     {
@@ -82,13 +81,15 @@ export default async function MarketPage({
     },
   ];
 
-  const snapshotAt = rows[0]?.snapshot_at ?? null;
+  // From the unfiltered snapshot: every row carries the same snapshot time,
+  // and an expiring filter that keeps nothing must not blank it.
+  const snapshotAt = listings[0]?.snapshot_at ?? null;
 
   return (
     <>
       <StatusHeader
         title="Market"
-        subtitle={`${rows.length} listings · snapshot ${ago(snapshotAt)}`}
+        subtitle={`${listingsLine(rows.length, listings.length, expiring)} · snapshot ${ago(snapshotAt)}`}
       />
       <div className="flex items-center gap-2 px-6 py-4">
         <Link

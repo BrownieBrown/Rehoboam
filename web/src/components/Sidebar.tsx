@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { countdown, money } from "@/lib/format";
+import { countdown, DASH, money } from "@/lib/format";
 import type { ShellFacts } from "@/lib/queries";
 
 const ENTRIES: { href: string; label: string }[] = [
@@ -12,9 +12,15 @@ const ENTRIES: { href: string; label: string }[] = [
   { href: "/health", label: "Calibration & health" },
 ];
 
-function humanizeLineup(result: string | null): string {
-  if (!result) return "not attempted";
-  return result.replace("_", " ");
+/**
+ * "not attempted" only for a real session row whose `lineup_result` is empty.
+ * With no session row at all (none has run, or the store did not answer)
+ * nothing is known, so the card shows a dash rather than a skipped lineup.
+ */
+function humanizeLineup(facts: ShellFacts): string {
+  if (facts.lastSessionAt === null) return DASH;
+  if (!facts.lineupResult) return "not attempted";
+  return facts.lineupResult.replace("_", " ");
 }
 
 /**
@@ -59,7 +65,7 @@ export function Sidebar({ facts, current }: { facts: ShellFacts; current?: strin
           </div>
           <div className="flex items-center justify-between gap-2">
             <dt className="text-muted">Lineup</dt>
-            <dd className="text-text-dim">{humanizeLineup(facts.lineupResult)}</dd>
+            <dd className="text-text-dim">{humanizeLineup(facts)}</dd>
           </div>
           <div className="flex items-center justify-between gap-2">
             <dt className="text-muted">Budget</dt>

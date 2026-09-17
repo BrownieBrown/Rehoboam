@@ -45,7 +45,7 @@ export function gateSentence(gate: Gate | null): string {
   const reports = `${gate.consecutive_ok} of ${gate.required} consecutive reports beat the baseline`;
   const clean = `${num(gate.integrity_clean_days, 1)} of ${gate.required_clean_days} days free of integrity failures`;
   return gate.passes
-    ? `Gate passed: ${reports}, and ${clean}. Trading can resume.`
+    ? `Gate passed: ${reports}, and ${clean}. Trading may be switched back on (\`TRADING_MODE\`).`
     : `Gate not passed: ${reports}, and ${clean}.`;
 }
 
@@ -64,18 +64,32 @@ export function gateSentence(gate: Gate | null): string {
  *   *non-null* here. Saying "the bot wasn't writing them" would be false, and
  *   a real gate verdict exists to show instead (the caller renders
  *   `gateSentence` alongside this sentence in that case).
+ *
+ * `n` counts only rows that were fresh AND predicted (`build_report`), so an
+ * empty report can also hold fresh rows with no prediction
+ * (`n_unpredicted`). Those are named first: "all were stale" or "the only row
+ * was stale" is true only when there were none.
  */
 export function emptyReportSentence(row: {
   backfill: boolean;
   gate: unknown;
   n_stale_rows: number;
+  n_unpredicted: number;
 }): string {
   if (!row.backfill && row.gate === null) {
     return "Settled with no predictions — this matchday finished before the bot was writing them.";
   }
-  if (row.n_stale_rows > 0) {
-    const were = row.n_stale_rows === 1 ? "was" : "were";
-    return `No row could be scored — all ${row.n_stale_rows} ${were} stale.`;
+  if (row.n_unpredicted > 0) {
+    const had = row.n_unpredicted === 1 ? "row had" : "rows had";
+    const stale =
+      row.n_stale_rows > 0
+        ? `, and ${row.n_stale_rows} ${row.n_stale_rows === 1 ? "was" : "were"} stale`
+        : "";
+    return `No row could be scored — ${row.n_unpredicted} ${had} no prediction${stale}.`;
+  }
+  if (row.n_stale_rows === 1) return "No row could be scored — the only row was stale.";
+  if (row.n_stale_rows > 1) {
+    return `No row could be scored — all ${row.n_stale_rows} were stale.`;
   }
   return "No row could be scored.";
 }

@@ -1,6 +1,16 @@
 import { requireSession } from "@/lib/auth";
-import { clubs, players, selfName, PLAYER_SORTS, type PlayerRow } from "@/lib/queries";
+import Link from "next/link";
+import {
+  clubs,
+  playerCount,
+  players,
+  selfName,
+  PLAYER_SORTS,
+  type PlayerFilter,
+  type PlayerRow,
+} from "@/lib/queries";
 import { sortDir, sortKey } from "@/lib/sort";
+import { clampPage, pageHref, pageOffset, pageSummary, parsePage } from "@/lib/paging";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Filters } from "@/components/Filters";
 import { Pill } from "@/components/Pill";
@@ -12,6 +22,20 @@ const TONE: Record<Tone, string> = {
   negative: "text-negative",
   neutral: "text-muted",
 };
+
+const PAGE_LINK =
+  "inline-flex h-8 items-center rounded-md border border-border-strong px-3 text-[13px] font-semibold";
+
+/** Previous / next, or the same label greyed out where there is no such page. */
+function PageLink({ href, children }: { href: string | null; children: React.ReactNode }) {
+  return href ? (
+    <Link href={href} className={`${PAGE_LINK} text-text-dim hover:text-text`}>
+      {children}
+    </Link>
+  ) : (
+    <span className={`${PAGE_LINK} text-muted opacity-50`}>{children}</span>
+  );
+}
 
 function Trend({ pct, value }: { pct?: number | null; value?: number | null }) {
   const out = pct !== undefined ? signedPct(pct) : signed(value ?? null, 1);
@@ -28,12 +52,30 @@ export default async function PlayersPage({
   const sort = sortKey(params.sort, PLAYER_SORTS, "predicted_ep");
   const dir = sortDir(params.dir);
   const owner = params.owner === "mine" || params.owner === "free" ? params.owner : undefined;
+  const filter: PlayerFilter = { position: params.position, owner, club: params.club, q: params.q };
+  const requested = parsePage(params.page);
 
-  const [rows, clubList, me] = await Promise.all([
-    players({ sort, dir, position: params.position, owner, club: params.club, q: params.q }),
+  const [firstTry, clubList, me] = await Promise.all([
+    players({ ...filter, sort, dir, offset: pageOffset(requested) }),
     clubs(),
     selfName(),
   ]);
+  let page = requested;
+  let rows = firstTry;
+  let counted: number | null = null;
+  if (rows.length === 0 && requested > 1) {
+    // Past the last page (an edited URL, or rows that went away): show the
+    // last page there is (page 1 when nothing matches) instead.
+    counted = await playerCount(filter);
+    page = clampPage(requested, counted);
+    rows = await players({ ...filter, sort, dir, offset: pageOffset(page) });
+  }
+  const offset = pageOffset(page);
+  // With rows, `total` was counted by the statement that returned them. With
+  // none on page 1, the filters matched nothing. With none after the clamp,
+  // the count that chose the page is the only number there is.
+  const total = rows[0]?.total ?? counted ?? 0;
+  const hasNext = offset + rows.length < total;
 
   const columns: Column<PlayerRow>[] = [
     {
@@ -69,11 +111,15 @@ export default async function PlayersPage({
       key: "owner",
       label: "Owner",
       align: "left",
+      // `player_table.owner` is 'Kickbase' for a free agent and 'market' for
+      // one in the newest listing snapshot - both muted, never a manager's style.
       cell: (p) =>
         p.owner === me ? (
           <Pill tone="accent">{p.owner}</Pill>
-        ) : p.owner === "Kickbase" ? (
-          <span className="text-sm text-muted">free agent</span>
+        ) : p.owner === "Kickbase" || p.owner === "market" ? (
+          <span className="text-sm text-muted">
+            free agent{p.owner === "market" || p.listed ? " - listed" : null}
+          </span>
         ) : (
           <span className="text-sm text-text-dim">
             {p.owner}
@@ -98,8 +144,23 @@ export default async function PlayersPage({
     <>
       <StatusHeader title="Players" />
       <Filters clubs={clubList} params={params} />
+      <div className="flex items-center justify-between gap-4 px-6 py-3">
+        <span className="tnum text-sm text-muted">{pageSummary(offset, rows.length, total)}</span>
+        <div className="flex items-center gap-2">
+          <PageLink href={page > 1 ? pageHref("/", params, page - 1) : null}>Previous</PageLink>
+          <PageLink href={hasNext ? pageHref("/", params, page + 1) : null}>Next</PageLink>
+        </div>
+      </div>
       <div className="px-6 pb-6">
-        <DataTable columns={columns} rows={rows} sort={sort} dir={dir} basePath="/" query={params} />
+        {/* A new sort starts again at page 1. */}
+        <DataTable
+          columns={columns}
+          rows={rows}
+          sort={sort}
+          dir={dir}
+          basePath="/"
+          query={{ ...params, page: undefined }}
+        />
       </div>
     </>
   );
