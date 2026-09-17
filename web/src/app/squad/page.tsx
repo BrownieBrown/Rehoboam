@@ -4,7 +4,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Formation } from "@/components/Formation";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
-import { money, num, signed, POSITION, type Tone } from "@/lib/format";
+import { DASH, money, num, pct, signed, POSITION, type Tone } from "@/lib/format";
 import { integritySentence } from "@/lib/integrity";
 
 export const revalidate = 300;
@@ -98,7 +98,7 @@ export default async function SquadPage() {
       cell: (p) => (
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-semibold text-text">{p.name}</span>
-          <span className="text-xs text-muted">{p.team ?? "-"}</span>
+          <span className="text-xs text-muted">{p.team ?? DASH}</span>
         </div>
       ),
     },
@@ -108,7 +108,7 @@ export default async function SquadPage() {
       align: "left",
       sortable: false,
       cell: (p) => {
-        const pos = POSITION[p.position ?? ""] ?? { short: p.position ?? "-", token: "plain" };
+        const pos = POSITION[p.position ?? ""] ?? { short: p.position ?? DASH, token: "plain" };
         return <Pill tone={pos.token}>{pos.short}</Pill>;
       },
     },
@@ -122,7 +122,7 @@ export default async function SquadPage() {
       key: "p_start",
       label: "P(start)",
       sortable: false,
-      cell: (p) => (p.p_start === null ? "-" : `${Math.round(p.p_start * 100)}%`),
+      cell: (p) => pct(p.p_start),
     },
     {
       key: "market_value",
@@ -148,7 +148,7 @@ export default async function SquadPage() {
       key: "in_best_11",
       label: "In XI",
       sortable: false,
-      cell: (p) => (p.in_best_11 ? "yes" : "-"),
+      cell: (p) => (p.in_best_11 ? "yes" : DASH),
     },
   ];
 

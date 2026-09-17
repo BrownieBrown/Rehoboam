@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ago, countdown, money, num, signed, signedPct } from "./format";
+import { ago, countdown, DASH, money, num, pct, signed, signedPct } from "./format";
 
 describe("money", () => {
   it("writes the exact figure with separators", () => {
@@ -76,5 +76,19 @@ describe("ago", () => {
   it("names the UTC clock time and the distance", () => {
     const t = Date.UTC(2026, 8, 16, 8, 1, 13) / 1000;
     expect(ago(t, t + 3 * 3600)).toBe("08:01 UTC · 3 h ago");
+  });
+});
+
+describe("pct", () => {
+  it("rounds a 0-1 probability to a whole percent", () => {
+    expect(pct(0.8365)).toBe("84%");
+  });
+  it("handles the boundaries", () => {
+    expect(pct(0)).toBe("0%");
+    expect(pct(1)).toBe("100%");
+  });
+  it("shows an em dash for nothing", () => {
+    expect(pct(null)).toBe(DASH);
+    expect(pct(undefined)).toBe(DASH);
   });
 });

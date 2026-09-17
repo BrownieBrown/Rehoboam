@@ -5,7 +5,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Filters } from "@/components/Filters";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
-import { money, num, signed, signedPct, POSITION, type Tone } from "@/lib/format";
+import { DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
 
 export const revalidate = 300;
 
@@ -45,7 +45,7 @@ export default async function PlayersPage({
       cell: (p) => (
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-semibold text-text">{p.name}</span>
-          <span className="text-xs text-muted">{p.team ?? "-"}</span>
+          <span className="text-xs text-muted">{p.team ?? DASH}</span>
         </div>
       ),
     },
@@ -91,7 +91,7 @@ export default async function PlayersPage({
     {
       key: "p_start",
       label: "P(start)",
-      cell: (p) => (p.p_start === null ? "-" : `${Math.round(p.p_start * 100)}%`),
+      cell: (p) => pct(p.p_start),
     },
     { key: "fair_value_gap", label: "Fair", cell: (p) => <Trend value={p.fair_value_gap} /> },
   ];

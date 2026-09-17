@@ -1,6 +1,6 @@
 export type Tone = "positive" | "negative" | "neutral";
 
-const DASH = "—";
+export const DASH = "—";
 const MINUS = "−";
 
 const groups = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
@@ -41,6 +41,12 @@ export function signed(n: number | null | undefined, digits = 1): { text: string
 export function signedPct(n: number | null | undefined): { text: string; tone: Tone } {
   if (n === null || n === undefined) return { text: DASH, tone: "neutral" };
   return { text: withSign(n, `${Math.abs(n).toFixed(2)}%`), tone: tone(n) };
+}
+
+/** A 0-1 probability as a whole percent, e.g. 0.84 -> "84%"; a dash when unknown. */
+export function pct(p: number | null | undefined): string {
+  if (p === null || p === undefined) return DASH;
+  return `${Math.round(p * 100)}%`;
 }
 
 /** Time left on a Kickbase listing. A manager's listing has no expiry. */

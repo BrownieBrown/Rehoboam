@@ -1,4 +1,4 @@
-import { num } from "@/lib/format";
+import { DASH, num, pct } from "@/lib/format";
 import { deriveLineup, lineupNotes } from "@/lib/lineup";
 import type { SquadRow } from "@/lib/queries";
 
@@ -29,10 +29,10 @@ export function Formation({ formation, eleven }: { formation: string | null; ele
               className="flex w-40 flex-col gap-1 rounded-lg border border-border bg-surface p-3"
             >
               <span className="text-sm font-semibold text-text">{p.name}</span>
-              <span className="text-xs text-muted">{p.team ?? "-"}</span>
+              <span className="text-xs text-muted">{p.team ?? DASH}</span>
               <span className="tnum text-lg font-bold text-text">{num(p.predicted_ep, 0)}</span>
               <span className="tnum text-xs text-muted">
-                {p.p_start === null ? "-" : `${Math.round(p.p_start * 100)}% to start`}
+                {p.p_start === null ? DASH : `${pct(p.p_start)} to start`}
               </span>
             </div>
           ))}
