@@ -45,7 +45,7 @@ export function gateSentence(gate: Gate | null): string {
   const reports = `${gate.consecutive_ok} of ${gate.required} consecutive reports beat the baseline`;
   const clean = `${num(gate.integrity_clean_days, 1)} of ${gate.required_clean_days} days free of integrity failures`;
   return gate.passes
-    ? `Gate passed: ${reports}, and ${clean}. Trading may be switched back on (\`TRADING_MODE\`).`
+    ? `Gate passed: ${reports}, and ${clean}. Trading may be switched back on (TRADING_MODE).`
     : `Gate not passed: ${reports}, and ${clean}.`;
 }
 

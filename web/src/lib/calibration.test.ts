@@ -82,7 +82,7 @@ describe("gateSentence", () => {
     };
     const text = gateSentence(gate);
     expect(text).toBe(
-      "Gate passed: 3 of 3 consecutive reports beat the baseline, and 7.0 of 7 days free of integrity failures. Trading may be switched back on (`TRADING_MODE`).",
+      "Gate passed: 3 of 3 consecutive reports beat the baseline, and 7.0 of 7 days free of integrity failures. Trading may be switched back on (TRADING_MODE).",
     );
     expect(text).not.toMatch(FORBIDDEN);
   });
