@@ -50,6 +50,8 @@ def test_ingest_records_a_session_facts_row(monkeypatch, store_dsn):
         ingest_mv_stale_after_hours=168.0,
         ingest_status_stale_after_hours=3.0,
         ingest_transfers_stale_after_hours=168.0,
+        mv_forecast_momentum=0.9,
+        mv_forecast_cap=0.2,
     )
     fake_api = SimpleNamespace(client=object(), user=SimpleNamespace(id="u1"))
     monkeypatch.setattr(
@@ -75,6 +77,13 @@ def test_ingest_records_a_session_facts_row(monkeypatch, store_dsn):
     assert row["errors"] == 0
     assert row["extra"]["status_written"] == 480
     assert row["extra"]["failed"] == 3
+    assert row["extra"]["mv_forecast"] == {
+        "written": 0,
+        "scored": 0,
+        "unscorable": 0,
+        "error": None,
+    }
+    assert "mv_forecast" in result.output
 
 
 def test_export_without_connection_string_fails_before_uploading(monkeypatch, store_dsn):
@@ -113,6 +122,8 @@ def test_a_session_facts_row_exists_via_sessionstore_facts(monkeypatch, store_ds
         ingest_mv_stale_after_hours=168.0,
         ingest_status_stale_after_hours=3.0,
         ingest_transfers_stale_after_hours=168.0,
+        mv_forecast_momentum=0.9,
+        mv_forecast_cap=0.2,
     )
     fake_api = SimpleNamespace(client=object(), user=SimpleNamespace(id="u1"))
     monkeypatch.setattr(

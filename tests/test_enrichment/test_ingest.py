@@ -52,6 +52,14 @@ def test_facts_for_ingest_maps_stats_into_extra_and_zeroes_errors():
     }
 
 
+def test_facts_for_ingest_carries_the_forecast_step_outcome():
+    stats = IngestStats(status_written=1, started_at=1.0, duration_s=2.0)
+    step = {"written": 3, "scored": 2, "unscorable": 1, "error": None}
+    facts = facts_for_ingest(stats, app="external", session_id="s", mv_forecast=step)
+    assert facts.extra["mv_forecast"] == step
+    assert "mv_forecast" not in facts_for_ingest(stats, app="external", session_id="s").extra
+
+
 def test_facts_for_ingest_flags_a_run_that_wrote_nothing():
     """Every player failed and none of the write counters moved -- unlike the
     test above, there is no evidence the run did anything, so I7 must not

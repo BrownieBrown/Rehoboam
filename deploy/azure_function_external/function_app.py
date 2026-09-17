@@ -105,10 +105,31 @@ def ingest(timer: func.TimerRequest):
             calibration = asdict(outcome)
             logging.info("calibration-end %s", calibration)
 
+        mv_forecast = None
+        try:
+            from rehoboam.enrichment.mv_forecast import run_mv_forecast
+            from rehoboam.store.mv_forecast_store import MvForecastStore
+
+            mv_forecast = asdict(
+                run_mv_forecast(
+                    MvForecastStore(),
+                    now=time.time(),
+                    momentum=settings.mv_forecast_momentum,
+                    cap=settings.mv_forecast_cap,
+                )
+            )
+            logging.info("mv-forecast-end %s", mv_forecast)
+        except Exception:
+            logging.warning("mv forecast: step failed", exc_info=True)
+
         try:
             SessionStore().record(
                 facts_for_ingest(
-                    stats, app="external", session_id=session_id, calibration=calibration
+                    stats,
+                    app="external",
+                    session_id=session_id,
+                    calibration=calibration,
+                    mv_forecast=mv_forecast,
                 )
             )
         except Exception:

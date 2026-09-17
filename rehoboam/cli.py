@@ -394,13 +394,16 @@ def ingest_cmd(
     """One budgeted ingestion pass — what func-rehoboam-external runs twice a day."""
     import time
     import uuid
+    from dataclasses import asdict
 
     from .bid_learner import BidLearner
     from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from .enrichment.mv_forecast import run_mv_forecast
     from .services.session_facts import SessionFacts
     from .store.calibration_store import CalibrationStore
     from .store.corpus_store import CorpusStore
     from .store.league_store import LeagueStore
+    from .store.mv_forecast_store import MvForecastStore
     from .store.session_store import SessionStore
 
     _ensure_store()
@@ -443,8 +446,18 @@ def ingest_cmd(
         except Exception:
             logger.error("session_facts write failed", exc_info=True)
         raise
+    mv_outcome = run_mv_forecast(
+        MvForecastStore(),
+        now=time.time(),
+        momentum=settings.mv_forecast_momentum,
+        cap=settings.mv_forecast_cap,
+    )
     try:
-        SessionStore().record(facts_for_ingest(stats, app="cli", session_id=session_id))
+        SessionStore().record(
+            facts_for_ingest(
+                stats, app="cli", session_id=session_id, mv_forecast=asdict(mv_outcome)
+            )
+        )
     except Exception:
         logger.error("session_facts write failed", exc_info=True)
 
@@ -463,6 +476,12 @@ def ingest_cmd(
         table.add_row(name, str(getattr(stats, name)))
     table.add_row("stopped_by", stats.stopped_by or "—")
     table.add_row("duration_s", f"{stats.duration_s:.0f}")
+    table.add_row(
+        "mv_forecast",
+        f"written {mv_outcome.written} · scored {mv_outcome.scored} · "
+        f"unscorable {mv_outcome.unscorable}"
+        + (f" · error {mv_outcome.error}" if mv_outcome.error else ""),
+    )
     console.print(table)
 
 

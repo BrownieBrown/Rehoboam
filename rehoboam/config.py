@@ -607,6 +607,21 @@ class Settings(BaseSettings):
             "Env: INGEST_TRANSFERS_STALE_AFTER_HOURS."
         ),
     )
+    mv_forecast_momentum: float = Field(
+        default=0.9,
+        description=(
+            "The next market-value update is forecast as this multiple of the last "
+            "one (spec 2026-09-17). Re-derive with `rehoboam backtest-mv`. "
+            "Env: MV_FORECAST_MOMENTUM."
+        ),
+    )
+    mv_forecast_cap: float = Field(
+        default=0.20,
+        description=(
+            "The last update's move is capped at ± this fraction before the multiple "
+            "is applied. Env: MV_FORECAST_CAP."
+        ),
+    )
 
     # Telegram approval gate
     telegram_bot_token: str = Field(

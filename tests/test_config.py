@@ -71,3 +71,21 @@ def test_settings_missing_required_fields(monkeypatch, tmp_path):
     field_names = [error["loc"][0] for error in errors]
     assert "kickbase_email" in field_names
     assert "kickbase_password" in field_names
+
+
+def test_mv_forecast_settings_default_to_the_measured_rule(monkeypatch):
+    monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+    monkeypatch.setenv("KICKBASE_PASSWORD", "testpassword")
+    monkeypatch.delenv("MV_FORECAST_MOMENTUM", raising=False)
+    monkeypatch.delenv("MV_FORECAST_CAP", raising=False)
+    s = Settings()
+    assert (s.mv_forecast_momentum, s.mv_forecast_cap) == (0.9, 0.2)
+
+
+def test_mv_forecast_settings_read_the_environment(monkeypatch):
+    monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+    monkeypatch.setenv("KICKBASE_PASSWORD", "testpassword")
+    monkeypatch.setenv("MV_FORECAST_MOMENTUM", "0.85")
+    monkeypatch.setenv("MV_FORECAST_CAP", "0.15")
+    s = Settings()
+    assert (s.mv_forecast_momentum, s.mv_forecast_cap) == (0.85, 0.15)

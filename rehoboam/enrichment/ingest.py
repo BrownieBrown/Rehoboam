@@ -73,6 +73,7 @@ def facts_for_ingest(
     app: str,
     session_id: str,
     calibration: dict | None = None,
+    mv_forecast: dict | None = None,
 ) -> SessionFacts:
     """The row a completed ingest run leaves for rule I7.
 
@@ -87,6 +88,9 @@ def facts_for_ingest(
     `calibration`, when given, is the report step's `CalibrationOutcome` --
     it never affects `errors`, since `run_calibration` catches its own
     exceptions and reports them inside the outcome instead.
+
+    `mv_forecast`, when given, is the forecast step's `MvForecastOutcome` as a
+    dict -- like calibration, it never affects `errors`.
     """
     wrote_nothing = stats.failed and not (
         stats.status_written
@@ -99,6 +103,8 @@ def facts_for_ingest(
     extra = asdict(stats)
     if calibration is not None:
         extra["calibration"] = calibration
+    if mv_forecast is not None:
+        extra["mv_forecast"] = mv_forecast
     return SessionFacts(
         session_id=session_id,
         app=app,
