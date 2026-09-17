@@ -16,8 +16,9 @@ export type ShellFacts = {
 };
 
 /**
- * The sidebar and header need these on every route, including the login page
- * where there is no session — so this never throws; a failure renders dashes.
+ * The sidebar and header need these on every data page, so this never throws:
+ * when the store does not answer, the shell shows every fact as unknown
+ * instead of taking the page down with it.
  *
  * `cache()` (not `fetch` memoization — `sql` is a raw Postgres client, so
  * Next's automatic per-request dedupe never applies to it) means the

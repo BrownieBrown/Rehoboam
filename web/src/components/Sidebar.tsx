@@ -18,9 +18,9 @@ function humanizeLineup(result: string | null): string {
 }
 
 /**
- * The root layout renders one Sidebar above every route without knowing
- * which — there is no server-side pathname in a shared layout short of a
- * middleware header this task doesn't own — so `current` is an optional
+ * The `(app)` layout renders one Sidebar beside all four data pages without
+ * knowing which — there is no server-side pathname in a shared layout short
+ * of a middleware header this task doesn't own — so `current` is an optional
  * override and, absent one, this is the one piece of the shell that reads
  * the route itself via `usePathname`. Everything else here is static markup
  * built from `facts`, already fetched server-side by the layout.
