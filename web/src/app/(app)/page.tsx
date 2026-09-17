@@ -29,7 +29,8 @@ const TONE: Record<Tone, string> = {
 const APPS_HINT = "Matches played this season, started or came on";
 const STARTS_HINT = "Matches he started";
 const FAIR_PRICE_HINT =
-  "What his average points are worth at his position's going rate, against his market value";
+
+  "What his average points are worth at his position's going rate, from at least three appearances";
 
 const PAGE_LINK =
   "inline-flex h-8 items-center rounded-md border border-border-strong px-3 text-[13px] font-semibold";

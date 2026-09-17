@@ -28,7 +28,8 @@ function Chip({ href, active, children }: { href: string; active: boolean; child
 }
 
 const FAIR_PRICE_HINT =
-  "What his average points are worth at his position's going rate, against his market value";
+
+  "What his average points are worth at his position's going rate, from at least three appearances";
 
 const PPM_HINT = "Season points per million euros of market value";
 

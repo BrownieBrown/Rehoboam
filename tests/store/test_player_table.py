@@ -241,16 +241,57 @@ def test_the_numbers(store_dsn):
     assert round(float(c["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
 
 
+def _fair_price_seed(dsn):
+    """Two defenders with three appearances each, plus one with a single big
+    game. Two points define the position's line exactly, so each of the two
+    gets his own market value back as a fair price."""
+    corpus = CorpusStore(dsn=dsn)
+    corpus.upsert_players(
+        [
+            {"player_id": "d1", "last_name": "Dee One", "position": "Defender", "team_id": "7"},
+            {"player_id": "d2", "last_name": "Dee Two", "position": "Defender", "team_id": "7"},
+            {"player_id": "d3", "last_name": "Dee Three", "position": "Defender", "team_id": "7"},
+        ]
+    )
+    # 60 points a game and 20 points a game, three games each.
+    corpus.record_match_history(
+        "d1", "7", _perf([("2026/2027", [_m(1, 5, 60), _m(2, 5, 60), _m(3, 5, 60)])])
+    )
+    corpus.record_match_history(
+        "d2", "7", _perf([("2026/2027", [_m(1, 5, 20), _m(2, 5, 20), _m(3, 5, 20)])])
+    )
+    # One appearance, a huge score: the line would price him absurdly.
+    corpus.record_match_history("d3", "7", _perf([("2026/2027", [_m(1, 5, 200)])]))
+    for pid, mv in (("d1", 20_000_000), ("d2", 4_000_000), ("d3", 1_000_000)):
+        corpus.record_status_daily(
+            pid, date.today(), {"st": 0, "prob": 1, "mv": mv, "tid": "7", "tfhmvt": 0}, NOW
+        )
+    return LeagueStore(dsn=dsn)
+
+
 def test_fair_price_is_what_his_average_is_worth_at_his_positions_rate(store_dsn):
-    """Two midfielders define the position's price-to-points line exactly, so
-    each one's fair price is his own market value and his gap is zero. The lone
-    forward has no average at all, so he has no price."""
-    league = _seed(store_dsn)
+    league = _fair_price_seed(store_dsn)
     rows = {r["player_id"]: r for r in league.player_table()}
-    a, b, c = rows["a"], rows["b"], rows["c"]
-    assert abs(a["fair_price"] - a["market_value"]) <= 1
-    assert round(float(a["fair_value_gap"]), 1) == 0.0
-    assert abs(b["fair_price"] - b["market_value"]) <= 1
+    d1, d2 = rows["d1"], rows["d2"]
+    assert d1["appearances"] == 3 and float(d1["avg_points"]) == 60.0
+    assert abs(d1["fair_price"] - d1["market_value"]) <= 1
+    assert round(float(d1["fair_value_gap"]), 1) == 0.0
+    assert abs(d2["fair_price"] - d2["market_value"]) <= 1
+
+
+def test_fair_price_needs_three_appearances(store_dsn):
+    """One huge game must not price a player: the gap in points still shows,
+    but the euro price says nothing until there is a season behind it."""
+    league = _fair_price_seed(store_dsn)
+    d3 = {r["player_id"]: r for r in league.player_table()}["d3"]
+    assert d3["appearances"] == 1 and float(d3["avg_points"]) == 200.0
+    assert d3["fair_price"] is None
+    assert d3["fair_value_gap"] is not None
+
+
+def test_fair_price_is_absent_without_any_average(store_dsn):
+    league = _seed(store_dsn)
+    c = {r["player_id"]: r for r in league.player_table()}["c"]
     assert c["avg_points"] is None and c["fair_price"] is None
 
 
