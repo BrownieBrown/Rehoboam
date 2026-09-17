@@ -49,4 +49,35 @@ export function gateSentence(gate: Gate | null): string {
     : `Gate not passed: ${reports}, and ${clean}.`;
 }
 
+/**
+ * A row with `n === 0` has two distinct causes (`enrichment/calibrate.py`
+ * ~:255-305), and only one of them means "the bot wasn't writing predictions
+ * yet":
+ *
+ * - No player anywhere had a prediction before this kickoff — the empty
+ *   report is written with `gate = None`. Only true for a **live** row: a
+ *   backfill row's own predictions are what it scores, so an empty backfill
+ *   never means "the bot wasn't running."
+ * - Predictions existed, but every row for this matchday was stale (or there
+ *   were no actuals to score against) — `build_report` still returns `n = 0`,
+ *   but a live row's gate is computed regardless of `n`, so `gate` is
+ *   *non-null* here. Saying "the bot wasn't writing them" would be false, and
+ *   a real gate verdict exists to show instead (the caller renders
+ *   `gateSentence` alongside this sentence in that case).
+ */
+export function emptyReportSentence(row: {
+  backfill: boolean;
+  gate: unknown;
+  n_stale_rows: number;
+}): string {
+  if (!row.backfill && row.gate === null) {
+    return "Settled with no predictions — this matchday finished before the bot was writing them.";
+  }
+  if (row.n_stale_rows > 0) {
+    const were = row.n_stale_rows === 1 ? "was" : "were";
+    return `No row could be scored — all ${row.n_stale_rows} ${were} stale.`;
+  }
+  return "No row could be scored.";
+}
+
 export { DASH };
