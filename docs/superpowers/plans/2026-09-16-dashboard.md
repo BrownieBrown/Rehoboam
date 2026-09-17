@@ -2522,7 +2522,7 @@ ______________________________________________________________________
 
 **Files:**
 
-- Create: `web/src/app/health/page.tsx`, `web/src/components/BarPair.tsx`
+- Create: `web/src/app/health/page.tsx`, `web/src/components/BarPair.tsx`, `web/src/lib/calibration.ts`, `web/src/lib/calibration.test.ts`
 - Modify: `web/src/lib/queries.ts` (append `calibration()` and `sessions()`)
 
 **Interfaces:**
@@ -2531,6 +2531,77 @@ ______________________________________________________________________
 - Produces: `calibration()` and `sessions(limit)` in `queries.ts`.
 
 Current production state this page must survive: every live report has `n = 0` and `gate = null`, and only the backfill rows carry metrics. It must say so rather than render blanks.
+
+- [ ] **Step 0: Every sentence and bar this page draws comes from one tested module**
+
+This page states verdicts — "beats the baseline", "gate passed" — and the earlier pages taught the rule the hard way: text that explains a number must be true in every case that produces the number. So the wording lives in a pure module the node test environment can reach, and the components only render what it returns.
+
+Create `web/src/lib/calibration.ts`:
+
+```ts
+import { DASH, num } from "./format";
+
+export type Better = "higher" | "lower";
+export type Outcome = "beats" | "ties" | "loses" | "unknown";
+
+/** Ours against the baseline. A tie is a tie — never reported as a loss. */
+export function compare(ours: number | null, baseline: number | null, better: Better): Outcome {
+  if (ours === null || baseline === null) return "unknown";
+  if (ours === baseline) return "ties";
+  const oursWins = better === "higher" ? ours > baseline : ours < baseline;
+  return oursWins ? "beats" : "loses";
+}
+
+export const OUTCOME_TEXT: Record<Outcome, string> = {
+  beats: "beats the baseline",
+  ties: "ties the baseline",
+  loses: "loses to the baseline",
+  unknown: "not yet reported",
+};
+
+/**
+ * Bar widths as fractions of the larger magnitude. A negative value (Spearman
+ * can fall below zero) draws an EMPTY bar — never a bar as long as the
+ * equivalent positive value — and the signed number beside it carries the truth.
+ */
+export function barWidths(ours: number, baseline: number): { ours: number; baseline: number } {
+  const max = Math.max(ours, baseline, 0);
+  if (max === 0) return { ours: 0, baseline: 0 };
+  return { ours: Math.max(0, ours) / max, baseline: Math.max(0, baseline) / max };
+}
+
+export type Gate = {
+  spearman_ok: boolean | null;
+  regret_ok: boolean | null;
+  consecutive_ok: number;
+  required: number;
+  integrity_clean_days: number;
+  required_clean_days: number;
+  passes: boolean;
+};
+
+/** The gate verdict from `services/calibration.gate_verdict`, as one sentence. Never JSON. */
+export function gateSentence(gate: Gate | null): string {
+  if (gate === null) return "No gate verdict yet. The first one comes with the first live report.";
+  const reports = `${gate.consecutive_ok} of ${gate.required} consecutive reports beat the baseline`;
+  const clean = `${num(gate.integrity_clean_days, 1)} of ${gate.required_clean_days} days free of integrity failures`;
+  return gate.passes
+    ? `Gate passed: ${reports}, and ${clean}. Trading can resume.`
+    : `Gate not passed: ${reports}, and ${clean}.`;
+}
+
+export { DASH };
+```
+
+Read `rehoboam/services/calibration.py`'s `gate_verdict` and confirm the `Gate` fields match what it returns before relying on them; if they differ, follow the Python.
+
+Write `web/src/lib/calibration.test.ts` **first**:
+
+- `compare`: higher-is-better beats, loses and **ties**; lower-is-better beats and loses; either side null gives `unknown`.
+- `barWidths`: the larger value gets `1`; a negative value gets `0`, never a positive width; both zero gives zeros; both negative gives zeros.
+- `gateSentence`: `null`; a passing gate; a failing gate; and a failing gate whose `spearman_ok` and `regret_ok` are both `null` (the no-report case the Python produces) — the sentence must still read correctly and must not contain `null`, `undefined`, `NaN` or a brace.
+
+`BarPair` (Step 2) then uses `compare` for its verdict text and `barWidths` for its widths — replace the hard-coded `win` and `Math.abs(value) / max` logic in the step below with those two calls. A tie renders `ties the baseline` in `text-muted`, not red.
 
 - [ ] **Step 1: Append the queries**
 
@@ -2563,6 +2634,19 @@ export type SessionRow = {
   universe_size: number | null; stopped_by: string | null;
   league_teams: number | null; league_fixtures: number | null; league_failed: number | null;
 };
+
+/**
+ * `worst` stores player ids; a person cannot act on "11006". Resolve names in
+ * one query for every id on the page, and fall back to the id if a player has
+ * left the universe.
+ */
+export async function playerNames(ids: string[]): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const rows = await sql<{ player_id: string; name: string }[]>`
+    select player_id, name from rehoboam.web_players where player_id = any(${ids})
+  `;
+  return Object.fromEntries(rows.map((r) => [r.player_id, r.name]));
+}
 
 export async function sessions(limit = 30): Promise<SessionRow[]> {
   return sql<SessionRow[]>`
@@ -2627,11 +2711,14 @@ export function BarPair({
 `web/src/app/health/page.tsx` renders:
 
 1. `StatusHeader title="Calibration & health"`.
-1. One card per matchday from `calibration()`, newest first, grouped so a matchday with both a live and a backfill row shows the live one and marks the backfill "leak-free backfill". Each card: the matchday number; `BarPair` for Spearman (`spearman` vs `baseline_spearman`, `betterIs: "higher"`) and for top-eleven regret (`top11_regret` vs `baseline_top11_regret`, `betterIs: "lower"`, `digits: 0`); a line `n = 478 - 45 stale rows excluded - MAE 42.2 - bias -0.98` through `num()`; the gate as one sentence (`gate === null ? "No gate verdict yet." : sentence built from its fields - read services/calibration.py's gate_verdict for the shape and render its keys, never JSON`); and the three `worst` entries as `player_id - predicted X, actual Y`.
-   A row with `n === 0` renders the card title plus "Settled with no predictions - this matchday finished before the bot was writing them." and nothing else.
+1. One card per matchday from `calibration()`, newest matchday first. **Inside a card, show every row that exists for that matchday, live first and then the backfill, each labelled** ("Live" / "Leak-free backfill"). Do not hide one behind the other: today every live row is empty (`n = 0`) and the backfill rows carry the only real metrics, so showing just the live row would hide the numbers that matter.
+   - A row with `n === 0` renders one line: "Settled with no predictions — this matchday finished before the bot was writing them."
+   - Otherwise: `BarPair` for Spearman (`spearman` vs `baseline_spearman`, `better: "higher"`) and for top-eleven regret (`top11_regret` vs `baseline_top11_regret`, `better: "lower"`, `digits: 0`); one line built from `num()` — `n = 478 · 45 stale rows excluded · MAE 42.2 · bias −0.98`, with the bias through `signed()` so its minus is U+2212; the gate through `gateSentence()`; and the three `worst` entries as `{name} ({position}) — predicted {num(predicted, 0)}, scored {num(actual, 0)}`, names from `playerNames()` called once for every id on the page.
+   - Only a live row carries the gate; the backfill is kept apart from it by design. Say so under a backfill row rather than showing its null gate as "no verdict yet".
+1. `StatusHeader title="Calibration & health"`, above the cards.
 1. A runs table from `sessions(30)`: Time (`ago(started_at)`), App (`app` + `mode`, with `dry run` in muted text when `dry_run === 1`), Duration (`num(duration_s, 0)` + ` s`), Result (`lineup_result` for trading sessions; for ingest rows `status_written / universe_size` plus `stopped_by` in `text-negative` when it is `deadline`), Requests (`num(requests)`), League (`league_teams`/`league_fixtures` when present), Errors (`errors`, red when above zero), Integrity (the `integrity_rules` joined, each with `title={integritySentence(rule, integrity_details[rule] ?? "")}`).
 
-Tonight's ingest run must be legible in that table at a glance: `371 / 462` with `deadline` in red.
+The 17:00 UTC ingest on 2026-09-16 stopped at its deadline with status for 371 of 462 players; that must be legible in the runs table at a glance, `371 / 462` with `deadline` in red.
 
 - [ ] **Step 4: Run the suite and the build**
 
