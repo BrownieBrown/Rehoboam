@@ -1,24 +1,25 @@
 import { num } from "@/lib/format";
+import { deriveLineup } from "@/lib/lineup";
 import type { SquadRow } from "@/lib/queries";
 
 /**
- * The eleven the session actually chose, laid out by its formation string
- * ("4-3-3" = 4 defenders, 3 midfielders, 3 forwards, keeper on top). No pitch
- * graphic: rows of cards read better at a glance and survive any formation.
+ * The predicted best eleven (`predictions.in_best_11`), grouped by position -
+ * never truncated by the formation string. `in_best_11` is a squad snapshot
+ * taken early in a session, while `legal_formation` is computed later from a
+ * squad re-fetched live: the league's Top-5 forced sale, or the emergency
+ * fill, can run in between, so the two can genuinely disagree. A row capped
+ * to the formation's count would silently drop a real starter with no
+ * indication - a silently short figure is worse than an honest one - so this
+ * renders every flagged player and, when `deriveLineup` finds a mismatch,
+ * says so underneath instead of hiding it.
  */
 export function Formation({ formation, eleven }: { formation: string | null; eleven: SquadRow[] }) {
-  const byPosition = (name: string) => eleven.filter((p) => p.position === name);
-  const counts = (formation ?? "").split("-").map((n) => Number(n));
-  const rows: { label: string; players: SquadRow[] }[] = [
-    { label: "GK", players: byPosition("Goalkeeper").slice(0, 1) },
-    { label: "DEF", players: byPosition("Defender").slice(0, counts[0] || 99) },
-    { label: "MID", players: byPosition("Midfielder").slice(0, counts[1] || 99) },
-    { label: "FW", players: byPosition("Forward").slice(0, counts[2] || 99) },
-  ];
+  const { groups, mismatch } = deriveLineup(eleven, formation);
 
   return (
     <div className="flex flex-col gap-3">
-      {rows.map((row) => (
+      <h2 className="text-sm font-semibold text-text">Predicted best eleven</h2>
+      {groups.map((row) => (
         <div key={row.label} className="flex flex-wrap justify-center gap-3">
           {row.players.map((p) => (
             <div
@@ -35,6 +36,12 @@ export function Formation({ formation, eleven }: { formation: string | null; ele
           ))}
         </div>
       ))}
+      {mismatch ? (
+        <p className="text-xs text-muted">
+          The lineup the session submitted used {formation}. It differs from this predicted eleven
+          because the squad changed during the session.
+        </p>
+      ) : null}
     </div>
   );
 }
