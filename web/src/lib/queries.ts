@@ -212,3 +212,85 @@ export async function latestSessionRules(): Promise<{ rule: string; detail: stri
   `;
   return Object.entries(row?.integrity_details ?? {}).map(([rule, detail]) => ({ rule, detail }));
 }
+
+export type MarketRow = {
+  snapshot_at: number;
+  player_id: string;
+  name: string | null;
+  team: string | null;
+  position: string | null;
+  ask: number;
+  market_value: number | null;
+  mv_trend: number | null;
+  offer_count: number | null;
+  our_bid: number | null;
+  listed_at: number | null;
+  expires_at: number | null;
+  status: number | null;
+  lineup_probability: number | null;
+  seller: string;
+  is_ours: boolean;
+  predicted_ep: number | null;
+  p_start: number | null;
+  fair_value_gap: number | null;
+  points: number | null;
+  avg_points: number | null;
+};
+
+export const MARKET_SORTS = [
+  "name",
+  "position",
+  "ask",
+  "market_value",
+  "seller",
+  "expires_at",
+  "offer_count",
+  "predicted_ep",
+  "p_start",
+  "fair_value_gap",
+];
+
+export async function market(opts: {
+  sort: string;
+  dir: "asc" | "desc";
+  expiringHours?: number;
+}): Promise<MarketRow[]> {
+  const cutoff = opts.expiringHours ? Date.now() / 1000 + opts.expiringHours * 3600 : null;
+  return sql<MarketRow[]>`
+    select * from rehoboam.web_market
+    where (${cutoff}::double precision is null
+           or (expires_at is not null and expires_at <= ${cutoff}))
+    order by ${sql.unsafe(opts.sort)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
+             player_id asc
+  `;
+}
+
+export type ManagerRow = {
+  manager_id: string;
+  manager: string;
+  is_self: boolean;
+  squad_size: number;
+  team_value: number | null;
+  top: string[];
+};
+
+/** One row per manager, from each manager's own newest squad snapshot. */
+export async function managers(): Promise<ManagerRow[]> {
+  return sql<ManagerRow[]>`
+    with ranked as (
+      select manager_id, manager, is_self, player_name, market_value, predicted_ep,
+             row_number() over (
+               partition by manager_id order by predicted_ep desc nulls last, player_id
+             ) as rank
+      from rehoboam.web_ownership
+    )
+    select manager_id, manager, is_self,
+        count(*)::int as squad_size,
+        sum(market_value)::bigint as team_value,
+        array_remove(array_agg(case when rank <= 3 then player_name end
+                               order by rank), null) as top
+    from ranked
+    group by manager_id, manager, is_self
+    order by is_self desc, team_value desc nulls last
+  `;
+}
