@@ -1,17 +1,20 @@
 import { requireSession } from "@/lib/auth";
 import {
   calibration,
+  mvAccuracy,
   playerNames,
   sessions,
   type CalibrationRow,
+  type MvAccuracyRow,
   type SessionRow,
 } from "@/lib/queries";
 import { DataTable, type Column } from "@/components/DataTable";
 import { BarPair } from "@/components/BarPair";
 import { StatusHeader } from "@/components/StatusHeader";
-import { ago, DASH, num, signed } from "@/lib/format";
+import { ago, DASH, money, num, signed } from "@/lib/format";
 import { integritySentence } from "@/lib/integrity";
 import { emptyReportSentence, gateSentence, type Gate } from "@/lib/calibration";
+import { accuracySentence, directionRight, summarize } from "@/lib/mv-accuracy";
 
 /** Newest matchday first; within a matchday, live before backfill (the order `calibration()` already returns). */
 function byMatchday(rows: CalibrationRow[]): CalibrationRow[][] {
@@ -124,7 +127,11 @@ function ResultCell({ row }: { row: SessionRow }) {
 export default async function HealthPage() {
   await requireSession();
 
-  const [calibrationRows, sessionRows] = await Promise.all([calibration(), sessions(30)]);
+  const [calibrationRows, sessionRows, mvRows] = await Promise.all([
+    calibration(),
+    sessions(30),
+    mvAccuracy(),
+  ]);
   const ids = [...new Set(calibrationRows.flatMap((r) => r.worst.map((w) => w.player_id)))];
   const names = await playerNames(ids);
   const matchdays = byMatchday(calibrationRows);
@@ -184,6 +191,18 @@ export default async function HealthPage() {
     },
   ];
 
+  const pp = (n: number | null) => (n === null ? DASH : `${num(n, 2)} pp`);
+  const mvColumns: Column<MvAccuracyRow>[] = [
+    { key: "target_day", label: "Update", align: "left", sortable: false, cell: (r) => r.target_day },
+    { key: "scored", label: "Scored", sortable: false, cell: (r) => num(r.scored) },
+    { key: "unscorable", label: "Unscorable", sortable: false, cell: (r) => num(r.unscorable) },
+    { key: "direction", label: "Direction right", sortable: false, cell: (r) => directionRight(r) },
+    { key: "mae_pct", label: "Avg miss", sortable: false, cell: (r) => pp(r.mae_pct) },
+    { key: "baseline_mae_pct", label: "No change", sortable: false, cell: (r) => pp(r.baseline_mae_pct) },
+    { key: "mae_eur", label: "Avg miss (€)", sortable: false, cell: (r) => money(r.mae_eur) },
+    { key: "baseline_mae_eur", label: "No change (€)", sortable: false, cell: (r) => money(r.baseline_mae_eur) },
+  ];
+
   return (
     <>
       <StatusHeader title="Calibration & health" />
@@ -211,6 +230,15 @@ export default async function HealthPage() {
               ))}
             </div>
           )}
+        </div>
+        <div>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
+            Market-value forecast
+          </h2>
+          <p className="mb-3 text-sm text-text-dim">{accuracySentence(summarize(mvRows))}</p>
+          {mvRows.length > 0 ? (
+            <DataTable columns={mvColumns} rows={mvRows} sort="" dir="desc" basePath="/health" />
+          ) : null}
         </div>
         <div>
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">

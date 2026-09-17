@@ -375,6 +375,30 @@ export async function calibration(): Promise<CalibrationRow[]> {
   `;
 }
 
+export type MvAccuracyRow = {
+  /** YYYY-MM-DD, the Berlin date of the update. */
+  target_day: string;
+  scored: number;
+  unscorable: number;
+  directional: number;
+  direction_hits: number;
+  mae_pct: number | null;
+  baseline_mae_pct: number | null;
+  mae_eur: number | null;
+  baseline_mae_eur: number | null;
+};
+
+/** The newest scored updates first. The date is text: postgres.js would make a `date` a JS Date. */
+export async function mvAccuracy(limit = 14): Promise<MvAccuracyRow[]> {
+  return sql<MvAccuracyRow[]>`
+    select to_char(target_day, 'YYYY-MM-DD') as target_day, scored, unscorable,
+           directional, direction_hits, mae_pct, baseline_mae_pct, mae_eur, baseline_mae_eur
+    from rehoboam.web_mv_accuracy
+    order by target_day desc
+    limit ${limit}
+  `;
+}
+
 export type SessionRow = {
   session_id: string;
   app: string;
