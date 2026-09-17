@@ -578,3 +578,6 @@ def test_web_players_and_web_market_carry_the_fair_price(store_dsn):
     assert "fair_price" in players["a"]
     market = _rows(store_dsn, "select * from rehoboam.web_market")[0]
     assert "fair_price" in market
+    # Migration 010: the Market page reads yesterday's move and points per
+    # million from the same row, not from a second query.
+    assert "trend_24h_pct" in market and "points_per_million" in market

@@ -287,6 +287,9 @@ export type MarketRow = {
   next_mv_pct: number | null;
   /** What his average points are worth at his position's going rate, in euros. */
   fair_price: number | null;
+  /** Migration 010: the same two numbers the Players page shows. */
+  trend_24h_pct: number | null;
+  points_per_million: number | null;
 };
 
 export const MARKET_SORTS = [
@@ -296,6 +299,8 @@ export const MARKET_SORTS = [
   "market_value",
   "next_mv_pct",
   "fair_price",
+  "trend_24h_pct",
+  "points_per_million",
   "seller",
   "expires_at",
   "predicted_ep",

@@ -12,6 +12,7 @@ import {
 import { sortDir, sortKey } from "@/lib/sort";
 import { clampPage, pageHref, pageOffset, pageSummary, parsePage } from "@/lib/paging";
 import { DataTable, type Column } from "@/components/DataTable";
+import { FairPrice } from "@/components/FairPrice";
 import { Filters } from "@/components/Filters";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
@@ -27,8 +28,6 @@ const TONE: Record<Tone, string> = {
 
 const APPS_HINT = "Matches played this season, started or came on";
 const STARTS_HINT = "Matches he started";
-const FAIR_PTS_HINT =
-  "His average points minus what players at his position and price average — positive means he outscores his price";
 const FAIR_PRICE_HINT =
   "What his average points are worth at his position's going rate, against his market value";
 
@@ -112,7 +111,7 @@ export default async function PlayersPage({
       key: "fair_price",
       label: "Fair price",
       hint: FAIR_PRICE_HINT,
-      cell: (p) => money(p.fair_price),
+      cell: (p) => <FairPrice price={p.fair_price} marketValue={p.market_value} />,
     },
     { key: "trend_24h_pct", label: "24h", cell: (p) => <Trend pct={p.trend_24h_pct} /> },
     { key: "trend_7d_pct", label: "7d", cell: (p) => <Trend pct={p.trend_7d_pct} /> },
@@ -126,7 +125,7 @@ export default async function PlayersPage({
     { key: "avg_points", label: "Avg", cell: (p) => num(p.avg_points, 1) },
     { key: "median_points", label: "Median", cell: (p) => num(p.median_points, 1) },
     { key: "points_per_million", label: "Pts / M", cell: (p) => num(p.points_per_million, 2) },
-    { key: "appearances", label: "Apps", hint: APPS_HINT, cell: (p) => num(p.appearances) },
+    { key: "appearances", label: "Played", hint: APPS_HINT, cell: (p) => num(p.appearances) },
     { key: "starts", label: "Starts", hint: STARTS_HINT, cell: (p) => num(p.starts) },
     {
       key: "owner",
@@ -157,12 +156,6 @@ export default async function PlayersPage({
       key: "p_start",
       label: "P(start)",
       cell: (p) => pct(p.p_start),
-    },
-    {
-      key: "fair_value_gap",
-      label: "Fair pts",
-      hint: FAIR_PTS_HINT,
-      cell: (p) => <Trend value={p.fair_value_gap} />,
     },
   ];
 

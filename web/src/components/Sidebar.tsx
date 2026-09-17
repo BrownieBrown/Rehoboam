@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { countdown, DASH, money } from "@/lib/format";
+import { DASH, money } from "@/lib/format";
 import type { ShellFacts } from "@/lib/queries";
 
 const ENTRIES: { href: string; label: string }[] = [
@@ -59,10 +59,6 @@ export function Sidebar({ facts, current }: { facts: ShellFacts; current?: strin
 
       <div className="rounded-lg border border-border bg-surface p-3 text-xs">
         <dl className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <dt className="text-muted">Next kickoff</dt>
-            <dd className="tnum text-text-dim">{countdown(facts.nextKickoff)}</dd>
-          </div>
           <div className="flex items-center justify-between gap-2">
             <dt className="text-muted">Lineup</dt>
             <dd className="text-text-dim">{humanizeLineup(facts)}</dd>

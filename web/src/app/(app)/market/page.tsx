@@ -1,10 +1,11 @@
 import { requireSession } from "@/lib/auth";
-import { managers, market, MARKET_SORTS, type MarketRow } from "@/lib/queries";
+import { market, MARKET_SORTS, type MarketRow } from "@/lib/queries";
 import { sortDir, sortKey } from "@/lib/sort";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
-import { ago, countdown, DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
+import { ago, countdown, DASH, money, num, pct, signedPct, POSITION, type Tone } from "@/lib/format";
+import { FairPrice } from "@/components/FairPrice";
 import { expiringWithin, listingsLine } from "@/lib/expiry";
 import { bySeller, sellerScope } from "@/lib/market-filter";
 import { hrefFor } from "@/lib/query-href";
@@ -26,10 +27,16 @@ function Chip({ href, active, children }: { href: string; active: boolean; child
   );
 }
 
-const FAIR_PTS_HINT =
-  "His average points minus what players at his position and price average — positive means he outscores his price";
 const FAIR_PRICE_HINT =
   "What his average points are worth at his position's going rate, against his market value";
+
+const PPM_HINT = "Season points per million euros of market value";
+
+/** A signed percentage in its tone, for the 24h move. */
+function Trend({ pct }: { pct: number | null }) {
+  const out = signedPct(pct);
+  return <span className={TONE[out.tone]}>{out.text}</span>;
+}
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -49,7 +56,7 @@ export default async function MarketPage({
   const expiring = params.expiring === "6" ? 6 : undefined;
   const scope = sellerScope(params.from);
 
-  const [listings, managerRows] = await Promise.all([market({ sort, dir }), managers()]);
+  const listings = await market({ sort, dir });
   const bySource = bySeller(listings, scope);
   const rows = expiring ? expiringWithin(bySource, expiring, Date.now() / 1000) : bySource;
 
@@ -74,19 +81,16 @@ export default async function MarketPage({
     { key: "market_value", label: "Market value", cell: (r) => money(r.market_value) },
     {
       key: "fair_price", label: "Fair price", hint: FAIR_PRICE_HINT,
-      cell: (r) => money(r.fair_price),
+      cell: (r) => <FairPrice price={r.fair_price} marketValue={r.market_value} />,
+    },
+    { key: "trend_24h_pct", label: "24h", cell: (r) => <Trend pct={r.trend_24h_pct} /> },
+    {
+      key: "points_per_million", label: "Pts / M", hint: PPM_HINT,
+      cell: (r) => num(r.points_per_million, 2),
     },
     {
       key: "next_mv_pct", label: "Next MV", hint: NEXT_MV_HINT,
       cell: (r) => <NextMvCell pct={r.next_mv_pct} change={r.next_mv_change} />,
-    },
-    {
-      key: "over", label: "Ask vs MV", sortable: false,
-      cell: (r) => {
-        if (!r.market_value) return DASH;
-        const out = signedPct(((r.ask - r.market_value) / r.market_value) * 100);
-        return <span className={TONE[out.tone]}>{out.text}</span>;
-      },
     },
     {
       key: "seller", label: "Seller", align: "left",
@@ -103,13 +107,6 @@ export default async function MarketPage({
     {
       key: "p_start", label: "P(start)",
       cell: (r) => pct(r.p_start),
-    },
-    {
-      key: "fair_value_gap", label: "Fair pts", hint: FAIR_PTS_HINT,
-      cell: (r) => {
-        const out = signed(r.fair_value_gap, 1);
-        return <span className={TONE[out.tone]}>{out.text}</span>;
-      },
     },
   ];
 
@@ -152,47 +149,6 @@ export default async function MarketPage({
           columns={columns} rows={rows} sort={sort} dir={dir}
           basePath="/market" query={params}
         />
-      </div>
-      <div className="px-6 pb-8">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
-          Who owns what
-        </h2>
-        <div className="overflow-x-auto rounded-lg border border-border bg-surface">
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="text-[11px] uppercase tracking-[0.08em] text-muted">
-                <th className="h-10 border-b border-border-strong px-3 text-left">Manager</th>
-                <th className="h-10 border-b border-border-strong px-3 text-right">Squad</th>
-                <th className="h-10 border-b border-border-strong px-3 text-right">Team value</th>
-                <th className="h-10 border-b border-border-strong px-3 text-left">
-                  Top three by predicted points
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {managerRows.map((m) => (
-                <tr key={m.manager_id}>
-                  <td className="h-11 border-b border-border px-3 text-left">
-                    {m.is_self ? (
-                      <Pill tone="accent">{m.manager}</Pill>
-                    ) : (
-                      <span className="text-sm text-text-dim">{m.manager}</span>
-                    )}
-                  </td>
-                  <td className="tnum h-11 border-b border-border px-3 text-right">
-                    {m.squad_size}
-                  </td>
-                  <td className="tnum h-11 border-b border-border px-3 text-right">
-                    {money(m.team_value)}
-                  </td>
-                  <td className="h-11 border-b border-border px-3 text-left text-sm text-muted">
-                    {m.top.join(", ") || DASH}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </div>
     </>
   );
