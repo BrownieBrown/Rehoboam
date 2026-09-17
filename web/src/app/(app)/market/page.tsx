@@ -8,6 +8,8 @@ import { ago, countdown, DASH, money, num, pct, signed, signedPct, POSITION, typ
 import { expiringWithin, listingsLine } from "@/lib/expiry";
 import { bySeller, sellerScope } from "@/lib/market-filter";
 import { hrefFor } from "@/lib/query-href";
+import { NextMvCell } from "@/components/NextMv";
+import { NEXT_MV_HINT } from "@/lib/next-mv";
 import Link from "next/link";
 
 /** A filter chip: a plain link, filled when it is the active choice. */
@@ -65,6 +67,10 @@ export default async function MarketPage({
     },
     { key: "ask", label: "Ask", cell: (r) => money(r.ask) },
     { key: "market_value", label: "Market value", cell: (r) => money(r.market_value) },
+    {
+      key: "next_mv_pct", label: "Next MV", hint: NEXT_MV_HINT,
+      cell: (r) => <NextMvCell pct={r.next_mv_pct} change={r.next_mv_change} />,
+    },
     {
       key: "over", label: "Ask vs MV", sortable: false,
       cell: (r) => {

@@ -16,6 +16,8 @@ import { Filters } from "@/components/Filters";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
 import { DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
+import { NextMvCell } from "@/components/NextMv";
+import { NEXT_MV_HINT } from "@/lib/next-mv";
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -101,6 +103,12 @@ export default async function PlayersPage({
     { key: "market_value", label: "Market value", cell: (p) => money(p.market_value) },
     { key: "trend_24h_pct", label: "24h", cell: (p) => <Trend pct={p.trend_24h_pct} /> },
     { key: "trend_7d_pct", label: "7d", cell: (p) => <Trend pct={p.trend_7d_pct} /> },
+    {
+      key: "next_mv_pct",
+      label: "Next MV",
+      hint: NEXT_MV_HINT,
+      cell: (p) => <NextMvCell pct={p.next_mv_pct} change={p.next_mv_change} />,
+    },
     { key: "points", label: "Pts", cell: (p) => <b className="text-text">{num(p.points)}</b> },
     { key: "avg_points", label: "Avg", cell: (p) => num(p.avg_points, 1) },
     { key: "median_points", label: "Median", cell: (p) => num(p.median_points, 1) },

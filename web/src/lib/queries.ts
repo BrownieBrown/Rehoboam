@@ -93,6 +93,9 @@ export type PlayerRow = {
   p_start: number | null;
   fair_value_gap: number | null;
   listed: boolean;
+  /** Forecast for the next market-value update: euros, and percent with two decimals. */
+  next_mv_change: number | null;
+  next_mv_pct: number | null;
   /** Every row the filters match, counted in the same statement as this page. */
   total: number;
 };
@@ -103,6 +106,7 @@ export const PLAYER_SORTS = [
   "market_value",
   "trend_24h_pct",
   "trend_7d_pct",
+  "next_mv_pct",
   "points",
   "avg_points",
   "median_points",
@@ -275,6 +279,9 @@ export type MarketRow = {
   fair_value_gap: number | null;
   points: number | null;
   avg_points: number | null;
+  /** Forecast for the next market-value update: euros, and percent with two decimals. */
+  next_mv_change: number | null;
+  next_mv_pct: number | null;
 };
 
 export const MARKET_SORTS = [
@@ -282,6 +289,7 @@ export const MARKET_SORTS = [
   "position",
   "ask",
   "market_value",
+  "next_mv_pct",
   "seller",
   "expires_at",
   "predicted_ep",
