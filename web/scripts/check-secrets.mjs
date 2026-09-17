@@ -2,7 +2,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const NEEDLES = ["DATABASE_URL", "pooler.supabase.com", "rehoboam_bot"];
+const NEEDLES = ["DATABASE_URL", "pooler.supabase.com", "rehoboam_bot", "ALLOWED_EMAILS"];
 const ROOT = ".next/static";
 
 async function* files(dir) {

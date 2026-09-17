@@ -1,32 +1,21 @@
-"use client";
+import { Suspense } from "react";
+import { LoginError } from "./LoginError";
+import { LoginForm } from "./LoginForm";
 
-import { useActionState } from "react";
-import { sendMagicLink } from "./actions";
-
+/**
+ * A server component on purpose: the page itself reads no data and needs no
+ * client runtime, so it stays prerendered static. The one thing that does
+ * need the request's query string — the `?error=` message — is isolated in
+ * `LoginError`, a client leaf wrapped in `<Suspense>` so only that leaf
+ * renders on the client; the rest of this page still prerenders.
+ */
 export default function LoginPage() {
-  const [state, action, pending] = useActionState(sendMagicLink, { message: "" });
   return (
-    <main className="flex min-h-screen items-center justify-center bg-bg">
-      <form action={action} className="w-80 rounded-lg border border-border bg-surface p-6">
-        <h1 className="mb-1 text-lg font-bold text-text">Rehoboam</h1>
-        <p className="mb-5 text-sm text-muted">Sign in with a link sent to your inbox.</p>
-        <input
-          type="email"
-          name="email"
-          required
-          autoComplete="email"
-          placeholder="you@example.com"
-          className="mb-3 h-10 w-full rounded-md border border-border-strong bg-bg px-3 text-sm text-text outline-none focus:border-accent"
-        />
-        <button
-          type="submit"
-          disabled={pending}
-          className="h-10 w-full rounded-md bg-accent text-sm font-semibold text-on-accent disabled:opacity-60"
-        >
-          {pending ? "Sending…" : "Send the link"}
-        </button>
-        {state.message ? <p className="mt-3 text-sm text-muted">{state.message}</p> : null}
-      </form>
+    <main className="flex min-h-screen flex-col items-center justify-center gap-3 bg-bg">
+      <Suspense fallback={null}>
+        <LoginError />
+      </Suspense>
+      <LoginForm />
     </main>
   );
 }

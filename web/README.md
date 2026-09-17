@@ -18,27 +18,48 @@ Never widen the site's access with a raw table query.
 site's first deploy** — the same way as every other store migration (see the
 bot repo's `CLAUDE.md`, "Store workflow"). Nothing in `web/` runs it for you.
 
-Auth is Supabase Auth, magic-link only (no password, no self-serve sign-up).
-The middleware (`src/middleware.ts`) redirects an anonymous request to
-`/login`; every data page, and the `(app)` layout that renders the sidebar,
-also calls `requireSession()` itself, so a request the middleware's matcher
-somehow lets through still gets no data. `/login` and `/auth/callback` sit
-outside the `(app)` route group and never render the sidebar. `next build`
-runs `scripts/check-secrets.mjs`, which fails the build if `DATABASE_URL` or
-anything naming the pooler or the bot role turns up in the client bundle.
+Auth is Supabase Auth, magic-link only (no password). Signing in is only
+half of access control, though: the site is **single-owner in code**. The
+middleware (`src/middleware.ts`) and `requireSession()`
+(`src/lib/auth.ts`) both check the signed-in user's email against
+`ALLOWED_EMAILS` (`src/lib/allowed-emails.ts`) and sign out and redirect to
+`/login?error=not-allowed` anyone who isn't on it — a request the
+middleware's matcher somehow lets through still gets no data from
+`requireSession()` either. `/login` and `/auth/callback` sit outside the
+`(app)` route group and never render the sidebar. `next build` runs
+`scripts/check-secrets.mjs`, which fails the build if `DATABASE_URL`,
+`ALLOWED_EMAILS`, or anything naming the pooler or the bot role turns up in
+the client bundle.
 
 ## Environment variables
 
-Three, all required, none of them optional:
+Four, all required, none of them optional:
 
-| Variable                        | What it is                                                                                                                                                                                                | Where it comes from                                                 |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `DATABASE_URL`                  | The `rehoboam_bot` role's connection string, through the Supabase **transaction pooler** (port 6543) — the same role and pooler the bot itself connects through. Server-side only — never `NEXT_PUBLIC_`. | Supabase project → Database → Connection pooling, transaction mode. |
-| `NEXT_PUBLIC_SUPABASE_URL`      | The Supabase project's API URL. Public by design.                                                                                                                                                         | Supabase project → Project Settings → API.                          |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The project's anon key, used only to drive sign-in (magic link) in the browser — it carries no access to the store; that's `DATABASE_URL`'s job, server-side only.                                        | Supabase project → Project Settings → API.                          |
+| Variable                        | What it is                                                                                                                                                                                                            | Where it comes from                                                 |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `DATABASE_URL`                  | The `rehoboam_bot` role's connection string, through the Supabase **transaction pooler** (port 6543) — the same role and pooler the bot itself connects through. Server-side only — never `NEXT_PUBLIC_`.             | Supabase project → Database → Connection pooling, transaction mode. |
+| `NEXT_PUBLIC_SUPABASE_URL`      | The Supabase project's API URL. Public by design.                                                                                                                                                                     | Supabase project → Project Settings → API.                          |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The project's anon key, used only to drive sign-in (magic link) in the browser — it carries no access to the store; that's `DATABASE_URL`'s job, server-side only.                                                    | Supabase project → Project Settings → API.                          |
+| `ALLOWED_EMAILS`                | Comma-separated email addresses allowed to use the site, matched exact (trimmed, lower-cased) after sign-in. Server-side only — never `NEXT_PUBLIC_`. **Empty or unset locks everyone out** — fails closed, not open. | You choose it — the owner's own email address(es).                  |
 
 See `.env.example`. For local development, copy it to `.env.local` (already
 `.gitignore`d) and fill in real values.
+
+### Owner steps: keeping this a one-user site
+
+`ALLOWED_EMAILS` is the code-level gate, but it is only half the lock — the
+other half lives in the Supabase project itself, and both must be done:
+
+1. Set `ALLOWED_EMAILS` to the owner's email address (in Vercel's project
+   env vars for the deployed site, and in `.env.local` for local dev).
+1. In the Supabase dashboard, **Authentication → Sign In / Providers →
+   Email**, turn **Allow new users to sign up** off. The publishable anon
+   key ships to every browser, so anyone holding it can call Supabase's
+   sign-up endpoint directly regardless of what this app's own login form
+   does (`shouldCreateUser: false` only stops the form itself from creating
+   accounts). `ALLOWED_EMAILS` keeps the site closed even if sign-ups are
+   ever switched back on — the two together are the access model, and
+   neither is a substitute for the other.
 
 ## Local development
 
