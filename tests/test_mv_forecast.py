@@ -9,13 +9,15 @@ import pytest
 from rehoboam.services.mv_forecast import (
     BERLIN,
     METHOD,
+    POST,
+    PRE,
     SCORED,
     UNSCORABLE,
     backtest,
     berlin_today,
     forecast,
+    reading_window,
     score,
-    usable_day,
 )
 
 DAY = date(2026, 9, 17)
@@ -67,23 +69,28 @@ def test_no_forecast_without_a_positive_value_before_and_after(market_value, las
     assert forecast("p", market_value, last_change, DAY, momentum=0.9, cap=0.2) is None
 
 
-def test_usable_day_is_the_berlin_date_before_the_cutoff():
-    assert usable_day(_epoch(2026, 9, 17, 7, 0)) == date(2026, 9, 17)
-    assert usable_day(_epoch(2026, 9, 17, 21, 44)) == date(2026, 9, 17)
-    assert usable_day(_epoch(2026, 9, 17, 0, 5)) == date(2026, 9, 17)
+def test_reading_window_before_the_cutoff_is_pre():
+    assert reading_window(_epoch(2026, 9, 17, 7, 0)) == (date(2026, 9, 17), PRE)
+    assert reading_window(_epoch(2026, 9, 17, 21, 44)) == (date(2026, 9, 17), PRE)
+    assert reading_window(_epoch(2026, 9, 17, 0, 5)) == (date(2026, 9, 17), PRE)
 
 
-def test_usable_day_refuses_a_fetch_near_or_after_the_update():
-    assert usable_day(_epoch(2026, 9, 17, 21, 45)) is None
-    assert usable_day(_epoch(2026, 9, 17, 23, 30)) is None
+def test_reading_window_is_ambiguous_between_the_cutoff_and_the_post_start():
+    assert reading_window(_epoch(2026, 9, 17, 21, 45)) is None
+    assert reading_window(_epoch(2026, 9, 17, 22, 29)) is None
 
 
-def test_usable_day_follows_berlin_in_winter_too():
+def test_reading_window_after_the_post_start_is_post():
+    assert reading_window(_epoch(2026, 9, 17, 22, 30)) == (date(2026, 9, 17), POST)
+    assert reading_window(_epoch(2026, 9, 17, 23, 59)) == (date(2026, 9, 17), POST)
+
+
+def test_reading_window_follows_berlin_in_winter_too():
     # In January Berlin is UTC+1: 17:00 UTC is 18:00 there, 21:00 UTC is 22:00
     utc_17 = datetime.fromisoformat("2027-01-15T17:00:00+00:00").timestamp()
-    assert usable_day(utc_17) == date(2027, 1, 15)
+    assert reading_window(utc_17) == (date(2027, 1, 15), PRE)
     utc_21 = datetime.fromisoformat("2027-01-15T21:00:00+00:00").timestamp()
-    assert usable_day(utc_21) is None
+    assert reading_window(utc_21) is None
 
 
 def test_berlin_today_crosses_midnight_before_utc_does():

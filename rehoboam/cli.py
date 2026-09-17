@@ -485,6 +485,108 @@ def ingest_cmd(
     console.print(table)
 
 
+@app.command("mv-nightly")
+def mv_nightly_cmd(
+    deadline_seconds: float | None = typer.Option(None, "--deadline-seconds"),
+    max_requests: int | None = typer.Option(None, "--max-requests"),
+    throttle: float = typer.Option(0.25, "--throttle", help="Seconds between requests."),
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """Status-only pass right after Kickbase's ~22:00 market-value update --
+    what func-rehoboam-external runs at 21:45 UTC. Scores tonight's result
+    and writes tomorrow's forecast; no league refresh."""
+    import time
+    import uuid
+    from dataclasses import asdict
+
+    from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from .enrichment.mv_forecast import run_mv_forecast
+    from .services.session_facts import SessionFacts
+    from .store.corpus_store import CorpusStore
+    from .store.mv_forecast_store import MvForecastStore
+    from .store.session_store import SessionStore
+
+    _ensure_store()
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    try:
+        api, settings, league = _login_and_get_league(league_index)
+        budget = IngestBudget(
+            deadline=time.time() + (deadline_seconds or settings.ingest_deadline_seconds),
+            max_requests=max_requests or settings.ingest_max_requests,
+        )
+        stats = run_ingestion(
+            api.client,
+            CorpusStore(),
+            league_id=league.id,
+            budget=budget,
+            stale_after_seconds=10 * 86400,
+            mv_stale_after_seconds=10 * 86400,
+            status_stale_after_seconds=0.0,
+            transfers_stale_after_seconds=10 * 86400,
+            throttle_seconds=throttle,
+            league_store=None,
+            learner=None,
+        )
+    except Exception as e:
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="cli",
+                    mode="mv_nightly",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logger.error("session_facts write failed", exc_info=True)
+        raise
+    mv_outcome = run_mv_forecast(
+        MvForecastStore(),
+        now=time.time(),
+        momentum=settings.mv_forecast_momentum,
+        cap=settings.mv_forecast_cap,
+    )
+    try:
+        SessionStore().record(
+            facts_for_ingest(
+                stats,
+                app="cli",
+                session_id=session_id,
+                mv_forecast=asdict(mv_outcome),
+                mode="mv_nightly",
+            )
+        )
+    except Exception:
+        logger.error("session_facts write failed", exc_info=True)
+
+    table = Table(title="MV Nightly")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    for name in (
+        "universe_size",
+        "status_written",
+        "performance_fetched",
+        "mv_fetched",
+        "transfers_fetched",
+        "failed",
+        "requests",
+    ):
+        table.add_row(name, str(getattr(stats, name)))
+    table.add_row("stopped_by", stats.stopped_by or "—")
+    table.add_row("duration_s", f"{stats.duration_s:.0f}")
+    table.add_row(
+        "mv_forecast",
+        f"written {mv_outcome.written} · scored {mv_outcome.scored} · "
+        f"unscorable {mv_outcome.unscorable}"
+        + (f" · error {mv_outcome.error}" if mv_outcome.error else ""),
+    )
+    console.print(table)
+
+
 @app.command("export")
 def export_cmd():
     """One-off weekly export — every store table as gzip CSV in the Blob container."""

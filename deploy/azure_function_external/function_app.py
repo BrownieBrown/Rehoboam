@@ -152,6 +152,98 @@ def ingest(timer: func.TimerRequest):
             logging.error("session_facts write failed", exc_info=True)
 
 
+# 21:45 UTC — 23:45 Berlin in summer, 22:45 in winter: after Kickbase's ~22:00
+# market-value move, so these readings say what it did. Status only: the full
+# passes at 05:00/17:00 keep performance, MV series and transfers fresh.
+@app.timer_trigger(schedule="0 45 21 * * *", arg_name="timer", run_on_startup=False)
+def mv_nightly(timer: func.TimerRequest):
+    from rehoboam.api import KickbaseAPI
+    from rehoboam.config import get_settings
+    from rehoboam.enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from rehoboam.services.session_facts import SessionFacts
+    from rehoboam.store import ensure_ready
+    from rehoboam.store.corpus_store import CorpusStore
+    from rehoboam.store.session_store import SessionStore
+
+    _prepare()
+    logging.info("mv-nightly-start")
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    try:
+        ensure_ready()
+        settings = get_settings()
+        api = KickbaseAPI(settings.kickbase_email, settings.kickbase_password)
+        api.login()
+        leagues = api.get_leagues()
+        if not leagues:
+            logging.error("mv-nightly: no leagues found")
+            return
+        league = leagues[int(os.getenv("LEAGUE_INDEX", "0"))]
+
+        budget = IngestBudget(
+            deadline=started_at + settings.ingest_deadline_seconds,
+            max_requests=settings.ingest_max_requests,
+        )
+        stats = run_ingestion(
+            api.client,
+            CorpusStore(),
+            league_id=league.id,
+            budget=budget,
+            stale_after_seconds=10 * 86400,
+            mv_stale_after_seconds=10 * 86400,
+            status_stale_after_seconds=0.0,
+            transfers_stale_after_seconds=10 * 86400,
+            league_store=None,
+            learner=None,
+        )
+
+        mv_forecast = None
+        try:
+            from rehoboam.enrichment.mv_forecast import run_mv_forecast
+            from rehoboam.store.mv_forecast_store import MvForecastStore
+
+            mv_forecast = asdict(
+                run_mv_forecast(
+                    MvForecastStore(),
+                    now=time.time(),
+                    momentum=settings.mv_forecast_momentum,
+                    cap=settings.mv_forecast_cap,
+                )
+            )
+            logging.info("mv-forecast-end %s", mv_forecast)
+        except Exception:
+            logging.warning("mv forecast: step failed", exc_info=True)
+
+        try:
+            SessionStore().record(
+                facts_for_ingest(
+                    stats,
+                    app="external",
+                    session_id=session_id,
+                    mv_forecast=mv_forecast,
+                    mode="mv_nightly",
+                )
+            )
+        except Exception:
+            logging.error("session_facts write failed", exc_info=True)
+    except Exception as e:
+        logging.error(f"mv-nightly failed: {e}", exc_info=True)
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="external",
+                    mode="mv_nightly",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logging.error("session_facts write failed", exc_info=True)
+
+
 # Sunday 03:00 UTC, when nothing else runs.
 @app.timer_trigger(schedule="0 0 3 * * 0", arg_name="timer", run_on_startup=False)
 def weekly_export(timer: func.TimerRequest):

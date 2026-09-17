@@ -113,6 +113,50 @@ def test_a_late_next_day_reading_is_not_used_to_score(store_dsn):
     assert (out.scored, out.unscorable) == (0, 1)
 
 
+def test_a_nightly_run_scores_todays_forecast_and_writes_tomorrows(store_dsn):
+    _universe(store_dsn, "a")
+    _reading(store_dsn, "a", D16, 10_000_000, 100_000, _at(D16, 7))
+    _run(store_dsn, _at(D16, 7, 9))  # morning: forecasts D16, base_mv=10,000,000
+    # tonight's ~22:00 update overwrites the day's row with the post-update value
+    _reading(store_dsn, "a", D16, 10_090_000, 90_000, _at(D16, 23, 45))
+    out = _run(store_dsn, _at(D16, 23, 45))
+    assert (out.scored, out.unscorable, out.written, out.error) == (1, 0, 1, None)
+    rows = _forecasts(store_dsn)
+    d16 = rows[("a", D16)]
+    assert (d16["outcome"], d16["actual_change"]) == ("scored", 90_000)
+    assert d16["actual_pct"] == 90_000 / 10_000_000
+    d17 = rows[("a", D17)]
+    assert (d17["base_mv"], d17["last_change"]) == (10_090_000, 90_000)
+    assert d17["scored_at"] is None
+
+
+def test_the_next_mornings_run_has_nothing_left_for_d16_and_rewrites_d17(store_dsn):
+    _universe(store_dsn, "a")
+    _reading(store_dsn, "a", D16, 10_000_000, 100_000, _at(D16, 7))
+    _run(store_dsn, _at(D16, 7, 9))
+    _reading(store_dsn, "a", D16, 10_090_000, 90_000, _at(D16, 23, 45))
+    _run(store_dsn, _at(D16, 23, 45))  # scores D16, writes D17 (base_mv=10,090,000)
+    _reading(store_dsn, "a", D17, 10_170_000, 80_000, _at(D17, 7))
+    out = _run(store_dsn, _at(D17, 7, 9))
+    assert (out.scored, out.unscorable) == (0, 0)  # D16 already scored last night
+    rows = _forecasts(store_dsn)
+    assert rows[("a", D16)]["scored_at"] is not None  # untouched, still scored
+    d17 = rows[("a", D17)]
+    assert d17["base_mv"] == 10_170_000  # rewritten -- it was still unscored
+    assert d17["scored_at"] is None
+
+
+def test_a_reading_in_the_ambiguous_window_is_used_for_neither(store_dsn):
+    _universe(store_dsn, "a")
+    _reading(store_dsn, "a", D16, 10_000_000, 100_000, _at(D16, 7))
+    _run(store_dsn, _at(D16, 7, 9))  # forecasts D16
+    _reading(store_dsn, "a", D16, 10_090_000, 90_000, _at(D16, 22, 0))  # 22:00 -- ambiguous
+    out = _run(store_dsn, _at(D16, 22, 5))
+    assert (out.scored, out.unscorable, out.written) == (0, 0, 0)
+    row = _forecasts(store_dsn)[("a", D16)]
+    assert row["scored_at"] is None and row["base_mv"] == 10_000_000
+
+
 def test_a_failing_store_is_reported_not_raised():
     class Broken:
         def pending(self, before):

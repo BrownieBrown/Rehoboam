@@ -118,19 +118,25 @@ Migration `008_mv_forecast.sql`:
   `predicted_change = round(market_value × predicted_pct)`.
 - Constants are `Settings` fields, `MV_FORECAST_MOMENTUM` = 0.95 and
   `MV_FORECAST_CAP` = 0.30, so they can be re-tuned from the environment.
-- `usable_day(fetched_at)`: the Berlin date of a status fetch when its
-  Berlin time is before 21:45, else `None`. A fetch after 21:45 may be on
-  either side of the update, so it is used for neither forecasting nor
-  scoring. The ingestion runs at 05:00 and 17:00 UTC (07:00/19:00 Berlin in
-  summer, 06:00/18:00 in winter) and stops within nine minutes, so its rows
-  are always usable. `player_status_daily.day` is keyed by the ingestion
-  run's UTC date, not its Berlin one; the two scheduled runs land on the
-  same calendar date in both zones all year, but a manual `rehoboam ingest`
-  between 22:00 UTC (summer) or 23:00 UTC (winter) and midnight UTC writes
-  under the previous day's key and overwrites that day's pre-update reading,
-  so avoid running it in that window.
-- `score(forecast, next_row)`: `next_row` is the player's status row for
-  `target_day + 1`, usable for that day. If `next_row.market_value − next_row.mv_change ≠ base_mv`, the day did not line up: `unscorable`.
+- `reading_window(fetched_at)`: which update a reading sits against —
+  `(day, PRE)` when its Berlin time is before 21:45 (that Berlin day's
+  update hasn't happened yet), `(day, POST)` when it is 22:30 or later
+  (that day's update already has), and `None` in the 21:45–22:30 window,
+  where a reading could be on either side and is used for neither
+  forecasting nor scoring. A reading after midnight belongs to the new day
+  and is `PRE` for it — which is also "after yesterday's update". The
+  twice-daily ingestion runs at 05:00 and 17:00 UTC (07:00/19:00 Berlin in
+  summer, 06:00/18:00 in winter) land `PRE`; the nightly pass at 21:45 UTC
+  (23:45 Berlin in summer, 22:45 in winter) lands `POST`.
+  `player_status_daily.day` is keyed by the ingestion run's UTC date, not
+  its Berlin one; the scheduled runs land on the same calendar date in both
+  zones all year, but a manual `rehoboam ingest` between 22:00 UTC (summer)
+  or 23:00 UTC (winter) and midnight UTC writes under the previous day's
+  key and overwrites that day's pre-update reading, so avoid running it in
+  that window.
+- `score(forecast, next_row)`: a forecast for target day D is settled by
+  the first reading after D's update — a `(D, POST)` reading, or else a
+  `(D + 1, PRE)` one. If `next_row.market_value − next_row.mv_change ≠ base_mv`, the day did not line up: `unscorable`.
   Otherwise `actual_change = next_row.mv_change`, `actual_pct = actual_change / base_mv`. The base check keeps a mis-dated reading from
   ever counting as a hit or a miss.
 - `backtest(series, *, momentum, cap)`: replays `forecast` over consecutive
@@ -139,18 +145,35 @@ Migration `008_mv_forecast.sql`:
 
 ## When it runs
 
-`rehoboam/enrichment/mv_forecast.py::run_mv_forecast(store, *, now, momentum, cap)`, called by the ingestion Function after calibration and by
-`rehoboam ingest`. It never raises; its outcome (`written`, `scored`,
-`unscorable`, `error`) goes into the run's `session_facts.extra` under
-`mv_forecast`.
+`rehoboam/enrichment/mv_forecast.py::run_mv_forecast(store, *, now, momentum, cap)`, called by the ingestion Function after calibration, by the nightly
+Function, and by `rehoboam ingest` / `rehoboam mv-nightly`. It never raises;
+its outcome (`written`, `scored`, `unscorable`, `error`) goes into the run's
+`session_facts.extra` under `mv_forecast`.
 
-1. Score first. Every unscored forecast with `target_day` before today
-   (Berlin): with a usable row for `target_day + 1`, score it; with none and
-   `target_day + 1` already past, mark it `unscorable`; otherwise leave it
-   (the afternoon run may still read it).
-1. Then forecast. Every status row for today with a usable fetch, a market
-   value and a `mv_change` gets a forecast for today's update. A second run
-   the same day rewrites unscored rows; scored rows are never touched.
+1. Score first. Every forecast still unscored, with `target_day` D up to and
+   including today (Berlin): prefer a `(D, POST)` reading, else a
+   `(D + 1, PRE)` one; with neither and `D + 1` already past, mark it
+   `unscorable`; otherwise leave it (a later pass may still read it).
+1. Then forecast, from every status row for today with a usable
+   `reading_window`, a market value and a `mv_change`. A `PRE` row forecasts
+   today's update, exactly as the twice-daily runs always have. A `POST`
+   row — only the nightly pass produces one, by re-reading every player's
+   status right after the ~22:00 move — forecasts *tomorrow's* update, using
+   the value and change that move just produced as `base_mv` and
+   `last_change`. A second run the same day rewrites unscored rows; scored
+   rows are never touched.
+
+The nightly pass (`mv_nightly` in `deploy/azure_function_external/function_app.py`, `rehoboam mv-nightly`) runs at 21:45 UTC — after the market-value
+move but still the same UTC day the twice-daily runs use, so
+`player_status_daily.day` lines up. It re-reads every player's status
+(`status_stale_after_seconds=0.0`) and nothing else (performance, MV series
+and transfers windows all set to 10 days, well past their normal staleness,
+so those kinds are untouched and no league refresh runs), then runs the
+forecast step. It is the only pass whose readings say what the update
+actually did: it scores tonight's forecast (written that morning) and
+writes tomorrow's, so the site is never blank between 22:00 and the next
+morning's run. Its `session_facts` row uses `mode="mv_nightly"`, not
+`"ingest"` — rule I7 only cares that the twice-daily pass is keeping up.
 
 ## The pages
 
@@ -179,8 +202,9 @@ Migration `008_mv_forecast.sql`:
 
 ## Testing
 
-- Pure: `forecast`, `usable_day` (including 21:44/21:45 Berlin and a
-  winter date), `score` (match, mismatch, zero change), `backtest`.
+- Pure: `forecast`, `reading_window` (including 21:44/21:45/22:29/22:30
+  Berlin, after midnight and a winter date), `score` (match, mismatch, zero
+  change), `backtest`.
 - Store (real PostgreSQL): the status writer stores `mv_change`; forecast
   upsert rewrites unscored rows only; pending selection; outcomes.
 - Views: `web_mv_forecast` shows only the live day (computed with the

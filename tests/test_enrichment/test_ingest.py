@@ -511,3 +511,12 @@ def test_league_refresh_market_payload_reaches_the_store_through_the_counting_wr
     )
     assert stats.league["listings"] == 1
     assert [r["player_id"] for r in league_store.latest_market()] == ["11"]
+
+
+def test_facts_for_ingest_mode_defaults_to_ingest_and_can_be_overridden():
+    """The nightly pass reuses this helper but must not claim `mode="ingest"`
+    -- rule I7 counts only ingest rows (rehoboam/store/session_store.py)."""
+    stats = IngestStats(started_at=1.0, duration_s=1.0)
+    assert facts_for_ingest(stats, app="external", session_id="s").mode == "ingest"
+    facts = facts_for_ingest(stats, app="external", session_id="s", mode="mv_nightly")
+    assert facts.mode == "mv_nightly"

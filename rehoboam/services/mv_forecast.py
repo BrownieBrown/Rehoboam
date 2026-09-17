@@ -17,8 +17,14 @@ from zoneinfo import ZoneInfo
 
 METHOD = "momentum-v1"
 BERLIN = ZoneInfo("Europe/Berlin")
-#: From this Berlin time on, a reading may be on either side of the update.
-FETCH_CUTOFF = time(21, 45)
+
+#: Kickbase moves market values "gegen 22 Uhr"; a reading between these two
+#: times could be on either side of that move, so it is used for nothing.
+PRE_CUTOFF = time(21, 45)
+POST_START = time(22, 30)
+
+PRE = "pre"
+POST = "post"
 
 SCORED = "scored"
 UNSCORABLE = "unscorable"
@@ -64,14 +70,18 @@ def berlin_today(now: float) -> date:
     return datetime.fromtimestamp(now, tz=BERLIN).date()
 
 
-def usable_day(fetched_at: float) -> date | None:
-    """The Berlin date whose update a reading precedes, or None when the
-    reading was taken so close to (or after) the update that it could be on
-    either side of it."""
+def reading_window(fetched_at: float) -> tuple[date, str] | None:
+    """Which update a reading sits against: `(day, PRE)` for a reading taken
+    before that Berlin day's update, `(day, POST)` for one taken after it, and
+    None in the ambiguous window between. A reading after midnight belongs to
+    the new day and is PRE for it — which is also "after yesterday's update"."""
     local = datetime.fromtimestamp(fetched_at, tz=BERLIN)
-    if local.time() >= FETCH_CUTOFF:
-        return None
-    return local.date()
+    t = local.time()
+    if t < PRE_CUTOFF:
+        return (local.date(), PRE)
+    if t >= POST_START:
+        return (local.date(), POST)
+    return None
 
 
 @dataclass(frozen=True)

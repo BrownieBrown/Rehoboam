@@ -86,6 +86,43 @@ def test_ingest_records_a_session_facts_row(monkeypatch, store_dsn):
     assert "mv_forecast" in result.output
 
 
+def test_mv_nightly_records_a_session_facts_row_with_that_mode(monkeypatch, store_dsn):
+    fake_league = SimpleNamespace(id="L1")
+    fake_settings = SimpleNamespace(
+        ingest_deadline_seconds=60.0,
+        ingest_max_requests=100,
+        mv_forecast_momentum=0.9,
+        mv_forecast_cap=0.2,
+    )
+    fake_api = SimpleNamespace(client=object(), user=SimpleNamespace(id="u1"))
+    monkeypatch.setattr(
+        "rehoboam.cli._login_and_get_league",
+        lambda league_index: (fake_api, fake_settings, fake_league),
+    )
+    canned_stats = IngestStats(
+        universe_size=500,
+        status_written=500,
+        requests=500,
+        stopped_by=None,
+        started_at=time.time(),
+        duration_s=12.0,
+    )
+    monkeypatch.setattr("rehoboam.enrichment.ingest.run_ingestion", lambda *a, **kw: canned_stats)
+    result = runner.invoke(app, ["mv-nightly"])
+    assert result.exit_code == 0, result.output
+    row = _latest_facts(store_dsn, app_name="cli", mode="mv_nightly")
+    assert row is not None
+    assert row["errors"] == 0
+    assert row["extra"]["status_written"] == 500
+    assert row["extra"]["mv_forecast"] == {
+        "written": 0,
+        "scored": 0,
+        "unscorable": 0,
+        "error": None,
+    }
+    assert "mv_forecast" in result.output
+
+
 def test_export_without_connection_string_fails_before_uploading(monkeypatch, store_dsn):
     monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
     result = runner.invoke(app, ["export"])
