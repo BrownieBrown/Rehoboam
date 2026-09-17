@@ -154,7 +154,7 @@ The eleven on `/squad` is the store's best guess at the eleven for the
 does eventually record that: Kickbase's own `/teamcenter` truth, written to
 `rehoboam.matchday_lineup_results` by `Trader` once every match of that
 matchday has finished. But that write is retrospective — it only exists
-after the matchday concludes — and none of the six `web_*` views this page
+after the matchday concludes — and none of the `web_*` views this page
 reads join that table. What the page shows instead: the eleven
 (`in_best_11`) comes from `rehoboam.predictions`, written early in the
 session from that session's opening squad snapshot; the formation
