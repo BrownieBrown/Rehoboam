@@ -19,6 +19,32 @@ declare global {
 }
 
 /**
+ * `types` is not optional. postgres.js parses int2/int4/float/bool/json
+ * by default but returns `bigint` (oid 20) and `numeric` (oid 1700) as
+ * strings, and the views are full of both: market values, asks and budgets
+ * are bigint columns, `player_table`'s `sum()`/`count()` columns are bigint,
+ * and every `round(…::numeric, n)` column is numeric. A string there reaches
+ * `num()` as `"123".toFixed` and the page throws. Both parse to a plain
+ * `number`: an integer stays exact because every one here (euros, points,
+ * counts) is far below 2^53, and a rounded value still prints the digits it
+ * was rounded to.
+ */
+const types = {
+  bigint: {
+    to: 20,
+    from: [20],
+    parse: (x: string) => Number(x),
+    serialize: (x: number) => String(x),
+  },
+  numeric: {
+    to: 1700,
+    from: [1700],
+    parse: (x: string) => Number(x),
+    serialize: (x: number) => String(x),
+  },
+};
+
+/**
  * One client per process, reused across requests.
  *
  * `prepare: false` is not optional: the Supabase transaction pooler rejects
@@ -34,6 +60,7 @@ export const sql =
     idle_timeout: 20,
     connect_timeout: 10,
     transform: { undefined: null },
+    types,
   });
 
 if (process.env.NODE_ENV !== "production") globalThis.__rehoboamSql = sql;

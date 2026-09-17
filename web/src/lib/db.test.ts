@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from "vitest";
-import { dsn } from "./db";
+import { dsn, sql } from "./db";
 
 const original = process.env.DATABASE_URL;
 afterEach(() => {
@@ -22,5 +22,20 @@ describe("dsn", () => {
     process.env.NEXT_PUBLIC_DATABASE_URL = "postgresql://leaked";
     expect(() => dsn()).toThrow(/DATABASE_URL is not set/);
     delete process.env.NEXT_PUBLIC_DATABASE_URL;
+  });
+});
+
+describe("sql", () => {
+  // postgres.js hands bigint (oid 20) and numeric (oid 1700) back as strings
+  // unless a parser is registered, and `num("123")` throws on `.toFixed`.
+  // This is the assertion that fails if the `types` option is ever dropped.
+  it("parses bigint and numeric columns to numbers", () => {
+    for (const oid of [20, 1700]) {
+      const parse = sql.options.parsers[oid];
+      expect(parse, `no parser for oid ${oid}`).toBeTypeOf("function");
+      expect(parse("123")).toBe(123);
+    }
+    expect(sql.options.parsers[1700]("-12.35")).toBe(-12.35);
+    expect(sql.options.parsers[20]("65089670")).toBe(65089670);
   });
 });
