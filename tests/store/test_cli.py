@@ -218,3 +218,45 @@ def test_backfill_league_walks_every_page(store_dsn, monkeypatch):
     with connect(store_dsn) as conn:
         n = conn.execute("SELECT count(*) AS n FROM rehoboam.manager_transfers").fetchone()["n"]
     assert n == 52  # 26 per manager × 2 managers
+
+
+def _mv_series(dsn):
+    from rehoboam.store.corpus_store import CorpusStore
+
+    corpus = CorpusStore(dsn=dsn)
+    corpus.upsert_players(
+        [{"player_id": "a", "last_name": "A", "position": "Forward", "team_id": "3"}]
+    )
+    corpus.record_mv_series(
+        "a",
+        {
+            "it": [
+                {"dt": 20000, "mv": 100},
+                {"dt": 20001, "mv": 110},
+                {"dt": 20002, "mv": 121},
+            ]
+        },
+    )
+
+
+def test_backtest_mv_prints_one_row_per_combination_and_the_best(store_dsn):
+    _mv_series(store_dsn)
+    result = runner.invoke(app, ["backtest-mv", "--momentum", "1.0,0.5", "--cap", "0.5"])
+    assert result.exit_code == 0, result.output
+    assert "Market-value forecast backtest" in result.output
+    assert "1.00" in result.output and "0.50" in result.output
+    # momentum 1.0 forecasts +11 for a real +11: no miss, so it is the best
+    assert "Lowest miss: momentum 1.00, cap 0.50" in result.output
+
+
+def test_backtest_mv_rejects_a_bad_list_without_a_traceback(store_dsn):
+    result = runner.invoke(app, ["backtest-mv", "--momentum", "fast"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "--momentum" in result.output
+
+
+def test_backtest_mv_on_an_empty_store_says_so(store_dsn):
+    result = runner.invoke(app, ["backtest-mv"])
+    assert result.exit_code == 0, result.output
+    assert "No daily market values" in result.output

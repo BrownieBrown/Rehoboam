@@ -1008,6 +1008,64 @@ def backtest_baseline(
     console.print(table)
 
 
+def _float_list(raw: str, flag: str) -> list[float]:
+    try:
+        values = [float(part) for part in raw.split(",") if part.strip()]
+    except ValueError:
+        values = []
+    if not values:
+        console.print(f"[red]{flag} takes a comma-separated list of numbers, e.g. 0.8,0.9[/red]")
+        raise typer.Exit(code=1)
+    return values
+
+
+@app.command("backtest-mv")
+def backtest_mv(
+    momentum: str = typer.Option("0.8,0.85,0.9,0.95,1.0", "--momentum"),
+    cap: str = typer.Option("0.1,0.15,0.2,0.3", "--cap"),
+):
+    """Replay the market-value forecast over every stored daily series (read-only)."""
+    from .services.mv_forecast import backtest
+    from .store.mv_forecast_store import MvForecastStore
+
+    momenta = _float_list(momentum, "--momentum")
+    caps = _float_list(cap, "--cap")
+    _ensure_store()
+    series = MvForecastStore().daily_series()
+    results = [backtest(series, momentum=m, cap=c) for m in momenta for c in caps]
+    if not results or results[0].forecasts == 0:
+        console.print("No daily market values in the store to replay.")
+        return
+
+    table = Table(title="Market-value forecast backtest")
+    columns = (
+        "Momentum",
+        "Cap",
+        "Forecasts",
+        "Direction right",
+        "Miss (pp)",
+        "No change (pp)",
+    )
+    for column in columns:
+        table.add_column(column, justify="right")
+    for r in results:
+        rate = "—" if r.direction_rate is None else f"{100 * r.direction_rate:.1f}%"
+        table.add_row(
+            f"{r.momentum:.2f}",
+            f"{r.cap:.2f}",
+            f"{r.forecasts:,}",
+            rate,
+            f"{r.mae_pp:.3f}",
+            f"{r.baseline_mae_pp:.3f}",
+        )
+    console.print(table)
+    best = min(results, key=lambda r: r.mae_pp)
+    console.print(
+        f"Lowest miss: momentum {best.momentum:.2f}, cap {best.cap:.2f} "
+        f"({best.mae_pp:.3f} pp against {best.baseline_mae_pp:.3f} pp for no change)."
+    )
+
+
 @app.command("diagnose-flips")
 def diagnose_flips(
     learner_db: Path = typer.Option(
