@@ -165,10 +165,10 @@ Python rule list). Header: budget, sellable value, next kickoff.
 ### Market
 
 The newest snapshot: Player, Pos, Ask, Market value, Ask vs MV (%),
-Seller, Expires in, Offers, EP, P(start), Fair. Sorted by EP by
+Seller, Expires in, EP, P(start), Fair. Sorted by EP by
 default; a chip "expiring \< 6 h". *Amended 2026-09-17:* Kickbase's own
 listings by default, with chips for managers' listings and for all
-sellers. Below: the ownership table — one row
+sellers; no Offers column, because every stored listing reports 0 offers. Below: the ownership table — one row
 per manager: name, squad size, team value, top three by predicted
 points — from `web_ownership`, ours first.
 

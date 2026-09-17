@@ -81,7 +81,6 @@ export default async function MarketPage({
         ),
     },
     { key: "expires_at", label: "Expires in", cell: (r) => countdown(r.expires_at) },
-    { key: "offer_count", label: "Offers", cell: (r) => num(r.offer_count) },
     {
       key: "predicted_ep", label: "EP",
       cell: (r) => <b className="text-[15px] text-text">{num(r.predicted_ep, 0)}</b>,

@@ -261,6 +261,7 @@ export type MarketRow = {
   ask: number;
   market_value: number | null;
   mv_trend: number | null;
+  /** Always 0 in every stored listing: Kickbase does not share the real count. Not shown. */
   offer_count: number | null;
   our_bid: number | null;
   listed_at: number | null;
@@ -283,7 +284,6 @@ export const MARKET_SORTS = [
   "market_value",
   "seller",
   "expires_at",
-  "offer_count",
   "predicted_ep",
   "p_start",
   "fair_value_gap",
