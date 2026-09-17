@@ -21,10 +21,34 @@ function fw(n: number) {
   return Array.from({ length: n }, () => ({ position: "Forward" }));
 }
 
+/** Total players across every returned group - the "nothing vanished" invariant. */
+function rendered(groups: { players: unknown[] }[]) {
+  return groups.reduce((n, g) => n + g.players.length, 0);
+}
+
+const MATCHING = [...gk(1), ...def(4), ...mid(3), ...fw(3)];
+const EXTRA_MID = [...gk(1), ...def(3), ...mid(4), ...fw(3)];
+
+// Named cases reused by the "nothing vanishes" property test below and
+// (where relevant) by their own dedicated behavioral test.
+const CASES: [string, { position: string | null }[], string | null][] = [
+  ["matching 4-3-3", MATCHING, "4-3-3"],
+  ["forced sale: 4 DEF under 3-4-3", MATCHING, "3-4-3"],
+  ["emergency fill: extra MID", EXTRA_MID, "4-3-3"],
+  ["null formation", MATCHING, null],
+  ["empty eleven", [], "4-3-3"],
+  ["unknown position", [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: "Wingback" }], "4-3-3"],
+  ["null position", [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: null }], "4-3-3"],
+  [
+    "trailing space in position",
+    [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: "Forward " }],
+    "4-3-3",
+  ],
+];
+
 describe("deriveLineup", () => {
   it("reports no mismatch when the eleven matches the submitted formation", () => {
-    const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(3)];
-    const { groups, derivedFormation, mismatch } = deriveLineup(eleven, "4-3-3");
+    const { groups, derivedFormation, mismatch } = deriveLineup(MATCHING, "4-3-3");
     expect(derivedFormation).toBe("4-3-3");
     expect(mismatch).toBe(false);
     expect(groups.map((g) => [g.label, g.players.length])).toEqual([
@@ -40,23 +64,20 @@ describe("deriveLineup", () => {
     // refreshed after the sale); the session's submitted lineup went with
     // three. Every player is still present in the figure - nothing is
     // silently dropped - the mismatch is surfaced instead.
-    const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(3)];
-    const { derivedFormation, mismatch, groups } = deriveLineup(eleven, "3-4-3");
+    const { derivedFormation, mismatch, groups } = deriveLineup(MATCHING, "3-4-3");
     expect(derivedFormation).toBe("4-3-3");
     expect(mismatch).toBe(true);
     expect(groups[1].players).toHaveLength(4); // all four defenders still render
   });
 
   it("flags a mismatch when the emergency fill adds a player the formation string does not account for", () => {
-    const eleven = [...gk(1), ...def(3), ...mid(4), ...fw(3)];
-    const { derivedFormation, mismatch } = deriveLineup(eleven, "4-3-3");
+    const { derivedFormation, mismatch } = deriveLineup(EXTRA_MID, "4-3-3");
     expect(derivedFormation).toBe("3-4-3");
     expect(mismatch).toBe(true);
   });
 
   it("treats a null formation as unknown, not as a mismatch", () => {
-    const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(3)];
-    const { mismatch } = deriveLineup(eleven, null);
+    const { mismatch } = deriveLineup(MATCHING, null);
     expect(mismatch).toBe(false);
   });
 
@@ -65,5 +86,52 @@ describe("deriveLineup", () => {
     expect(groups.every((g) => g.players.length === 0)).toBe(true);
     expect(derivedFormation).toBe("0-0-0");
     expect(mismatch).toBe(true);
+  });
+
+  // The class this whole helper exists to close: a player deriveLineup
+  // cannot place by exact position string must still render, not vanish.
+  describe("a player whose position isn't one of the four exact strings", () => {
+    it("groups an unrecognized position under Other and reports a mismatch", () => {
+      const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: "Wingback" }];
+      const { groups, mismatch } = deriveLineup(eleven, "4-3-3");
+      const other = groups.find((g) => g.label === "Other");
+      expect(other?.players).toEqual([{ position: "Wingback" }]);
+      expect(mismatch).toBe(true);
+      expect(rendered(groups)).toBe(11);
+    });
+
+    it("groups a null position under Other and reports a mismatch", () => {
+      const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: null }];
+      const { groups, mismatch } = deriveLineup(eleven, "4-3-3");
+      const other = groups.find((g) => g.label === "Other");
+      expect(other?.players).toEqual([{ position: null }]);
+      expect(mismatch).toBe(true);
+      expect(rendered(groups)).toBe(11);
+    });
+
+    it("groups a position with stray whitespace under Other and reports a mismatch", () => {
+      const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: "Forward " }];
+      const { groups, mismatch } = deriveLineup(eleven, "4-3-3");
+      const other = groups.find((g) => g.label === "Other");
+      expect(other?.players).toEqual([{ position: "Forward " }]);
+      // "Forward " is not "Forward" - it must not silently join the FW row,
+      // which would both hide the data problem and corrupt the FW count.
+      expect(groups.find((g) => g.label === "FW")?.players).toHaveLength(2);
+      expect(mismatch).toBe(true);
+      expect(rendered(groups)).toBe(11);
+    });
+
+    it("never presents Other as agreeing with a known formation, even by coincidence", () => {
+      // Same D-M-F counts as a legit 4-3-3 (2 FW + 1 stray "looks like" 3),
+      // but the stray can't actually be placed - must still mismatch.
+      const eleven = [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: "Wingback" }];
+      const { mismatch } = deriveLineup(eleven, "4-3-2");
+      expect(mismatch).toBe(true);
+    });
+  });
+
+  it.each(CASES)("nothing vanishes: %s", (_name, eleven, formation) => {
+    const check = deriveLineup(eleven, formation);
+    expect(rendered(check.groups)).toBe(eleven.length);
   });
 });
