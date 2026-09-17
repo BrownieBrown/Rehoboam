@@ -40,7 +40,9 @@ export function DataTable<T>({
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-surface">
+    // `overflow-x-auto`, never `overflow-hidden`: a table wider than the
+    // screen must scroll sideways, not lose its right-hand columns.
+    <div className="overflow-x-auto rounded-lg border border-border bg-surface">
       <table className="w-full border-collapse">
         <thead>
           <tr>

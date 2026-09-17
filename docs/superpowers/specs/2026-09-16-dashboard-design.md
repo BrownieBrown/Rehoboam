@@ -111,8 +111,8 @@ page load through the pooler.
 
 - **Supabase Auth** on the existing project (`qznixprbyldatdjzorbq`):
   email provider only, **sign-ups disabled**, one user created by hand
-  with Marco's address. Sign-in is a magic link; sessions last thirty
-  days. *Amended 2026-09-17:* sign-in is the owner's email and password,
+  with Marco's address. Sign-in is a magic link; session length follows
+  the Supabase project's settings. *Amended 2026-09-17:* sign-in is the owner's email and password,
   with the magic link kept behind "Forgot your password?"; the owner is
   created in the dashboard with a password and Auto Confirm.
 - `web/src/middleware.ts` uses `@supabase/ssr` to read the session
@@ -166,7 +166,9 @@ Python rule list). Header: budget, sellable value, next kickoff.
 
 The newest snapshot: Player, Pos, Ask, Market value, Ask vs MV (%),
 Seller, Expires in, Offers, EP, P(start), Fair. Sorted by EP by
-default; a chip "expiring \< 6 h". Below: the ownership table — one row
+default; a chip "expiring \< 6 h". *Amended 2026-09-17:* Kickbase's own
+listings by default, with chips for managers' listings and for all
+sellers. Below: the ownership table — one row
 per manager: name, squad size, team value, top three by predicted
 points — from `web_ownership`, ours first.
 

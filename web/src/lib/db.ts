@@ -45,12 +45,26 @@ const types = {
 };
 
 /**
+ * A real postgres.js option (its defaults and `connection.js` read it) that
+ * the package's type definitions leave out, so it is spread in rather than
+ * written into the options literal.
+ */
+const noPipelining = { max_pipeline: 0 };
+
+/**
  * One client per process, reused across requests.
  *
  * `prepare: false` is not optional: the Supabase transaction pooler rejects
  * prepared statements, which is the same reason the Python store passes
  * `prepare_threshold=None`. `max: 3` keeps a serverless fleet from exhausting
  * the pooler's connection budget; the site is read-only and low-traffic.
+ *
+ * `max_pipeline: 0` is not optional either. By default postgres.js sends a
+ * second query down a connection before the first has answered, and through
+ * the transaction pooler that stalls: the Market page's two parallel queries,
+ * three pages at once, hung on the second round every time against the real
+ * store. With 0, each connection carries one query at a time, and the same
+ * test completed 90 of 90 pairs.
  */
 export const sql =
   globalThis.__rehoboamSql ??
@@ -59,6 +73,7 @@ export const sql =
     max: 3,
     idle_timeout: 20,
     connect_timeout: 10,
+    ...noPipelining,
     transform: { undefined: null },
     types,
   });

@@ -29,11 +29,15 @@ const b64url = (s: string) => Buffer.from(s).toString("base64url");
 const jwt = (exp: number) =>
   `${b64url('{"alg":"HS256","typ":"JWT"}')}.${b64url(JSON.stringify({ sub: "u1", exp }))}.sig`;
 
+let calls: string[] = [];
+
 function installFetch(email: string, logout: "ok" | "500" = "ok") {
+  calls = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
       const u = String(url);
+      calls.push(u);
       if (u.includes("grant_type=pkce")) {
         const exp = Math.floor(Date.now() / 1000) + 3600;
         return new Response(
@@ -88,9 +92,13 @@ describe("auth callback", () => {
       installFetch("evil@example.com", logout);
       const { res, setCookie } = await run("https://site.test/auth/callback?code=c1&next=/squad");
       expect(res.headers.get("location")).toBe("https://site.test/login?error=not-allowed");
-      const auth = setCookie.filter((c) => c.startsWith(`${KEY}=`));
+      // A large session is split into `…-auth-token.0`, `.1`, … cookies.
+      const auth = setCookie.filter((c) => c.startsWith(`${KEY}=`) || c.startsWith(`${KEY}.`));
       expect(auth.length).toBe(1);
       expect(auth[0]).toMatch(/^sb-abcdefgh-auth-token=;.*Max-Age=0/);
+      // Local scope only: never the account's sessions on other devices.
+      const signOuts = calls.filter((u) => u.includes("/logout"));
+      expect(signOuts.map((u) => new URL(u).searchParams.get("scope"))).toEqual(["local"]);
     });
   }
 

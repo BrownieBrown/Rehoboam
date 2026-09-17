@@ -38,16 +38,23 @@ from `requireSession()`. `/login` and `/auth/callback` sit outside the
 `ALLOWED_EMAILS`, or anything naming the pooler or the bot role turns up in
 the client bundle.
 
+The database client (`src/lib/db.ts`) sets three options that are not
+optional. `prepare: false`, because the transaction pooler rejects prepared
+statements. `types`, because postgres.js returns bigint and numeric columns
+as strings. `max_pipeline: 0`, because a second query sent down a busy
+connection stalls behind the pooler; the pages run their queries in
+parallel, and the Market page stalled on it during the first local run.
+
 ## Environment variables
 
 Four, all required, none of them optional:
 
-| Variable                        | What it is                                                                                                                                                                                                            | Where it comes from                                                 |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `DATABASE_URL`                  | The `rehoboam_bot` role's connection string, through the Supabase **transaction pooler** (port 6543) — the same role and pooler the bot itself connects through. Server-side only — never `NEXT_PUBLIC_`.             | Supabase project → Database → Connection pooling, transaction mode. |
-| `NEXT_PUBLIC_SUPABASE_URL`      | The Supabase project's API URL. Public by design.                                                                                                                                                                     | Supabase project → Project Settings → API.                          |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The project's anon key, used only to drive sign-in (password or link) — it carries no access to the store; that's `DATABASE_URL`'s job, server-side only.                                                             | Supabase project → Project Settings → API.                          |
-| `ALLOWED_EMAILS`                | Comma-separated email addresses allowed to use the site, matched exact (trimmed, lower-cased) after sign-in. Server-side only — never `NEXT_PUBLIC_`. **Empty or unset locks everyone out** — fails closed, not open. | You choose it — the owner's own email address(es).                  |
+| Variable                        | What it is                                                                                                                                                                                                                                                 | Where it comes from                                                 |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `DATABASE_URL`                  | The `rehoboam_bot` role's connection string, through the Supabase **transaction pooler** (port 6543) — the same role and pooler the bot itself connects through. Server-side only — never `NEXT_PUBLIC_`.                                                  | Supabase project → Database → Connection pooling, transaction mode. |
+| `NEXT_PUBLIC_SUPABASE_URL`      | The Supabase project's API URL. Public by design.                                                                                                                                                                                                          | Supabase project → Project Settings → API.                          |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The project's anon key. It drives sign-in (password or link), and the middleware and `requireSession()` use it on every request to check, refresh and clear the session. It carries no access to the store; that's `DATABASE_URL`'s job, server-side only. | Supabase project → Project Settings → API.                          |
+| `ALLOWED_EMAILS`                | Comma-separated email addresses allowed to use the site, matched exact (trimmed, lower-cased) after sign-in. Server-side only — never `NEXT_PUBLIC_`. **Empty or unset locks everyone out** — fails closed, not open.                                      | You choose it — the owner's own email address(es).                  |
 
 See `.env.example`. For local development, copy it to `.env.local` (already
 `.gitignore`d) and fill in real values.
@@ -75,9 +82,11 @@ other half lives in the Supabase project itself, and both must be done:
    references the auth user's id.
 1. Use a long password. The publishable key lets anyone try passwords
    against Supabase's token endpoint directly, with Supabase's per-IP rate
-   limit as the brake. Attempts made through this site's form all come from
-   the server's address, so hammering the form can also rate-limit the
-   owner for a few minutes.
+   limit as the brake. That endpoint also serves session refreshes, and
+   attempts made through this site's form come from the server's addresses.
+   Hammering the form can therefore get the owner's refresh refused, and a
+   refused refresh after the access token has expired signs the owner out
+   until the limit resets.
 
 `ALLOWED_EMAILS` keeps the site closed even if sign-ups are ever switched
 back on — the two together are the access model, and neither is a

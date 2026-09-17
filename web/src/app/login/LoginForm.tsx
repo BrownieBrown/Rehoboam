@@ -24,6 +24,7 @@ export function LoginForm() {
           type="email"
           name="email"
           required
+          defaultValue={signIn.email}
           autoComplete="username"
           aria-label="Email"
           placeholder="you@example.com"
@@ -70,7 +71,11 @@ export function LoginForm() {
           >
             {sending ? "Sending…" : "Send the link"}
           </button>
-          {link.message ? <p className="mt-3 text-sm text-muted">{link.message}</p> : null}
+          {link.message ? (
+            <p role="status" className="mt-3 text-sm text-muted">
+              {link.message}
+            </p>
+          ) : null}
         </form>
       </details>
     </div>

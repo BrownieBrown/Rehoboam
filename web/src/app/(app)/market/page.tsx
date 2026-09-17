@@ -6,7 +6,23 @@ import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
 import { ago, countdown, DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
 import { expiringWithin, listingsLine } from "@/lib/expiry";
+import { bySeller, sellerScope } from "@/lib/market-filter";
+import { hrefFor } from "@/lib/query-href";
 import Link from "next/link";
+
+/** A filter chip: a plain link, filled when it is the active choice. */
+function Chip({ href, active, children }: { href: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className={`inline-flex h-8 items-center rounded-md px-3 text-[13px] font-semibold ${
+        active ? "bg-text text-bg" : "border border-border-strong text-text-dim"
+      }`}
+    >
+      {children}
+    </Link>
+  );
+}
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -24,9 +40,11 @@ export default async function MarketPage({
   const sort = sortKey(params.sort, MARKET_SORTS, "predicted_ep");
   const dir = sortDir(params.dir);
   const expiring = params.expiring === "6" ? 6 : undefined;
+  const scope = sellerScope(params.from);
 
   const [listings, managerRows] = await Promise.all([market({ sort, dir }), managers()]);
-  const rows = expiring ? expiringWithin(listings, expiring, Date.now() / 1000) : listings;
+  const bySource = bySeller(listings, scope);
+  const rows = expiring ? expiringWithin(bySource, expiring, Date.now() / 1000) : bySource;
 
   const columns: Column<MarketRow>[] = [
     {
@@ -82,32 +100,35 @@ export default async function MarketPage({
   ];
 
   // From the unfiltered snapshot: every row carries the same snapshot time,
-  // and an expiring filter that keeps nothing must not blank it.
+  // and a filter that keeps nothing must not blank it.
   const snapshotAt = listings[0]?.snapshot_at ?? null;
 
   return (
     <>
       <StatusHeader
         title="Market"
-        subtitle={`${listingsLine(rows.length, listings.length, expiring)} · snapshot ${ago(snapshotAt)}`}
+        subtitle={`${listingsLine(rows.length, listings.length, { scope, hours: expiring })} · snapshot ${ago(snapshotAt)}`}
       />
-      <div className="flex items-center gap-2 px-6 py-4">
-        <Link
-          href="/market"
-          className={`inline-flex h-8 items-center rounded-md px-3 text-[13px] font-semibold ${
-            expiring ? "border border-border-strong text-text-dim" : "bg-text text-bg"
-          }`}
-        >
-          All
-        </Link>
-        <Link
-          href="/market?expiring=6"
-          className={`inline-flex h-8 items-center rounded-md px-3 text-[13px] font-semibold ${
-            expiring ? "bg-text text-bg" : "border border-border-strong text-text-dim"
-          }`}
-        >
-          Expiring under 6 h
-        </Link>
+      <div className="flex flex-wrap items-center gap-4 px-6 py-4">
+        <div className="flex items-center gap-2">
+          <Chip href={hrefFor("/market", params, { from: null })} active={scope === "kickbase"}>
+            From Kickbase
+          </Chip>
+          <Chip href={hrefFor("/market", params, { from: "managers" })} active={scope === "managers"}>
+            From managers
+          </Chip>
+          <Chip href={hrefFor("/market", params, { from: "all" })} active={scope === "all"}>
+            All sellers
+          </Chip>
+        </div>
+        <div className="flex items-center gap-2">
+          <Chip href={hrefFor("/market", params, { expiring: null })} active={!expiring}>
+            Any expiry
+          </Chip>
+          <Chip href={hrefFor("/market", params, { expiring: "6" })} active={expiring === 6}>
+            Expiring under 6 h
+          </Chip>
+        </div>
       </div>
       <div className="px-6 pb-6">
         <DataTable
@@ -119,7 +140,7 @@ export default async function MarketPage({
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
           Who owns what
         </h2>
-        <div className="overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="overflow-x-auto rounded-lg border border-border bg-surface">
           <table className="w-full border-collapse">
             <thead>
               <tr className="text-[11px] uppercase tracking-[0.08em] text-muted">

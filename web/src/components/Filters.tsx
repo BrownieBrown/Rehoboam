@@ -1,24 +1,10 @@
 import Link from "next/link";
 import { POSITION } from "@/lib/format";
+import { hrefFor, type Params } from "@/lib/query-href";
 
-type Params = Record<string, string | undefined>;
-
-/**
- * Every entry in `params` reproduced as-is, then `overrides` applied on top
- * - a `null` override clears that key, anything else sets it. Used by every
- * chip link below so toggling one filter never drops another (position,
- * ownership, club, search, sort, dir all survive together). The page number
- * is the one thing dropped: a changed filter starts again at page 1.
- */
-function hrefFor(params: Params, overrides: Record<string, string | null>): string {
-  const next = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) if (v && k !== "page") next.set(k, v);
-  for (const [k, v] of Object.entries(overrides)) {
-    if (v === null) next.delete(k);
-    else next.set(k, v);
-  }
-  const qs = next.toString();
-  return qs ? `/?${qs}` : "/";
+/** Every Players filter link keeps the rest of the current state. */
+function playersHref(params: Params, overrides: Record<string, string | null>): string {
+  return hrefFor("/", params, overrides);
 }
 
 function Chip({
@@ -45,7 +31,7 @@ function Chip({
 /**
  * Server component, no client JavaScript. Position and ownership are single-
  * value choices, so each option is a plain link that sets or clears exactly
- * one search param while carrying the rest along (`hrefFor`). Club and free
+ * one search param while carrying the rest along (`playersHref`). Club and free
  * text need a value the URL bar can't offer as a click target, so those two
  * live in a GET form instead - its hidden inputs carry every other filter
  * that's currently active, so submitting the form doesn't clobber a chip
@@ -58,24 +44,24 @@ export function Filters({ clubs, params }: { clubs: string[]; params: Params }) 
   return (
     <div className="flex flex-wrap items-center gap-4 border-b border-border px-6 py-3">
       <div className="flex items-center gap-1.5">
-        <Chip href={hrefFor(params, { position: null })} active={!position}>
+        <Chip href={playersHref(params, { position: null })} active={!position}>
           All
         </Chip>
         {Object.entries(POSITION).map(([full, meta]) => (
-          <Chip key={full} href={hrefFor(params, { position: full })} active={position === full}>
+          <Chip key={full} href={playersHref(params, { position: full })} active={position === full}>
             {meta.short}
           </Chip>
         ))}
       </div>
 
       <div className="flex items-center gap-1.5">
-        <Chip href={hrefFor(params, { owner: null })} active={!owner}>
+        <Chip href={playersHref(params, { owner: null })} active={!owner}>
           Everyone
         </Chip>
-        <Chip href={hrefFor(params, { owner: "mine" })} active={owner === "mine"}>
+        <Chip href={playersHref(params, { owner: "mine" })} active={owner === "mine"}>
           My squad
         </Chip>
-        <Chip href={hrefFor(params, { owner: "free" })} active={owner === "free"}>
+        <Chip href={playersHref(params, { owner: "free" })} active={owner === "free"}>
           Free agents
         </Chip>
       </div>

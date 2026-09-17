@@ -97,17 +97,21 @@ async function run(f: FormData) {
   const req = new NextRequest("https://site.test/login", { method: "POST" });
   store = MutableRequestCookiesAdapter.wrap(new RequestCookies(req.headers));
   let message: string | null = null;
+  let email: string | undefined;
   let location: string | null = null;
   try {
-    message = (await signInWithPassword({ message: "" }, f)).message;
+    ({ message, email } = await signInWithPassword({ message: "" }, f));
   } catch (err) {
     if (!isRedirectError(err)) throw err;
     location = getURLFromRedirectError(err);
   }
   const headers = new Headers();
   appendMutableCookies(headers, store);
-  const auth = headers.getSetCookie().filter((c) => c.startsWith(`${KEY}=`));
-  return { message, location, auth };
+  // A large session is split into `…-auth-token.0`, `.1`, … cookies.
+  const auth = headers
+    .getSetCookie()
+    .filter((c) => c.startsWith(`${KEY}=`) || c.startsWith(`${KEY}.`));
+  return { message, email, location, auth };
 }
 
 beforeEach(() => {
@@ -135,13 +139,28 @@ describe("signInWithPassword", () => {
       expect(location).toBe("/login?error=not-allowed");
       expect(auth.length).toBe(1);
       expect(auth[0]).toMatch(/^sb-abcdefgh-auth-token=;.*Max-Age=0/);
-      expect(calls.some((u) => u.includes("/logout"))).toBe(true);
+      // Local scope only: a global sign-out would end the account's
+      // sessions on every other device too.
+      const signOuts = calls.filter((u) => u.includes("/logout"));
+      expect(signOuts.length).toBe(1);
+      expect(new URL(signOuts[0]).searchParams.get("scope")).toBe("local");
     });
   }
 
   it("fails closed when ALLOWED_EMAILS is unset", async () => {
     delete process.env.ALLOWED_EMAILS;
     installFetch({ kind: "ok", email: "owner@example.com" });
+    const { location, auth } = await run(form("owner@example.com", " pass word "));
+    expect(location).toBe("/login?error=not-allowed");
+    expect(auth.every((c) => /Max-Age=0/.test(c))).toBe(true);
+    const signOuts = calls.filter((u) => u.includes("/logout"));
+    expect(signOuts.map((u) => new URL(u).searchParams.get("scope"))).toEqual(["local"]);
+  });
+
+  // The allow list judges the account Supabase signed in, never the typed
+  // address: an allowed address typed in must not admit another account.
+  it("judges the email Supabase returns, not the one typed", async () => {
+    installFetch({ kind: "ok", email: "evil@example.com" });
     const { location, auth } = await run(form("owner@example.com", " pass word "));
     expect(location).toBe("/login?error=not-allowed");
     expect(auth.every((c) => /Max-Age=0/.test(c))).toBe(true);
@@ -157,8 +176,9 @@ describe("signInWithPassword", () => {
   for (const [token, want] of failures) {
     it(`failure ${token.status}/${token.code ?? "none"}: says "${want}", no session, no redirect`, async () => {
       installFetch(token);
-      const { message, location, auth } = await run(form("owner@example.com", "x"));
+      const { message, email, location, auth } = await run(form(" owner@example.com ", "x"));
       expect(message).toBe(want);
+      expect(email).toBe("owner@example.com");
       expect(location).toBeNull();
       expect(auth.some((c) => c.includes("base64-"))).toBe(false);
     });

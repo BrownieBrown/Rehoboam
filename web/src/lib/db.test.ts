@@ -38,4 +38,15 @@ describe("sql", () => {
     expect(sql.options.parsers[1700]("-12.35")).toBe(-12.35);
     expect(sql.options.parsers[20]("65089670")).toBe(65089670);
   });
+
+  // Pipelined queries through the Supabase transaction pooler hang: two
+  // pages' worth of parallel queries (3 connections, 6 queries) stalled on
+  // the second round every time against the real store, and completed 90 of
+  // 90 pairs with pipelining off. This fails if the option is ever dropped.
+  it("never pipelines a second query onto a busy connection", () => {
+    // Missing from postgres.js's option types, present at runtime.
+    const options = sql.options as unknown as { max_pipeline: number };
+    expect(options.max_pipeline).toBe(0);
+    expect(sql.options.prepare).toBe(false);
+  });
 });

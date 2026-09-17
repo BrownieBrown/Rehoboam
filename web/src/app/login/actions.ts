@@ -12,15 +12,21 @@ import { passwordFailureMessage } from "@/lib/login-error";
  * is signed straight back out, exactly as the callback does for a link.
  * `redirect()` throws, so neither call may sit inside a try/catch.
  */
-export async function signInWithPassword(_prev: { message: string }, form: FormData) {
+/**
+ * What the password form shows after an attempt. `email` is handed back so
+ * the form can refill it: React clears a form after every action.
+ */
+export type SignInState = { message: string; email?: string };
+
+export async function signInWithPassword(_prev: SignInState, form: FormData): Promise<SignInState> {
   const email = String(form.get("email") ?? "").trim();
   // Never trimmed: leading or trailing spaces can be part of a password.
   const password = String(form.get("password") ?? "");
-  if (!email || !password) return { message: "Enter your email and password." };
+  if (!email || !password) return { message: "Enter your email and password.", email };
 
   const supabase = await createServerClient();
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) return { message: passwordFailureMessage(error) };
+  if (error) return { message: passwordFailureMessage(error), email };
 
   if (!isAllowedEmail(data.user?.email, process.env.ALLOWED_EMAILS)) {
     await supabase.auth.signOut({ scope: "local" });

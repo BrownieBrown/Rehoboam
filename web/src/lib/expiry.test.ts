@@ -28,15 +28,25 @@ describe("expiringWithin", () => {
 });
 
 describe("listingsLine", () => {
-  it("counts the whole snapshot when unfiltered", () => {
+  it("counts the whole snapshot when nothing is filtered", () => {
     expect(listingsLine(48, 48)).toBe("48 listings");
+    expect(listingsLine(48, 48, { scope: "all" })).toBe("48 listings");
     expect(listingsLine(1, 1)).toBe("1 listing");
     expect(listingsLine(0, 0)).toBe("0 listings");
   });
 
-  it("says what the filter kept out of what the snapshot holds", () => {
-    expect(listingsLine(3, 48, 6)).toBe("3 of 48 listings expiring under 6 h");
-    expect(listingsLine(0, 48, 6)).toBe("0 of 48 listings expiring under 6 h");
-    expect(listingsLine(0, 1, 6)).toBe("0 of 1 listing expiring under 6 h");
+  it("says what the expiry filter kept out of what the snapshot holds", () => {
+    expect(listingsLine(3, 48, { hours: 6 })).toBe("3 of 48 listings expiring under 6 h");
+    expect(listingsLine(0, 48, { hours: 6 })).toBe("0 of 48 listings expiring under 6 h");
+    expect(listingsLine(0, 1, { hours: 6 })).toBe("0 of 1 listing expiring under 6 h");
+  });
+
+  it("names the seller filter, alone or with the expiry filter", () => {
+    expect(listingsLine(22, 47, { scope: "kickbase" })).toBe("22 of 47 listings from Kickbase");
+    expect(listingsLine(25, 47, { scope: "managers" })).toBe("25 of 47 listings from managers");
+    expect(listingsLine(0, 47, { scope: "kickbase", hours: 6 })).toBe(
+      "0 of 47 listings from Kickbase expiring under 6 h",
+    );
+    expect(listingsLine(0, 0, { scope: "kickbase" })).toBe("0 of 0 listings from Kickbase");
   });
 });
