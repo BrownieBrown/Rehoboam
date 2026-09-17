@@ -1,11 +1,19 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  // Mirrors Next's server-bundler resolve condition so importing db.ts under
-  // plain Node (no Next build step) resolves `server-only` to its no-op
-  // export instead of the throwing one — the same reason `db.ts` needs
-  // `import "server-only"` to be a build-time guard, not a test-time crash.
-  resolve: { conditions: ["react-server"] },
+  resolve: {
+    // Mirrors the `@/*` -> `./src/*` mapping tsconfig.json declares for the
+    // compiler; Vite doesn't read tsconfig `paths` on its own, and
+    // middleware.ts (and anything else under test that imports via `@/…`,
+    // e.g. middleware.test.ts) needs it resolved at test time too.
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    // Mirrors Next's server-bundler resolve condition so importing db.ts under
+    // plain Node (no Next build step) resolves `server-only` to its no-op
+    // export instead of the throwing one — the same reason `db.ts` needs
+    // `import "server-only"` to be a build-time guard, not a test-time crash.
+    conditions: ["react-server"],
+  },
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],

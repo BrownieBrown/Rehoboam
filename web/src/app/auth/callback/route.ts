@@ -12,8 +12,11 @@ export async function GET(request: NextRequest) {
     if (!error) {
       if (!isAllowedEmail(data.user?.email, process.env.ALLOWED_EMAILS)) {
         // A not-allowed account must never leave this route holding a
-        // session, even for the single request that follows.
-        await supabase.auth.signOut();
+        // session, even for the single request that follows. "local"
+        // scope is enough — it only needs to end here, not on every other
+        // device this account (which isn't the owner) might hold a session
+        // on.
+        await supabase.auth.signOut({ scope: "local" });
         return NextResponse.redirect(new URL("/login?error=not-allowed", request.nextUrl.origin));
       }
       // `next` is already an absolute, resolved, same-origin URL string

@@ -21,27 +21,24 @@ export async function middleware(request: NextRequest) {
     const to = request.nextUrl.clone();
     to.pathname = "/login";
     to.searchParams.set("next", path);
-    return NextResponse.redirect(to);
+    return redirectWithCookies(to, response);
   }
   if (decision === "to-home") {
     const to = request.nextUrl.clone();
     to.pathname = "/";
     to.search = "";
-    return NextResponse.redirect(to);
+    return redirectWithCookies(to, response);
   }
   if (decision === "sign-out") {
-    // `signOut()` calls the client's `setAll` above, which writes the
-    // cleared cookies onto `response`. A redirect built as a fresh
-    // `NextResponse.redirect(...)` would carry none of that, so build the
-    // redirect from `response` and copy its cookies across explicitly.
-    await supabase.auth.signOut();
+    // A misconfigured deploy (say, an unset ALLOWED_EMAILS) must not end
+    // the owner's sessions on every other device too — "local" only ends
+    // this one, on this browser, which is all sign-out needs here.
+    await supabase.auth.signOut({ scope: "local" });
     const to = request.nextUrl.clone();
     to.pathname = "/login";
     to.search = "";
     to.searchParams.set("error", "not-allowed");
-    const redirect = NextResponse.redirect(to);
-    for (const cookie of response.cookies.getAll()) redirect.cookies.set(cookie);
-    return redirect;
+    return redirectWithCookies(to, response);
   }
   return response;
 }
@@ -49,3 +46,20 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
+
+/**
+ * `getUser()` and `signOut()` above both write through the Supabase
+ * client's `setAll`, which lands on `response` — a rotated access/refresh
+ * token (auth-js refreshes inside `getUser()` once under ~90s of expiry)
+ * or a cleared session cookie. `response` is not what any of the three
+ * branches above return, though: each one needs to redirect, and
+ * `NextResponse.redirect(...)` builds a brand-new response that starts
+ * with no cookies of its own. This builds that new redirect and copies
+ * `response`'s cookies onto it, so a rotated token or a cleared cookie
+ * still reaches the browser instead of being silently dropped.
+ */
+function redirectWithCookies(to: URL, from: NextResponse) {
+  const redirect = NextResponse.redirect(to);
+  for (const cookie of from.cookies.getAll()) redirect.cookies.set(cookie);
+  return redirect;
+}

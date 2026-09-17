@@ -8,9 +8,12 @@ export interface GateInput {
 }
 
 /**
- * The one decision table behind both lock points (the middleware and
- * `requireSession`): who gets through, who gets sent to `/login`, who gets
- * bounced away from `/login`, and who gets signed out.
+ * The middleware's one decision table: who gets through, who gets sent to
+ * `/login`, who gets bounced away from `/login`, and who gets signed out.
+ * `requireSession()` (`lib/auth.ts`) enforces the same not-allowed rule as
+ * a second lock, but redirects directly rather than going through this
+ * table — every page that calls it is already private, so it never needs
+ * `to-home` or the plain `next` case.
  *
  * The not-allowed check comes first, before anything else, so a signed-in
  * but disallowed account is never confused with "no user" (which would send

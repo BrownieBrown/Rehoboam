@@ -20,12 +20,16 @@ bot repo's `CLAUDE.md`, "Store workflow"). Nothing in `web/` runs it for you.
 
 Auth is Supabase Auth, magic-link only (no password). Signing in is only
 half of access control, though: the site is **single-owner in code**. The
-middleware (`src/middleware.ts`) and `requireSession()`
-(`src/lib/auth.ts`) both check the signed-in user's email against
-`ALLOWED_EMAILS` (`src/lib/allowed-emails.ts`) and sign out and redirect to
-`/login?error=not-allowed` anyone who isn't on it — a request the
-middleware's matcher somehow lets through still gets no data from
-`requireSession()` either. `/login` and `/auth/callback` sit outside the
+middleware (`src/middleware.ts`), the auth callback
+(`src/app/auth/callback/route.ts`) and `requireSession()`
+(`src/lib/auth.ts`) all check the signed-in user's email against
+`ALLOWED_EMAILS` (`src/lib/allowed-emails.ts`) and refuse anyone who isn't
+on it — the middleware and the callback sign the account out and redirect to
+`/login?error=not-allowed`; `requireSession()` can only redirect there (a
+server component can't clear cookies), which is fine because the middleware
+signs the account out on the very next request regardless. Either way, a
+request the middleware's matcher somehow lets through still gets no data
+from `requireSession()`. `/login` and `/auth/callback` sit outside the
 `(app)` route group and never render the sidebar. `next build` runs
 `scripts/check-secrets.mjs`, which fails the build if `DATABASE_URL`,
 `ALLOWED_EMAILS`, or anything naming the pooler or the bot role turns up in
@@ -52,14 +56,22 @@ other half lives in the Supabase project itself, and both must be done:
 
 1. Set `ALLOWED_EMAILS` to the owner's email address (in Vercel's project
    env vars for the deployed site, and in `.env.local` for local dev).
-1. In the Supabase dashboard, **Authentication → Sign In / Providers →
-   Email**, turn **Allow new users to sign up** off. The publishable anon
-   key ships to every browser, so anyone holding it can call Supabase's
-   sign-up endpoint directly regardless of what this app's own login form
-   does (`shouldCreateUser: false` only stops the form itself from creating
-   accounts). `ALLOWED_EMAILS` keeps the site closed even if sign-ups are
-   ever switched back on — the two together are the access model, and
-   neither is a substitute for the other.
+1. In the Supabase dashboard, **Authentication → Sign In / Providers**,
+   under **User Signups**, turn **Allow new users to sign up** off — this is
+   a project-wide auth setting, not something inside the Email provider's
+   own panel (leave the Email provider's **Confirm email** switch as it is;
+   it's unrelated). The publishable anon key ships to every browser, so
+   anyone holding it can call Supabase's sign-up endpoint directly
+   regardless of what this app's own login form does (`shouldCreateUser: false` only stops the form itself from creating accounts).
+1. Sign in as the owner once, over the magic link, **before** turning
+   sign-ups off — that first sign-in is what creates the owner's Supabase
+   account. Do this before or immediately after step 1, but before relying
+   on `ALLOWED_EMAILS` day to day: an address named in `ALLOWED_EMAILS`
+   with no account behind it yet is still just an email address, and while
+   sign-ups are on, anyone could register it first. `ALLOWED_EMAILS` keeps
+   the site closed even if sign-ups are ever switched back on — the two
+   together are the access model, and neither is a substitute for the
+   other.
 
 ## Local development
 
