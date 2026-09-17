@@ -93,15 +93,14 @@ class MvForecastStore:
     def record_outcomes(self, outcomes: list[tuple[str, date, Score]], *, scored_at: float) -> int:
         """Fill each forecast's outcome once; an already scored row is left alone.
         Returns how many rows were filled."""
-        filled = 0
         if not outcomes:
             return 0
-        with self.connection() as conn:
-            for player_id, target_day, s in outcomes:
-                cur = conn.execute(
-                    "UPDATE rehoboam.mv_forecasts SET scored_at = %s, outcome = %s, "
-                    "actual_change = %s, actual_pct = %s "
-                    "WHERE player_id = %s AND target_day = %s AND scored_at IS NULL",
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.executemany(
+                "UPDATE rehoboam.mv_forecasts SET scored_at = %s, outcome = %s, "
+                "actual_change = %s, actual_pct = %s "
+                "WHERE player_id = %s AND target_day = %s AND scored_at IS NULL",
+                [
                     (
                         scored_at,
                         s.outcome,
@@ -109,10 +108,11 @@ class MvForecastStore:
                         s.actual_pct,
                         player_id,
                         target_day,
-                    ),
-                )
-                filled += cur.rowcount
-        return filled
+                    )
+                    for player_id, target_day, s in outcomes
+                ],
+            )
+            return cur.rowcount
 
     def daily_series(self) -> list[list[int]]:
         """Each player's stored daily market values, oldest first, split into
