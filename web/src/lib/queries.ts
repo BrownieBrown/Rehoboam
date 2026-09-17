@@ -160,3 +160,55 @@ export async function players(opts: {
     limit ${opts.limit ?? 50}
   `;
 }
+
+export type SquadRow = {
+  session_id: string;
+  legal_formation: string | null;
+  budget: number | null;
+  sellable_value: number | null;
+  next_kickoff: number | null;
+  session_started_at: number;
+  cost_basis_missing: number | null;
+  player_id: string | null;
+  name: string | null;
+  team: string | null;
+  position: string | null;
+  market_value: number | null;
+  points: number | null;
+  avg_points: number | null;
+  owner: string | null;
+  predicted_ep: number | null;
+  live_ep: number | null;
+  in_best_11: boolean;
+  p_start: number | null;
+  cost_basis: number | null;
+  gain_loss: number | null;
+};
+
+export async function squad(): Promise<SquadRow[]> {
+  return sql<SquadRow[]>`
+    select * from rehoboam.web_squad
+    order by in_best_11 desc, predicted_ep desc nulls last, player_id asc
+  `;
+}
+
+/**
+ * `web_squad` left-joins the predictions, so a session that ran but recorded no
+ * roster comes back as ONE row whose `player_id` is null - the session facts
+ * survive, the players do not. Split the two before rendering.
+ */
+export function splitSquad(rows: SquadRow[]) {
+  const players = rows.filter((r) => r.player_id !== null);
+  return { session: rows[0] ?? null, players };
+}
+
+/** The integrity rules the newest real session raised, as rule + detail pairs. */
+export async function latestSessionRules(): Promise<{ rule: string; detail: string }[]> {
+  const [row] = await sql<{ integrity_details: Record<string, string> }[]>`
+    select integrity_details from rehoboam.web_session_summary
+    where app = 'function' and dry_run = 0
+    order by started_at desc
+    limit 1
+  `;
+  return Object.entries(row?.integrity_details ?? {}).map(([rule, detail]) => ({ rule, detail }));
+}

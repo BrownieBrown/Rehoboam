@@ -20,6 +20,7 @@ export function DataTable<T>({
   dir,
   basePath,
   query,
+  rowClass,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -27,6 +28,8 @@ export function DataTable<T>({
   dir: "asc" | "desc";
   basePath: string;
   query?: Record<string, string | undefined>;
+  /** Extra classes for one row, e.g. dimming a bench player. */
+  rowClass?: (row: T) => string;
 }) {
   function href(key: string) {
     const params = new URLSearchParams();
@@ -62,7 +65,7 @@ export function DataTable<T>({
         </thead>
         <tbody>
           {rows.map((row, i) => (
-            <tr key={i}>
+            <tr key={i} className={rowClass?.(row)}>
               {columns.map((c) => (
                 <td
                   key={c.key}

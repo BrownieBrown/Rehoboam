@@ -369,8 +369,10 @@ def test_web_session_summary_flattens_an_ingest_run_and_its_rules(store_dsn):
     assert ingest["integrity_rules"] == []
     session = rows["sess1"]
     assert session["integrity_rules"] == ["I4"]
+    assert session["integrity_details"] == {"I4": "2 owned player(s) without a cost basis"}
     assert session["league_state_squads"] == 158
     assert session["requests"] is None, "a trading session has no ingest counters"
+    assert ingest["integrity_details"] == {}
 
 
 def test_web_calibration_keeps_an_empty_settled_report(store_dsn):

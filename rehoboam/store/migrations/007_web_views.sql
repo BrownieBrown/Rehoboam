@@ -58,6 +58,7 @@ select f.session_id, f.app, f.mode, f.dry_run, f.started_at, f.duration_s, f.pha
     f.cost_basis_missing, f.predictions_written, f.lineup_result,
     f.errors, f.error_text,
     coalesce(i.rules, array[]::text[]) as integrity_rules,
+    coalesce(i.rule_details, '{}'::jsonb) as integrity_details,
     (f.extra -> 'league_state' ->> 'squads')::int as league_state_squads,
     (f.extra ->> 'requests')::int as requests,
     (f.extra ->> 'failed')::int as failed,
@@ -75,7 +76,9 @@ select f.session_id, f.app, f.mode, f.dry_run, f.started_at, f.duration_s, f.pha
     f.extra -> 'calibration' -> 'reported' as calibration_reported
 from rehoboam.session_facts f
 left join (
-    select session_id, array_agg(distinct rule order by rule) as rules
+    select session_id,
+        array_agg(distinct rule order by rule) as rules,
+        jsonb_object_agg(rule, detail) as rule_details
     from rehoboam.integrity_failures
     group by session_id
 ) i on i.session_id = f.session_id;
