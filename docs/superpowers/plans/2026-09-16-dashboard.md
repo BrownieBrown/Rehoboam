@@ -2240,6 +2240,7 @@ ______________________________________________________________________
 
 - Create: `web/src/app/market/page.tsx`
 - Modify: `web/src/lib/queries.ts` (append `market()` and `managers()`)
+- Modify (Step 0): `web/src/lib/format.ts`, `web/src/lib/format.test.ts`, `web/src/app/page.tsx`, `web/src/app/squad/page.tsx`, `web/src/components/Formation.tsx`
 
 **Interfaces:**
 
@@ -2247,6 +2248,29 @@ ______________________________________________________________________
 - Produces: `market(opts)` and `managers()` in `queries.ts`.
 
 Two tables on one page: the newest listing snapshot on top, the league's ownership underneath.
+
+- [ ] **Step 0: One null placeholder, everywhere**
+
+The plan's page code writes a plain hyphen `"-"` for missing values, while `format.ts` renders missing numbers as an em dash `—`. Tasks 5 and 6 shipped eight of those hyphens, so the squad table shows `—` for a null cost basis and `-` for a null start probability in the same row. Fix it once, before this task adds more:
+
+1. In `web/src/lib/format.ts`, export the dash (`export const DASH = "—";` in place of the private const) and add a percent helper, since `p_start` is the one number every page formats by hand:
+
+   ```ts
+   /** A 0-1 probability as a whole percent, e.g. 0.84 -> "84%"; a dash when unknown. */
+   export function pct(p: number | null | undefined): string {
+     if (p === null || p === undefined) return DASH;
+     return `${Math.round(p * 100)}%`;
+   }
+   ```
+
+   Test it first in `format.test.ts`: `0.8365 -> "84%"`, `0 -> "0%"`, `1 -> "100%"`, `null` and `undefined` -> the em dash.
+
+1. Replace every `"-"` null placeholder under `web/src` with `DASH`, and every hand-built `Math.round(x * 100)%` with `pct(x)` — in `src/app/page.tsx`, `src/app/squad/page.tsx` and `src/components/Formation.tsx`. `Formation`'s "% to start" suffix becomes `` `${pct(p.p_start)} to start` `` only when `p_start` is known; keep the bare dash otherwise.
+
+1. Afterwards `grep -rn '"-"' web/src` must print nothing.
+
+Commit this step on its own, before the market page, so the review can gate it separately:
+`refactor(web): one null placeholder and one percent formatter on every page`
 
 - [ ] **Step 1: Append the queries**
 
@@ -2316,7 +2340,7 @@ import { sortDir, sortKey } from "@/lib/sort";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
-import { ago, countdown, money, num, signed, signedPct, POSITION, type Tone } from "@/lib/format";
+import { ago, countdown, DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
 import Link from "next/link";
 
 export const revalidate = 300;
@@ -2349,14 +2373,14 @@ export default async function MarketPage({
       cell: (r) => (
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-semibold text-text">{r.name ?? r.player_id}</span>
-          <span className="text-xs text-muted">{r.team ?? "-"}</span>
+          <span className="text-xs text-muted">{r.team ?? DASH}</span>
         </div>
       ),
     },
     {
       key: "position", label: "Pos", align: "left",
       cell: (r) => {
-        const pos = POSITION[r.position ?? ""] ?? { short: r.position ?? "-", token: "plain" };
+        const pos = POSITION[r.position ?? ""] ?? { short: r.position ?? DASH, token: "plain" };
         return <Pill tone={pos.token}>{pos.short}</Pill>;
       },
     },
@@ -2365,7 +2389,7 @@ export default async function MarketPage({
     {
       key: "over", label: "Ask vs MV", sortable: false,
       cell: (r) => {
-        if (!r.market_value) return "-";
+        if (!r.market_value) return DASH;
         const out = signedPct(((r.ask - r.market_value) / r.market_value) * 100);
         return <span className={TONE[out.tone]}>{out.text}</span>;
       },
@@ -2385,7 +2409,7 @@ export default async function MarketPage({
     },
     {
       key: "p_start", label: "P(start)",
-      cell: (r) => (r.p_start === null ? "-" : `${Math.round(r.p_start * 100)}%`),
+      cell: (r) => pct(r.p_start),
     },
     {
       key: "fair_value_gap", label: "Fair",
@@ -2402,7 +2426,7 @@ export default async function MarketPage({
     <>
       <StatusHeader
         title="Market"
-        subtitle={`${rows.length} listings - snapshot ${ago(snapshotAt)}`}
+        subtitle={`${rows.length} listings · snapshot ${ago(snapshotAt)}`}
       />
       <div className="flex items-center gap-2 px-6 py-4">
         <Link
@@ -2461,7 +2485,7 @@ export default async function MarketPage({
                     {money(m.team_value)}
                   </td>
                   <td className="h-11 border-b border-border px-3 text-left text-sm text-muted">
-                    {m.top.join(", ") || "-"}
+                    {m.top.join(", ") || DASH}
                   </td>
                 </tr>
               ))}
