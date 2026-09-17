@@ -83,9 +83,14 @@ BASE_URL=https://<preview-or-prod-domain> npm run e2e
 
 ## The Squad page shows a prediction, not a submission
 
-The eleven on `/squad` is the store's best guess at what the bot fielded, not
-a record of what it actually submitted — the store doesn't keep that. The
-eleven (`in_best_11`) comes from `rehoboam.predictions`, written early in the
+The eleven on `/squad` is the store's best guess at the eleven for the
+*coming* matchday, not a record of what the bot actually fielded. The store
+does eventually record that: Kickbase's own `/teamcenter` truth, written to
+`rehoboam.matchday_lineup_results` by `Trader` once every match of that
+matchday has finished. But that write is retrospective — it only exists
+after the matchday concludes — and none of the six `web_*` views this page
+reads join that table. What the page shows instead: the eleven
+(`in_best_11`) comes from `rehoboam.predictions`, written early in the
 session from that session's opening squad snapshot; the formation
 (`legal_formation`) comes from `rehoboam.session_facts`, computed later from
 a squad the bot re-fetches live at the lineup step. A forced sale (the
@@ -93,8 +98,9 @@ league's Top-5 rule) or an emergency buy can happen in between, so the two
 can genuinely disagree — the derived D-M-F count won't match the submitted
 formation, or a player the derivation can't place shows up under "Other".
 When that happens the page says so, in words, instead of presenting a
-mismatched eleven as fact. Recording the lineup the bot actually submitted is
-a known follow-up on the bot side, not something this page can fix by itself.
+mismatched eleven as fact. Wiring the squad page to that retrospective
+record — so a finished matchday can show what was actually fielded, not just
+what was predicted for it — is a known follow-up on the bot side.
 
 ## A dry run moves real numbers
 
@@ -106,8 +112,11 @@ in `rehoboam/auto_trader.py`). Running the bot locally against the real
 `DATABASE_URL` can therefore move what the Players and Market pages show,
 within the 5-minute cache (`revalidate = 300`) — the same store, the same
 views, whoever wrote to it last. The one exception is `/squad`: it and the
-sidebar's session summary key off the newest session where `app = 'function' and dry_run = 0`, so a local dry run never becomes "the" session those two
-read.
+sidebar's session summary key off the newest session where
+`app = 'function' and dry_run = 0`. The CLI always writes `app = 'cli'`
+(`rehoboam/cli.py`) — for `auto` as much as for `status` — so *any* local
+run fails that filter regardless of `--dry-run`; only a live Azure Function
+session ever becomes "the" session those two read.
 
 ## Redirects and the auth allowlist
 
