@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loginErrorMessage } from "./login-error";
+import { loginErrorMessage, passwordFailureMessage } from "./login-error";
 
 describe("loginErrorMessage", () => {
   it("returns the fixed sentence for each known value", () => {
@@ -21,6 +21,35 @@ describe("loginErrorMessage", () => {
   it("returns null for every inherited Object.prototype key", () => {
     for (const value of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) {
       expect(loginErrorMessage(value)).toBeNull();
+    }
+  });
+});
+
+describe("passwordFailureMessage", () => {
+  it("says the credentials are wrong only when Supabase says so", () => {
+    expect(passwordFailureMessage({ status: 400, code: "invalid_credentials" })).toBe(
+      "Wrong email or password.",
+    );
+  });
+
+  it("says to wait when Supabase rate-limits the attempt", () => {
+    for (const error of [{ status: 429 }, { status: 429, code: "over_request_rate_limit" }]) {
+      expect(passwordFailureMessage(error)).toBe("Too many attempts. Wait a few minutes and try again.");
+    }
+  });
+
+  // Every other failure (an outage, an unconfirmed address, a 400 without a
+  // code) gets a sentence that is true in every one of those cases, and
+  // never claims the password was wrong.
+  it("falls back to a sentence true for any other failure", () => {
+    for (const error of [
+      { status: 500 },
+      { status: 400 },
+      { status: 400, code: "email_not_confirmed" },
+      { status: 0, code: "unexpected_failure" },
+      {},
+    ]) {
+      expect(passwordFailureMessage(error)).toBe("Sign-in didn't work. Try again, or use a sign-in link.");
     }
   });
 });

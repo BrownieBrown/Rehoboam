@@ -112,7 +112,9 @@ page load through the pooler.
 - **Supabase Auth** on the existing project (`qznixprbyldatdjzorbq`):
   email provider only, **sign-ups disabled**, one user created by hand
   with Marco's address. Sign-in is a magic link; sessions last thirty
-  days.
+  days. *Amended 2026-09-17:* sign-in is the owner's email and password,
+  with the magic link kept behind "Forgot your password?"; the owner is
+  created in the dashboard with a password and Auto Confirm.
 - `web/src/middleware.ts` uses `@supabase/ssr` to read the session
   cookie on every request and redirects anything without one to
   `/login`. Server components call `requireSession()` before any query,
@@ -202,7 +204,7 @@ a glance in this table.
 - `web/`: Vitest for the pure helpers (number formatting, trend
   colouring, sort comparators, expiry countdown, integrity code map);
   one Playwright smoke test per page against a preview deploy: log in
-  with a test magic link, page renders, table has rows. The database is
+  with the owner's saved session, page renders, table has rows. The database is
   never mocked in the site's tests; the views are the contract and the
   Python tests own them.
 

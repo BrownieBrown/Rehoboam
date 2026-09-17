@@ -18,13 +18,16 @@ Never widen the site's access with a raw table query.
 site's first deploy** — the same way as every other store migration (see the
 bot repo's `CLAUDE.md`, "Store workflow"). Nothing in `web/` runs it for you.
 
-Auth is Supabase Auth, magic-link only (no password). Signing in is only
-half of access control, though: the site is **single-owner in code**. The
-middleware (`src/middleware.ts`), the auth callback
-(`src/app/auth/callback/route.ts`) and `requireSession()`
+Auth is Supabase Auth: email and password first
+(`signInWithPassword` in `src/app/login/actions.ts`), with a one-time link
+to the inbox behind "Forgot your password?" as the fallback. Signing in is
+only half of access control, though: the site is **single-owner in code**.
+The middleware (`src/middleware.ts`), the password sign-in action, the auth
+callback (`src/app/auth/callback/route.ts`) and `requireSession()`
 (`src/lib/auth.ts`) all check the signed-in user's email against
 `ALLOWED_EMAILS` (`src/lib/allowed-emails.ts`) and refuse anyone who isn't
-on it — the middleware and the callback sign the account out and redirect to
+on it — the middleware, the sign-in action and the callback sign the account
+out and redirect to
 `/login?error=not-allowed`; `requireSession()` can only redirect there (a
 server component can't clear cookies), which is fine because the middleware
 signs the account out on the very next request regardless. Either way, a
@@ -43,7 +46,7 @@ Four, all required, none of them optional:
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `DATABASE_URL`                  | The `rehoboam_bot` role's connection string, through the Supabase **transaction pooler** (port 6543) — the same role and pooler the bot itself connects through. Server-side only — never `NEXT_PUBLIC_`.             | Supabase project → Database → Connection pooling, transaction mode. |
 | `NEXT_PUBLIC_SUPABASE_URL`      | The Supabase project's API URL. Public by design.                                                                                                                                                                     | Supabase project → Project Settings → API.                          |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The project's anon key, used only to drive sign-in (magic link) in the browser — it carries no access to the store; that's `DATABASE_URL`'s job, server-side only.                                                    | Supabase project → Project Settings → API.                          |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The project's anon key, used only to drive sign-in (password or link) — it carries no access to the store; that's `DATABASE_URL`'s job, server-side only.                                                             | Supabase project → Project Settings → API.                          |
 | `ALLOWED_EMAILS`                | Comma-separated email addresses allowed to use the site, matched exact (trimmed, lower-cased) after sign-in. Server-side only — never `NEXT_PUBLIC_`. **Empty or unset locks everyone out** — fails closed, not open. | You choose it — the owner's own email address(es).                  |
 
 See `.env.example`. For local development, copy it to `.env.local` (already
@@ -62,16 +65,23 @@ other half lives in the Supabase project itself, and both must be done:
    own panel (leave the Email provider's **Confirm email** switch as it is;
    it's unrelated). The publishable anon key ships to every browser, so
    anyone holding it can call Supabase's sign-up endpoint directly
-   regardless of what this app's own login form does (`shouldCreateUser: false` only stops the form itself from creating accounts).
-1. Sign in as the owner once, over the magic link, **before** turning
-   sign-ups off — that first sign-in is what creates the owner's Supabase
-   account. Do this before or immediately after step 1, but before relying
-   on `ALLOWED_EMAILS` day to day: an address named in `ALLOWED_EMAILS`
-   with no account behind it yet is still just an email address, and while
-   sign-ups are on, anyone could register it first. `ALLOWED_EMAILS` keeps
-   the site closed even if sign-ups are ever switched back on — the two
-   together are the access model, and neither is a substitute for the
-   other.
+   regardless of what this app's own login form does (`shouldCreateUser: false` only stops the link form itself from creating accounts).
+1. Create the owner in **Authentication → Users → Add user → Create new
+   user**, with the owner's address, a long password, and **Auto Confirm
+   User** ticked. The dashboard creates the account through the admin API,
+   so it works with sign-ups already off — no window in which someone else
+   could register the address first. One way to change the password later
+   is to delete the user and create it again; nothing in the store
+   references the auth user's id.
+1. Use a long password. The publishable key lets anyone try passwords
+   against Supabase's token endpoint directly, with Supabase's per-IP rate
+   limit as the brake. Attempts made through this site's form all come from
+   the server's address, so hammering the form can also rate-limit the
+   owner for a few minutes.
+
+`ALLOWED_EMAILS` keeps the site closed even if sign-ups are ever switched
+back on — the two together are the access model, and neither is a
+substitute for the other.
 
 ## Local development
 
@@ -106,7 +116,7 @@ cd web
 npx playwright codegen --save-storage=e2e/.auth.json https://<preview-or-prod-domain>
 ```
 
-Sign in with the magic link sent to your inbox in the window that opens, then
+Sign in with the owner's email and password in the window that opens, then
 close it — codegen writes the authenticated cookies to `e2e/.auth.json` on
 close. That file is a live session and is `.gitignore`d; never commit it.
 
@@ -168,9 +178,9 @@ a second parse could reinterpret. Never hand a raw query param to a redirect.
 
 That said, `safeNext()` is a second line of defense, not the only one.
 Supabase's own redirect allowlist (Auth → URL Configuration) is a **security
-control, not configuration**: the magic link's `emailRedirectTo` is built
+control, not configuration**: the fallback link's `emailRedirectTo` is built
 from the incoming request's `Origin` header, and it's Supabase honouring only
 allowlisted destinations — not anything this app does — that stops a forged
-`Origin` from pointing the magic link somewhere else. Keep that list tight:
+`Origin` from pointing the link somewhere else. Keep that list tight:
 the production domain and the `https://*-<project>.vercel.app/auth/callback`
 preview pattern, nothing wider.
