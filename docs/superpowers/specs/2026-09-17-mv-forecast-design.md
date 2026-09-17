@@ -36,6 +36,20 @@ Measured on `mv_series` (read-only, 2026-09-17), with daily moves capped at
 - What the rule cannot see is a turn (an injury, a big match). That is the
   job of a later model, which this design makes measurable.
 
+Backtest (2026-09-17, `backtest-mv` code over production): run against the
+store's actual daily values, over the full history (190,714 forecasts) and
+over this season alone (20,403 forecasts), both picked momentum 0.95 with a
+0.30 cap as the lowest average miss — direction right 95.0 % for every pair:
+
+| pair                      | full history miss | this season miss |
+| ------------------------- | ----------------- | ---------------- |
+| 0.95 / 0.30 (new default) | 0.878 pp          | 1.349 pp         |
+| 0.90 / 0.20 (old default) | 0.906 pp          | 1.400 pp         |
+| no change                 | 2.382 pp          | 3.693 pp         |
+
+`Settings` defaults moved to `MV_FORECAST_MOMENTUM` = 0.95 and
+`MV_FORECAST_CAP` = 0.30 on this evidence.
+
 Kickbase's league player-details response (`GET /v4/leagues/{league}/players/{player}`) carries `tfhmvt`, the euro change of
 the last update, and `mvt`, its direction (1 up, 2 down, 0 flat). Probed
 live on 2026-09-17 for four listed players: `tfhmvt` equalled the last
@@ -102,8 +116,8 @@ Migration `008_mv_forecast.sql`:
   `market_value ≤ 0` or `previous ≤ 0`. `last_pct = last_change / previous`;
   `predicted_pct = momentum × clamp(last_pct, −cap, +cap)`;
   `predicted_change = round(market_value × predicted_pct)`.
-- Constants are `Settings` fields, `MV_FORECAST_MOMENTUM` = 0.9 and
-  `MV_FORECAST_CAP` = 0.20, so they can be re-tuned from the environment.
+- Constants are `Settings` fields, `MV_FORECAST_MOMENTUM` = 0.95 and
+  `MV_FORECAST_CAP` = 0.30, so they can be re-tuned from the environment.
 - `usable_day(fetched_at)`: the Berlin date of a status fetch when its
   Berlin time is before 21:45, else `None`. A fetch after 21:45 may be on
   either side of the update, so it is used for neither forecasting nor

@@ -608,7 +608,7 @@ class Settings(BaseSettings):
         ),
     )
     mv_forecast_momentum: float = Field(
-        default=0.9,
+        default=0.95,
         description=(
             "The next market-value update is forecast as this multiple of the last "
             "one (spec 2026-09-17). Re-derive with `rehoboam backtest-mv`. "
@@ -616,7 +616,7 @@ class Settings(BaseSettings):
         ),
     )
     mv_forecast_cap: float = Field(
-        default=0.20,
+        default=0.30,
         description=(
             "The last update's move is capped at ± this fraction before the multiple "
             "is applied. Env: MV_FORECAST_CAP."

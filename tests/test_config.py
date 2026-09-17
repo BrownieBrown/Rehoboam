@@ -79,7 +79,7 @@ def test_mv_forecast_settings_default_to_the_measured_rule(monkeypatch):
     monkeypatch.delenv("MV_FORECAST_MOMENTUM", raising=False)
     monkeypatch.delenv("MV_FORECAST_CAP", raising=False)
     s = Settings()
-    assert (s.mv_forecast_momentum, s.mv_forecast_cap) == (0.9, 0.2)
+    assert (s.mv_forecast_momentum, s.mv_forecast_cap) == (0.95, 0.3)
 
 
 def test_mv_forecast_settings_read_the_environment(monkeypatch):

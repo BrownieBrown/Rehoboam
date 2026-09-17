@@ -3,9 +3,9 @@
 Pure: no I/O. Kickbase updates every market value once a day at about 22:00
 Berlin time. Over a year of daily values, the next update moved like the last
 one, a little weaker: `momentum × last move`, with the last move capped,
-missed by a third to a quarter as much as "no change" and had the direction
-right about 95 % of the time. What it cannot see is a turn; the scoring below
-is what makes a better rule measurable.
+missed by about a third as much as "no change" and had the direction right
+about 95 % of the time. What it cannot see is a turn; the scoring below is
+what makes a better rule measurable.
 """
 
 from __future__ import annotations
