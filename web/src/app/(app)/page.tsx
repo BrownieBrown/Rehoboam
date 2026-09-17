@@ -17,13 +17,20 @@ import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
 import { DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
 import { NextMvCell } from "@/components/NextMv";
-import { NEXT_MV_HINT } from "@/lib/next-mv";
+import { NEXT_MV_HINT, noForecastNote } from "@/lib/next-mv";
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
   negative: "text-negative",
   neutral: "text-muted",
 };
+
+const APPS_HINT = "Matches played this season, started or came on";
+const STARTS_HINT = "Matches he started";
+const FAIR_PTS_HINT =
+  "His average points minus what players at his position and price average — positive means he outscores his price";
+const FAIR_PRICE_HINT =
+  "What his average points are worth at his position's going rate, against his market value";
 
 const PAGE_LINK =
   "inline-flex h-8 items-center rounded-md border border-border-strong px-3 text-[13px] font-semibold";
@@ -101,6 +108,12 @@ export default async function PlayersPage({
       },
     },
     { key: "market_value", label: "Market value", cell: (p) => money(p.market_value) },
+    {
+      key: "fair_price",
+      label: "Fair price",
+      hint: FAIR_PRICE_HINT,
+      cell: (p) => money(p.fair_price),
+    },
     { key: "trend_24h_pct", label: "24h", cell: (p) => <Trend pct={p.trend_24h_pct} /> },
     { key: "trend_7d_pct", label: "7d", cell: (p) => <Trend pct={p.trend_7d_pct} /> },
     {
@@ -113,8 +126,8 @@ export default async function PlayersPage({
     { key: "avg_points", label: "Avg", cell: (p) => num(p.avg_points, 1) },
     { key: "median_points", label: "Median", cell: (p) => num(p.median_points, 1) },
     { key: "points_per_million", label: "Pts / M", cell: (p) => num(p.points_per_million, 2) },
-    { key: "appearances", label: "Apps", cell: (p) => num(p.appearances) },
-    { key: "starts", label: "Starts", cell: (p) => num(p.starts) },
+    { key: "appearances", label: "Apps", hint: APPS_HINT, cell: (p) => num(p.appearances) },
+    { key: "starts", label: "Starts", hint: STARTS_HINT, cell: (p) => num(p.starts) },
     {
       key: "owner",
       label: "Owner",
@@ -145,7 +158,12 @@ export default async function PlayersPage({
       label: "P(start)",
       cell: (p) => pct(p.p_start),
     },
-    { key: "fair_value_gap", label: "Fair", cell: (p) => <Trend value={p.fair_value_gap} /> },
+    {
+      key: "fair_value_gap",
+      label: "Fair pts",
+      hint: FAIR_PTS_HINT,
+      cell: (p) => <Trend value={p.fair_value_gap} />,
+    },
   ];
 
   return (
@@ -159,6 +177,9 @@ export default async function PlayersPage({
           <PageLink href={hasNext ? pageHref("/", params, page + 1) : null}>Next</PageLink>
         </div>
       </div>
+      {noForecastNote(rows) ? (
+        <p className="px-6 pt-1 text-sm text-muted">{noForecastNote(rows)}</p>
+      ) : null}
       <div className="px-6 pb-6">
         {/* A new sort starts again at page 1. */}
         <DataTable

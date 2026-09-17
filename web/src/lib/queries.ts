@@ -96,6 +96,8 @@ export type PlayerRow = {
   /** Forecast for the next market-value update: euros, and percent with two decimals. */
   next_mv_change: number | null;
   next_mv_pct: number | null;
+  /** What his average points are worth at his position's going rate, in euros. */
+  fair_price: number | null;
   /** Every row the filters match, counted in the same statement as this page. */
   total: number;
 };
@@ -107,6 +109,7 @@ export const PLAYER_SORTS = [
   "trend_24h_pct",
   "trend_7d_pct",
   "next_mv_pct",
+  "fair_price",
   "points",
   "avg_points",
   "median_points",
@@ -282,6 +285,8 @@ export type MarketRow = {
   /** Forecast for the next market-value update: euros, and percent with two decimals. */
   next_mv_change: number | null;
   next_mv_pct: number | null;
+  /** What his average points are worth at his position's going rate, in euros. */
+  fair_price: number | null;
 };
 
 export const MARKET_SORTS = [
@@ -290,6 +295,7 @@ export const MARKET_SORTS = [
   "ask",
   "market_value",
   "next_mv_pct",
+  "fair_price",
   "seller",
   "expires_at",
   "predicted_ep",

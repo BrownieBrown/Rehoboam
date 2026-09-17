@@ -9,7 +9,7 @@ import { expiringWithin, listingsLine } from "@/lib/expiry";
 import { bySeller, sellerScope } from "@/lib/market-filter";
 import { hrefFor } from "@/lib/query-href";
 import { NextMvCell } from "@/components/NextMv";
-import { NEXT_MV_HINT } from "@/lib/next-mv";
+import { NEXT_MV_HINT, noForecastNote } from "@/lib/next-mv";
 import Link from "next/link";
 
 /** A filter chip: a plain link, filled when it is the active choice. */
@@ -25,6 +25,11 @@ function Chip({ href, active, children }: { href: string; active: boolean; child
     </Link>
   );
 }
+
+const FAIR_PTS_HINT =
+  "His average points minus what players at his position and price average — positive means he outscores his price";
+const FAIR_PRICE_HINT =
+  "What his average points are worth at his position's going rate, against his market value";
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -68,6 +73,10 @@ export default async function MarketPage({
     { key: "ask", label: "Ask", cell: (r) => money(r.ask) },
     { key: "market_value", label: "Market value", cell: (r) => money(r.market_value) },
     {
+      key: "fair_price", label: "Fair price", hint: FAIR_PRICE_HINT,
+      cell: (r) => money(r.fair_price),
+    },
+    {
       key: "next_mv_pct", label: "Next MV", hint: NEXT_MV_HINT,
       cell: (r) => <NextMvCell pct={r.next_mv_pct} change={r.next_mv_change} />,
     },
@@ -96,7 +105,7 @@ export default async function MarketPage({
       cell: (r) => pct(r.p_start),
     },
     {
-      key: "fair_value_gap", label: "Fair",
+      key: "fair_value_gap", label: "Fair pts", hint: FAIR_PTS_HINT,
       cell: (r) => {
         const out = signed(r.fair_value_gap, 1);
         return <span className={TONE[out.tone]}>{out.text}</span>;
@@ -135,6 +144,9 @@ export default async function MarketPage({
           </Chip>
         </div>
       </div>
+      {noForecastNote(rows) ? (
+        <p className="px-6 pb-2 text-sm text-muted">{noForecastNote(rows)}</p>
+      ) : null}
       <div className="px-6 pb-6">
         <DataTable
           columns={columns} rows={rows} sort={sort} dir={dir}

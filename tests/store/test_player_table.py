@@ -200,6 +200,7 @@ def test_the_view_has_base_xi_columns_in_order(store_dsn):
         "predicted_ep",
         "p_start",
         "fair_value_gap",
+        "fair_price",
     ]
 
 
@@ -224,6 +225,19 @@ def test_the_numbers(store_dsn):
     c = rows["c"]
     assert round(float(c["trend_24h_pct"]), 1) == round(100 * (12 - 11) / 11, 1)
     assert round(float(c["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
+
+
+def test_fair_price_is_what_his_average_is_worth_at_his_positions_rate(store_dsn):
+    """Two midfielders define the position's price-to-points line exactly, so
+    each one's fair price is his own market value and his gap is zero. The lone
+    forward has no average at all, so he has no price."""
+    league = _seed(store_dsn)
+    rows = {r["player_id"]: r for r in league.player_table()}
+    a, b, c = rows["a"], rows["b"], rows["c"]
+    assert abs(a["fair_price"] - a["market_value"]) <= 1
+    assert round(float(a["fair_value_gap"]), 1) == 0.0
+    assert abs(b["fair_price"] - b["market_value"]) <= 1
+    assert c["avg_points"] is None and c["fair_price"] is None
 
 
 def test_filters_and_order(store_dsn):

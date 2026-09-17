@@ -549,3 +549,32 @@ def test_web_mv_accuracy_counts_hits_misses_and_unscorable_rows(store_dsn):
     assert float(row["baseline_mae_pct"]) == 0.53
     assert row["mae_eur"] == 67  # (20 + 150 + 30) / 3 = 66.67
     assert row["baseline_mae_eur"] == 53  # (80 + 50 + 30) / 3 = 53.33
+
+
+def test_web_players_and_web_market_carry_the_fair_price(store_dsn):
+    """Migration 009's `fair_price` (euros) rides along with `fair_value_gap`
+    (points) on both views the site reads."""
+    _players(store_dsn)
+    LeagueStore(dsn=store_dsn).write_listings(
+        [
+            {
+                "snapshot_at": NOW,
+                "player_id": "a",
+                "ask": 10_000_000,
+                "market_value": 10_000_000,
+                "mv_trend": 1,
+                "seller_id": None,
+                "offer_count": 0,
+                "our_bid": None,
+                "listed_at": None,
+                "expires_at": NOW + 3600,
+                "status": 0,
+                "lineup_probability": 1,
+                "source": "test",
+            }
+        ]
+    )
+    players = {r["player_id"]: r for r in _rows(store_dsn, "select * from rehoboam.web_players")}
+    assert "fair_price" in players["a"]
+    market = _rows(store_dsn, "select * from rehoboam.web_market")[0]
+    assert "fair_price" in market
