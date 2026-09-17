@@ -54,8 +54,13 @@ Four pages behind a login, one user, desktop first:
   A new number the site needs becomes a migration first.
 - **Next.js middleware** checks a Supabase Auth session on every route
   except `/login`; server components assert it again before querying.
-- Pages **revalidate every five minutes**. The store changes at 05:00,
-  08:00, 17:00 and 20:00 UTC; nothing is live-polled.
+- Pages **render on every request**. Each one reads the session cookie
+  (`requireSession()`), and Players and Market also read their search
+  parameters; either makes a route dynamic in Next 15, so there is no
+  route cache and a `revalidate` export would do nothing. Every page load
+  queries the views afresh through the pooler, which is acceptable for one
+  read-only user. The store changes at 05:00, 08:00, 17:00 and 20:00 UTC;
+  nothing is live-polled.
 - Nothing in `rehoboam` is exposed through Supabase's Data API (the
   store design's rule stands); no row-level security is needed because
   the browser never holds a database credential.
@@ -118,15 +123,17 @@ page load through the pooler.
   build step (`scripts/check-secrets.mjs`) fails the build if that
   string or the pooler host appears in the client bundle.
 - Failure modes: Supabase Auth unreachable → the login page, never data.
-  Postgres unreachable → the page renders the last successful
-  revalidation with a banner "store unavailable since <time>"; if there
-  is no cached render, a plain error page. Never a stack trace.
+  Postgres unreachable → there is no cached render to fall back to: the
+  sidebar shows every fact as unknown, and the page area shows "The store
+  is not answering" (`error.tsx`) with a retry button. Never a stack
+  trace.
 
 ## The pages
 
 All four share one shell: the sidebar (four entries, the "next kickoff ·
 lineup set · budget" card), a header with the status line ("588 players
-· store updated 08:01 UTC · next session 20:00 UTC", from
+· last session 08:01 UTC · next session 20:00 UTC": the count from
+`web_players`, the start of the newest live trading session from
 `web_session_summary`), and one table component (sortable header,
 tabular numerals, 44 px rows).
 

@@ -7,8 +7,6 @@ import { StatusHeader } from "@/components/StatusHeader";
 import { ago, countdown, DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
 import Link from "next/link";
 
-export const revalidate = 300;
-
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
   negative: "text-negative",

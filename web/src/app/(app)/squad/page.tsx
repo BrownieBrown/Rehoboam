@@ -7,8 +7,6 @@ import { StatusHeader } from "@/components/StatusHeader";
 import { DASH, money, num, pct, signed, POSITION, type Tone } from "@/lib/format";
 import { integritySentence } from "@/lib/integrity";
 
-export const revalidate = 300;
-
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
   negative: "text-negative",

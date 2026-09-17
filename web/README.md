@@ -20,8 +20,10 @@ bot repo's `CLAUDE.md`, "Store workflow"). Nothing in `web/` runs it for you.
 
 Auth is Supabase Auth, magic-link only (no password, no self-serve sign-up).
 The middleware (`src/middleware.ts`) redirects an anonymous request to
-`/login`; every page also calls `requireSession()` itself, so a route the
-middleware's matcher somehow misses still cannot reach the store. `next build`
+`/login`; every data page, and the `(app)` layout that renders the sidebar,
+also calls `requireSession()` itself, so a request the middleware's matcher
+somehow lets through still gets no data. `/login` and `/auth/callback` sit
+outside the `(app)` route group and never render the sidebar. `next build`
 runs `scripts/check-secrets.mjs`, which fails the build if `DATABASE_URL` or
 anything naming the pooler or the bot role turns up in the client bundle.
 
@@ -100,7 +102,10 @@ formation, or a player the derivation can't place shows up under "Other".
 When that happens the page says so, in words, instead of presenting a
 mismatched eleven as fact. Wiring the squad page to that retrospective
 record — so a finished matchday can show what was actually fielded, not just
-what was predicted for it — is a known follow-up on the bot side.
+what was predicted for it — is a known follow-up, and it needs no change to
+how the bot behaves: the bot already writes that table, so the work is a new
+numbered migration in this repository that exposes it through a `web_*` view,
+and the page that reads the view.
 
 ## A dry run moves real numbers
 
@@ -109,9 +114,11 @@ what was predicted for it — is a known follow-up on the bot side.
 writes the same market snapshot, squad snapshots, and prediction rows a live
 session would, unconditionally (`_write_league_state`, `_write_league_predictions`
 in `rehoboam/auto_trader.py`). Running the bot locally against the real
-`DATABASE_URL` can therefore move what the Players and Market pages show,
-within the 5-minute cache (`revalidate = 300`) — the same store, the same
-views, whoever wrote to it last. The one exception is `/squad`: it and the
+`DATABASE_URL` can therefore move what the Players and Market pages show on
+the next page load — the same store, the same views, whoever wrote to it
+last. There is no page cache to wait out: every page reads the session
+cookie, which makes it render per request, so every load queries the views
+afresh. The one exception is `/squad`: it and the
 sidebar's session summary key off the newest session where
 `app = 'function' and dry_run = 0`. The CLI always writes `app = 'cli'`
 (`rehoboam/cli.py`) — for `auto` as much as for `status` — so *any* local

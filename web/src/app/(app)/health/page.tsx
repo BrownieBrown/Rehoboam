@@ -13,8 +13,6 @@ import { ago, DASH, num, signed } from "@/lib/format";
 import { integritySentence } from "@/lib/integrity";
 import { emptyReportSentence, gateSentence, type Gate } from "@/lib/calibration";
 
-export const revalidate = 300;
-
 /** Newest matchday first; within a matchday, live before backfill (the order `calibration()` already returns). */
 function byMatchday(rows: CalibrationRow[]): CalibrationRow[][] {
   const groups = new Map<string, CalibrationRow[]>();
