@@ -67,9 +67,12 @@ def test_transfer_rows_skip_items_without_dt():
     assert isinstance(row["transfer_at"], float)
 
 
-def test_status_row_reads_st_prob_mv_tid():
+def test_status_row_reads_st_prob_mv_tid_and_the_last_mv_change():
     row = rows.status_row(
-        "p1", date(2026, 9, 14), {"st": 0, "prob": 1, "mv": 1_000_000, "tid": 7}, 123.0
+        "p1",
+        date(2026, 9, 14),
+        {"st": 0, "prob": 1, "mv": 1_000_000, "tid": 7, "tfhmvt": -25_000},
+        123.0,
     )
     assert row == {
         "player_id": "p1",
@@ -77,6 +80,7 @@ def test_status_row_reads_st_prob_mv_tid():
         "status": 0,
         "lineup_probability": 1,
         "market_value": 1_000_000,
+        "mv_change": -25_000,
         "team_id": "7",
         "fetched_at": 123.0,
     }
@@ -88,8 +92,10 @@ def test_status_row_tolerates_missing_fields():
         row["status"],
         row["lineup_probability"],
         row["market_value"],
+        row["mv_change"],
         row["team_id"],
     ) == (
+        None,
         None,
         None,
         None,

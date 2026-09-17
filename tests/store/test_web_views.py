@@ -422,3 +422,130 @@ def test_web_calibration_keeps_an_empty_settled_report(store_dsn):
     assert len(rows) == 1
     assert rows[0]["n"] == 0 and rows[0]["gate"] is None
     assert rows[0]["backfill"] is False
+
+
+def _berlin_live_day(dsn):
+    """The day web_mv_forecast shows, computed with the database's own clock."""
+    return _rows(
+        dsn,
+        "select ((now() at time zone 'Europe/Berlin') + interval '2 hours')::date as d",
+    )[0]["d"]
+
+
+def _forecast(dsn, player_id, target_day, *, change, pct, scored=False):
+    with connect(dsn) as conn:
+        conn.execute(
+            "insert into rehoboam.mv_forecasts (player_id, target_day, made_at, method, "
+            "base_mv, last_change, predicted_change, predicted_pct, scored_at, outcome, "
+            "actual_change, actual_pct) values (%s, %s, %s, 'momentum-v1', 10000000, "
+            "100000, %s, %s, %s, %s, %s, %s)",
+            (
+                player_id,
+                target_day,
+                NOW,
+                change,
+                pct,
+                NOW if scored else None,
+                "scored" if scored else None,
+                change if scored else None,
+                pct if scored else None,
+            ),
+        )
+
+
+def test_web_mv_forecast_shows_only_the_live_days_unscored_forecast(store_dsn):
+    from datetime import timedelta
+
+    _players(store_dsn)
+    live = _berlin_live_day(store_dsn)
+    _forecast(store_dsn, "a", live, change=90_000, pct=0.009)
+    _forecast(store_dsn, "a", live - timedelta(days=1), change=5, pct=0.5)
+    _forecast(store_dsn, "b", live, change=-18_000, pct=-0.009, scored=True)
+    rows = _rows(store_dsn, "select * from rehoboam.web_mv_forecast")
+    assert [(r["player_id"], r["target_day"]) for r in rows] == [("a", live)]
+    assert float(rows[0]["predicted_pct"]) == 0.9  # percent, two decimals
+    players = {r["player_id"]: r for r in _rows(store_dsn, "select * from rehoboam.web_players")}
+    assert players["a"]["next_mv_change"] == 90_000
+    assert float(players["a"]["next_mv_pct"]) == 0.9
+    assert players["b"]["next_mv_change"] is None and players["b"]["next_mv_pct"] is None
+
+
+def test_web_market_carries_the_listed_players_forecast(store_dsn):
+    _players(store_dsn)
+    _forecast(store_dsn, "a", _berlin_live_day(store_dsn), change=-45_000, pct=-0.0045)
+    LeagueStore(dsn=store_dsn).write_listings(
+        [
+            {
+                "snapshot_at": NOW,
+                "player_id": "a",
+                "ask": 10_000_000,
+                "market_value": 10_000_000,
+                "mv_trend": 2,
+                "seller_id": None,
+                "offer_count": 0,
+                "our_bid": None,
+                "listed_at": None,
+                "expires_at": NOW + 3600,
+                "status": 0,
+                "lineup_probability": 1,
+                "source": "test",
+            }
+        ]
+    )
+    row = _rows(store_dsn, "select * from rehoboam.web_market")[0]
+    assert row["next_mv_change"] == -45_000
+    assert float(row["next_mv_pct"]) == -0.45
+
+
+def test_web_mv_accuracy_counts_hits_misses_and_unscorable_rows(store_dsn):
+    from datetime import date
+
+    day = date(2026, 9, 16)
+    with connect(store_dsn) as conn:
+        for pid, pred, actual, outcome in (
+            ("a", 100, 80, "scored"),  # right direction, miss 20 € / 0.2 pp
+            ("b", 100, -50, "scored"),  # wrong direction, miss 150 € / 1.5 pp
+            ("c", 0, 30, "scored"),  # flat forecast: not directional
+            ("d", 100, None, "unscorable"),
+        ):
+            conn.execute(
+                "insert into rehoboam.mv_forecasts (player_id, target_day, made_at, method, "
+                "base_mv, last_change, predicted_change, predicted_pct, scored_at, outcome, "
+                "actual_change, actual_pct) values (%s, %s, 1, 'momentum-v1', 10000, 100, "
+                "%s, %s, 2, %s, %s, %s)",
+                (
+                    pid,
+                    day,
+                    pred,
+                    pred / 10000,
+                    outcome,
+                    actual,
+                    None if actual is None else actual / 10000,
+                ),
+            )
+        # an unscored row never counts
+        conn.execute(
+            "insert into rehoboam.mv_forecasts (player_id, target_day, made_at, method, "
+            "base_mv, last_change, predicted_change, predicted_pct) "
+            "values ('e', %s, 1, 'momentum-v1', 10000, 100, 100, 0.01)",
+            (day,),
+        )
+    (row,) = _rows(store_dsn, "select * from rehoboam.web_mv_accuracy")
+    assert row["target_day"] == day
+    assert (
+        row["scored"],
+        row["unscorable"],
+        row["directional"],
+        row["direction_hits"],
+    ) == (
+        3,
+        1,
+        2,
+        1,
+    )
+    # misses: |0.8-1.0|=0.2, |-0.5-1.0|=1.5, |0.3-0|=0.3 pp -> mean 0.67
+    assert float(row["mae_pct"]) == 0.67
+    # no change: 0.8, 0.5, 0.3 pp -> mean 0.53
+    assert float(row["baseline_mae_pct"]) == 0.53
+    assert row["mae_eur"] == 67  # (20 + 150 + 30) / 3 = 66.67
+    assert row["baseline_mae_eur"] == 53  # (80 + 50 + 30) / 3 = 53.33
