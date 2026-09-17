@@ -94,10 +94,11 @@ def facts_for_ingest(
     dict -- like calibration, it never affects `errors`.
 
     `mode` defaults to `"ingest"`, what the twice-daily pass writes. The
-    nightly pass (status only, right after Kickbase's market-value update)
-    reuses this helper but passes `mode="mv_nightly"`: rule I7
-    (`rehoboam/store/session_store.py`) counts only `mode = 'ingest'` rows,
-    so the nightly pass must not claim to be one.
+    nightly pass (status for every player; nothing else refreshes, right
+    after Kickbase's market-value update) reuses this helper but passes
+    `mode="mv_nightly"`: rule I7 (`rehoboam/store/session_store.py`) counts
+    only `mode = 'ingest'` rows, so the nightly pass must not claim to be
+    one.
     """
     wrote_nothing = stats.failed and not (
         stats.status_written

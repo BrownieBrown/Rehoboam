@@ -153,8 +153,11 @@ def ingest(timer: func.TimerRequest):
 
 
 # 21:45 UTC — 23:45 Berlin in summer, 22:45 in winter: after Kickbase's ~22:00
-# market-value move, so these readings say what it did. Status only: the full
-# passes at 05:00/17:00 keep performance, MV series and transfers fresh.
+# market-value move, so these readings say what it did. Status for every
+# player; nothing else refreshes -- the full passes at 05:00/17:00 keep
+# performance, MV series and transfers fresh. The deadline is clamped to 540s
+# (9 min) so a slow run doesn't cross Berlin midnight (22:00 UTC) and key its
+# readings to the wrong day.
 @app.timer_trigger(schedule="0 45 21 * * *", arg_name="timer", run_on_startup=False)
 def mv_nightly(timer: func.TimerRequest):
     from rehoboam.api import KickbaseAPI
@@ -181,7 +184,9 @@ def mv_nightly(timer: func.TimerRequest):
         league = leagues[int(os.getenv("LEAGUE_INDEX", "0"))]
 
         budget = IngestBudget(
-            deadline=started_at + settings.ingest_deadline_seconds,
+            # 21:45 UTC + up to 9 min must not cross Berlin midnight (22:00
+            # UTC), or a slow run's readings would key to the wrong day.
+            deadline=started_at + min(settings.ingest_deadline_seconds, 540.0),
             max_requests=settings.ingest_max_requests,
         )
         stats = run_ingestion(

@@ -136,13 +136,17 @@ def test_the_next_mornings_run_has_nothing_left_for_d16_and_rewrites_d17(store_d
     _run(store_dsn, _at(D16, 7, 9))
     _reading(store_dsn, "a", D16, 10_090_000, 90_000, _at(D16, 23, 45))
     _run(store_dsn, _at(D16, 23, 45))  # scores D16, writes D17 (base_mv=10,090,000)
-    _reading(store_dsn, "a", D17, 10_170_000, 80_000, _at(D17, 7))
+    made_at_night = _forecasts(store_dsn)[("a", D17)]["made_at"]
+    # Nothing moves between 23:45 last night and 07:00 this morning: the same
+    # update, read again -- not a second, different report of it.
+    _reading(store_dsn, "a", D17, 10_090_000, 90_000, _at(D17, 7))
     out = _run(store_dsn, _at(D17, 7, 9))
     assert (out.scored, out.unscorable) == (0, 0)  # D16 already scored last night
     rows = _forecasts(store_dsn)
     assert rows[("a", D16)]["scored_at"] is not None  # untouched, still scored
     d17 = rows[("a", D17)]
-    assert d17["base_mv"] == 10_170_000  # rewritten -- it was still unscored
+    assert d17["base_mv"] == 10_090_000  # unchanged -- same reading, rewritten in place
+    assert d17["made_at"] > made_at_night  # rewritten -- it was still unscored
     assert d17["scored_at"] is None
 
 

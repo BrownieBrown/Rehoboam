@@ -492,9 +492,10 @@ def mv_nightly_cmd(
     throttle: float = typer.Option(0.25, "--throttle", help="Seconds between requests."),
     league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
 ):
-    """Status-only pass right after Kickbase's ~22:00 market-value update --
-    what func-rehoboam-external runs at 21:45 UTC. Scores tonight's result
-    and writes tomorrow's forecast; no league refresh."""
+    """Status for every player; nothing else refreshes -- right after
+    Kickbase's ~22:00 market-value update, what func-rehoboam-external runs
+    at 21:45 UTC. Scores tonight's result and writes tomorrow's forecast;
+    no league refresh."""
     import time
     import uuid
     from dataclasses import asdict
@@ -512,7 +513,12 @@ def mv_nightly_cmd(
     try:
         api, settings, league = _login_and_get_league(league_index)
         budget = IngestBudget(
-            deadline=time.time() + (deadline_seconds or settings.ingest_deadline_seconds),
+            # 21:45 UTC + up to 9 min must not cross Berlin midnight (22:00
+            # UTC), or a slow run's readings would key to the wrong day --
+            # clamp the default, but an explicit --deadline-seconds is still
+            # honoured as-is.
+            deadline=time.time()
+            + (deadline_seconds or min(settings.ingest_deadline_seconds, 540.0)),
             max_requests=max_requests or settings.ingest_max_requests,
         )
         stats = run_ingestion(

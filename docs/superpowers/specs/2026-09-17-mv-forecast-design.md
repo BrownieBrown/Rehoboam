@@ -165,15 +165,22 @@ its outcome (`written`, `scored`, `unscorable`, `error`) goes into the run's
 
 The nightly pass (`mv_nightly` in `deploy/azure_function_external/function_app.py`, `rehoboam mv-nightly`) runs at 21:45 UTC — after the market-value
 move but still the same UTC day the twice-daily runs use, so
-`player_status_daily.day` lines up. It re-reads every player's status
-(`status_stale_after_seconds=0.0`) and nothing else (performance, MV series
-and transfers windows all set to 10 days, well past their normal staleness,
-so those kinds are untouched and no league refresh runs), then runs the
-forecast step. It is the only pass whose readings say what the update
-actually did: it scores tonight's forecast (written that morning) and
-writes tomorrow's, so the site is never blank between 22:00 and the next
-morning's run. Its `session_facts` row uses `mode="mv_nightly"`, not
-`"ingest"` — rule I7 only cares that the twice-daily pass is keeping up.
+`player_status_daily.day` lines up. It re-reads status for every player
+(`status_stale_after_seconds=0.0`); nothing else refreshes (performance, MV
+series and transfers windows all set to 10 days, well past their normal
+staleness, so those kinds are untouched and no league refresh runs), then
+runs the forecast step. Its `IngestBudget` deadline is `min(settings.ingest_deadline_seconds, 540.0)` (CLI: still honours an explicit
+`--deadline-seconds`) — the run starts at 21:45 UTC and Berlin midnight is
+22:00 UTC, so a run that took longer than nine minutes could read a player
+after midnight and key that reading to the wrong day. It is the only pass
+whose readings say what the update actually did: it scores tonight's
+forecast (written that morning) and writes tomorrow's. `web_mv_forecast`
+still flips from today's row to tomorrow's at 22:00 Berlin (see "The
+pages"), so the site's forecast column is blank only between 22:00 Berlin
+and whenever the nightly pass actually writes (typically a few minutes
+later), not until the next morning's run as before. Its `session_facts`
+row uses `mode="mv_nightly"`, not `"ingest"` — rule I7 only cares that the
+twice-daily pass is keeping up.
 
 ## The pages
 

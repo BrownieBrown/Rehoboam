@@ -93,6 +93,16 @@ def test_reading_window_follows_berlin_in_winter_too():
     assert reading_window(utc_21) is None
 
 
+def test_the_nightly_schedules_21_45_utc_lands_in_post_in_both_seasons():
+    """Pins the mv_nightly cron (21:45 UTC) against PRE_CUTOFF/POST_START, so
+    a change to either constant -- or to the cron -- fails loudly here
+    instead of quietly producing nothing for the nightly pass."""
+    july = datetime.fromisoformat("2026-07-15T21:45:00+00:00").timestamp()
+    assert reading_window(july) == (date(2026, 7, 15), POST)
+    january = datetime.fromisoformat("2027-01-15T21:45:00+00:00").timestamp()
+    assert reading_window(january) == (date(2027, 1, 15), POST)
+
+
 def test_berlin_today_crosses_midnight_before_utc_does():
     utc_2230 = datetime.fromisoformat("2026-09-16T22:30:00+00:00").timestamp()
     assert berlin_today(utc_2230) == date(2026, 9, 17)
