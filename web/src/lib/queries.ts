@@ -294,3 +294,78 @@ export async function managers(): Promise<ManagerRow[]> {
     order by is_self desc, team_value desc nulls last
   `;
 }
+
+export type CalibrationRow = {
+  season: string;
+  day_number: number;
+  backfill: boolean;
+  computed_at: number;
+  n: number;
+  n_unpredicted: number;
+  n_stale_rows: number;
+  mae: number | null;
+  bias: number | null;
+  spearman: number | null;
+  baseline_spearman: number | null;
+  spearman_played: number | null;
+  top11_regret: number | null;
+  baseline_top11_regret: number | null;
+  squad_regret: number | null;
+  live_spearman: number | null;
+  live_n: number;
+  worst: { player_id: string; position: string; predicted: number; actual: number }[];
+  gate: Record<string, unknown> | null;
+};
+
+/** Every calibration report, live and backfill. The caller groups by matchday itself. */
+export async function calibration(): Promise<CalibrationRow[]> {
+  return sql<CalibrationRow[]>`
+    select * from rehoboam.web_calibration
+    order by day_number asc, backfill asc
+  `;
+}
+
+export type SessionRow = {
+  session_id: string;
+  app: string;
+  mode: string;
+  dry_run: number;
+  started_at: number;
+  duration_s: number;
+  errors: number;
+  error_text: string;
+  lineup_result: string | null;
+  predictions_written: number | null;
+  integrity_rules: string[];
+  integrity_details: Record<string, string>;
+  league_state_squads: number | null;
+  requests: number | null;
+  failed: number | null;
+  status_written: number | null;
+  universe_size: number | null;
+  stopped_by: string | null;
+  league_teams: number | null;
+  league_fixtures: number | null;
+  league_failed: number | null;
+};
+
+/**
+ * `worst` stores player ids; a person cannot act on "11006". Resolve names in
+ * one query for every id on the page, and fall back to the id if a player has
+ * left the universe.
+ */
+export async function playerNames(ids: string[]): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const rows = await sql<{ player_id: string; name: string }[]>`
+    select player_id, name from rehoboam.web_players where player_id = any(${ids})
+  `;
+  return Object.fromEntries(rows.map((r) => [r.player_id, r.name]));
+}
+
+export async function sessions(limit = 30): Promise<SessionRow[]> {
+  return sql<SessionRow[]>`
+    select * from rehoboam.web_session_summary
+    order by started_at desc
+    limit ${limit}
+  `;
+}
