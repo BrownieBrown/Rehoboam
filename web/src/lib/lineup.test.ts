@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveLineup } from "./lineup";
+import { deriveLineup, lineupNotes } from "./lineup";
 
 /**
  * `in_best_11` is a squad snapshot taken early in a session
@@ -28,6 +28,15 @@ function rendered(groups: { players: unknown[] }[]) {
 
 const MATCHING = [...gk(1), ...def(4), ...mid(3), ...fw(3)];
 const EXTRA_MID = [...gk(1), ...def(3), ...mid(4), ...fw(3)];
+const ONE_STRAY = [...gk(1), ...def(4), ...mid(3), ...fw(2), { position: "Wingback" }];
+const TWO_STRAYS = [
+  ...gk(1),
+  ...def(4),
+  ...mid(3),
+  ...fw(1),
+  { position: "Wingback" },
+  { position: "Sweeper" },
+];
 
 // Named cases reused by the "nothing vanishes" property test below and
 // (where relevant) by their own dedicated behavioral test.
@@ -133,5 +142,70 @@ describe("deriveLineup", () => {
   it.each(CASES)("nothing vanishes: %s", (_name, eleven, formation) => {
     const check = deriveLineup(eleven, formation);
     expect(rendered(check.groups)).toBe(eleven.length);
+  });
+});
+
+/**
+ * `deriveLineup`'s `mismatch` has two independent causes - a formation
+ * difference, and a player `deriveLineup` couldn't place. The two must
+ * never be explained with the same sentence: a formation-difference cause
+ * ("worked out at different points in the session") is not true when the
+ * real cause is an unplaced player - the comparison itself isn't
+ * trustworthy then, so `lineupNotes` must say only the unplaced sentence
+ * and never the squad-change one in that case, even if the two D-M-F
+ * strings happen to coincide.
+ */
+describe("lineupNotes", () => {
+  it("returns nothing when the eleven matches the submitted formation", () => {
+    const check = deriveLineup(MATCHING, "4-3-3");
+    expect(lineupNotes(check, "4-3-3")).toEqual([]);
+  });
+
+  it("names the submitted formation when it differs and no player is unplaced", () => {
+    const check = deriveLineup(MATCHING, "3-4-3");
+    const notes = lineupNotes(check, "3-4-3");
+    expect(notes).toEqual([
+      "The lineup the session submitted used 3-4-3. The two are worked out at different " +
+        "points in the session, and the squad can change in between.",
+    ]);
+  });
+
+  it("gives only the unplaced sentence, singular, for one stray player - never the squad-change sentence", () => {
+    const check = deriveLineup(ONE_STRAY, "4-3-3");
+    const notes = lineupNotes(check, "4-3-3");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^1 player has/);
+    expect(notes[0]).toContain("It is listed under Other");
+    expect(notes[0]).toContain("4-3-3");
+    expect(notes[0]).not.toContain("squad can change");
+  });
+
+  it("uses the plural for two stray players", () => {
+    const check = deriveLineup(TWO_STRAYS, "4-3-3");
+    const notes = lineupNotes(check, "4-3-3");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^2 players have/);
+    expect(notes[0]).toContain("They are listed under Other");
+  });
+
+  it("says the formation is unknown when a stray player meets a null formation", () => {
+    const check = deriveLineup(ONE_STRAY, null);
+    const notes = lineupNotes(check, null);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("unknown");
+  });
+
+  it("gives only the unplaced sentence even when the D-M-F counts coincidentally match", () => {
+    // Same case as deriveLineup's "never presents Other as agreeing ... by
+    // coincidence" test above: 2 FW + 1 stray reads as "3" by count, so
+    // formationDiffers is false here - but the stray still makes the
+    // comparison untrustworthy, so the squad-change sentence must not appear.
+    const check = deriveLineup(ONE_STRAY, "4-3-2");
+    expect(check.formationDiffers).toBe(false);
+    expect(check.unplaced).toBe(1);
+    const notes = lineupNotes(check, "4-3-2");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^1 player has/);
+    expect(notes[0]).not.toContain("worked out at different points");
   });
 });

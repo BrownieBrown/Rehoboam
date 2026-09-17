@@ -1,5 +1,5 @@
 import { num } from "@/lib/format";
-import { deriveLineup } from "@/lib/lineup";
+import { deriveLineup, lineupNotes } from "@/lib/lineup";
 import type { SquadRow } from "@/lib/queries";
 
 /**
@@ -10,16 +10,18 @@ import type { SquadRow } from "@/lib/queries";
  * fill, can run in between, so the two can genuinely disagree. A row capped
  * to the formation's count would silently drop a real starter with no
  * indication - a silently short figure is worse than an honest one - so this
- * renders every flagged player and, when `deriveLineup` finds a mismatch,
- * says so underneath instead of hiding it.
+ * renders every flagged player and, underneath, only what `lineupNotes` can
+ * say is certainly true about any disagreement (never both a formation
+ * difference and an unplaced-player explanation at once - see `lineup.ts`).
  */
 export function Formation({ formation, eleven }: { formation: string | null; eleven: SquadRow[] }) {
-  const { groups, mismatch } = deriveLineup(eleven, formation);
+  const check = deriveLineup(eleven, formation);
+  const notes = lineupNotes(check, formation);
 
   return (
     <div className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold text-text">Predicted best eleven</h2>
-      {groups.map((row) => (
+      {check.groups.map((row) => (
         <div key={row.label} className="flex flex-wrap justify-center gap-3">
           {row.players.map((p) => (
             <div
@@ -36,12 +38,11 @@ export function Formation({ formation, eleven }: { formation: string | null; ele
           ))}
         </div>
       ))}
-      {mismatch ? (
-        <p className="text-xs text-muted">
-          The lineup the session submitted used {formation}. It differs from this predicted eleven
-          because the squad changed during the session.
+      {notes.map((note, i) => (
+        <p key={i} className="text-xs text-muted">
+          {note}
         </p>
-      ) : null}
+      ))}
     </div>
   );
 }
