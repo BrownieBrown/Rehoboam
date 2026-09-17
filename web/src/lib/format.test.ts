@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ago, countdown, DASH, money, num, pct, signed, signedPct } from "./format";
+import { ago, countdown, DASH, money, num, pct, signed, signedPct, signedMoney } from "./format";
 
 describe("money", () => {
   it("writes the exact figure with separators", () => {
@@ -90,5 +90,27 @@ describe("pct", () => {
   it("shows an em dash for nothing", () => {
     expect(pct(null)).toBe(DASH);
     expect(pct(undefined)).toBe(DASH);
+  });
+});
+
+describe("signedMoney", () => {
+  it("formats negative values with grouping and a real minus sign", () => {
+    expect(signedMoney(-8094199)).toEqual({ text: "−8,094,199", tone: "negative" });
+    expect(signedMoney(-8094199).text.charCodeAt(0)).toBe("−".charCodeAt(0));
+  });
+  it("formats positive values with grouping and a plus sign", () => {
+    expect(signedMoney(2000000)).toEqual({ text: "+2,000,000", tone: "positive" });
+  });
+  it("formats zero without a sign", () => {
+    expect(signedMoney(0)).toEqual({ text: "0", tone: "neutral" });
+  });
+  it("shows an em dash for null and undefined", () => {
+    expect(signedMoney(null)).toEqual({ text: "—", tone: "neutral" });
+    expect(signedMoney(undefined)).toEqual({ text: "—", tone: "neutral" });
+  });
+  it("never abbreviates, even for very large values", () => {
+    const result = signedMoney(-1234567890);
+    expect(result.text).not.toMatch(/M|m|k|B|b/);
+    expect(result.text).toBe("−1,234,567,890");
   });
 });

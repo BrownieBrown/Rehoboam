@@ -43,6 +43,12 @@ export function signedPct(n: number | null | undefined): { text: string; tone: T
   return { text: withSign(n, `${Math.abs(n).toFixed(2)}%`), tone: tone(n) };
 }
 
+/** Signed money: exact, grouped, with a real minus and a tone, e.g. "−8,094,199". */
+export function signedMoney(n: number | null | undefined): { text: string; tone: Tone } {
+  if (n === null || n === undefined) return { text: DASH, tone: "neutral" };
+  return { text: withSign(n, groups.format(Math.abs(n))), tone: tone(n) };
+}
+
 /** A 0-1 probability as a whole percent, e.g. 0.84 -> "84%"; a dash when unknown. */
 export function pct(p: number | null | undefined): string {
   if (p === null || p === undefined) return DASH;

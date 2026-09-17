@@ -4,7 +4,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Formation } from "@/components/Formation";
 import { Pill } from "@/components/Pill";
 import { StatusHeader } from "@/components/StatusHeader";
-import { DASH, money, num, pct, signed, POSITION, type Tone } from "@/lib/format";
+import { DASH, money, num, pct, signedMoney, POSITION, type Tone } from "@/lib/format";
 import { integritySentence } from "@/lib/integrity";
 
 const TONE: Record<Tone, string> = {
@@ -136,7 +136,7 @@ export default async function SquadPage() {
       label: "Gain/loss",
       sortable: false,
       cell: (p) => {
-        const out = signed(p.gain_loss, 0);
+        const out = signedMoney(p.gain_loss);
         return <span className={TONE[out.tone]}>{out.text}</span>;
       },
     },
