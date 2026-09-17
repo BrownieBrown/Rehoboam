@@ -120,3 +120,12 @@ def test_a_failing_store_is_reported_not_raised():
 
     out = run_mv_forecast(Broken(), now=_at(D17, 7), momentum=0.9, cap=0.2)
     assert out.written == 0 and out.error == "pooler down"
+
+
+def test_an_exception_without_a_message_is_still_reported():
+    class Silent:
+        def pending(self, before):
+            raise TimeoutError()
+
+    out = run_mv_forecast(Silent(), now=_at(D17, 7), momentum=0.9, cap=0.2)
+    assert out.error == "TimeoutError"

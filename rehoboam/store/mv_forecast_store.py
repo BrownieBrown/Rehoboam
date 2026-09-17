@@ -79,7 +79,7 @@ class MvForecastStore:
                     for f in forecasts
                 ],
             )
-        return len(forecasts)
+            return cur.rowcount
 
     def pending(self, before: date) -> list[dict[str, Any]]:
         with self.connection() as conn:

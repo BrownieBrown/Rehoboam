@@ -40,7 +40,7 @@ describe("accuracySentence", () => {
   it("says the forecast beats no change only when its miss is smaller", () => {
     const s = { updates: 14, scored: 7000, maePct: 0.7, baselineMaePct: 2.1, directionRate: 0.953 };
     expect(accuracySentence(s)).toBe(
-      'Over the last 14 updates (7000 forecasts), the forecast missed by 0.70 points of percent on average, better than "no change" at 2.10. It called the direction right 95% of the time.',
+      'Over the last 14 updates (7000 forecasts), the forecast missed by 0.70 points of percent on average, better than "no change" at 2.10. It called the direction right 95% of the time when both it and the update moved.',
     );
   });
 
@@ -51,7 +51,7 @@ describe("accuracySentence", () => {
     );
     const loss = { updates: 2, scored: 5, maePct: 3, baselineMaePct: 1, directionRate: 0 };
     expect(accuracySentence(loss)).toBe(
-      'Over the last 2 updates (5 forecasts), the forecast missed by 3.00 points of percent on average, worse than "no change" at 1.00. It called the direction right 0% of the time.',
+      'Over the last 2 updates (5 forecasts), the forecast missed by 3.00 points of percent on average, worse than "no change" at 1.00. It called the direction right 0% of the time when both it and the update moved.',
     );
   });
 });

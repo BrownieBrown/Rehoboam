@@ -123,7 +123,12 @@ Migration `008_mv_forecast.sql`:
   either side of the update, so it is used for neither forecasting nor
   scoring. The ingestion runs at 05:00 and 17:00 UTC (07:00/19:00 Berlin in
   summer, 06:00/18:00 in winter) and stops within nine minutes, so its rows
-  are always usable.
+  are always usable. `player_status_daily.day` is keyed by the ingestion
+  run's UTC date, not its Berlin one; the two scheduled runs land on the
+  same calendar date in both zones all year, but a manual `rehoboam ingest`
+  between 22:00 UTC (summer) or 23:00 UTC (winter) and midnight UTC writes
+  under the previous day's key and overwrites that day's pre-update reading,
+  so avoid running it in that window.
 - `score(forecast, next_row)`: `next_row` is the player's status row for
   `target_day + 1`, usable for that day. If `next_row.market_value − next_row.mv_change ≠ base_mv`, the day did not line up: `unscorable`.
   Otherwise `actual_change = next_row.mv_change`, `actual_pct = actual_change / base_mv`. The base check keeps a mis-dated reading from

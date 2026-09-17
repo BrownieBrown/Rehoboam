@@ -55,7 +55,7 @@ export function accuracySentence(s: AccuracySummary): string {
   const direction =
     s.directionRate === null
       ? ""
-      : ` It called the direction right ${Math.round(s.directionRate * 100)}% of the time.`;
+      : ` It called the direction right ${Math.round(s.directionRate * 100)}% of the time when both it and the update moved.`;
   return `Over ${updates} (${forecasts}), the forecast missed by ${num(s.maePct, 2)} points of percent on average, ${verdict} "no change" at ${num(s.baselineMaePct, 2)}.${direction}`;
 }
 

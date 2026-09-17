@@ -69,11 +69,12 @@ def test_upsert_writes_then_rewrites_only_unscored_rows(store_dsn):
     )
     assert written == 2
     store.record_outcomes([("b", D16, Score("scored", 50_000, 0.005))], scored_at=2.0)
-    store.upsert_forecasts(
+    rewritten = store.upsert_forecasts(
         [_forecast("a", D17, change=1), _forecast("b", D16, change=1)],
         made_at=3.0,
         method="m",
     )
+    assert rewritten == 1
     rows = _rows(store_dsn)
     assert (rows[("a", D17)]["predicted_change"], rows[("a", D17)]["made_at"]) == (
         1,
@@ -119,6 +120,24 @@ def test_record_outcomes_fills_the_row_once(store_dsn):
         -0.002,
         5.0,
     )
+
+
+def test_record_outcomes_counts_only_the_rows_it_filled_in_a_mixed_batch(store_dsn):
+    store = MvForecastStore(dsn=store_dsn)
+    store.upsert_forecasts([_forecast("a", D16), _forecast("b", D16)], made_at=1.0, method="m")
+    store.record_outcomes([("a", D16, Score("scored", 5, 0.0000005))], scored_at=2.0)
+    filled = store.record_outcomes(
+        [
+            ("a", D16, Score("scored", 7, 0.0000007)),  # already scored: left alone
+            ("b", D16, Score("unscorable", None, None)),  # fresh: filled
+            ("z", D16, Score("scored", 1, 0.1)),  # no such forecast
+        ],
+        scored_at=3.0,
+    )
+    assert filled == 1
+    rows = _rows(store_dsn)
+    assert rows[("a", D16)]["actual_change"] == 5
+    assert rows[("b", D16)]["outcome"] == "unscorable"
 
 
 def test_daily_series_splits_each_player_at_gaps(store_dsn):
