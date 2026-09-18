@@ -233,6 +233,15 @@ export type PlayerProfile = PlayerRow & {
   season_average: number | null;
   rank_overall: number | null;
   rank_position: number | null;
+  /** Kickbase's `st` availability code — 0 is fit. `availability.ts` names it. */
+  availability: number | null;
+  /** How many players carry a rank at all, for the "of N" under each rank. */
+  ranked_overall_total: number | null;
+  ranked_position_total: number | null;
+  /** His club's line in the newest stored matchday of the league table. */
+  club_place: number | null;
+  club_points: number | null;
+  club_goal_difference: number | null;
 };
 
 /** One player's row from `web_player_profile`: `web_players`' columns plus the

@@ -1,5 +1,7 @@
-"""The player panel's one-row view (migration 016): season stats from the
-newest status row, the market-value move in euros, and his rank."""
+"""The player panel's one-row view: season stats from the newest status row,
+the market-value move in euros, his rank (migration 016), and -- migration
+019 -- his availability code, each rank's denominator, and his club's
+league position."""
 
 from __future__ import annotations
 
@@ -7,6 +9,7 @@ import time
 from datetime import date, timedelta
 
 from rehoboam.store.corpus_store import CorpusStore
+from rehoboam.store.league_store import LeagueStore
 
 NOW = time.time()
 
@@ -168,3 +171,72 @@ def test_two_players_with_equal_points_share_a_rank(store_dsn):
     a, b = _row(store, "a"), _row(store, "b")
     assert a["rank_overall"] == b["rank_overall"] == 1
     assert a["rank_position"] == b["rank_position"] == 1
+
+
+def test_trend_7d_falls_back_to_the_daily_status_series(store_dsn):
+    """No mv_series point older than a week, but a daily status row there:
+    the 7d move is still a number, as player_table has always had it."""
+    store = CorpusStore(dsn=store_dsn)
+    store.upsert_players(
+        [{"player_id": "fb", "last_name": "Fallback", "position": "Midfielder", "team_id": "7"}]
+    )
+    store.record_status_daily(
+        "fb", date.today() - timedelta(days=9), {"mv": 10_000_000}, NOW - 9 * 86400
+    )
+    store.record_status_daily("fb", date.today(), {"mv": 12_000_000}, NOW)
+    row = _row(store, "fb")
+    assert row["trend_7d_eur"] == 2_000_000
+
+
+def test_rank_denominators_count_the_ranked_players(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    store.upsert_players(
+        [
+            {"player_id": "ra", "last_name": "A", "position": "Forward", "team_id": "7"},
+            {"player_id": "rb", "last_name": "B", "position": "Forward", "team_id": "7"},
+            {"player_id": "rc", "last_name": "C", "position": "Defender", "team_id": "7"},
+            {"player_id": "rd", "last_name": "D", "position": "Forward", "team_id": "7"},
+        ]
+    )
+    for pid, pts in (("ra", 300), ("rb", 200), ("rc", 100)):
+        _played(store, pid, pts)
+    a, c, d = _row(store, "ra"), _row(store, "rc"), _row(store, "rd")
+    assert (a["rank_overall"], a["ranked_overall_total"]) == (1, 3)
+    assert (a["rank_position"], a["ranked_position_total"]) == (1, 2)
+    assert (c["rank_position"], c["ranked_position_total"]) == (1, 1)
+    # A player with no points is not ranked and gets no denominator either.
+    assert (d["rank_overall"], d["ranked_overall_total"]) == (None, None)
+
+
+def test_club_league_position_comes_from_the_newest_matchday(store_dsn):
+    LeagueStore(dsn=store_dsn).upsert_teams(
+        [{"team_id": "t-1", "name": "Freiburg", "short_name": None, "updated_at": NOW}]
+    )
+    store = CorpusStore(dsn=store_dsn)
+    store.upsert_players(
+        [{"player_id": "cl", "last_name": "Club", "position": "Forward", "team_id": "t-1"}]
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "insert into rehoboam.league_table"
+            " (season, day_number, team_id, place, points, played, goal_difference, updated_at)"
+            " values ('2026/2027', 2, 't-1', 5, 4, 2, 1, 0),"
+            "        ('2026/2027', 3, 't-1', 1, 9, 3, 9, 0)"
+        )
+    row = _row(store, "cl")
+    assert (row["club_place"], row["club_points"], row["club_goal_difference"]) == (
+        1,
+        9,
+        9,
+    )
+
+
+def test_availability_is_the_newest_status_code(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    store.upsert_players(
+        [{"player_id": "av", "last_name": "Av", "position": "Midfielder", "team_id": "7"}]
+    )
+    store.record_status_daily("av", date.today() - timedelta(days=1), {"st": 0}, NOW - 86400)
+    store.record_status_daily("av", date.today(), {"st": 4}, NOW)
+    row = _row(store, "av")
+    assert row["availability"] == 4
