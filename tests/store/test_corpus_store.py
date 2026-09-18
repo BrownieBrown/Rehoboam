@@ -77,6 +77,16 @@ def test_status_daily_is_one_row_per_player_per_day_and_refetch_replaces(store_d
     assert store.status_on("p1", date(2026, 9, 13)) is None
 
 
+def test_status_daily_stores_the_last_mv_change_and_a_refetch_replaces_it(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "p1")
+    day = date(2026, 9, 14)
+    store.record_status_daily("p1", day, {"mv": 5_000_000, "tfhmvt": 100_000}, 10.0)
+    assert store.status_on("p1", day)["mv_change"] == 100_000
+    store.record_status_daily("p1", day, {"mv": 5_000_000}, 20.0)
+    assert store.status_on("p1", day)["mv_change"] is None
+
+
 def test_players_needing_refresh_orders_never_fetched_then_oldest(store_dsn):
     store = CorpusStore(dsn=store_dsn)
     _universe(store, "a", "b", "c", "d")

@@ -52,8 +52,10 @@ def _seed(dsn):
                 "average_points": 10.0,
             },
             {
-                # No player_status_daily rows at all -- exercises the mv_series
-                # fallback for trend_24h_pct/trend_7d_pct (Important #4).
+                # No day-7 player_status_daily row -- exercises the mv_series
+                # fallback for trend_7d_pct. Its only status row (below) carries
+                # no mv_change, so trend_24h_pct is null: that no longer falls
+                # back to mv_series at all (fix round 1).
                 "player_id": "c",
                 "first_name": None,
                 "last_name": "Gamma",
@@ -90,7 +92,10 @@ def _seed(dsn):
     )
     corpus.record_match_history("b", "8", _perf([("2026/2027", [_m(1, 5, 10)])]))
     corpus.record_status_daily(
-        "a", date.today(), {"st": 0, "prob": 1, "mv": 12_000_000, "tid": "7"}, NOW
+        "a",
+        date.today(),
+        {"st": 0, "prob": 1, "mv": 12_000_000, "tfhmvt": 1_000_000, "tid": "7"},
+        NOW,
     )
     corpus.record_status_daily(
         "a",
@@ -103,6 +108,11 @@ def _seed(dsn):
         date.today() - timedelta(days=7),
         {"st": 0, "prob": 1, "mv": 10_000_000, "tid": "7"},
         NOW - 7 * 86400,
+    )
+    # A newest row with no mv_change (pre-migration-008-style) -- trend_24h_pct
+    # must be null, not fall back to any other reading.
+    corpus.record_status_daily(
+        "c", date.today(), {"st": 0, "prob": 1, "mv": 12_000_000, "tid": "9"}, NOW
     )
     league = LeagueStore(dsn=dsn)
     league.upsert_teams(
@@ -200,6 +210,7 @@ def test_the_view_has_base_xi_columns_in_order(store_dsn):
         "predicted_ep",
         "p_start",
         "fair_value_gap",
+        "fair_price",
     ]
 
 
@@ -214,16 +225,74 @@ def test_the_numbers(store_dsn):
     assert float(a["avg_points"]) == 50.0 and float(a["median_points"]) == 50.0
     assert a["points_prev"] == 100 and a["appearances_prev"] == 1 and a["starts_prev"] == 1
     assert round(float(a["points_per_million"]), 2) == round(100 / 12.0, 2)
-    # trend_24h/7d for "a" come from player_status_daily rows (Important #4), not mv_series.
-    assert round(float(a["trend_24h_pct"]), 1) == round(100 * (12 - 11) / 11, 1)
+    # trend_24h_pct is Kickbase's own last move (mv_change) on the newest
+    # status reading (fix round 1) -- 11,000,000 -> 12,000,000 is +1,000,000.
+    assert round(float(a["trend_24h_pct"]), 2) == round(100 * 1_000_000 / 11_000_000, 2)
+    # trend_7d still comes from the day-7 player_status_daily row for "a".
     assert round(float(a["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
     assert a["owner"] == "Rival" and float(a["predicted_ep"]) == 61.5 and float(a["p_start"]) == 0.7
     assert b["owner"] == "Kickbase" and b["team"] is None and b["points_prev"] is None
     assert b["predicted_ep"] is None and b["trend_24h_pct"] is None
-    # "c" has no player_status_daily rows at all: trend falls back to mv_series.
+    # "c"'s newest (and only) status row has no mv_change: trend_24h_pct is
+    # null, not a fallback to mv_series. trend_7d_pct still falls back to
+    # mv_series since "c" has no day-7 player_status_daily row.
     c = rows["c"]
-    assert round(float(c["trend_24h_pct"]), 1) == round(100 * (12 - 11) / 11, 1)
+    assert c["trend_24h_pct"] is None
     assert round(float(c["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
+
+
+def _fair_price_seed(dsn):
+    """Two defenders with three appearances each, plus one with a single big
+    game. Two points define the position's line exactly, so each of the two
+    gets his own market value back as a fair price."""
+    corpus = CorpusStore(dsn=dsn)
+    corpus.upsert_players(
+        [
+            {"player_id": "d1", "last_name": "Dee One", "position": "Defender", "team_id": "7"},
+            {"player_id": "d2", "last_name": "Dee Two", "position": "Defender", "team_id": "7"},
+            {"player_id": "d3", "last_name": "Dee Three", "position": "Defender", "team_id": "7"},
+        ]
+    )
+    # 60 points a game and 20 points a game, three games each.
+    corpus.record_match_history(
+        "d1", "7", _perf([("2026/2027", [_m(1, 5, 60), _m(2, 5, 60), _m(3, 5, 60)])])
+    )
+    corpus.record_match_history(
+        "d2", "7", _perf([("2026/2027", [_m(1, 5, 20), _m(2, 5, 20), _m(3, 5, 20)])])
+    )
+    # One appearance, a huge score: the line would price him absurdly.
+    corpus.record_match_history("d3", "7", _perf([("2026/2027", [_m(1, 5, 200)])]))
+    for pid, mv in (("d1", 20_000_000), ("d2", 4_000_000), ("d3", 1_000_000)):
+        corpus.record_status_daily(
+            pid, date.today(), {"st": 0, "prob": 1, "mv": mv, "tid": "7", "tfhmvt": 0}, NOW
+        )
+    return LeagueStore(dsn=dsn)
+
+
+def test_fair_price_is_what_his_average_is_worth_at_his_positions_rate(store_dsn):
+    league = _fair_price_seed(store_dsn)
+    rows = {r["player_id"]: r for r in league.player_table()}
+    d1, d2 = rows["d1"], rows["d2"]
+    assert d1["appearances"] == 3 and float(d1["avg_points"]) == 60.0
+    assert abs(d1["fair_price"] - d1["market_value"]) <= 1
+    assert round(float(d1["fair_value_gap"]), 1) == 0.0
+    assert abs(d2["fair_price"] - d2["market_value"]) <= 1
+
+
+def test_fair_price_needs_three_appearances(store_dsn):
+    """One huge game must not price a player: the gap in points still shows,
+    but the euro price says nothing until there is a season behind it."""
+    league = _fair_price_seed(store_dsn)
+    d3 = {r["player_id"]: r for r in league.player_table()}["d3"]
+    assert d3["appearances"] == 1 and float(d3["avg_points"]) == 200.0
+    assert d3["fair_price"] is None
+    assert d3["fair_value_gap"] is not None
+
+
+def test_fair_price_is_absent_without_any_average(store_dsn):
+    league = _seed(store_dsn)
+    c = {r["player_id"]: r for r in league.player_table()}["c"]
+    assert c["avg_points"] is None and c["fair_price"] is None
 
 
 def test_filters_and_order(store_dsn):

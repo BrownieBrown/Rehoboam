@@ -394,13 +394,16 @@ def ingest_cmd(
     """One budgeted ingestion pass — what func-rehoboam-external runs twice a day."""
     import time
     import uuid
+    from dataclasses import asdict
 
     from .bid_learner import BidLearner
     from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from .enrichment.mv_forecast import run_mv_forecast
     from .services.session_facts import SessionFacts
     from .store.calibration_store import CalibrationStore
     from .store.corpus_store import CorpusStore
     from .store.league_store import LeagueStore
+    from .store.mv_forecast_store import MvForecastStore
     from .store.session_store import SessionStore
 
     _ensure_store()
@@ -443,8 +446,18 @@ def ingest_cmd(
         except Exception:
             logger.error("session_facts write failed", exc_info=True)
         raise
+    mv_outcome = run_mv_forecast(
+        MvForecastStore(),
+        now=time.time(),
+        momentum=settings.mv_forecast_momentum,
+        cap=settings.mv_forecast_cap,
+    )
     try:
-        SessionStore().record(facts_for_ingest(stats, app="cli", session_id=session_id))
+        SessionStore().record(
+            facts_for_ingest(
+                stats, app="cli", session_id=session_id, mv_forecast=asdict(mv_outcome)
+            )
+        )
     except Exception:
         logger.error("session_facts write failed", exc_info=True)
 
@@ -463,6 +476,120 @@ def ingest_cmd(
         table.add_row(name, str(getattr(stats, name)))
     table.add_row("stopped_by", stats.stopped_by or "—")
     table.add_row("duration_s", f"{stats.duration_s:.0f}")
+    table.add_row(
+        "mv_forecast",
+        f"written {mv_outcome.written} · scored {mv_outcome.scored} · "
+        f"unscorable {mv_outcome.unscorable}"
+        + (f" · error {mv_outcome.error}" if mv_outcome.error else ""),
+    )
+    console.print(table)
+
+
+@app.command("mv-nightly")
+def mv_nightly_cmd(
+    deadline_seconds: float | None = typer.Option(None, "--deadline-seconds"),
+    max_requests: int | None = typer.Option(None, "--max-requests"),
+    throttle: float = typer.Option(0.25, "--throttle", help="Seconds between requests."),
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """Status for every player; nothing else refreshes -- right after
+    Kickbase's ~22:00 market-value update, what func-rehoboam-external runs
+    at 21:45 UTC. Scores tonight's result and writes tomorrow's forecast;
+    no league refresh."""
+    import time
+    import uuid
+    from dataclasses import asdict
+
+    from .enrichment.ingest import IngestBudget, facts_for_ingest, run_ingestion
+    from .enrichment.mv_forecast import run_mv_forecast
+    from .services.session_facts import SessionFacts
+    from .store.corpus_store import CorpusStore
+    from .store.mv_forecast_store import MvForecastStore
+    from .store.session_store import SessionStore
+
+    _ensure_store()
+    session_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    try:
+        api, settings, league = _login_and_get_league(league_index)
+        budget = IngestBudget(
+            # 21:45 UTC + up to 9 min must not cross Berlin midnight (22:00
+            # UTC), or a slow run's readings would key to the wrong day --
+            # clamp the default, but an explicit --deadline-seconds is still
+            # honoured as-is.
+            deadline=time.time()
+            + (deadline_seconds or min(settings.ingest_deadline_seconds, 540.0)),
+            max_requests=max_requests or settings.ingest_max_requests,
+        )
+        stats = run_ingestion(
+            api.client,
+            CorpusStore(),
+            league_id=league.id,
+            budget=budget,
+            stale_after_seconds=10 * 86400,
+            mv_stale_after_seconds=10 * 86400,
+            status_stale_after_seconds=0.0,
+            transfers_stale_after_seconds=10 * 86400,
+            throttle_seconds=throttle,
+            league_store=None,
+            learner=None,
+        )
+    except Exception as e:
+        try:
+            SessionStore().record(
+                SessionFacts(
+                    session_id=session_id,
+                    app="cli",
+                    mode="mv_nightly",
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    errors=1,
+                    error_text=str(e)[:2000],
+                )
+            )
+        except Exception:
+            logger.error("session_facts write failed", exc_info=True)
+        raise
+    mv_outcome = run_mv_forecast(
+        MvForecastStore(),
+        now=time.time(),
+        momentum=settings.mv_forecast_momentum,
+        cap=settings.mv_forecast_cap,
+    )
+    try:
+        SessionStore().record(
+            facts_for_ingest(
+                stats,
+                app="cli",
+                session_id=session_id,
+                mv_forecast=asdict(mv_outcome),
+                mode="mv_nightly",
+            )
+        )
+    except Exception:
+        logger.error("session_facts write failed", exc_info=True)
+
+    table = Table(title="MV Nightly")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    for name in (
+        "universe_size",
+        "status_written",
+        "performance_fetched",
+        "mv_fetched",
+        "transfers_fetched",
+        "failed",
+        "requests",
+    ):
+        table.add_row(name, str(getattr(stats, name)))
+    table.add_row("stopped_by", stats.stopped_by or "—")
+    table.add_row("duration_s", f"{stats.duration_s:.0f}")
+    table.add_row(
+        "mv_forecast",
+        f"written {mv_outcome.written} · scored {mv_outcome.scored} · "
+        f"unscorable {mv_outcome.unscorable}"
+        + (f" · error {mv_outcome.error}" if mv_outcome.error else ""),
+    )
     console.print(table)
 
 
@@ -987,6 +1114,64 @@ def backtest_baseline(
     table.add_row("Total chosen points", f"{report.total_chosen_points:,.0f}")
     table.add_row("Total best-possible points", f"{report.total_best_points:,.0f}")
     console.print(table)
+
+
+def _float_list(raw: str, flag: str) -> list[float]:
+    try:
+        values = [float(part) for part in raw.split(",") if part.strip()]
+    except ValueError:
+        values = []
+    if not values:
+        console.print(f"[red]{flag} takes a comma-separated list of numbers, e.g. 0.8,0.9[/red]")
+        raise typer.Exit(code=1)
+    return values
+
+
+@app.command("backtest-mv")
+def backtest_mv(
+    momentum: str = typer.Option("0.8,0.85,0.9,0.95,1.0", "--momentum"),
+    cap: str = typer.Option("0.1,0.15,0.2,0.3", "--cap"),
+):
+    """Replay the market-value forecast over every stored daily series (read-only)."""
+    from .services.mv_forecast import backtest
+    from .store.mv_forecast_store import MvForecastStore
+
+    momenta = _float_list(momentum, "--momentum")
+    caps = _float_list(cap, "--cap")
+    _ensure_store()
+    series = MvForecastStore().daily_series()
+    results = [backtest(series, momentum=m, cap=c) for m in momenta for c in caps]
+    if not results or results[0].forecasts == 0:
+        console.print("No daily market values in the store to replay.")
+        return
+
+    table = Table(title="Market-value forecast backtest")
+    columns = (
+        "Momentum",
+        "Cap",
+        "Forecasts",
+        "Direction right",
+        "Miss (pp)",
+        "No change (pp)",
+    )
+    for column in columns:
+        table.add_column(column, justify="right")
+    for r in results:
+        rate = "—" if r.direction_rate is None else f"{100 * r.direction_rate:.1f}%"
+        table.add_row(
+            f"{r.momentum:.2f}",
+            f"{r.cap:.2f}",
+            f"{r.forecasts:,}",
+            rate,
+            f"{r.mae_pp:.3f}",
+            f"{r.baseline_mae_pp:.3f}",
+        )
+    console.print(table)
+    best = min(results, key=lambda r: r.mae_pp)
+    console.print(
+        f"Lowest miss: momentum {best.momentum:.2f}, cap {best.cap:.2f} "
+        f"({best.mae_pp:.3f} pp against {best.baseline_mae_pp:.3f} pp for no change)."
+    )
 
 
 @app.command("diagnose-flips")

@@ -93,6 +93,11 @@ export type PlayerRow = {
   p_start: number | null;
   fair_value_gap: number | null;
   listed: boolean;
+  /** Forecast for the next market-value update: euros, and percent with two decimals. */
+  next_mv_change: number | null;
+  next_mv_pct: number | null;
+  /** What his average points are worth at his position's going rate, in euros. */
+  fair_price: number | null;
   /** Every row the filters match, counted in the same statement as this page. */
   total: number;
 };
@@ -103,6 +108,8 @@ export const PLAYER_SORTS = [
   "market_value",
   "trend_24h_pct",
   "trend_7d_pct",
+  "next_mv_pct",
+  "fair_price",
   "points",
   "avg_points",
   "median_points",
@@ -275,6 +282,14 @@ export type MarketRow = {
   fair_value_gap: number | null;
   points: number | null;
   avg_points: number | null;
+  /** Forecast for the next market-value update: euros, and percent with two decimals. */
+  next_mv_change: number | null;
+  next_mv_pct: number | null;
+  /** What his average points are worth at his position's going rate, in euros. */
+  fair_price: number | null;
+  /** Migration 010: the same two numbers the Players page shows. */
+  trend_24h_pct: number | null;
+  points_per_million: number | null;
 };
 
 export const MARKET_SORTS = [
@@ -282,6 +297,10 @@ export const MARKET_SORTS = [
   "position",
   "ask",
   "market_value",
+  "next_mv_pct",
+  "fair_price",
+  "trend_24h_pct",
+  "points_per_million",
   "seller",
   "expires_at",
   "predicted_ep",
@@ -364,6 +383,30 @@ export async function calibration(): Promise<CalibrationRow[]> {
   return sql<CalibrationRow[]>`
     select * from rehoboam.web_calibration
     order by day_number asc, backfill asc
+  `;
+}
+
+export type MvAccuracyRow = {
+  /** YYYY-MM-DD, the Berlin date of the update. */
+  target_day: string;
+  scored: number;
+  unscorable: number;
+  directional: number;
+  direction_hits: number;
+  mae_pct: number | null;
+  baseline_mae_pct: number | null;
+  mae_eur: number | null;
+  baseline_mae_eur: number | null;
+};
+
+/** The newest scored updates first. The date is text: postgres.js would make a `date` a JS Date. */
+export async function mvAccuracy(limit = 14): Promise<MvAccuracyRow[]> {
+  return sql<MvAccuracyRow[]>`
+    select to_char(target_day, 'YYYY-MM-DD') as target_day, scored, unscorable,
+           directional, direction_hits, mae_pct, baseline_mae_pct, mae_eur, baseline_mae_eur
+    from rehoboam.web_mv_accuracy
+    order by target_day desc
+    limit ${limit}
   `;
 }
 

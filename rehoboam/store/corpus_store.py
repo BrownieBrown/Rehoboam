@@ -202,12 +202,14 @@ class CorpusStore:
             conn.execute(
                 """
                 INSERT INTO rehoboam.player_status_daily (
-                    player_id, day, status, lineup_probability, market_value, team_id, fetched_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    player_id, day, status, lineup_probability, market_value, mv_change,
+                    team_id, fetched_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (player_id, day) DO UPDATE SET
                     status = excluded.status,
                     lineup_probability = excluded.lineup_probability,
                     market_value = excluded.market_value,
+                    mv_change = excluded.mv_change,
                     team_id = excluded.team_id,
                     fetched_at = excluded.fetched_at
                 """,
@@ -217,6 +219,7 @@ class CorpusStore:
                     r["status"],
                     r["lineup_probability"],
                     r["market_value"],
+                    r["mv_change"],
                     r["team_id"],
                     r["fetched_at"],
                 ),
@@ -401,8 +404,9 @@ class CorpusStore:
     def status_on(self, player_id: str, day: date) -> dict[str, Any] | None:
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT player_id, day, status, lineup_probability, market_value, team_id, "
-                "fetched_at FROM rehoboam.player_status_daily WHERE player_id = %s AND day = %s",
+                "SELECT player_id, day, status, lineup_probability, market_value, mv_change, "
+                "team_id, fetched_at FROM rehoboam.player_status_daily "
+                "WHERE player_id = %s AND day = %s",
                 (str(player_id), day),
             ).fetchone()
         return dict(row) if row else None

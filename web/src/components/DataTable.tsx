@@ -5,6 +5,8 @@ export type Column<T> = {
   label: string;
   align?: "left" | "right";
   sortable?: boolean;
+  /** Shown as the header's tooltip. */
+  hint?: string;
   cell: (row: T) => React.ReactNode;
 };
 
@@ -49,6 +51,7 @@ export function DataTable<T>({
             {columns.map((c) => (
               <th
                 key={c.key}
+                title={c.hint}
                 className={`h-10 whitespace-nowrap border-b border-border-strong px-3 text-[11px] font-semibold uppercase tracking-[0.08em] ${
                   c.align === "left" ? "text-left" : "text-right"
                 } ${c.key === sort ? "text-accent" : "text-muted"}`}

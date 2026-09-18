@@ -73,6 +73,8 @@ def facts_for_ingest(
     app: str,
     session_id: str,
     calibration: dict | None = None,
+    mv_forecast: dict | None = None,
+    mode: str = "ingest",
 ) -> SessionFacts:
     """The row a completed ingest run leaves for rule I7.
 
@@ -87,6 +89,16 @@ def facts_for_ingest(
     `calibration`, when given, is the report step's `CalibrationOutcome` --
     it never affects `errors`, since `run_calibration` catches its own
     exceptions and reports them inside the outcome instead.
+
+    `mv_forecast`, when given, is the forecast step's `MvForecastOutcome` as a
+    dict -- like calibration, it never affects `errors`.
+
+    `mode` defaults to `"ingest"`, what the twice-daily pass writes. The
+    nightly pass (status for every player; nothing else refreshes, right
+    after Kickbase's market-value update) reuses this helper but passes
+    `mode="mv_nightly"`: rule I7 (`rehoboam/store/session_store.py`) counts
+    only `mode = 'ingest'` rows, so the nightly pass must not claim to be
+    one.
     """
     wrote_nothing = stats.failed and not (
         stats.status_written
@@ -99,10 +111,12 @@ def facts_for_ingest(
     extra = asdict(stats)
     if calibration is not None:
         extra["calibration"] = calibration
+    if mv_forecast is not None:
+        extra["mv_forecast"] = mv_forecast
     return SessionFacts(
         session_id=session_id,
         app=app,
-        mode="ingest",
+        mode=mode,
         started_at=stats.started_at,
         duration_s=stats.duration_s,
         errors=errors,

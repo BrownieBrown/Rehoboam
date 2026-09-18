@@ -5,18 +5,30 @@ lineup, Market, and Calibration & health — built with Next.js (App Router)
 and deployed on Vercel. Every page is a server component; nothing in `web/`
 ever writes to the store, places a trade, or calls the Kickbase API.
 
+Players and Market also show `Next MV`, the forecast for tonight's ~22:00
+market-value update — the percent change over the signed euro amount, a dash
+when there is no live forecast (overnight included, until the morning run
+writes tomorrow's). Calibration & health shows how those forecasts have
+scored against "no change".
+
 The site is **read-only and names no table**. Every query in
-`src/lib/queries.ts` reads one of six views —
+`src/lib/queries.ts` reads one of seven views —
 `rehoboam.web_players`, `rehoboam.web_squad`, `rehoboam.web_session_summary`,
-`rehoboam.web_market`, `rehoboam.web_ownership`, `rehoboam.web_calibration` —
-defined in migration `rehoboam/store/migrations/007_web_views.sql` in the bot
-repo. If a page needs a number the views don't expose, the fix starts there:
-add or extend a view in a new numbered migration, apply it, then read it here.
-Never widen the site's access with a raw table query.
+`rehoboam.web_market`, `rehoboam.web_ownership`, `rehoboam.web_calibration`,
+`rehoboam.web_mv_accuracy` — defined in migrations
+`rehoboam/store/migrations/007_web_views.sql` and `008_mv_forecast.sql` in
+the bot repo; migration 008 also defines `web_mv_forecast`, left-joined into
+`web_players` and `web_market` for their `next_mv_change`/`next_mv_pct`
+columns rather than queried on its own. If a page needs a number the views
+don't expose, the fix starts there: add or extend a view in a new numbered
+migration, apply it, then read it here. Never widen the site's access with a
+raw table query.
 
 **Migration 007 must be applied to production, as the admin, before the
-site's first deploy** — the same way as every other store migration (see the
-bot repo's `CLAUDE.md`, "Store workflow"). Nothing in `web/` runs it for you.
+site's first deploy**, and **migration 008 before any deploy that reads its
+columns** (`Next MV`, the accuracy section) — the same way as every other
+store migration (see the bot repo's `CLAUDE.md`, "Store workflow"). Nothing
+in `web/` runs it for you.
 
 Auth is Supabase Auth: email and password first
 (`signInWithPassword` in `src/app/login/actions.ts`), with a one-time link
@@ -142,7 +154,7 @@ The eleven on `/squad` is the store's best guess at the eleven for the
 does eventually record that: Kickbase's own `/teamcenter` truth, written to
 `rehoboam.matchday_lineup_results` by `Trader` once every match of that
 matchday has finished. But that write is retrospective — it only exists
-after the matchday concludes — and none of the six `web_*` views this page
+after the matchday concludes — and none of the `web_*` views this page
 reads join that table. What the page shows instead: the eleven
 (`in_best_11`) comes from `rehoboam.predictions`, written early in the
 session from that session's opening squad snapshot; the formation

@@ -133,8 +133,9 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
 
     ``st`` is the injury/availability status (0 healthy), ``prob`` the lineup
     probability (1 starter … 5 unlikely) — the two fields the scorer never had
-    day by day. Missing fields stay None rather than becoming a fake healthy
-    starter.
+    day by day. ``tfhmvt`` is the euro change of the last daily market-value
+    update, read with the value it produced. Missing fields stay None rather
+    than becoming a fake healthy starter.
     """
     tid = details.get("tid")
     return {
@@ -143,6 +144,7 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
         "status": _opt_int(details.get("st")),
         "lineup_probability": _opt_int(details.get("prob")),
         "market_value": _opt_int(details.get("mv")),
+        "mv_change": _opt_int(details.get("tfhmvt")),
         "team_id": str(tid) if tid is not None else None,
         "fetched_at": float(fetched_at),
     }
