@@ -298,6 +298,13 @@ export type PlayerMatch = {
  * alone would show next season's remaining fixtures ahead of the matches he
  * actually played. `match_at is null` keeps a row whose date text never
  * parsed (unplayed history, or malformed text) rather than hiding it.
+ *
+ * Filtering to played matchdays only narrows *which* rows come back -- it
+ * does not say whether he was on the pitch for one that did. `points = 0`
+ * here means either "played and scored nothing" or "an unused sub /
+ * out of the squad, so there's nothing to score": `status` is what tells
+ * those apart (5 started, 3 came on, everything else did not play), which
+ * is exactly what `formEntries` (`./form.ts`) reads it for.
  */
 export async function playerMatches(playerId: string, limit = 12): Promise<PlayerMatch[]> {
   return sql<PlayerMatch[]>`
