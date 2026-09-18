@@ -319,9 +319,16 @@ def test_the_budget_running_out_mid_batch_stops_the_rest_of_the_rows(store_dsn):
 
 
 class _FailingUpdateConnection:
-    """Wraps one real connection: the UPDATE naming `fail_player_id` raises;
-    every other statement -- the read queries, every other row's UPDATE --
-    reaches the real, migrated database untouched."""
+    """Wraps one real connection: the UPDATE naming `fail_player_id` is
+    swapped for one that sets a column `player_universe` doesn't have, but
+    is still handed to the REAL connection -- so psycopg raises from an
+    actual Postgres error (`UndefinedColumn`) and the underlying transaction
+    is genuinely marked aborted, the same as a real pooler drop mid-write.
+    A Python-level raise here, never reaching the server, would prove
+    nothing: the old shared-transaction code would pass this test
+    identically, since the connection's transaction state was never
+    poisoned. Every other statement -- the read queries, every other row's
+    UPDATE -- reaches the real, migrated database untouched."""
 
     def __init__(self, conn, fail_player_id: str):
         self._conn = conn
@@ -329,7 +336,7 @@ class _FailingUpdateConnection:
 
     def execute(self, sql, params=None):
         if params and self._fail_player_id in params and sql.strip().upper().startswith("UPDATE"):
-            raise RuntimeError("simulated pooler drop")
+            sql = sql.replace("SET image_path", "SET no_such_column")
         return self._conn.execute(sql, params)
 
 
