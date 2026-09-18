@@ -11,6 +11,15 @@
 -- middle, and `create or replace view` may only append columns in Postgres.
 -- Nothing else in the schema selects from `web_player_profile`, so the
 -- cascade drops nothing beyond the view itself.
+--
+-- Fix round 1 (2026-09-18): `league_table` is append-only across seasons
+-- and never purged, so `max(day_number)` with no season filter would
+-- resolve to a *previous* season's higher final day number in the opening
+-- matchdays of a new one, joining the club's row from the wrong season.
+-- `newest_season` resolves the season first, the same two-step `cur`/`prev`
+-- pattern 006 and 011 already use against `player_match_history` --
+-- `season` is text of the form '2026/2027', which both of those migrations
+-- already rely on sorting correctly under `max()`.
 drop view if exists rehoboam.web_player_profile cascade;
 create view rehoboam.web_player_profile as
 with newest_status as (
@@ -43,13 +52,18 @@ ranked as (
     from rehoboam.web_players
     where points is not null
 ),
+newest_season as (
+    select max(season) as season from rehoboam.league_table
+),
 newest_day as (
-    select max(day_number) as day_number from rehoboam.league_table
+    select max(l.day_number) as day_number
+    from rehoboam.league_table l, newest_season s
+    where l.season = s.season
 ),
 club as (
     select l.team_id, l.place, l.points, l.goal_difference
-    from rehoboam.league_table l, newest_day d
-    where l.day_number = d.day_number
+    from rehoboam.league_table l, newest_season s, newest_day d
+    where l.season = s.season and l.day_number = d.day_number
 )
 select p.*,
     n.mv_change as trend_24h_eur,

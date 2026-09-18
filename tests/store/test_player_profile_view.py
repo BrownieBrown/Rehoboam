@@ -231,6 +231,30 @@ def test_club_league_position_comes_from_the_newest_matchday(store_dsn):
     )
 
 
+def test_club_league_position_ignores_a_higher_day_number_from_an_older_season(store_dsn):
+    """`league_table` is append-only across seasons and never purged, so a
+    previous season's final day_number can be higher than the current
+    season's newest one. The view must resolve the newest *season* first --
+    not just the highest day_number anywhere in the table -- or it would
+    join the club's row from a season that already finished."""
+    LeagueStore(dsn=store_dsn).upsert_teams(
+        [{"team_id": "t-2", "name": "Union", "short_name": None, "updated_at": NOW}]
+    )
+    store = CorpusStore(dsn=store_dsn)
+    store.upsert_players(
+        [{"player_id": "cl2", "last_name": "Club2", "position": "Forward", "team_id": "t-2"}]
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "insert into rehoboam.league_table"
+            " (season, day_number, team_id, place, points, played, goal_difference, updated_at)"
+            " values ('2025/2026', 34, 't-2', 7, 40, 34, -10, 0),"
+            "        ('2026/2027', 2, 't-2', 2, 6, 2, 3, 0)"
+        )
+    row = _row(store, "cl2")
+    assert (row["club_place"], row["club_points"], row["club_goal_difference"]) == (2, 6, 3)
+
+
 def test_availability_is_the_newest_status_code(store_dsn):
     store = CorpusStore(dsn=store_dsn)
     store.upsert_players(
