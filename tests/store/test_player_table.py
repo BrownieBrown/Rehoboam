@@ -116,7 +116,15 @@ def _seed(dsn):
     )
     league = LeagueStore(dsn=dsn)
     league.upsert_teams(
-        [{"team_id": "7", "name": "Club Seven", "short_name": "SEV", "updated_at": NOW}]
+        [
+            {
+                "team_id": "7",
+                "name": "Club Seven",
+                "short_name": "SEV",
+                "updated_at": NOW,
+                "crest_source": "content/file/team7.svg",
+            }
+        ]
     )
     league.upsert_managers(
         [
@@ -211,6 +219,8 @@ def test_the_view_has_base_xi_columns_in_order(store_dsn):
         "p_start",
         "fair_value_gap",
         "fair_price",
+        "image_path",
+        "crest_path",
     ]
 
 
@@ -239,6 +249,28 @@ def test_the_numbers(store_dsn):
     c = rows["c"]
     assert c["trend_24h_pct"] is None
     assert round(float(c["trend_7d_pct"]), 1) == round(100 * (12 - 10) / 10, 1)
+
+
+def test_image_path_and_joined_crest_path_are_selected(store_dsn):
+    """Migration 021: `image_path`/`crest_path` stay null until a later task's
+    sync writes them, but `player_table` must already join and select them --
+    this is the only writer that exists today, so it sets them directly."""
+    league = _seed(store_dsn)
+    with league.connection() as conn:
+        conn.execute(
+            "update rehoboam.player_universe set image_path = %s where player_id = 'a'",
+            ("players/a.png",),
+        )
+        conn.execute(
+            "update rehoboam.teams set crest_path = %s where team_id = '7'",
+            ("teams/7.png",),
+        )
+    rows = {r["player_id"]: r for r in league.player_table()}
+    assert rows["a"]["image_path"] == "players/a.png"
+    assert rows["a"]["crest_path"] == "teams/7.png"
+    # "b" has no team and no synced photo: both stay null, not an error.
+    assert rows["b"]["image_path"] is None
+    assert rows["b"]["crest_path"] is None
 
 
 def _fair_price_seed(dsn):

@@ -29,8 +29,20 @@ def test_upcoming_fixtures_carry_the_opponent_and_his_place(store_dsn):
     past = datetime.now(timezone.utc) - timedelta(days=2)
     LeagueStore(dsn=store_dsn).upsert_teams(
         [
-            {"team_id": "t-me", "name": "Freiburg", "short_name": None, "updated_at": NOW},
-            {"team_id": "t-op", "name": "Frankfurt", "short_name": None, "updated_at": NOW},
+            {
+                "team_id": "t-me",
+                "name": "Freiburg",
+                "short_name": None,
+                "updated_at": NOW,
+                "crest_source": None,
+            },
+            {
+                "team_id": "t-op",
+                "name": "Frankfurt",
+                "short_name": None,
+                "updated_at": NOW,
+                "crest_source": None,
+            },
         ]
     )
     CorpusStore(dsn=store_dsn).upsert_players(
@@ -82,8 +94,20 @@ def test_opponent_place_ignores_a_higher_day_number_from_an_older_season(store_d
     soon = datetime.now(timezone.utc) + timedelta(days=2)
     LeagueStore(dsn=store_dsn).upsert_teams(
         [
-            {"team_id": "t-me2", "name": "Freiburg", "short_name": None, "updated_at": NOW},
-            {"team_id": "t-op2", "name": "Union", "short_name": None, "updated_at": NOW},
+            {
+                "team_id": "t-me2",
+                "name": "Freiburg",
+                "short_name": None,
+                "updated_at": NOW,
+                "crest_source": None,
+            },
+            {
+                "team_id": "t-op2",
+                "name": "Union",
+                "short_name": None,
+                "updated_at": NOW,
+                "crest_source": None,
+            },
         ]
     )
     CorpusStore(dsn=store_dsn).upsert_players(

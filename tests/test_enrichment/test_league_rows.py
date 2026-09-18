@@ -215,10 +215,22 @@ def test_league_table_rows():
 
 
 def test_team_row():
+    assert team_row(
+        {"tid": "7", "tn": "Club Seven", "ts": "SEV", "tim": "content/file/team7.svg"},
+        updated_at=T0,
+    ) == {
+        "team_id": "7",
+        "name": "Club Seven",
+        "short_name": "SEV",
+        "updated_at": T0,
+        "crest_source": "content/file/team7.svg",
+    }
+    # No `tim` on the payload: crest_source is None, not a fabricated path.
     assert team_row({"tid": "7", "tn": "Club Seven", "ts": "SEV"}, updated_at=T0) == {
         "team_id": "7",
         "name": "Club Seven",
         "short_name": "SEV",
         "updated_at": T0,
+        "crest_source": None,
     }
     assert team_row({"tn": "no id"}, updated_at=T0) is None

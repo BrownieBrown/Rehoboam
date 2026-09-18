@@ -210,7 +210,15 @@ def test_rank_denominators_count_the_ranked_players(store_dsn):
 
 def test_club_league_position_comes_from_the_newest_matchday(store_dsn):
     LeagueStore(dsn=store_dsn).upsert_teams(
-        [{"team_id": "t-1", "name": "Freiburg", "short_name": None, "updated_at": NOW}]
+        [
+            {
+                "team_id": "t-1",
+                "name": "Freiburg",
+                "short_name": None,
+                "updated_at": NOW,
+                "crest_source": None,
+            }
+        ]
     )
     store = CorpusStore(dsn=store_dsn)
     store.upsert_players(
@@ -238,7 +246,15 @@ def test_club_league_position_ignores_a_higher_day_number_from_an_older_season(s
     not just the highest day_number anywhere in the table -- or it would
     join the club's row from a season that already finished."""
     LeagueStore(dsn=store_dsn).upsert_teams(
-        [{"team_id": "t-2", "name": "Union", "short_name": None, "updated_at": NOW}]
+        [
+            {
+                "team_id": "t-2",
+                "name": "Union",
+                "short_name": None,
+                "updated_at": NOW,
+                "crest_source": None,
+            }
+        ]
     )
     store = CorpusStore(dsn=store_dsn)
     store.upsert_players(

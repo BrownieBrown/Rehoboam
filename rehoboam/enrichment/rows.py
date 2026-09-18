@@ -142,7 +142,11 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
     ``tp``/``ap`` are this season's goals, assists, yellow cards, red cards,
     seconds played, total points and average points — what Kickbase's own
     player card shows, probed live 2026-09-18 (all null for a player with no
-    appearances; ``ap`` is a float). Missing fields stay None rather than
+    appearances; ``ap`` is a float). ``pim`` is the player's photo, a
+    CDN-relative path (`content/file/<hash>.png`, probed live 2026-09-18) —
+    the exact path as Kickbase gives it, so a changed photo is detectable;
+    the caller carries it onto ``player_universe.image_source``, it is not a
+    ``player_status_daily`` column. Missing fields stay None rather than
     becoming a fake healthy starter or a fake zero season.
     """
     tid = details.get("tid")
@@ -162,6 +166,7 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
         "seconds_played": _opt_int(details.get("sec")),
         "season_points": _opt_int(details.get("tp")),
         "season_average": _opt_float(details.get("ap")),
+        "image_source": details.get("pim"),
     }
 
 
@@ -339,7 +344,13 @@ def league_table_rows(
 
 
 def team_row(profile: dict, *, updated_at: float) -> dict | None:
-    """`/teams/{tid}/teamprofile` → one `teams` row; None without an id."""
+    """`/teams/{tid}/teamprofile` → one `teams` row; None without an id.
+
+    `tim` is the club crest, a CDN-relative path (`content/file/<hash>.svg`,
+    probed live 2026-09-18) — the exact path as Kickbase gives it, so a
+    changed crest is detectable; `crest_path` (where our own copy lives) is a
+    later task's concern and is not written here.
+    """
     if not isinstance(profile, dict) or not profile.get("tid"):
         return None
     return {
@@ -347,4 +358,5 @@ def team_row(profile: dict, *, updated_at: float) -> dict | None:
         "name": str(profile.get("tn") or profile["tid"]),
         "short_name": str(profile["ts"]) if profile.get("ts") else None,
         "updated_at": updated_at,
+        "crest_source": profile.get("tim"),
     }

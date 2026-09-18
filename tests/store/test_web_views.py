@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 
 from rehoboam.services.calibration import CalibrationReport
 from rehoboam.services.session_facts import IntegrityFailure, SessionFacts
@@ -41,8 +42,20 @@ def _players(dsn):
     )
     LeagueStore(dsn=dsn).upsert_teams(
         [
-            {"team_id": "7", "name": "Bayern", "short_name": "FCB", "updated_at": NOW},
-            {"team_id": "8", "name": "Schalke", "short_name": "S04", "updated_at": NOW},
+            {
+                "team_id": "7",
+                "name": "Bayern",
+                "short_name": "FCB",
+                "updated_at": NOW,
+                "crest_source": "content/file/bayern.svg",
+            },
+            {
+                "team_id": "8",
+                "name": "Schalke",
+                "short_name": "S04",
+                "updated_at": NOW,
+                "crest_source": None,
+            },
         ]
     )
 
@@ -133,6 +146,151 @@ def test_web_players_flags_a_listed_player_its_owner_still_owns(store_dsn):
     row = {r["player_id"]: r for r in _rows(store_dsn, "select * from rehoboam.web_players")}["a"]
     # `player_table.owner` says "Rival"; only `listed` tells the page it is for sale.
     assert row["owner"] == "Rival" and row["listed"] is True
+
+
+def test_web_players_column_order_is_unchanged_plus_the_appended_columns(store_dsn):
+    """Migration 021 regression: every column `web_players` had before is
+    still there, with its old name, in its old order -- only the three new
+    ones (021) are appended at the end."""
+    _players(store_dsn)
+    with connect(store_dsn) as conn:
+        cols = [
+            r["column_name"]
+            for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='rehoboam' AND table_name='web_players' "
+                "ORDER BY ordinal_position"
+            ).fetchall()
+        ]
+    assert cols == [
+        "player_id",
+        "name",
+        "team",
+        "team_id",
+        "position",
+        "market_value",
+        "trend_24h_pct",
+        "trend_7d_pct",
+        "points",
+        "avg_points",
+        "median_points",
+        "points_per_million",
+        "points_prev",
+        "avg_points_prev",
+        "appearances",
+        "appearances_prev",
+        "starts",
+        "starts_prev",
+        "owner",
+        "predicted_ep",
+        "p_start",
+        "fair_value_gap",
+        "listed",
+        "next_mv_change",
+        "next_mv_pct",
+        "fair_price",
+        "image_path",
+        "crest_path",
+        "availability",
+    ]
+
+
+def test_web_market_column_order_is_unchanged_plus_trend_24h_eur(store_dsn):
+    with connect(store_dsn) as conn:
+        cols = [
+            r["column_name"]
+            for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='rehoboam' AND table_name='web_market' "
+                "ORDER BY ordinal_position"
+            ).fetchall()
+        ]
+    assert cols == [
+        "snapshot_at",
+        "player_id",
+        "name",
+        "team",
+        "position",
+        "ask",
+        "market_value",
+        "mv_trend",
+        "offer_count",
+        "our_bid",
+        "listed_at",
+        "expires_at",
+        "status",
+        "lineup_probability",
+        "seller",
+        "is_ours",
+        "predicted_ep",
+        "p_start",
+        "fair_value_gap",
+        "points",
+        "avg_points",
+        "next_mv_change",
+        "next_mv_pct",
+        "fair_price",
+        "trend_24h_pct",
+        "points_per_million",
+        "trend_24h_eur",
+    ]
+
+
+def test_web_players_carries_image_path_crest_path_and_availability(store_dsn):
+    """`image_path`/`crest_path` stay null until a later task's sync writes
+    them (021's own writers only fill `*_source`), so this sets them via a
+    raw update to prove the join/select plumbing, same as player_table's own
+    test. `availability` is the newest `player_status_daily.status`."""
+    _players(store_dsn)
+    CorpusStore(dsn=store_dsn).record_status_daily("a", date.today(), {"st": 4}, NOW)
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "update rehoboam.player_universe set image_path = %s where player_id = 'a'",
+            ("players/a.png",),
+        )
+        conn.execute(
+            "update rehoboam.teams set crest_path = %s where team_id = '7'",
+            ("teams/7.png",),
+        )
+    row = {r["player_id"]: r for r in _rows(store_dsn, "select * from rehoboam.web_players")}["a"]
+    assert row["image_path"] == "players/a.png"
+    assert row["crest_path"] == "teams/7.png"
+    assert row["availability"] == 4
+
+
+def test_web_players_availability_is_null_without_a_status_row(store_dsn):
+    _players(store_dsn)
+    row = {r["player_id"]: r for r in _rows(store_dsn, "select * from rehoboam.web_players")}["b"]
+    assert row["availability"] is None
+
+
+def test_web_market_carries_trend_24h_eur_from_the_newest_status_row(store_dsn):
+    _players(store_dsn)
+    CorpusStore(dsn=store_dsn).record_status_daily(
+        "a", date.today(), {"mv": 10_000_000, "tfhmvt": -250_000}, NOW
+    )
+    LeagueStore(dsn=store_dsn).write_listings(
+        [
+            {
+                "snapshot_at": NOW,
+                "player_id": "a",
+                "ask": 10_000_000,
+                "market_value": 10_000_000,
+                "mv_trend": 0,
+                "seller_id": None,
+                "offer_count": 0,
+                "our_bid": None,
+                "listed_at": NOW,
+                "expires_at": NOW + 10,
+                "status": 0,
+                "lineup_probability": 1,
+                "source": "test",
+            }
+        ]
+    )
+    row = _rows(store_dsn, "select * from rehoboam.web_market")[0]
+    assert row["trend_24h_eur"] == -250_000
+    assert "trend_24h_pct" in row, "the existing percent column must not be removed"
 
 
 def test_web_ownership_takes_each_managers_own_newest_snapshot(store_dsn):

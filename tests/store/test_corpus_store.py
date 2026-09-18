@@ -129,6 +129,26 @@ def test_status_daily_stores_season_stats_and_a_refetch_replaces_them(store_dsn)
     ) == (None, None, None, None, None, None, None)
 
 
+def test_status_daily_carries_the_photo_path_onto_player_universe(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "p1")
+    day = date(2026, 9, 14)
+    store.record_status_daily("p1", day, {"mv": 5_000_000, "pim": "content/file/abc.png"}, 10.0)
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/abc.png"
+    # A later fetch with no `pim` carries the latest reading, same as every
+    # other status field -- it does not keep a stale photo path forever.
+    store.record_status_daily("p1", day, {"mv": 5_000_000}, 20.0)
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] is None
+
+
 def test_players_needing_refresh_orders_never_fetched_then_oldest(store_dsn):
     store = CorpusStore(dsn=store_dsn)
     _universe(store, "a", "b", "c", "d")

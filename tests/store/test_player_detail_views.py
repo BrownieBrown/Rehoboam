@@ -79,8 +79,20 @@ def _seed(dsn):
     league = LeagueStore(dsn=dsn)
     league.upsert_teams(
         [
-            {"team_id": "1", "name": "Club One", "short_name": "ONE", "updated_at": NOW},
-            {"team_id": "2", "name": "Club Two", "short_name": "TWO", "updated_at": NOW},
+            {
+                "team_id": "1",
+                "name": "Club One",
+                "short_name": "ONE",
+                "updated_at": NOW,
+                "crest_source": None,
+            },
+            {
+                "team_id": "2",
+                "name": "Club Two",
+                "short_name": "TWO",
+                "updated_at": NOW,
+                "crest_source": None,
+            },
             # "55" deliberately left unseeded: an unknown opponent.
         ]
     )

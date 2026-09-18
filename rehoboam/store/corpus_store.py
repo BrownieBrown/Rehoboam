@@ -196,7 +196,10 @@ class CorpusStore:
         self, player_id: str, day: date, details: dict[str, Any], fetched_at: float
     ) -> int:
         """One row per player per day; a second fetch the same day replaces it,
-        so the row always carries the latest reading before kickoff."""
+        so the row always carries the latest reading before kickoff. Also carries
+        the photo path (`image_source`) onto `player_universe` in the same
+        transaction — it is a player-identity fact, not a daily reading, so it
+        lives on the players table rather than being repeated on every status row."""
         r = _rows.status_row(player_id, day, details, fetched_at)
         with self.connection() as conn:
             conn.execute(
@@ -238,6 +241,15 @@ class CorpusStore:
                     r["season_points"],
                     r["season_average"],
                 ),
+            )
+            conn.execute(
+                """
+                INSERT INTO rehoboam.player_universe (player_id, image_source)
+                VALUES (%s, %s)
+                ON CONFLICT (player_id) DO UPDATE SET
+                    image_source = excluded.image_source
+                """,
+                (r["player_id"], r["image_source"]),
             )
         return 1
 

@@ -84,6 +84,7 @@ def test_status_row_reads_st_prob_mv_tid_and_the_last_mv_change():
             "sec": 11508,
             "tp": 242,
             "ap": 121.0,
+            "pim": "content/file/abc.png",
         },
         123.0,
     )
@@ -103,6 +104,7 @@ def test_status_row_reads_st_prob_mv_tid_and_the_last_mv_change():
         "seconds_played": 11508,
         "season_points": 242,
         "season_average": 121.0,
+        "image_source": "content/file/abc.png",
     }
 
 
@@ -121,7 +123,9 @@ def test_status_row_tolerates_missing_fields():
         row["seconds_played"],
         row["season_points"],
         row["season_average"],
+        row["image_source"],
     ) == (
+        None,
         None,
         None,
         None,
