@@ -1,0 +1,486 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; font-family: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif; background: #0e1116; color: #e6e9ef; -webkit-font-smoothing: antialiased; }
+    a { color: #e8b04a; text-decoration: none; }
+    a:hover { color: #f2c46f; }
+    .tnum { font-variant-numeric: tabular-nums; }
+  </style>
+</helmet>
+
+<div style="display: flex; width: 1440px; height: 900px; overflow: hidden;">
+
+  <!-- Sidebar -->
+  <div style="display: flex; flex-direction: column; width: 224px; flex-shrink: 0; border-right: 1px solid #1c222b; background: #0b0e12; padding: 16px 12px; gap: 16px;">
+    <div style="padding: 0 8px; font-size: 14px; font-weight: 700; letter-spacing: 0.025em; color: #e6e9ef;">Rehoboam</div>
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <div style="height: 36px; line-height: 36px; border-radius: 6px; padding: 0 10px; font-size: 14px; font-weight: 500; background: rgba(232,176,74,0.15); color: #e8b04a;">Players</div>
+      <div style="height: 36px; line-height: 36px; border-radius: 6px; padding: 0 10px; font-size: 14px; font-weight: 500; color: #c3c9d3;">Squad &amp; lineup</div>
+      <div style="height: 36px; line-height: 36px; border-radius: 6px; padding: 0 10px; font-size: 14px; font-weight: 500; color: #c3c9d3;">Market</div>
+      <div style="height: 36px; line-height: 36px; border-radius: 6px; padding: 0 10px; font-size: 14px; font-weight: 500; color: #c3c9d3;">Calibration &amp; health</div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div style="display: flex; flex-direction: column; flex-grow: 1; min-width: 0;">
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #1c222b; padding: 20px 24px;">
+      <div>
+        <div style="font-size: 18px; font-weight: 700; color: #e6e9ef;">Players</div>
+        <div style="margin-top: 4px; font-size: 14px; color: #8b93a1;">588 players · last session 08:04 · next session 20:00 UTC</div>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #1c222b; padding: 12px 24px;">
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #e8b04a; color: #14110a;">All</div>
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">GK</div>
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">DEF</div>
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">MID</div>
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">FW</div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">Everyone</div>
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">My squad</div>
+        <div style="height: 28px; line-height: 28px; border-radius: 6px; padding: 0 10px; font-size: 12px; font-weight: 500; background: #11161c; color: #c3c9d3;">Free agents</div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+        <div style="height: 32px; line-height: 30px; border-radius: 6px; border: 1px solid #242b35; background: #0e1116; padding: 0 8px; font-size: 12px; color: #8b93a1;">All clubs</div>
+        <div style="height: 32px; width: 208px; line-height: 30px; border-radius: 6px; border: 1px solid #242b35; background: #0e1116; padding: 0 8px; font-size: 12px; color: #8b93a1;">Search player or club</div>
+      </div>
+    </div>
+
+    <div style="display: flex; gap: 24px; padding: 20px 24px; flex-grow: 1; min-height: 0;">
+
+      <!-- Ranked list -->
+      <div style="display: flex; flex-direction: column; width: 400px; flex-shrink: 0; min-height: 0;">
+        <div style="display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px 10px 2px;">
+          <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Ranked by expected points</div>
+          <div style="font-size: 12px; color: #8b93a1;" class="tnum">1–12 of 588</div>
+        </div>
+        <div style="display: flex; flex-direction: column; border: 1px solid #1c222b; border-radius: 8px; background: #11161c; overflow: hidden; flex-grow: 1;">
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: rgba(232,176,74,0.08);">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #e8b04a;"></div>
+              <img src="p-matanovic.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #e6e9ef; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Igor Matanović</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #e07070;">FW</div>
+                  <img src="c-freiburg.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SC Freiburg</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e8b04a;">218</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">23.726.962</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #d9a441;"></div>
+              <img src="p-pavlovic.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Aleksandar Pavlović</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #d9a441;">MID</div>
+                  <img src="c-bayern.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">FC Bayern München</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">203</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">34.068.235</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #4fb3a8;"></div>
+              <img src="p-ginter.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Matthias Ginter</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #4fb3a8;">DEF</div>
+                  <img src="c-freiburg.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SC Freiburg</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">199</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">27.152.090</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #d9a441;"></div>
+              <img src="p-nusa.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Antonio Nusa</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #d9a441;">MID</div>
+                  <img src="c-leipzig.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">RB Leipzig</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">188</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">27.440.290</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #4fb3a8;"></div>
+              <img src="p-orban.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Willi Orban</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #4fb3a8;">DEF</div>
+                  <img src="c-leipzig.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">RB Leipzig</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">181</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">27.557.865</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #e07070;"></div>
+              <img src="p-gregoritsch.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Michael Gregoritsch</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #e07070;">FW</div>
+                  <img src="c-augsburg.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">FC Augsburg</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">171</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">14.663.181</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #d9a441;"></div>
+              <img src="p-engelhardt.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Yannik Engelhardt</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #d9a441;">MID</div>
+                  <img src="c-freiburg.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SC Freiburg</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">166</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">11.373.345</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #e07070;"></div>
+              <img src="p-daghim.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Adam Daghim</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #e07070;">FW</div>
+                  <img src="c-hoffenheim.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">TSG Hoffenheim</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">160</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">12.629.205</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #4fb3a8;"></div>
+              <img src="p-makengo.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Jordy Makengo</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #4fb3a8;">DEF</div>
+                  <img src="c-freiburg.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SC Freiburg</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">154</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">11.146.864</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #4fb3a8;"></div>
+              <img src="p-maluze.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Jeremiaha Maluze</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #e06c6c;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #4fb3a8;">DEF</div>
+                  <img src="c-frankfurt.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Eintracht Frankfurt</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">149</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">5.974.809</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #7c8cf0;"></div>
+              <img src="p-hein.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Karl Hein</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #7c8cf0;">GK</div>
+                  <img src="c-bremen.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">SV Werder Bremen</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">131</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">12.667.670</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 0; border-bottom: 1px solid #1c222b; background: transparent;">
+              <div style="width: 3px; height: 56px; flex-shrink: 0; background: #e07070;"></div>
+              <img src="p-hlozek.png" alt="" style="width: 34px; height: 34px; flex-shrink: 0; border-radius: 17px; object-fit: cover; background: #0e1116;">
+              <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 15px; font-weight: 600; color: #c3c9d3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Adam Hložek</div>
+                  <div style="width: 6px; height: 6px; flex-shrink: 0; border-radius: 3px; background: #5cc98a;"></div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <div style="font-size: 11px; font-weight: 600; color: #e07070;">FW</div>
+                  <img src="c-hoffenheim.svg" alt="" style="width: 14px; height: 14px; flex-shrink: 0; object-fit: contain;">
+                  <div style="font-size: 12px; color: #8b93a1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">TSG Hoffenheim</div>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0;">
+                <div class="tnum" style="font-size: 17px; font-weight: 600; color: #e6e9ef;">126</div>
+                <div class="tnum" style="font-size: 12px; color: #8b93a1;">9.137.587</div>
+              </div>
+            </div>
+        </div>
+      </div>
+
+      <!-- The player panel -->
+      <div style="display: flex; flex-direction: column; gap: 12px; flex-grow: 1; min-width: 0; border: 1px solid #1c222b; border-radius: 8px; background: #11161c; padding: 18px;">
+
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;">
+          <div style="display: flex; align-items: center; gap: 14px;">
+          <img src="p-matanovic.png" alt="" style="width: 66px; height: 66px; flex-shrink: 0; border-radius: 33px; object-fit: cover; background: #0e1116; border: 1px solid #1c222b;">
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <div style="font-size: 22px; font-weight: 700; color: #e6e9ef;">Igor Matanović</div>
+              <span style="display: inline-block; height: 21px; line-height: 21px; border-radius: 6px; padding: 0 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; background: rgba(92,201,138,0.15); color: #5cc98a;">FIT</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="display: inline-block; height: 21px; line-height: 21px; border-radius: 6px; padding: 0 8px; font-size: 12px; font-weight: 600; background: rgba(224,112,112,0.15); color: #e07070;">FW</span>
+              <img src="c-freiburg.svg" alt="" style="width: 16px; height: 16px; object-fit: contain;">
+              <span style="font-size: 13px; color: #c3c9d3;">SC Freiburg</span>
+              <span style="font-size: 13px; color: #8b93a1;">· free agent</span>
+            </div>
+          </div>
+          </div>
+          <div style="font-size: 20px; line-height: 1; color: #8b93a1;">×</div>
+        </div>
+
+        <div style="display: flex; align-items: stretch; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; overflow: hidden;">
+          <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; padding: 9px 13px;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Rank overall</div>
+            <div class="tnum" style="font-size: 15px; font-weight: 600; color: #e6e9ef;">1 <span style="font-size: 12px; font-weight: 400; color: #8b93a1;">of 167</span></div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; padding: 9px 13px; border-left: 1px solid #1c222b;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Rank, forwards</div>
+            <div class="tnum" style="font-size: 15px; font-weight: 600; color: #e6e9ef;">1 <span style="font-size: 12px; font-weight: 400; color: #8b93a1;">of 43</span></div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 2px; flex-grow: 1; padding: 9px 13px; border-left: 1px solid #1c222b;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Club in the table</div>
+            <div class="tnum" style="font-size: 15px; font-weight: 600; color: #e6e9ef;">1st <span style="font-size: 12px; font-weight: 400; color: #8b93a1;">9 pts · GD +9</span></div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;">
+          <div style="display: flex; flex-direction: column; gap: 2px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 10px 12px;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Market value</div>
+            <div class="tnum" style="font-size: 18px; font-weight: 600; color: #e6e9ef;">23.726.962</div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 2px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 10px 12px;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Expected points</div>
+            <div class="tnum" style="font-size: 18px; font-weight: 600; color: #e8b04a;">218</div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 2px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 10px 12px;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Ø points</div>
+            <div class="tnum" style="font-size: 18px; font-weight: 600; color: #e6e9ef;">253,0</div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 2px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 10px 12px;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Points per million</div>
+            <div class="tnum" style="font-size: 18px; font-weight: 600; color: #e6e9ef;">32,0</div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
+
+          <div style="display: flex; flex-direction: column; gap: 12px; min-width: 0;">
+            <div style="display: flex; flex-direction: column; gap: 8px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 11px 13px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">This season</div>
+              <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px;">
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Matches</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">3</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Started</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">3</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Minutes</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">248</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Ø min</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">83</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Goals</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">3</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Assists</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">1</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Yellow</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #d9a441;">0</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Red</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e06c6c;">0</div></div>
+              </div>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 8px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 11px 13px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Form — last five matchdays</div>
+              <div style="display: flex; gap: 6px;">
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-grow: 1; height: 50px; border: 1px solid #1c222b; border-radius: 6px;">
+                  <div style="font-size: 10px; color: #8b93a1;">MD 1</div>
+                  <div class="tnum" style="font-size: 15px; font-weight: 600; color: #5cc98a;">234</div>
+                  <div style="font-size: 9px; font-weight: 600; letter-spacing: 0.04em; color: #8b93a1;">START</div>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-grow: 1; height: 50px; border: 1px solid #1c222b; border-radius: 6px;">
+                  <div style="font-size: 10px; color: #8b93a1;">MD 2</div>
+                  <div class="tnum" style="font-size: 15px; font-weight: 600; color: #5cc98a;">272</div>
+                  <div style="font-size: 9px; font-weight: 600; letter-spacing: 0.04em; color: #8b93a1;">START</div>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-grow: 1; height: 50px; border: 1px solid #1c222b; border-radius: 6px;">
+                  <div style="font-size: 10px; color: #8b93a1;">MD 3</div>
+                  <div class="tnum" style="font-size: 15px; font-weight: 600; color: #5cc98a;">253</div>
+                  <div style="font-size: 9px; font-weight: 600; letter-spacing: 0.04em; color: #8b93a1;">START</div>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-grow: 1; height: 50px; border: 1px dashed #1c222b; border-radius: 6px;">
+                  <div style="font-size: 10px; color: #8b93a1;">MD 4</div>
+                  <div style="font-size: 12px; color: #8b93a1;">Sat</div>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-grow: 1; height: 50px; border: 1px dashed #1c222b; border-radius: 6px;">
+                  <div style="font-size: 10px; color: #8b93a1;">MD 5</div>
+                  <div style="font-size: 12px; color: #8b93a1;">—</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 12px; min-width: 0;">
+            <div style="display: flex; flex-direction: column; gap: 8px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 11px 13px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Next three matches</div>
+              <div style="display: flex; flex-direction: column; gap: 7px;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <div class="tnum" style="width: 32px; flex-shrink: 0; font-size: 11px; color: #8b93a1;">MD 4</div>
+                  <div style="width: 14px; flex-shrink: 0; font-size: 11px; font-weight: 700; color: #8b93a1;">A</div>
+                  <img src="c-frankfurt.svg" alt="" style="width: 15px; height: 15px; flex-shrink: 0; object-fit: contain;">
+                  <div style="flex-grow: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #e6e9ef; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Frankfurt</div>
+                  <div class="tnum" style="flex-shrink: 0; font-size: 11px; color: #8b93a1;">9th</div>
+                  <div class="tnum" style="width: 66px; flex-shrink: 0; text-align: right; white-space: nowrap; font-size: 11px; color: #c3c9d3;">Sat 13:30</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <div class="tnum" style="width: 32px; flex-shrink: 0; font-size: 11px; color: #8b93a1;">MD 5</div>
+                  <div style="width: 14px; flex-shrink: 0; font-size: 11px; font-weight: 700; color: #e8b04a;">H</div>
+                  <div style="flex-grow: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #e6e9ef; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Schalke</div>
+                  <div class="tnum" style="flex-shrink: 0; font-size: 11px; color: #8b93a1;">11th</div>
+                  <div class="tnum" style="width: 66px; flex-shrink: 0; text-align: right; white-space: nowrap; font-size: 11px; color: #c3c9d3;">11 Oct</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <div class="tnum" style="width: 32px; flex-shrink: 0; font-size: 11px; color: #8b93a1;">MD 6</div>
+                  <div style="width: 14px; flex-shrink: 0; font-size: 11px; font-weight: 700; color: #8b93a1;">A</div>
+                  <div style="flex-grow: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #e6e9ef; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Leverkusen</div>
+                  <div class="tnum" style="flex-shrink: 0; font-size: 11px; color: #8b93a1;">7th</div>
+                  <div class="tnum" style="width: 66px; flex-shrink: 0; text-align: right; white-space: nowrap; font-size: 11px; color: #c3c9d3;">18 Oct</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 8px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 11px 13px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Market value moves</div>
+              <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Last 24 h</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #5cc98a;">+212.434</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Last week</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #5cc98a;">+1.321.635</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Tonight, forecast</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #5cc98a;">+204.000</div></div>
+                <div style="display: flex; flex-direction: column; gap: 1px;"><div style="font-size: 10px; color: #8b93a1;">Fair value</div><div class="tnum" style="font-size: 14px; font-weight: 600; color: #e6e9ef;">31.480.000</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 6px; border: 1px solid #1c222b; border-radius: 8px; background: #0e1116; padding: 11px 13px; flex-grow: 1; min-height: 0;">
+          <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px;">
+            <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a1;">Market value</div>
+            <div style="display: flex; align-items: center; gap: 3px;">
+              <div style="height: 20px; line-height: 20px; border-radius: 5px; padding: 0 7px; font-size: 11px; font-weight: 600; color: #8b93a1;">7 d</div>
+              <div style="height: 20px; line-height: 20px; border-radius: 5px; padding: 0 7px; font-size: 11px; font-weight: 600; color: #8b93a1;">1 m</div>
+              <div style="height: 20px; line-height: 20px; border-radius: 5px; padding: 0 7px; font-size: 11px; font-weight: 600; background: rgba(232,176,74,0.15); color: #e8b04a;">3 m</div>
+              <div style="height: 20px; line-height: 20px; border-radius: 5px; padding: 0 7px; font-size: 11px; font-weight: 600; color: #8b93a1;">6 m</div>
+              <div style="height: 20px; line-height: 20px; border-radius: 5px; padding: 0 7px; font-size: 11px; font-weight: 600; color: #8b93a1;">1 y</div>
+            </div>
+          </div>
+          <svg viewBox="0 0 632 96" preserveAspectRatio="none" style="width: 100%; flex-grow: 1; min-height: 56px; display: block;" role="img" aria-label="Market value over three months">
+            <defs>
+              <linearGradient id="mvfill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#e8b04a" stop-opacity="0.22"></stop>
+                <stop offset="100%" stop-color="#e8b04a" stop-opacity="0"></stop>
+              </linearGradient>
+            </defs>
+            <line x1="0" y1="32" x2="632" y2="32" stroke="#1c222b" stroke-width="1"></line>
+            <line x1="0" y1="64" x2="632" y2="64" stroke="#1c222b" stroke-width="1"></line>
+            <path d="M5,86 L57,84 L109,81 L161,82 L213,76 L265,71 L317,73 L369,64 L421,51 L473,42 L525,30 L577,17 L627,8 L627,96 L5,96 Z" fill="url(#mvfill)"></path>
+            <path d="M5,86 L57,84 L109,81 L161,82 L213,76 L265,71 L317,73 L369,64 L421,51 L473,42 L525,30 L577,17 L627,8" fill="none" stroke="#e8b04a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"></path>
+            <circle cx="627" cy="8" r="3.5" fill="#e8b04a"></circle>
+          </svg>
+          <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px;">
+            <div class="tnum" style="font-size: 11px; color: #8b93a1;">Low 12.619.946 · 21 Jun</div>
+            <div class="tnum" style="font-size: 11px; color: #8b93a1;">High 23.726.962 · today</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {}
+</script>
+</body>
+</html>
