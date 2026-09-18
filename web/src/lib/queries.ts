@@ -221,16 +221,6 @@ export async function players(
   `;
 }
 
-/** One player's row from `web_players`, for the overlay's header and "our numbers"
- * grid. `total` is not meaningful here — it only exists so this shares `PlayerRow`'s
- * shape with the table query above — and is always 0. */
-export async function playerRow(playerId: string): Promise<PlayerRow | null> {
-  const [row] = await sql<PlayerRow[]>`
-    select *, 0 as total from rehoboam.web_players where player_id = ${playerId}
-  `;
-  return row ?? null;
-}
-
 export type PlayerProfile = PlayerRow & {
   trend_24h_eur: number | null;
   trend_7d_eur: number | null;
@@ -255,32 +245,13 @@ export type PlayerProfile = PlayerRow & {
 /** One player's row from `web_player_profile`: `web_players`' columns plus the
  * season stats, the market-value move in euros, and his rank -- what the
  * player panel's header needs in one query. `total` is not meaningful here --
- * see `playerRow` above -- and is always 0. */
+ * it only exists so this shares `PlayerRow`'s shape with the table query
+ * above -- and is always 0. */
 export async function playerProfile(playerId: string): Promise<PlayerProfile | null> {
   const [row] = await sql<PlayerProfile[]>`
     select *, 0 as total from rehoboam.web_player_profile where player_id = ${playerId}
   `;
   return row ?? null;
-}
-
-export type PlayerSeason = {
-  season: string;
-  appearances: number;
-  starts: number;
-  points: number;
-  avg_points: number | null;
-  median_points: number | null;
-  best_points: number | null;
-  minutes: number | null;
-};
-
-/** Every season the store has for this player, newest first. */
-export async function playerSeasons(playerId: string): Promise<PlayerSeason[]> {
-  return sql<PlayerSeason[]>`
-    select * from rehoboam.web_player_seasons
-    where player_id = ${playerId}
-    order by season desc
-  `;
 }
 
 export type PlayerMatch = {
@@ -322,25 +293,6 @@ export async function playerMatches(playerId: string, limit = 12): Promise<Playe
     where player_id = ${playerId} and (match_at is null or match_at <= now())
     order by match_at desc nulls last, season desc, day_number desc
     limit ${limit}
-  `;
-}
-
-/**
- * Every stored matchday of one season for one player, played or not -- lets
- * the panel draw a season strip with blanks for matchdays not yet played.
- * `match_at` is ISO-8601 text, not a JS Date, the same reason `playerMatches`
- * does it.
- */
-export async function playerSeasonGrid(
-  playerId: string,
-  season: string,
-): Promise<{ day_number: number; points: number | null; match_at: string | null }[]> {
-  return sql<{ day_number: number; points: number | null; match_at: string | null }[]>`
-    select day_number, points,
-      to_char(match_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as match_at
-    from rehoboam.web_player_matches
-    where player_id = ${playerId} and season = ${season}
-    order by day_number asc
   `;
 }
 
