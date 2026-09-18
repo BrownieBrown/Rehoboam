@@ -246,12 +246,12 @@ function Tile({
 }
 
 /** One cell of the five-matchday form strip. `entry.day_number === 0` is
- * `formEntries`' own front-padding for "we don't have this many played
- * matchdays yet" -- there is no real matchday to name, so it draws with a
- * dashed border and a dash instead of a number, the same signal the artboard
- * uses for a fixture that has not been played. A real matchday he did not
- * feature in keeps the solid border (it is a recorded result, just with
- * nothing to show) and simply omits the START/SUB role line. */
+ * `formEntries`' own padding, on the right, for "we don't have this many
+ * played matchdays yet" -- there is no real matchday to name, so it draws
+ * with a dashed border and a dash instead of a number, the same signal the
+ * artboard uses for a fixture that has not been played. A real matchday he
+ * did not feature in keeps the solid border (it is a recorded result, just
+ * with nothing to show) and simply omits the START/SUB role line. */
 function FormCell({ entry }: { entry: FormEntry }) {
   const hasDay = entry.day_number > 0;
   const roleLabel = entry.role === "started" ? "START" : entry.role === "came on" ? "SUB" : "";
