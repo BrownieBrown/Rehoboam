@@ -247,7 +247,7 @@ class CorpusStore:
                 INSERT INTO rehoboam.player_universe (player_id, image_source)
                 VALUES (%s, %s)
                 ON CONFLICT (player_id) DO UPDATE SET
-                    image_source = excluded.image_source
+                    image_source = coalesce(excluded.image_source, rehoboam.player_universe.image_source)
                 """,
                 (r["player_id"], r["image_source"]),
             )

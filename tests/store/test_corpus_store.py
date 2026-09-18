@@ -139,14 +139,39 @@ def test_status_daily_carries_the_photo_path_onto_player_universe(store_dsn):
             "select image_source from rehoboam.player_universe where player_id = 'p1'"
         ).fetchone()
     assert row["image_source"] == "content/file/abc.png"
-    # A later fetch with no `pim` carries the latest reading, same as every
-    # other status field -- it does not keep a stale photo path forever.
+    # A later fetch with no `pim` must not wipe a known path -- Kickbase omits
+    # `pim` on some responses, and `image_source` is the only record of where
+    # a player's photo lives.
     store.record_status_daily("p1", day, {"mv": 5_000_000}, 20.0)
     with connect(store_dsn) as conn:
         row = conn.execute(
             "select image_source from rehoboam.player_universe where player_id = 'p1'"
         ).fetchone()
-    assert row["image_source"] is None
+    assert row["image_source"] == "content/file/abc.png"
+
+
+def test_a_payload_without_pim_does_not_null_a_stored_image_source(store_dsn):
+    """Regression: `ON CONFLICT DO UPDATE SET image_source = excluded.image_source`
+    used to wipe a known path whenever a later payload omitted `pim`. The fix
+    coalesces onto the existing value instead, so only a genuine new `pim`
+    (never an absent one) can change it."""
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "p1")
+    day = date(2026, 9, 14)
+    store.record_status_daily("p1", day, {"pim": "content/file/first.png"}, 10.0)
+    store.record_status_daily("p1", day, {}, 20.0)  # no `pim` at all
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/first.png"
+    # A genuine new `pim` still replaces the old one.
+    store.record_status_daily("p1", day, {"pim": "content/file/second.png"}, 30.0)
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/second.png"
 
 
 def test_players_needing_refresh_orders_never_fetched_then_oldest(store_dsn):
