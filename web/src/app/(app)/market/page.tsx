@@ -1,5 +1,5 @@
 import { requireSession } from "@/lib/auth";
-import { market, MARKET_SORTS, type MarketRow } from "@/lib/queries";
+import { market, shellFacts, MARKET_SORTS, type MarketRow } from "@/lib/queries";
 import { sortDir, sortKey } from "@/lib/sort";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Pill } from "@/components/Pill";
@@ -57,7 +57,7 @@ export default async function MarketPage({
   const expiring = params.expiring === "6" ? 6 : undefined;
   const scope = sellerScope(params.from);
 
-  const listings = await market({ sort, dir });
+  const [listings, facts] = await Promise.all([market({ sort, dir }), shellFacts()]);
   const bySource = bySeller(listings, scope);
   const rows = expiring ? expiringWithin(bySource, expiring, Date.now() / 1000) : bySource;
 
@@ -120,6 +120,12 @@ export default async function MarketPage({
       <StatusHeader
         title="Market"
         subtitle={`${listingsLine(rows.length, listings.length, { scope, hours: expiring })} · snapshot ${ago(snapshotAt)}`}
+        right={
+          <div className="flex flex-col items-end">
+            <span className="text-[11px] uppercase tracking-[0.08em] text-muted">Budget</span>
+            <b className="tnum text-2xl font-bold text-text">{money(facts.budget)}</b>
+          </div>
+        }
       />
       <div className="flex flex-wrap items-center gap-4 px-6 py-4">
         <div className="flex items-center gap-2">

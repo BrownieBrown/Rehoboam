@@ -47,21 +47,7 @@ export default async function SquadPage() {
 
   const { session, players } = splitSquad(rows);
 
-  const header = (
-    <StatusHeader
-      title="Squad & lineup"
-      right={
-        <>
-          <span>
-            Budget <b className="tnum text-text">{money(session?.budget ?? null)}</b>
-          </span>
-          <span>
-            Sellable <b className="tnum text-text">{money(session?.sellable_value ?? null)}</b>
-          </span>
-        </>
-      }
-    />
-  );
+  const header = <StatusHeader title="Squad & lineup" />;
 
   // Case 2 of 3: the session ran and recorded its budget and formation, but
   // its roster write failed (or legitimately owned nothing) - `web_squad`'s
