@@ -279,6 +279,24 @@ def test_web_player_mv_prefers_the_daily_status_value_over_the_weekly_series(sto
     ]
 
 
+def test_web_player_mv_ignores_a_zero_status_reading(store_dsn):
+    """Migration 018: a `0` in `player_status_daily` is a sentinel Kickbase
+    writes for a player with no market value, not a real reading -- the
+    `mv_series` point for that day must win instead of flooring the chart."""
+    corpus = CorpusStore(dsn=store_dsn)
+    corpus.upsert_players([{"player_id": "p-zero", "last_name": "Zero"}])
+    corpus.record_status_daily("p-zero", date(2026, 9, 10), {"mv": 0}, NOW)
+    corpus.record_mv_series(
+        "p-zero", {"it": [{"dt": _days_since_epoch(date(2026, 9, 10)), "mv": 4_000_000}]}
+    )
+    with corpus.connection() as conn:
+        rows = conn.execute(
+            "select day, market_value from rehoboam.web_player_mv "
+            "where player_id = 'p-zero' order by day"
+        ).fetchall()
+    assert [(r["day"], r["market_value"]) for r in rows] == [(date(2026, 9, 10), 4_000_000)]
+
+
 def test_web_player_mv_uses_the_utc_date_not_the_session_timezone(store_dsn):
     """Every seed above lands at exact UTC midnight, where the session's
     timezone can't move the date -- this host's Postgres session defaults to
