@@ -195,7 +195,7 @@ def test_web_players_column_order_is_unchanged_plus_the_appended_columns(store_d
     ]
 
 
-def test_web_market_column_order_is_unchanged_plus_trend_24h_eur(store_dsn):
+def test_web_market_column_order_is_unchanged_plus_trend_24h_eur_and_images(store_dsn):
     with connect(store_dsn) as conn:
         cols = [
             r["column_name"]
@@ -233,6 +233,8 @@ def test_web_market_column_order_is_unchanged_plus_trend_24h_eur(store_dsn):
         "trend_24h_pct",
         "points_per_million",
         "trend_24h_eur",
+        "image_path",
+        "crest_path",
     ]
 
 
@@ -291,6 +293,47 @@ def test_web_market_carries_trend_24h_eur_from_the_newest_status_row(store_dsn):
     row = _rows(store_dsn, "select * from rehoboam.web_market")[0]
     assert row["trend_24h_eur"] == -250_000
     assert "trend_24h_pct" in row, "the existing percent column must not be removed"
+
+
+def test_web_market_carries_image_path_and_crest_path(store_dsn):
+    """Round 1 fix (task 10b): `web_market` already left-joins `web_players`
+    for `name`/`team`/etc, so `image_path`/`crest_path` ride along on that
+    same join rather than the web app re-joining the whole view a second
+    time per page load. Same raw-update technique as
+    `test_web_players_carries_image_path_crest_path_and_availability`, since
+    021's own writers only fill `*_source`."""
+    _players(store_dsn)
+    with connect(store_dsn) as conn:
+        conn.execute(
+            "update rehoboam.player_universe set image_path = %s where player_id = 'a'",
+            ("players/a.png",),
+        )
+        conn.execute(
+            "update rehoboam.teams set crest_path = %s where team_id = '7'",
+            ("teams/7.png",),
+        )
+    LeagueStore(dsn=store_dsn).write_listings(
+        [
+            {
+                "snapshot_at": NOW,
+                "player_id": "a",
+                "ask": 10_000_000,
+                "market_value": 10_000_000,
+                "mv_trend": 0,
+                "seller_id": None,
+                "offer_count": 0,
+                "our_bid": None,
+                "listed_at": NOW,
+                "expires_at": NOW + 10,
+                "status": 0,
+                "lineup_probability": 1,
+                "source": "test",
+            }
+        ]
+    )
+    row = _rows(store_dsn, "select * from rehoboam.web_market")[0]
+    assert row["image_path"] == "players/a.png"
+    assert row["crest_path"] == "teams/7.png"
 
 
 def test_web_ownership_takes_each_managers_own_newest_snapshot(store_dsn):

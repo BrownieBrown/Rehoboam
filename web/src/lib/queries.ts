@@ -465,11 +465,10 @@ export type MarketRow = {
   /** Migration 021: Kickbase's last-update change in euros, alongside the
    * existing percent above. */
   trend_24h_eur: number | null;
-  /** From `web_players`, joined in by `market()` below -- migration 021 put
-   * these two on `web_players`/`web_player_profile` but not on `web_market`
-   * itself (`tests/store/test_web_views.py`'s column-order regression test
-   * locks that), so the market row picks them up at read time instead of
-   * widening the store view. */
+  /** Migration 021 (round 1 fix): `web_market` already left-joins
+   * `web_players` internally for `name`/`team`/`predicted_ep`/etc, so these
+   * two ride along on that same join rather than the web app re-joining
+   * the whole view a second time per query. */
   image_path: string | null;
   crest_path: string | null;
 };
@@ -493,20 +492,12 @@ export const MARKET_SORTS = [
  * Every listing in the newest snapshot, sorted. Unfiltered on purpose: the
  * page narrows it with `expiringWithin`, so the snapshot time and the total
  * come from the same rows even when the filter matches nothing.
- *
- * Joins `web_players` back in for `image_path`/`crest_path` -- `web_market`
- * doesn't carry them (see `MarketRow` above) -- so every sort key must be
- * qualified with `m.`: most of `MARKET_SORTS` names a column both views
- * share (`name`, `market_value`, `predicted_ep`, ...), and an unqualified
- * `order by` over the join would be ambiguous.
  */
 export async function market(opts: { sort: string; dir: "asc" | "desc" }): Promise<MarketRow[]> {
   return sql<MarketRow[]>`
-    select m.*, p.image_path, p.crest_path
-    from rehoboam.web_market m
-    left join rehoboam.web_players p on p.player_id = m.player_id
-    order by ${sql.unsafe(`m.${opts.sort}`)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
-             m.player_id asc
+    select * from rehoboam.web_market
+    order by ${sql.unsafe(opts.sort)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
+             player_id asc
   `;
 }
 

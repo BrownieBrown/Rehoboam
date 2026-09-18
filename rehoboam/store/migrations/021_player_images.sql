@@ -35,11 +35,17 @@ alter table rehoboam.teams add column if not exists crest_path text;
 -- 3. `web_market` gains `trend_24h_eur`, the same `player_status_daily.mv_change`
 --    figure `web_player_profile` already shows, so Market can show euros
 --    beside the existing percentage. `trend_24h_pct` is untouched -- a later
---    task switches the column over.
+--    task switches the column over. It also gains `image_path`/`crest_path`
+--    (round 1 fix, task 10b): `web_market` already left-joins `web_players`
+--    internally for `name`/`team`/`predicted_ep`/etc, so selecting these two
+--    more off that same join is free -- the web app had briefly worked
+--    around their absence with a second read-time join over the whole view,
+--    which this replaces.
 --
 -- `player_table` and `web_players` only *append* columns below (same names,
 -- same order, new ones at the end), so `create or replace view` is safe for
--- both; only `web_player_profile` needs the drop.
+-- both; `web_market` appends the same way (its own `create or replace` is
+-- further down); only `web_player_profile` needs the drop.
 
 create or replace view rehoboam.player_table as
 with cur as (
@@ -223,7 +229,8 @@ select l.snapshot_at, l.player_id, p.name, p.team, p.position,
     p.next_mv_change, p.next_mv_pct,
     p.fair_price,
     p.trend_24h_pct, p.points_per_million,
-    ns.mv_change as trend_24h_eur
+    ns.mv_change as trend_24h_eur,
+    p.image_path, p.crest_path
 from rehoboam.market_listings l
 join newest n on l.snapshot_at = n.at
 left join rehoboam.web_players p on p.player_id = l.player_id
