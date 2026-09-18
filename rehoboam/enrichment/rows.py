@@ -128,14 +128,26 @@ def _opt_int(value: Any) -> int | None:
     return int(value) if value is not None else None
 
 
+def _opt_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
 def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> dict:
     """League player details → one ``player_status_daily`` row.
 
     ``st`` is the injury/availability status (0 healthy), ``prob`` the lineup
     probability (1 starter … 5 unlikely) — the two fields the scorer never had
     day by day. ``tfhmvt`` is the euro change of the last daily market-value
-    update, read with the value it produced. Missing fields stay None rather
-    than becoming a fake healthy starter.
+    update, read with the value it produced. ``g``/``a``/``y``/``r``/``sec``/
+    ``tp``/``ap`` are this season's goals, assists, yellow cards, red cards,
+    seconds played, total points and average points — what Kickbase's own
+    player card shows, probed live 2026-09-18 (all null for a player with no
+    appearances; ``ap`` is a float). ``pim`` is the player's photo, a
+    CDN-relative path (`content/file/<hash>.png`, probed live 2026-09-18) —
+    the exact path as Kickbase gives it, so a changed photo is detectable;
+    the caller carries it onto ``player_universe.image_source``, it is not a
+    ``player_status_daily`` column. Missing fields stay None rather than
+    becoming a fake healthy starter or a fake zero season.
     """
     tid = details.get("tid")
     return {
@@ -147,6 +159,14 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
         "mv_change": _opt_int(details.get("tfhmvt")),
         "team_id": str(tid) if tid is not None else None,
         "fetched_at": float(fetched_at),
+        "goals": _opt_int(details.get("g")),
+        "assists": _opt_int(details.get("a")),
+        "yellow_cards": _opt_int(details.get("y")),
+        "red_cards": _opt_int(details.get("r")),
+        "seconds_played": _opt_int(details.get("sec")),
+        "season_points": _opt_int(details.get("tp")),
+        "season_average": _opt_float(details.get("ap")),
+        "image_source": details.get("pim"),
     }
 
 
@@ -324,7 +344,13 @@ def league_table_rows(
 
 
 def team_row(profile: dict, *, updated_at: float) -> dict | None:
-    """`/teams/{tid}/teamprofile` → one `teams` row; None without an id."""
+    """`/teams/{tid}/teamprofile` → one `teams` row; None without an id.
+
+    `tim` is the club crest, a CDN-relative path (`content/file/<hash>.svg`,
+    probed live 2026-09-18) — the exact path as Kickbase gives it, so a
+    changed crest is detectable; `crest_path` (where our own copy lives) is a
+    later task's concern and is not written here.
+    """
     if not isinstance(profile, dict) or not profile.get("tid"):
         return None
     return {
@@ -332,4 +358,5 @@ def team_row(profile: dict, *, updated_at: float) -> dict | None:
         "name": str(profile.get("tn") or profile["tid"]),
         "short_name": str(profile["ts"]) if profile.get("ts") else None,
         "updated_at": updated_at,
+        "crest_source": profile.get("tim"),
     }

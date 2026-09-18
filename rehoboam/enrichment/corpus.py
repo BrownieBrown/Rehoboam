@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS player_universe (
     position       TEXT,
     team_id        TEXT,
     market_value   INTEGER,
-    average_points REAL
+    average_points REAL,
+    image_source   TEXT,
+    image_path     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS player_match_history (
@@ -151,6 +153,12 @@ class TrainingCorpus:
             conn.execute("ALTER TABLE sweep_progress ADD COLUMN transfers_fetched_at REAL")
         if "status_fetched_at" not in sweep_columns:
             conn.execute("ALTER TABLE sweep_progress ADD COLUMN status_fetched_at REAL")
+
+        universe_columns = {row[1] for row in conn.execute("PRAGMA table_info(player_universe)")}
+        if "image_source" not in universe_columns:
+            conn.execute("ALTER TABLE player_universe ADD COLUMN image_source TEXT")
+        if "image_path" not in universe_columns:
+            conn.execute("ALTER TABLE player_universe ADD COLUMN image_path TEXT")
 
     def upsert_players(self, players: list[dict[str, Any]]) -> int:
         """Insert or update universe rows. Returns rows written."""

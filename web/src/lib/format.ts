@@ -18,8 +18,16 @@ export function money(n: number | null | undefined): string {
   return groups.format(n);
 }
 
+/**
+ * A plain number, not necessarily euros — but a negative one still needs the
+ * same U+2212 minus sign as `money`/`signed`/`signedPct`, not `toFixed`'s
+ * ASCII hyphen-minus: the overlay is the first place that feeds this
+ * genuinely negative numbers (points can go negative on Kickbase), and one
+ * page keeps one glyph for "negative".
+ */
 export function num(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined) return DASH;
+  if (n < 0) return `${MINUS}${(-n).toFixed(digits)}`;
   return n.toFixed(digits);
 }
 
@@ -55,13 +63,20 @@ export function pct(p: number | null | undefined): string {
   return `${Math.round(p * 100)}%`;
 }
 
-/** Time left on a Kickbase listing. A manager's listing has no expiry. */
+/** Time left on a Kickbase listing. A manager's listing has no expiry.
+ * Under an hour, minutes alone ("48 min"); an hour or more, hours and
+ * minutes ("2 h 05 m", the pixel references' own format) rather than a
+ * decimal hour figure -- floored to whole minutes first, then split, so a
+ * remainder can never round up into "60 m" and carry wrong into the hour. */
 export function countdown(epoch: number | null | undefined, now = Date.now() / 1000): string {
   if (epoch === null || epoch === undefined) return DASH;
   const left = epoch - now;
   if (left <= 0) return "expired";
   if (left < 3600) return `${Math.round(left / 60)} min`;
-  return `${(left / 3600).toFixed(1)} h`;
+  const totalMinutes = Math.floor(left / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours} h ${String(minutes).padStart(2, "0")} m`;
 }
 
 /** "08:01 UTC · 3 h ago" — the store's clock is UTC, so the page's is too. */

@@ -47,28 +47,17 @@ export default async function SquadPage() {
 
   const { session, players } = splitSquad(rows);
 
-  const header = (
-    <StatusHeader
-      title="Squad & lineup"
-      right={
-        <>
-          <span>
-            Budget <b className="tnum text-text">{money(session?.budget ?? null)}</b>
-          </span>
-          <span>
-            Sellable <b className="tnum text-text">{money(session?.sellable_value ?? null)}</b>
-          </span>
-        </>
-      }
-    />
-  );
+  const header = <StatusHeader title="Squad & lineup" />;
 
   // Case 2 of 3: the session ran and recorded its budget and formation, but
   // its roster write failed (or legitimately owned nothing) - `web_squad`'s
   // left join surfaces that as one row whose player_id is null. The session
-  // facts (and any integrity rules it raised) are still real, so the header
-  // and the integrity block render normally; only the eleven and the table
-  // are missing.
+  // facts (and any integrity rules it raised) are still real, so the
+  // integrity block still renders and Formation still has a formation to
+  // draw; only the eleven and the table are missing. (The header itself
+  // carries no session facts either way - it dropped budget/sellable, see
+  // the "budget only on Market" commit - so it's just the title in every
+  // case, not something this case changes.)
   if (players.length === 0) {
     return (
       <>

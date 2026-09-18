@@ -165,7 +165,15 @@ def test_table_and_teams(store_dsn):
     )
     assert sorted(store.teams_older_than(T0)) == ["7", "8"]
     store.upsert_teams(
-        [{"team_id": "7", "name": "Club Seven", "short_name": "SEV", "updated_at": T0}]
+        [
+            {
+                "team_id": "7",
+                "name": "Club Seven",
+                "short_name": "SEV",
+                "updated_at": T0,
+                "crest_source": "content/file/team7.svg",
+            }
+        ]
     )
     assert store.teams_older_than(T0 - 1) == ["8"]
     assert store.teams_older_than(T0 + 1) == ["7", "8"]
@@ -190,3 +198,36 @@ def test_table_and_teams(store_dsn):
     with store.connection() as conn:
         n = conn.execute("SELECT count(*) AS n FROM rehoboam.league_table").fetchone()["n"]
     assert n == 1
+
+
+def test_upsert_teams_carries_the_crest_source_and_a_refetch_replaces_it(store_dsn):
+    store = LeagueStore(dsn=store_dsn)
+    store.upsert_teams(
+        [
+            {
+                "team_id": "9",
+                "name": "Club Nine",
+                "short_name": "NIN",
+                "updated_at": T0,
+                "crest_source": "content/file/team9.svg",
+            }
+        ]
+    )
+    with store.connection() as conn:
+        row = conn.execute("select crest_source from rehoboam.teams where team_id = '9'").fetchone()
+    assert row["crest_source"] == "content/file/team9.svg"
+    # A refetch with no crest carries the latest reading, same as name/short_name.
+    store.upsert_teams(
+        [
+            {
+                "team_id": "9",
+                "name": "Club Nine",
+                "short_name": "NIN",
+                "updated_at": T0 + 1,
+                "crest_source": None,
+            }
+        ]
+    )
+    with store.connection() as conn:
+        row = conn.execute("select crest_source from rehoboam.teams where team_id = '9'").fetchone()
+    assert row["crest_source"] is None

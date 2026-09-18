@@ -87,6 +87,93 @@ def test_status_daily_stores_the_last_mv_change_and_a_refetch_replaces_it(store_
     assert store.status_on("p1", day)["mv_change"] is None
 
 
+def test_status_daily_stores_season_stats_and_a_refetch_replaces_them(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "p1")
+    day = date(2026, 9, 14)
+    store.record_status_daily(
+        "p1",
+        day,
+        {
+            "mv": 5_000_000,
+            "g": 1,
+            "a": 2,
+            "y": 3,
+            "r": 0,
+            "sec": 11508,
+            "tp": 242,
+            "ap": 121.0,
+        },
+        10.0,
+    )
+    row = store.status_on("p1", day)
+    assert (
+        row["goals"],
+        row["assists"],
+        row["yellow_cards"],
+        row["red_cards"],
+        row["seconds_played"],
+        row["season_points"],
+        row["season_average"],
+    ) == (1, 2, 3, 0, 11508, 242, 121.0)
+    store.record_status_daily("p1", day, {"mv": 5_000_000}, 20.0)
+    row = store.status_on("p1", day)
+    assert (
+        row["goals"],
+        row["assists"],
+        row["yellow_cards"],
+        row["red_cards"],
+        row["seconds_played"],
+        row["season_points"],
+        row["season_average"],
+    ) == (None, None, None, None, None, None, None)
+
+
+def test_status_daily_carries_the_photo_path_onto_player_universe(store_dsn):
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "p1")
+    day = date(2026, 9, 14)
+    store.record_status_daily("p1", day, {"mv": 5_000_000, "pim": "content/file/abc.png"}, 10.0)
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/abc.png"
+    # A later fetch with no `pim` must not wipe a known path -- Kickbase omits
+    # `pim` on some responses, and `image_source` is the only record of where
+    # a player's photo lives.
+    store.record_status_daily("p1", day, {"mv": 5_000_000}, 20.0)
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/abc.png"
+
+
+def test_a_payload_without_pim_does_not_null_a_stored_image_source(store_dsn):
+    """Regression: `ON CONFLICT DO UPDATE SET image_source = excluded.image_source`
+    used to wipe a known path whenever a later payload omitted `pim`. The fix
+    coalesces onto the existing value instead, so only a genuine new `pim`
+    (never an absent one) can change it."""
+    store = CorpusStore(dsn=store_dsn)
+    _universe(store, "p1")
+    day = date(2026, 9, 14)
+    store.record_status_daily("p1", day, {"pim": "content/file/first.png"}, 10.0)
+    store.record_status_daily("p1", day, {}, 20.0)  # no `pim` at all
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/first.png"
+    # A genuine new `pim` still replaces the old one.
+    store.record_status_daily("p1", day, {"pim": "content/file/second.png"}, 30.0)
+    with connect(store_dsn) as conn:
+        row = conn.execute(
+            "select image_source from rehoboam.player_universe where player_id = 'p1'"
+        ).fetchone()
+    assert row["image_source"] == "content/file/second.png"
+
+
 def test_players_needing_refresh_orders_never_fetched_then_oldest(store_dsn):
     store = CorpusStore(dsn=store_dsn)
     _universe(store, "a", "b", "c", "d")

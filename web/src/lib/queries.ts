@@ -86,6 +86,10 @@ export type PlayerRow = {
   avg_points: number | null;
   median_points: number | null;
   points_per_million: number | null;
+  /** Last season's average, from `player_table`'s `prev`/`hist` CTEs --
+   * already in every `web_players` row, just never typed until the panel
+   * needed it. */
+  avg_points_prev: number | null;
   appearances: number | null;
   starts: number | null;
   owner: string;
@@ -98,6 +102,16 @@ export type PlayerRow = {
   next_mv_pct: number | null;
   /** What his average points are worth at his position's going rate, in euros. */
   fair_price: number | null;
+  /** Object paths inside the public `kickbase` Supabase Storage bucket
+   * (migration 021) -- null for every row until a later sync run writes
+   * them; `PlayerPhoto`/`ClubCrest` (`components/PlayerPhoto.tsx`) turn a
+   * path into the public URL, or fall back when there isn't one. */
+  image_path: string | null;
+  crest_path: string | null;
+  /** Kickbase's `st` availability code — 0 is fit. `availability.ts` names
+   * it. Migration 021 moved this up from `web_player_profile` alone onto
+   * every `web_players` row, for the list's fitness dot. */
+  availability: number | null;
   /** Every row the filters match, counted in the same statement as this page. */
   total: number;
 };
@@ -120,7 +134,7 @@ export const PLAYER_SORTS = [
   "predicted_ep",
   "p_start",
   "fair_value_gap",
-];
+] as const;
 
 /** Our own manager name, for the "my squad" filter and the amber owner pill. */
 export async function selfName(): Promise<string | null> {
@@ -207,6 +221,117 @@ export async function players(
   `;
 }
 
+export type PlayerProfile = PlayerRow & {
+  trend_24h_eur: number | null;
+  trend_7d_eur: number | null;
+  goals: number | null;
+  assists: number | null;
+  yellow_cards: number | null;
+  red_cards: number | null;
+  seconds_played: number | null;
+  season_points: number | null;
+  season_average: number | null;
+  rank_overall: number | null;
+  rank_position: number | null;
+  /** How many players carry a rank at all, for the "of N" under each rank. */
+  ranked_overall_total: number | null;
+  ranked_position_total: number | null;
+  /** His club's line in the newest stored matchday of the league table. */
+  club_place: number | null;
+  club_points: number | null;
+  club_goal_difference: number | null;
+};
+
+/** One player's row from `web_player_profile`: `web_players`' columns plus the
+ * season stats, the market-value move in euros, and his rank -- what the
+ * player panel's header needs in one query. `total` is not meaningful here --
+ * it only exists so this shares `PlayerRow`'s shape with the table query
+ * above -- and is always 0. */
+export async function playerProfile(playerId: string): Promise<PlayerProfile | null> {
+  const [row] = await sql<PlayerProfile[]>`
+    select *, 0 as total from rehoboam.web_player_profile where player_id = ${playerId}
+  `;
+  return row ?? null;
+}
+
+export type PlayerMatch = {
+  season: string;
+  day_number: number;
+  match_date: string | null;
+  points: number | null;
+  minutes: number | null;
+  status: number | null;
+  is_home: number | null;
+  opponent: string | null;
+  /** ISO-8601 text, not a JS Date: postgres.js would otherwise turn the
+   * view's `timestamptz` column into one, the same reason `playerMv` does
+   * this for its `day`. Null when the stored `match_date` text didn't parse
+   * into a real timestamp -- the row still appears, dashed, not dropped. */
+  match_at: string | null;
+};
+
+/**
+ * His newest *played* matches. `player_match_history` holds the whole
+ * fixture list, future matchdays included, as rows with a real future date,
+ * `status = 0`, `points = 0`; ordering by `season desc, day_number desc`
+ * alone would show next season's remaining fixtures ahead of the matches he
+ * actually played. `match_at is null` keeps a row whose date text never
+ * parsed (unplayed history, or malformed text) rather than hiding it.
+ *
+ * Filtering to played matchdays only narrows *which* rows come back -- it
+ * does not say whether he was on the pitch for one that did. `points = 0`
+ * here means either "played and scored nothing" or "an unused sub /
+ * out of the squad, so there's nothing to score": `status` is what tells
+ * those apart (5 started, 3 came on, everything else did not play), which
+ * is exactly what `formEntries` (`./form.ts`) reads it for.
+ */
+export async function playerMatches(playerId: string, limit = 12): Promise<PlayerMatch[]> {
+  return sql<PlayerMatch[]>`
+    select season, day_number, match_date, points, minutes, status, is_home, opponent,
+      to_char(match_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as match_at
+    from rehoboam.web_player_matches
+    where player_id = ${playerId} and (match_at is null or match_at <= now())
+    order by match_at desc nulls last, season desc, day_number desc
+    limit ${limit}
+  `;
+}
+
+export type PlayerMvPoint = { day: string; market_value: number };
+
+/** His market-value history over the last `days`. `day` arrives as text
+ * (`to_char`), not a JS Date — the same reason `mvAccuracy` does it. */
+export async function playerMv(playerId: string, days = 180): Promise<PlayerMvPoint[]> {
+  return sql<PlayerMvPoint[]>`
+    select to_char(day, 'YYYY-MM-DD') as day, market_value
+    from rehoboam.web_player_mv
+    where player_id = ${playerId} and day >= current_date - ${days}::int
+    order by day asc
+  `;
+}
+
+export type PlayerFixture = {
+  season: string;
+  day_number: number;
+  /** ISO-8601 text, not a JS Date — the same reason `playerMatches` does it. */
+  kickoff_at: string | null;
+  is_home: boolean;
+  opponent: string | null;
+  opponent_place: number | null;
+};
+
+/** His next `limit` matches, soonest first. Empty for a player with no club,
+ * and for one whose club has no upcoming fixture stored. */
+export async function playerFixtures(playerId: string, limit = 3): Promise<PlayerFixture[]> {
+  return sql<PlayerFixture[]>`
+    select season, day_number, is_home, opponent, opponent_place,
+      to_char(to_timestamp(kickoff) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as kickoff_at
+    from rehoboam.web_player_fixtures
+    where player_id = ${playerId}
+    order by kickoff asc
+    limit ${limit}::int
+  `;
+}
+
 export type SquadRow = {
   session_id: string;
   legal_formation: string | null;
@@ -265,7 +390,6 @@ export type MarketRow = {
   name: string | null;
   team: string | null;
   position: string | null;
-  ask: number;
   market_value: number | null;
   mv_trend: number | null;
   /** Always 0 in every stored listing: Kickbase does not share the real count. Not shown. */
@@ -290,23 +414,36 @@ export type MarketRow = {
   /** Migration 010: the same two numbers the Players page shows. */
   trend_24h_pct: number | null;
   points_per_million: number | null;
+  /** Migration 021: Kickbase's last-update change in euros, alongside the
+   * existing percent above. */
+  trend_24h_eur: number | null;
+  /** Migration 021 (round 1 fix): `web_market` already left-joins
+   * `web_players` internally for `name`/`team`/`predicted_ep`/etc, so these
+   * two ride along on that same join rather than the web app re-joining
+   * the whole view a second time per query. */
+  image_path: string | null;
+  crest_path: string | null;
+  /** Kickbase's `st` availability code -- same field, same meaning as
+   * `PlayerRow.availability`. Migration 021 (round 2 fix, finding 3) added
+   * it to `web_market` so the fitness dot can draw here too. */
+  availability: number | null;
 };
 
 export const MARKET_SORTS = [
   "name",
   "position",
-  "ask",
   "market_value",
   "next_mv_pct",
   "fair_price",
   "trend_24h_pct",
+  "trend_24h_eur",
   "points_per_million",
   "seller",
   "expires_at",
   "predicted_ep",
   "p_start",
   "fair_value_gap",
-];
+] as const;
 
 /**
  * Every listing in the newest snapshot, sorted. Unfiltered on purpose: the
