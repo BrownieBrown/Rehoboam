@@ -30,7 +30,10 @@ function parseDay(day: string): number {
  * of days with no snapshot) shows as a gap in slope instead of being silently
  * compressed away -- and a flat series still draws (as a straight line
  * through the middle) instead of returning null: only "fewer than two
- * points" has nothing to draw.
+ * points" has nothing to draw. Both axes are inset by `pad`, so the first
+ * and last point never sit on x=0 or x=width -- a `<circle r="4">` drawn on
+ * an extreme point (the common monotone-series case clips both at once)
+ * would otherwise be half outside the viewBox.
  */
 export function chart(
   points: ChartPoint[],
@@ -52,8 +55,9 @@ export function chart(
   const maxV = Math.max(...values);
   const flat = minV === maxV;
   const usable = Math.max(height - 2 * pad, 0);
+  const usableWidth = Math.max(width - 2 * pad, 0);
 
-  const xAt = (t: number) => round1(((t - minTime) / timeSpan) * width);
+  const xAt = (t: number) => round1(pad + ((t - minTime) / timeSpan) * usableWidth);
   const yAt = (v: number) =>
     flat ? round1(height / 2) : round1(pad + usable - ((v - minV) / (maxV - minV)) * usable);
 

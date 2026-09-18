@@ -15,12 +15,12 @@ describe("chart", () => {
     expect(chart([{ day: "2026-01-01", market_value: 10 }], 100, 50)).toBeNull();
   });
 
-  it("draws a straight line from x=0 to x=width for two points", () => {
+  it("draws a straight line from x=0 to x=width for two points with no padding", () => {
     const points: ChartPoint[] = [
       { day: "2026-01-01", market_value: 10 },
       { day: "2026-01-02", market_value: 20 },
     ];
-    const out = chart(points, 100, 50);
+    const out = chart(points, 100, 50, 0);
     expect(out).not.toBeNull();
     const cs = coords(out!.line);
     expect(cs[0][0]).toBe(0);
@@ -67,7 +67,7 @@ describe("chart", () => {
       { day: "2026-01-02", market_value: 0 }, // 1 day after the first
       { day: "2026-01-10", market_value: 0 }, // 9 days after the first, not the midpoint
     ];
-    const out = chart(points, 90, 50);
+    const out = chart(points, 90, 50, 0);
     const cs = coords(out!.line);
     // total span is 9 days; the middle point sits 1/9 of the way across,
     // not at index-based 1/2 (which would place it at x=45).
@@ -111,5 +111,49 @@ describe("chart", () => {
     const copy = JSON.parse(JSON.stringify(points));
     chart(points, 100, 50);
     expect(points).toEqual(copy);
+  });
+
+  it("insets x as well as y so the extreme dots are not clipped", () => {
+    const c = chart(
+      [
+        { day: "2026-01-01", market_value: 1 },
+        { day: "2026-01-11", market_value: 9 },
+      ],
+      100,
+      50,
+    )!;
+    expect(c.low.x).toBeCloseTo(6, 1);
+    expect(c.high.x).toBeCloseTo(94, 1);
+    expect(c.low.y).toBeCloseTo(44, 1);
+    expect(c.high.y).toBeCloseTo(6, 1);
+  });
+
+  it("closes the area path along the bottom of the box", () => {
+    const c = chart(
+      [
+        { day: "2026-01-01", market_value: 1 },
+        { day: "2026-01-11", market_value: 9 },
+      ],
+      100,
+      50,
+    )!;
+    expect(c.area.startsWith("M")).toBe(true);
+    expect(c.area.endsWith("Z")).toBe(true);
+    expect(c.area).toContain(c.line.slice(1));
+    expect(c.area).toContain("50");
+  });
+
+  it("draws a flat series through the middle, not along an edge", () => {
+    const c = chart(
+      [
+        { day: "2026-01-01", market_value: 7 },
+        { day: "2026-01-05", market_value: 7 },
+      ],
+      100,
+      50,
+    )!;
+    const ys = [...c.line.matchAll(/,([\d.]+)/g)].map((m) => Number(m[1]));
+    expect(new Set(ys).size).toBe(1);
+    expect(ys[0]).toBeCloseTo(25, 1);
   });
 });
