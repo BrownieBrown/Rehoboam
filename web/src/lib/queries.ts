@@ -430,7 +430,6 @@ export type MarketRow = {
   name: string | null;
   team: string | null;
   position: string | null;
-  ask: number;
   market_value: number | null;
   mv_trend: number | null;
   /** Always 0 in every stored listing: Kickbase does not share the real count. Not shown. */
@@ -460,7 +459,6 @@ export type MarketRow = {
 export const MARKET_SORTS = [
   "name",
   "position",
-  "ask",
   "market_value",
   "next_mv_pct",
   "fair_price",
@@ -471,7 +469,7 @@ export const MARKET_SORTS = [
   "predicted_ep",
   "p_start",
   "fair_value_gap",
-];
+] as const;
 
 /**
  * Every listing in the newest snapshot, sorted. Unfiltered on purpose: the

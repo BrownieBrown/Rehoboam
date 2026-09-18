@@ -157,7 +157,7 @@ export function PanelPlaceholder({ message }: { message: string }) {
 
 /** Amber pill when the owner is us, plain "free agent" for an unowned
  * player, the owning manager's name otherwise -- the same three-way rule
- * the Players page's owner column and `PlayerOverlay`'s `OwnerBadge` use. */
+ * the Players page's owner column uses. */
 function OwnerLabel({ owner, listed, me }: { owner: string; listed: boolean; me: string | null }) {
   if (owner === me) return <Pill tone="accent">{owner}</Pill>;
   if (owner === "Kickbase" || owner === "market") {
