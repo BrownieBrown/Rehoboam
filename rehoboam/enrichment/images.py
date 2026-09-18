@@ -21,6 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rehoboam.enrichment.ingest import IngestBudget
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,22 @@ def team_dest_path(team_id: str, source: str) -> str:
     # Crests pass through unmodified, so the key's extension should match
     # what Kickbase actually served.
     return _dest_path("teams", team_id, source, ext=_source_ext(source, default="svg"))
+
+
+#: Kickbase serves most crests as SVG, but not all -- the content type must
+#: come from the same extension `team_dest_path` put in the destination key,
+#: not be hardcoded to SVG.
+_CREST_CONTENT_TYPES = {
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
+
+
+def crest_content_type(source: str) -> str:
+    return _CREST_CONTENT_TYPES.get(_source_ext(source, default="svg"), "application/octet-stream")
 
 
 def _needs_sync(source: str | None, path: str | None, dest: str) -> bool:
@@ -159,64 +179,85 @@ def _team_candidates(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def sync_images(store, *, client, limit: int, now: float) -> dict[str, int]:
+def sync_images(store, *, client, limit: int, budget: IngestBudget) -> dict[str, int]:
     """Sync up to `limit` player photos and club crests, stalest (never
     synced) first. Never raises -- a failure is counted in `failed` and
     logged, and everything else this call already did stands.
 
-    `now` is accepted for symmetry with the other ingestion steps
-    (`run_mv_forecast`) and to leave room for a future staleness re-check;
-    nothing currently reads it beyond that.
+    `budget` is the same `IngestBudget` the per-player loop above spends
+    against, but this never calls `budget.spend()` -- photos/crests are
+    capped separately, by `limit` (`IMAGE_SYNC_LIMIT`), not by the Kickbase
+    request cap. What this reads off `budget` is the wall-clock deadline:
+    a run that used most of it on status/performance/MV before ever
+    reaching here must not then spend up to 60 more slow CDN-fetch +
+    resize + Storage-upload round trips past it, inside the host's own
+    hard timeout. Checked before starting at all, and again before every
+    row, the same "check before spending, never mid-write" shape
+    `IngestBudget.spend` uses for the Kickbase calls.
     """
     result = {"players": 0, "teams": 0, "skipped": 0, "failed": 0}
     if client is None:
         logger.info("sync_images: SUPABASE_STORAGE_KEY not set, skipping")
         return result
-    del now  # unused today; see docstring
+    if budget.exhausted():
+        logger.info("sync_images: budget already exhausted, skipping")
+        return result
     try:
         remaining = max(int(limit), 0)
         with store.connection() as conn:
-            for row in _player_candidates(conn):
-                if remaining <= 0:
-                    break
-                dest = player_dest_path(row["player_id"], row["image_source"])
-                if not _needs_sync(row["image_source"], row["image_path"], dest):
-                    result["skipped"] += 1
-                    continue
-                remaining -= 1
-                try:
-                    data = client.fetch(row["image_source"])
-                    data, content_type = _resize_photo(data)
-                    client.upload(dest, data, content_type=content_type)
-                    conn.execute(
+            player_rows = _player_candidates(conn)
+            team_rows = _team_candidates(conn)
+
+        for row in player_rows:
+            if remaining <= 0 or budget.exhausted():
+                break
+            dest = player_dest_path(row["player_id"], row["image_source"])
+            if not _needs_sync(row["image_source"], row["image_path"], dest):
+                result["skipped"] += 1
+                continue
+            remaining -= 1
+            try:
+                data = client.fetch(row["image_source"])
+                data, content_type = _resize_photo(data)
+                client.upload(dest, data, content_type=content_type)
+                # One transaction per row, committed here -- not one
+                # transaction for the whole sync. `store/__init__.py`
+                # documents `connection()` as a single non-autocommit
+                # transaction on the :6543 pooler: held open across every
+                # slow HTTP call above, a single failed UPDATE would abort
+                # it for every row after, rolling back rows that had
+                # already synced fine.
+                with store.connection() as write_conn:
+                    write_conn.execute(
                         "UPDATE rehoboam.player_universe SET image_path = %s "
                         "WHERE player_id = %s",
                         (dest, row["player_id"]),
                     )
-                    result["players"] += 1
-                except Exception as e:  # noqa: BLE001 -- one bad row must not stop the batch
-                    result["failed"] += 1
-                    logger.warning("image sync failed for player %s: %s", row["player_id"], e)
+                result["players"] += 1
+            except Exception as e:  # noqa: BLE001 -- one bad row must not stop the batch
+                result["failed"] += 1
+                logger.warning("image sync failed for player %s: %s", row["player_id"], e)
 
-            for row in _team_candidates(conn):
-                if remaining <= 0:
-                    break
-                dest = team_dest_path(row["team_id"], row["crest_source"])
-                if not _needs_sync(row["crest_source"], row["crest_path"], dest):
-                    result["skipped"] += 1
-                    continue
-                remaining -= 1
-                try:
-                    data = client.fetch(row["crest_source"])
-                    client.upload(dest, data, content_type="image/svg+xml")
-                    conn.execute(
+        for row in team_rows:
+            if remaining <= 0 or budget.exhausted():
+                break
+            dest = team_dest_path(row["team_id"], row["crest_source"])
+            if not _needs_sync(row["crest_source"], row["crest_path"], dest):
+                result["skipped"] += 1
+                continue
+            remaining -= 1
+            try:
+                data = client.fetch(row["crest_source"])
+                client.upload(dest, data, content_type=crest_content_type(row["crest_source"]))
+                with store.connection() as write_conn:
+                    write_conn.execute(
                         "UPDATE rehoboam.teams SET crest_path = %s WHERE team_id = %s",
                         (dest, row["team_id"]),
                     )
-                    result["teams"] += 1
-                except Exception as e:  # noqa: BLE001 -- one bad row must not stop the batch
-                    result["failed"] += 1
-                    logger.warning("image sync failed for team %s: %s", row["team_id"], e)
+                result["teams"] += 1
+            except Exception as e:  # noqa: BLE001 -- one bad row must not stop the batch
+                result["failed"] += 1
+                logger.warning("image sync failed for team %s: %s", row["team_id"], e)
     except Exception:  # noqa: BLE001 -- report, don't raise (mirrors run_mv_forecast)
         logger.exception("sync_images failed")
     logger.info(

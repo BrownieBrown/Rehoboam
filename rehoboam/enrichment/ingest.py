@@ -281,7 +281,7 @@ def run_ingestion(
                 except Exception:  # noqa: BLE001 -- image sync is never fatal to ingestion
                     logger.exception("could not build the image storage client")
                     image_client = None
-                sync_images(store, client=image_client, limit=IMAGE_SYNC_LIMIT, now=budget.now())
+                sync_images(store, client=image_client, limit=IMAGE_SYNC_LIMIT, budget=budget)
     except BudgetExhausted as stop:
         stats.stopped_by = stop.reason
     stats.requests = budget.requests
