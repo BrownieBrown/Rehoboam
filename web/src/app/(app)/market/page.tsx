@@ -11,6 +11,7 @@ import { bySeller, sellerScope } from "@/lib/market-filter";
 import { hrefFor } from "@/lib/query-href";
 import { NextMvCell } from "@/components/NextMv";
 import { NEXT_MV_HINT, noForecastNote } from "@/lib/next-mv";
+import { PlayerOverlay } from "@/components/PlayerOverlay";
 import Link from "next/link";
 
 /** A filter chip: a plain link, filled when it is the active choice. */
@@ -66,7 +67,12 @@ export default async function MarketPage({
       key: "name", label: "Player", align: "left",
       cell: (r) => (
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-semibold text-text">{r.name ?? r.player_id}</span>
+          <Link
+            href={hrefFor("/market", params, { player: r.player_id })}
+            className="text-sm font-semibold text-text hover:text-accent"
+          >
+            {r.name ?? r.player_id}
+          </Link>
           <span className="text-xs text-muted">{r.team ?? DASH}</span>
         </div>
       ),
@@ -127,6 +133,12 @@ export default async function MarketPage({
           </div>
         }
       />
+      {params.player ? (
+        <PlayerOverlay
+          playerId={params.player}
+          closeHref={hrefFor("/market", params, { player: null })}
+        />
+      ) : null}
       <div className="flex flex-wrap items-center gap-4 px-6 py-4">
         <div className="flex items-center gap-2">
           <Chip href={hrefFor("/market", params, { from: null })} active={scope === "kickbase"}>

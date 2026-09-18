@@ -15,10 +15,12 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { FairPrice } from "@/components/FairPrice";
 import { Filters } from "@/components/Filters";
 import { Pill } from "@/components/Pill";
+import { PlayerOverlay } from "@/components/PlayerOverlay";
 import { StatusHeader } from "@/components/StatusHeader";
 import { DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
 import { NextMvCell } from "@/components/NextMv";
 import { NEXT_MV_HINT, noForecastNote } from "@/lib/next-mv";
+import { hrefFor } from "@/lib/query-href";
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -93,7 +95,12 @@ export default async function PlayersPage({
       align: "left",
       cell: (p) => (
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-semibold text-text">{p.name}</span>
+          <Link
+            href={hrefFor("/", params, { player: p.player_id })}
+            className="text-sm font-semibold text-text hover:text-accent"
+          >
+            {p.name}
+          </Link>
           <span className="text-xs text-muted">{p.team ?? DASH}</span>
         </div>
       ),
@@ -163,6 +170,12 @@ export default async function PlayersPage({
   return (
     <>
       <StatusHeader title="Players" />
+      {params.player ? (
+        <PlayerOverlay
+          playerId={params.player}
+          closeHref={hrefFor("/", params, { player: null })}
+        />
+      ) : null}
       <Filters clubs={clubList} params={params} />
       <div className="flex items-center justify-between gap-4 px-6 py-3">
         <span className="tnum text-sm text-muted">{pageSummary(offset, rows.length, total)}</span>

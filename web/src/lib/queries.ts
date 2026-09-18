@@ -207,6 +207,70 @@ export async function players(
   `;
 }
 
+/** One player's row from `web_players`, for the overlay's header and "our numbers"
+ * grid. `total` is not meaningful here — it only exists so this shares `PlayerRow`'s
+ * shape with the table query above — and is always 0. */
+export async function playerRow(playerId: string): Promise<PlayerRow | null> {
+  const [row] = await sql<PlayerRow[]>`
+    select *, 0 as total from rehoboam.web_players where player_id = ${playerId}
+  `;
+  return row ?? null;
+}
+
+export type PlayerSeason = {
+  season: string;
+  appearances: number;
+  starts: number;
+  points: number;
+  avg_points: number | null;
+  median_points: number | null;
+  best_points: number | null;
+  minutes: number | null;
+};
+
+/** Every season the store has for this player, newest first. */
+export async function playerSeasons(playerId: string): Promise<PlayerSeason[]> {
+  return sql<PlayerSeason[]>`
+    select * from rehoboam.web_player_seasons
+    where player_id = ${playerId}
+    order by season desc
+  `;
+}
+
+export type PlayerMatch = {
+  season: string;
+  day_number: number;
+  match_date: string | null;
+  points: number | null;
+  minutes: number | null;
+  status: number | null;
+  is_home: number | null;
+  opponent: string | null;
+};
+
+/** His newest matches, played or not. */
+export async function playerMatches(playerId: string, limit = 12): Promise<PlayerMatch[]> {
+  return sql<PlayerMatch[]>`
+    select * from rehoboam.web_player_matches
+    where player_id = ${playerId}
+    order by season desc, day_number desc
+    limit ${limit}
+  `;
+}
+
+export type PlayerMvPoint = { day: string; market_value: number };
+
+/** His market-value history over the last `days`. `day` arrives as text
+ * (`to_char`), not a JS Date — the same reason `mvAccuracy` does it. */
+export async function playerMv(playerId: string, days = 180): Promise<PlayerMvPoint[]> {
+  return sql<PlayerMvPoint[]>`
+    select to_char(day, 'YYYY-MM-DD') as day, market_value
+    from rehoboam.web_player_mv
+    where player_id = ${playerId} and day >= current_date - ${days}
+    order by day asc
+  `;
+}
+
 export type SquadRow = {
   session_id: string;
   legal_formation: string | null;
