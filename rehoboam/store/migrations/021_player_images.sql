@@ -40,7 +40,10 @@ alter table rehoboam.teams add column if not exists crest_path text;
 --    internally for `name`/`team`/`predicted_ep`/etc, so selecting these two
 --    more off that same join is free -- the web app had briefly worked
 --    around their absence with a second read-time join over the whole view,
---    which this replaces.
+--    which this replaces. It also gains `availability` (round 2 fix, finding
+--    3): `web_players` already carries it (point 2 above), so Market's
+--    fitness dot reads it off the same join too, rather than the Market page
+--    going without one -- availability is the owner's headline request.
 --
 -- `player_table` and `web_players` only *append* columns below (same names,
 -- same order, new ones at the end), so `create or replace view` is safe for
@@ -230,7 +233,8 @@ select l.snapshot_at, l.player_id, p.name, p.team, p.position,
     p.fair_price,
     p.trend_24h_pct, p.points_per_million,
     ns.mv_change as trend_24h_eur,
-    p.image_path, p.crest_path
+    p.image_path, p.crest_path,
+    p.availability
 from rehoboam.market_listings l
 join newest n on l.snapshot_at = n.at
 left join rehoboam.web_players p on p.player_id = l.player_id

@@ -235,6 +235,7 @@ def test_web_market_column_order_is_unchanged_plus_trend_24h_eur_and_images(stor
         "trend_24h_eur",
         "image_path",
         "crest_path",
+        "availability",
     ]
 
 
@@ -334,6 +335,36 @@ def test_web_market_carries_image_path_and_crest_path(store_dsn):
     row = _rows(store_dsn, "select * from rehoboam.web_market")[0]
     assert row["image_path"] == "players/a.png"
     assert row["crest_path"] == "teams/7.png"
+
+
+def test_web_market_carries_availability_from_the_web_players_join(store_dsn):
+    """Round 2 fix (finding 3): `web_market` left-joins `web_players` for
+    `name`/`team`/`image_path`/etc already -- `availability` rides along on
+    that same join, so Market's fitness dot reads the newest
+    `player_status_daily.status`, same as `PlayerList`'s dot on Players."""
+    _players(store_dsn)
+    CorpusStore(dsn=store_dsn).record_status_daily("a", date.today(), {"st": 4}, NOW)
+    LeagueStore(dsn=store_dsn).write_listings(
+        [
+            {
+                "snapshot_at": NOW,
+                "player_id": "a",
+                "ask": 10_000_000,
+                "market_value": 10_000_000,
+                "mv_trend": 0,
+                "seller_id": None,
+                "offer_count": 0,
+                "our_bid": None,
+                "listed_at": NOW,
+                "expires_at": NOW + 10,
+                "status": 0,
+                "lineup_probability": 1,
+                "source": "test",
+            }
+        ]
+    )
+    row = _rows(store_dsn, "select * from rehoboam.web_market")[0]
+    assert row["availability"] == 4
 
 
 def test_web_ownership_takes_each_managers_own_newest_snapshot(store_dsn):

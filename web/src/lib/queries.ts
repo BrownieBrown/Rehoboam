@@ -423,6 +423,10 @@ export type MarketRow = {
    * the whole view a second time per query. */
   image_path: string | null;
   crest_path: string | null;
+  /** Kickbase's `st` availability code -- same field, same meaning as
+   * `PlayerRow.availability`. Migration 021 (round 2 fix, finding 3) added
+   * it to `web_market` so the fitness dot can draw here too. */
+  availability: number | null;
 };
 
 export const MARKET_SORTS = [

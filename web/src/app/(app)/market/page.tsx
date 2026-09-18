@@ -14,6 +14,7 @@ import {
   POSITION,
   type Tone,
 } from "@/lib/format";
+import { availability } from "@/lib/availability";
 import { expiringWithin, listingsLine } from "@/lib/expiry";
 import { bySeller, sellerScope } from "@/lib/market-filter";
 import { hrefFor, type Params } from "@/lib/query-href";
@@ -91,6 +92,14 @@ const RULE_COLOR: Record<string, string> = {
   def: "bg-def",
   mid: "bg-mid",
   fw: "bg-fw",
+};
+
+/** Same tone-to-color mapping as `PlayerList`'s own `DOT_TONE` -- the
+ * fitness dot beside a name. */
+const DOT_TONE: Record<Tone, string> = {
+  positive: "bg-positive",
+  negative: "bg-negative",
+  neutral: "bg-muted",
 };
 
 /** A new sort starts again at page one; clicking the active key flips its
@@ -230,6 +239,7 @@ function FullMarketTable({
         {rows.map((row) => {
           const pos = POSITION[row.position ?? ""] ?? { short: row.position ?? DASH, token: "plain" };
           const rule = RULE_COLOR[pos.token] ?? "bg-border-strong";
+          const avail = availability(row.availability);
           return (
             <Link
               key={row.player_id}
@@ -240,9 +250,15 @@ function FullMarketTable({
                 <span className={`h-7 w-[3px] shrink-0 rounded-sm ${rule}`} />
                 <PlayerPhoto path={row.image_path} name={row.name ?? row.player_id} size={30} />
                 <div className="flex min-w-0 flex-col gap-px">
-                  <span className="truncate text-sm font-semibold text-text">
-                    {row.name ?? row.player_id}
-                  </span>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm font-semibold text-text">
+                      {row.name ?? row.player_id}
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_TONE[avail.tone]}`}
+                    />
+                  </div>
                   <div className="flex min-w-0 items-center gap-1.5">
                     <ClubCrest path={row.crest_path} size={13} />
                     <span className="truncate text-[11px] text-muted">{row.team ?? DASH}</span>
@@ -337,6 +353,7 @@ function NarrowMarketTable({
         const isSelected = row.player_id === selected;
         const pos = POSITION[row.position ?? ""] ?? { short: row.position ?? DASH, token: "plain" };
         const rule = isSelected ? "bg-accent" : (RULE_COLOR[pos.token] ?? "bg-border-strong");
+        const avail = availability(row.availability);
         return (
           <Link
             key={row.player_id}
@@ -347,9 +364,15 @@ function NarrowMarketTable({
               <span className={`h-7 w-[3px] shrink-0 rounded-sm ${rule}`} />
               <PlayerPhoto path={row.image_path} name={row.name ?? row.player_id} size={30} />
               <div className="flex min-w-0 flex-col gap-px">
-                <span className="truncate text-[13px] font-semibold text-text">
-                  {row.name ?? row.player_id}
-                </span>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate text-[13px] font-semibold text-text">
+                    {row.name ?? row.player_id}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_TONE[avail.tone]}`}
+                  />
+                </div>
                 <div className="flex min-w-0 items-center gap-1">
                   <ClubCrest path={row.crest_path} size={13} />
                   <span className="truncate text-[10px] text-muted">{row.team ?? DASH}</span>
