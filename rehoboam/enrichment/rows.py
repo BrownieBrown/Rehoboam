@@ -128,14 +128,22 @@ def _opt_int(value: Any) -> int | None:
     return int(value) if value is not None else None
 
 
+def _opt_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
 def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> dict:
     """League player details → one ``player_status_daily`` row.
 
     ``st`` is the injury/availability status (0 healthy), ``prob`` the lineup
     probability (1 starter … 5 unlikely) — the two fields the scorer never had
     day by day. ``tfhmvt`` is the euro change of the last daily market-value
-    update, read with the value it produced. Missing fields stay None rather
-    than becoming a fake healthy starter.
+    update, read with the value it produced. ``g``/``a``/``y``/``r``/``sec``/
+    ``tp``/``ap`` are this season's goals, assists, yellow cards, red cards,
+    seconds played, total points and average points — what Kickbase's own
+    player card shows, probed live 2026-09-18 (all null for a player with no
+    appearances; ``ap`` is a float). Missing fields stay None rather than
+    becoming a fake healthy starter or a fake zero season.
     """
     tid = details.get("tid")
     return {
@@ -147,6 +155,13 @@ def status_row(player_id: str, day: date, details: dict, fetched_at: float) -> d
         "mv_change": _opt_int(details.get("tfhmvt")),
         "team_id": str(tid) if tid is not None else None,
         "fetched_at": float(fetched_at),
+        "goals": _opt_int(details.get("g")),
+        "assists": _opt_int(details.get("a")),
+        "yellow_cards": _opt_int(details.get("y")),
+        "red_cards": _opt_int(details.get("r")),
+        "seconds_played": _opt_int(details.get("sec")),
+        "season_points": _opt_int(details.get("tp")),
+        "season_average": _opt_float(details.get("ap")),
     }
 
 
