@@ -18,8 +18,16 @@ export function money(n: number | null | undefined): string {
   return groups.format(n);
 }
 
+/**
+ * A plain number, not necessarily euros — but a negative one still needs the
+ * same U+2212 minus sign as `money`/`signed`/`signedPct`, not `toFixed`'s
+ * ASCII hyphen-minus: the overlay is the first place that feeds this
+ * genuinely negative numbers (points can go negative on Kickbase), and one
+ * page keeps one glyph for "negative".
+ */
 export function num(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined) return DASH;
+  if (n < 0) return `${MINUS}${(-n).toFixed(digits)}`;
   return n.toFixed(digits);
 }
 

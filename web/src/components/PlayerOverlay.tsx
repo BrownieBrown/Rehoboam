@@ -82,67 +82,72 @@ function OwnerBadge({ owner, me, listed }: { owner: string; me: string | null; l
   );
 }
 
+/** The opponent's club name with an "H"/"A" marker from `is_home`. The
+ * marker is independent of the name: a team missing from `rehoboam.teams`
+ * still has a known home/away side, so it must not be lost along with the
+ * name. */
 function OpponentCell({ opponent, isHome }: { opponent: string | null; isHome: number | null }) {
-  if (opponent === null) return <span className="text-muted">{DASH}</span>;
   const side = isHome === 1 ? "H" : isHome === 0 ? "A" : null;
   return (
-    <span className="text-text-dim">
-      {opponent}
+    <span className={opponent === null ? "text-muted" : "text-text-dim"}>
+      {opponent ?? DASH}
       {side ? <span className="text-muted"> ({side})</span> : null}
     </span>
   );
 }
 
-function SeasonsTable({ seasons }: { seasons: PlayerSeason[] }) {
-  if (seasons.length === 0) {
-    return <p className="text-sm text-muted">No season has any recorded matches.</p>;
+type Col<T> = { label: string; align: "left" | "right"; cell: (row: T) => React.ReactNode };
+
+/**
+ * The one small table both the seasons and matches sections use. Alignment
+ * lives on the column descriptor -- the single source both the header cell
+ * and the body cell read -- so a header and its column's cells can never
+ * disagree about which side they sit on.
+ */
+function OverlayTable<T>({
+  columns,
+  rows,
+  rowKey,
+  emptyText,
+}: {
+  columns: Col<T>[];
+  rows: T[];
+  rowKey: (row: T) => string;
+  emptyText: string;
+}) {
+  if (rows.length === 0) {
+    return <p className="text-sm text-muted">{emptyText}</p>;
   }
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full border-collapse">
         <thead>
           <tr>
-            {["Season", "Played", "Starts", "Points", "Average", "Median", "Best", "Minutes"].map(
-              (label, i) => (
-                <th
-                  key={label}
-                  className={`h-9 whitespace-nowrap border-b border-border-strong px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted ${
-                    i === 0 ? "text-left" : "text-right"
-                  }`}
-                >
-                  {label}
-                </th>
-              ),
-            )}
+            {columns.map((c) => (
+              <th
+                key={c.label}
+                className={`h-9 whitespace-nowrap border-b border-border-strong px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted ${
+                  c.align === "left" ? "text-left" : "text-right"
+                }`}
+              >
+                {c.label}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {seasons.map((s) => (
-            <tr key={s.season}>
-              <td className="h-10 whitespace-nowrap border-b border-border px-3 text-left text-sm text-text">
-                {s.season}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.appearances)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.starts)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.points)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.avg_points, 1)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.median_points, 1)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.best_points)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(s.minutes)}
-              </td>
+          {rows.map((row) => (
+            <tr key={rowKey(row)}>
+              {columns.map((c) => (
+                <td
+                  key={c.label}
+                  className={`tnum h-10 whitespace-nowrap border-b border-border px-3 text-sm ${
+                    c.align === "left" ? "text-left" : "text-right"
+                  }`}
+                >
+                  {c.cell(row)}
+                </td>
+              ))}
             </tr>
           ))}
         </tbody>
@@ -151,60 +156,30 @@ function SeasonsTable({ seasons }: { seasons: PlayerSeason[] }) {
   );
 }
 
-function MatchesTable({ matches }: { matches: PlayerMatch[] }) {
-  if (matches.length === 0) {
-    return <p className="text-sm text-muted">No matches recorded yet.</p>;
-  }
-  return (
-    <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full border-collapse">
-        <thead>
-          <tr>
-            {["Season", "Matchday", "Date", "Opponent", "Points", "Minutes", "Status"].map(
-              (label, i) => (
-                <th
-                  key={label}
-                  className={`h-9 whitespace-nowrap border-b border-border-strong px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted ${
-                    i === 0 || i === 3 || i === 6 ? "text-left" : "text-right"
-                  }`}
-                >
-                  {label}
-                </th>
-              ),
-            )}
-          </tr>
-        </thead>
-        <tbody>
-          {matches.map((m) => (
-            <tr key={`${m.season}-${m.day_number}`}>
-              <td className="h-10 whitespace-nowrap border-b border-border px-3 text-left text-sm text-text-dim">
-                {m.season}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {m.day_number}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-left">
-                {matchDateCell(m.match_date)}
-              </td>
-              <td className="h-10 whitespace-nowrap border-b border-border px-3 text-left text-sm">
-                <OpponentCell opponent={m.opponent} isHome={m.is_home} />
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(m.points)}
-              </td>
-              <td className="tnum h-10 whitespace-nowrap border-b border-border px-3 text-right">
-                {num(m.minutes)}
-              </td>
-              <td className="h-10 whitespace-nowrap border-b border-border px-3 text-left text-sm text-text-dim">
-                {matchStatus(m.status)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+const SEASON_COLUMNS: Col<PlayerSeason>[] = [
+  { label: "Season", align: "left", cell: (s) => s.season },
+  { label: "Played", align: "right", cell: (s) => num(s.appearances) },
+  { label: "Starts", align: "right", cell: (s) => num(s.starts) },
+  { label: "Points", align: "right", cell: (s) => num(s.points) },
+  { label: "Average", align: "right", cell: (s) => num(s.avg_points, 1) },
+  { label: "Median", align: "right", cell: (s) => num(s.median_points, 1) },
+  { label: "Best", align: "right", cell: (s) => num(s.best_points) },
+  { label: "Minutes", align: "right", cell: (s) => num(s.minutes) },
+];
+
+const MATCH_COLUMNS: Col<PlayerMatch>[] = [
+  { label: "Season", align: "left", cell: (m) => m.season },
+  { label: "Matchday", align: "right", cell: (m) => num(m.day_number) },
+  { label: "Date", align: "left", cell: (m) => matchDateCell(m.match_date) },
+  {
+    label: "Opponent",
+    align: "left",
+    cell: (m) => <OpponentCell opponent={m.opponent} isHome={m.is_home} />,
+  },
+  { label: "Points", align: "right", cell: (m) => num(m.points) },
+  { label: "Minutes", align: "right", cell: (m) => num(m.minutes) },
+  { label: "Status", align: "left", cell: (m) => matchStatus(m.status) },
+];
 
 /**
  * A server-rendered, URL-driven overlay: `playerId` comes from `?player=`,
@@ -302,9 +277,16 @@ export async function PlayerOverlay({
                   role="img"
                   aria-label="Market value, last 180 days"
                   viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+                  preserveAspectRatio="none"
                   className="h-28 w-full text-accent"
                 >
-                  <polyline points={spark.path} fill="none" stroke="currentColor" strokeWidth={2} />
+                  <polyline
+                    points={spark.path}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    vectorEffect="non-scaling-stroke"
+                  />
                 </svg>
                 <div className="mt-2 flex items-center justify-between text-xs text-muted">
                   <span>
@@ -315,9 +297,13 @@ export async function PlayerOverlay({
                   </span>
                 </div>
               </>
-            ) : (
+            ) : mv.length < 2 ? (
               <p className="text-sm text-muted">
                 Not enough market-value history to draw a line.
+              </p>
+            ) : (
+              <p className="text-sm text-muted">
+                His market value has not moved in the last 180 days.
               </p>
             )}
           </div>
@@ -326,14 +312,24 @@ export async function PlayerOverlay({
             <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
               Seasons
             </h3>
-            <SeasonsTable seasons={seasons} />
+            <OverlayTable
+              columns={SEASON_COLUMNS}
+              rows={seasons}
+              rowKey={(s) => s.season}
+              emptyText="He has not played a match in any recorded season."
+            />
           </div>
 
           <div>
             <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
               Last matches
             </h3>
-            <MatchesTable matches={matches} />
+            <OverlayTable
+              columns={MATCH_COLUMNS}
+              rows={matches}
+              rowKey={(m) => `${m.season}-${m.day_number}`}
+              emptyText="No matches recorded yet."
+            />
           </div>
         </div>
       </div>

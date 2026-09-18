@@ -22,6 +22,9 @@ export function sparkline(
   const max = Math.max(...values);
   if (min === max) return null;
   const n = points.length;
+  // x is spaced by index, not by date: points are assumed evenly spaced
+  // along the axis, so a gap in the series (a day with no snapshot)
+  // compresses that stretch of time rather than leaving a visible gap.
   const path = points
     .map((p, i) => {
       const x = round1((i / (n - 1)) * width);

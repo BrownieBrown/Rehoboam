@@ -130,6 +130,9 @@ export default async function MarketPage({
           <div className="flex flex-col items-end">
             <span className="text-[11px] uppercase tracking-[0.08em] text-muted">Budget</span>
             <b className="tnum text-2xl font-bold text-text">{money(facts.budget)}</b>
+            {facts.lastSessionAt !== null ? (
+              <span className="text-xs text-muted">as of {ago(facts.lastSessionAt)}</span>
+            ) : null}
           </div>
         }
       />

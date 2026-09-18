@@ -56,6 +56,12 @@ describe("num", () => {
     expect(num(202, 1)).toBe("202.0");
     expect(num(null)).toBe("—");
   });
+
+  it("uses the same minus sign as money/signed/signedPct on a negative value, not a hyphen", () => {
+    expect(num(-12, 0)).toBe("−12");
+    expect(num(-12).charCodeAt(0)).toBe("−".charCodeAt(0));
+    expect(num(-3.5, 1)).toBe("−3.5");
+  });
 });
 
 describe("countdown", () => {

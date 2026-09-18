@@ -4,7 +4,7 @@ raw match log (played and missed alike), and daily market-value history."""
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 
 from rehoboam.store.corpus_store import CorpusStore
 from rehoboam.store.league_store import LeagueStore
@@ -129,11 +129,49 @@ def test_web_player_matches_returns_unplayed_rows_with_opponent_names(store_dsn)
     assert [r["status"] for r in rows] == [5, 3, 1, 0]
     day1, day4 = rows[0], rows[3]
     assert day1["opponent"] == "Club Two"
+    # Strict, not just `== 1`/`== 0`: `is_home` is an `integer` column
+    # (confirmed live), and `bool` is a subclass of `int` in Python, so the
+    # `not isinstance(..., bool)` half is what actually catches a
+    # driver/type regression that silently swapped it for a Python bool.
+    assert isinstance(day1["is_home"], int) and not isinstance(day1["is_home"], bool)
     assert day1["is_home"] == 1
     # Day 4's opponent team ("55") was never upserted into rehoboam.teams --
     # the left join must give null, not drop the row or raise.
     assert day4["opponent"] is None
+    assert isinstance(day4["is_home"], int) and not isinstance(day4["is_home"], bool)
     assert day4["is_home"] == 0
+
+
+def test_appearances_excludes_a_played_row_with_null_points(store_dsn):
+    """`points` is `not null` in the live schema (no played row has ever
+    carried a null value there), so this relaxes it on this throwaway test
+    database only, to prove the view itself doesn't silently inflate
+    `appearances` past what its points-based aggregates (avg/median/max/
+    sum(minutes)) cover -- independent of the table constraint that happens
+    to make the scenario unreachable in production today."""
+    corpus = _seed(store_dsn)
+    with corpus.connection() as conn:
+        conn.execute("alter table rehoboam.player_match_history alter column points drop not null")
+        conn.execute(
+            "insert into rehoboam.player_match_history "
+            "(player_id, season, day_number, match_date, points, minutes, team_id, "
+            "opponent_team_id, is_home, status) "
+            "values ('p1', '2026/2027', 5, '2026-09-26T13:30:00Z', null, 90, '1', '2', 1, 5)"
+        )
+        season_row = conn.execute(
+            "select * from rehoboam.web_player_seasons "
+            "where player_id = 'p1' and season = '2026/2027'"
+        ).fetchone()
+        match_row = conn.execute(
+            "select points from rehoboam.web_player_matches "
+            "where player_id = 'p1' and season = '2026/2027' and day_number = 5"
+        ).fetchone()
+    # The null-points started row does not count toward appearances (still 2,
+    # from _seed's two real played rows) -- count(points), not count(*).
+    assert season_row["appearances"] == 2
+    # ...but the raw match log still shows it, points and all.
+    assert match_row is not None
+    assert match_row["points"] is None
 
 
 def test_web_player_mv_returns_one_row_per_day_ascending(store_dsn):
@@ -155,3 +193,20 @@ def test_web_player_mv_returns_one_row_per_day_ascending(store_dsn):
         ).fetchall()
     assert [r["day"] for r in rows] == [date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)]
     assert [r["market_value"] for r in rows] == [8_000_000, 9_000_000, 10_000_000]
+
+
+def test_web_player_mv_uses_the_utc_date_not_the_session_timezone(store_dsn):
+    """Every seed above lands at exact UTC midnight, where the session's
+    timezone can't move the date -- this host's Postgres session defaults to
+    Europe/Berlin (confirmed live), so a snapshot near the UTC day boundary
+    is the one case that actually discriminates `at time zone 'UTC'` from
+    plain `::date`: without it, 23:30 UTC on the 4th reads as the 5th."""
+    corpus = _seed(store_dsn)
+    late = datetime(2026, 1, 4, 23, 30, 0, tzinfo=timezone.utc).timestamp()
+    corpus.record_mv_series("p1", {"it": [{"dt": late / 86400.0, "mv": 11_000_000}]})
+    with corpus.connection() as conn:
+        row = conn.execute(
+            "select day, market_value from rehoboam.web_player_mv "
+            "where player_id = 'p1' and market_value = 11000000"
+        ).fetchone()
+    assert row["day"] == date(2026, 1, 4)

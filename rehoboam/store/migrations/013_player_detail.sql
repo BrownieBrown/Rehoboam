@@ -10,7 +10,10 @@
 -- averages down.
 create or replace view rehoboam.web_player_seasons as
 select player_id, season,
-    count(*) as appearances,
+    -- Same rows as avg/median/max/sum(minutes) below: a played row with a
+    -- null points value (never observed live, but the column allows it)
+    -- must not inflate appearances past what those aggregates counted.
+    count(points) as appearances,
     count(*) filter (where status = 5) as starts,
     sum(points) as points,
     round(avg(points)::numeric, 1) as avg_points,

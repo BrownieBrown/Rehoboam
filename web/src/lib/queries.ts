@@ -266,7 +266,7 @@ export async function playerMv(playerId: string, days = 180): Promise<PlayerMvPo
   return sql<PlayerMvPoint[]>`
     select to_char(day, 'YYYY-MM-DD') as day, market_value
     from rehoboam.web_player_mv
-    where player_id = ${playerId} and day >= current_date - ${days}
+    where player_id = ${playerId} and day >= current_date - ${days}::int
     order by day asc
   `;
 }
