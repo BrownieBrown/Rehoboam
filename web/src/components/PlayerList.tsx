@@ -2,7 +2,9 @@ import Link from "next/link";
 import { PLAYER_SORTS, type PlayerRow } from "@/lib/queries";
 import { hrefFor, type Params } from "@/lib/query-href";
 import { sortDir, sortKey } from "@/lib/sort";
-import { DASH, money, num, pct, signed, signedPct, POSITION } from "@/lib/format";
+import { DASH, money, num, pct, signed, signedPct, POSITION, type Tone } from "@/lib/format";
+import { availability } from "@/lib/availability";
+import { ClubCrest, PlayerPhoto } from "@/components/PlayerPhoto";
 
 /** Every key `PLAYER_SORTS` can carry, as a literal union rather than plain
  * `string` -- what lets `SORT_LABEL` and `rankedFigureText` below be checked
@@ -50,6 +52,15 @@ const LABEL_COLOR: Record<string, string> = {
   fw: "text-fw",
 };
 
+/** The fitness dot beside each row's name -- same tone palette as
+ * everywhere else, solid background rather than the panel badge's 15%
+ * tint, since a 6 px dot has no room for a label to make the tint legible. */
+const DOT_TONE: Record<Tone, string> = {
+  positive: "bg-positive",
+  negative: "bg-negative",
+  neutral: "bg-muted",
+};
+
 /** A new sort starts again at page 1 -- `hrefFor` already drops `page` for
  * every link, the same rule `DataTable`'s own sort links followed. Clicking
  * the active key flips its direction; clicking a different one starts it
@@ -93,7 +104,7 @@ function rankedFigureText(row: PlayerRow, sort: SortKey): string | null {
     case "median_points":
       return num(row.median_points, 1);
     case "points_per_million":
-      return num(row.points_per_million, 2);
+      return num(row.points_per_million, 1);
     case "appearances":
       return num(row.appearances, 0);
     case "starts":
@@ -130,6 +141,7 @@ function Row({
   const ruleClass = isSelected ? "bg-accent" : (RULE_COLOR[pos.token] ?? "bg-border-strong");
   const labelClass = LABEL_COLOR[pos.token] ?? "text-muted";
   const figure = rankedFigureText(row, sort);
+  const avail = availability(row.availability);
   return (
     <Link
       href={hrefFor(basePath, params, { player: row.player_id })}
@@ -137,17 +149,20 @@ function Row({
         isSelected ? "bg-accent/8" : ""
       }`}
     >
-      {/* No photo here -- Task 10 wires in `PlayerPhoto`; until then the space
-          is left out entirely rather than drawn as a placeholder circle. */}
       <span className={`h-14 w-[3px] shrink-0 ${ruleClass}`} />
+      <PlayerPhoto path={row.image_path} name={row.name} size={34} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span
-          className={`truncate text-[15px] font-semibold ${isSelected ? "text-text" : "text-text-dim"}`}
-        >
-          {row.name}
-        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span
+            className={`truncate text-[15px] font-semibold ${isSelected ? "text-text" : "text-text-dim"}`}
+          >
+            {row.name}
+          </span>
+          <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_TONE[avail.tone]}`} />
+        </div>
         <div className="flex min-w-0 items-center gap-1.5">
           <span className={`text-[11px] font-semibold ${labelClass}`}>{pos.short}</span>
+          <ClubCrest path={row.crest_path} size={14} />
           <span className="truncate text-xs text-muted">{row.team ?? DASH}</span>
         </div>
       </div>

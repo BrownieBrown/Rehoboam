@@ -2,6 +2,13 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // Task 10b's PlayerPhoto.test.ts imports a .tsx component and calls it
+  // directly (no rendering library in this project) -- so its JSX must
+  // compile to react/jsx-runtime calls, the same automatic transform Next's
+  // own SWC build already uses for every component, rather than esbuild's
+  // classic `React.createElement` default, which would need `React` in
+  // scope everywhere JSX is written.
+  esbuild: { jsx: "automatic" },
   resolve: {
     // Mirrors the `@/*` -> `./src/*` mapping tsconfig.json declares for the
     // compiler; Vite doesn't read tsconfig `paths` on its own, and

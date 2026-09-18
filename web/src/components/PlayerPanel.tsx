@@ -24,6 +24,7 @@ import {
   type Tone,
 } from "@/lib/format";
 import { Pill } from "@/components/Pill";
+import { ClubCrest, PlayerPhoto } from "@/components/PlayerPhoto";
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -114,27 +115,6 @@ function toneOf(n: number | null): Tone {
 function Money({ value }: { value: number | null }) {
   const out = signedMoney(value);
   return <span className={TONE[out.tone]}>{out.text}</span>;
-}
-
-/** Two letters off the name, for the circle until Task 10 wires in the real
- * photo (`PlayerPhoto`, not yet built) — named differently on purpose so
- * that task can drop its import in without colliding with this one. */
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-function PhotoPlaceholder({ name }: { name: string }) {
-  return (
-    <div
-      aria-hidden="true"
-      className="flex h-[66px] w-[66px] shrink-0 items-center justify-center rounded-full border border-border bg-bg text-lg font-semibold text-muted"
-    >
-      {initials(name)}
-    </div>
-  );
 }
 
 /**
@@ -413,7 +393,7 @@ export async function PlayerPanel({
     <div className="flex min-w-0 flex-1 flex-col gap-3 rounded-lg border border-border bg-surface p-[18px]">
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3.5">
-          <PhotoPlaceholder name={profile.name} />
+          <PlayerPhoto path={profile.image_path} name={profile.name} size={66} />
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-2.5">
               <h2 className="truncate text-[22px] font-bold text-text">{profile.name}</h2>
@@ -425,6 +405,7 @@ export async function PlayerPanel({
             </div>
             <div className="flex items-center gap-2 text-[13px]">
               <Pill tone={pos.token}>{pos.short}</Pill>
+              <ClubCrest path={profile.crest_path} size={16} />
               <span className="text-text-dim">{profile.team ?? DASH}</span>
               <span className="text-muted">·</span>
               <OwnerLabel owner={profile.owner} listed={profile.listed} me={me} />

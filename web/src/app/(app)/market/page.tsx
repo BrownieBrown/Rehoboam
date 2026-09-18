@@ -11,7 +11,6 @@ import {
   num,
   signed,
   signedMoney,
-  signedPct,
   POSITION,
   type Tone,
 } from "@/lib/format";
@@ -20,6 +19,7 @@ import { bySeller, sellerScope } from "@/lib/market-filter";
 import { hrefFor, type Params } from "@/lib/query-href";
 import { NEXT_MV_HINT, noForecastNote } from "@/lib/next-mv";
 import { PlayerPanel } from "@/components/PlayerPanel";
+import { ClubCrest, PlayerPhoto } from "@/components/PlayerPhoto";
 import Link from "next/link";
 
 /** A filter chip: a plain link, filled when it is the active choice. */
@@ -46,12 +46,6 @@ const TONE: Record<Tone, string> = {
   negative: "text-negative",
   neutral: "text-muted",
 };
-
-/** A signed percentage in its tone, for the 24h move. */
-function Trend({ pct }: { pct: number | null }) {
-  const out = signedPct(pct);
-  return <span className={TONE[out.tone]}>{out.text}</span>;
-}
 
 /** A signed euro amount in its tone, for tonight's forecast move. */
 function MoneyTone({ value }: { value: number | null }) {
@@ -244,11 +238,15 @@ function FullMarketTable({
             >
               <div className="flex w-[230px] min-w-0 shrink-0 items-center gap-2.5 px-3">
                 <span className={`h-7 w-[3px] shrink-0 rounded-sm ${rule}`} />
+                <PlayerPhoto path={row.image_path} name={row.name ?? row.player_id} size={30} />
                 <div className="flex min-w-0 flex-col gap-px">
                   <span className="truncate text-sm font-semibold text-text">
                     {row.name ?? row.player_id}
                   </span>
-                  <span className="truncate text-[11px] text-muted">{row.team ?? DASH}</span>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <ClubCrest path={row.crest_path} size={13} />
+                    <span className="truncate text-[11px] text-muted">{row.team ?? DASH}</span>
+                  </div>
                 </div>
               </div>
               <div className="w-[56px] shrink-0 px-3">
@@ -261,7 +259,7 @@ function FullMarketTable({
                 <FairValueCell price={row.fair_price} marketValue={row.market_value} />
               </div>
               <div className="tnum w-[110px] shrink-0 px-3 text-right text-[13px] font-semibold">
-                <Trend pct={row.trend_24h_pct} />
+                <MoneyTone value={row.trend_24h_eur} />
               </div>
               <div className="tnum w-[118px] shrink-0 px-3 text-right text-[13px]">
                 <MoneyTone value={row.next_mv_change} />
@@ -345,13 +343,17 @@ function NarrowMarketTable({
             href={hrefFor("/market", params, { player: row.player_id })}
             className={`flex h-12 items-center border-b border-border ${isSelected ? "bg-accent/8" : ""}`}
           >
-            <div className="flex w-[190px] min-w-0 shrink-0 items-center gap-[9px] px-3">
+            <div className="flex w-[190px] min-w-0 shrink-0 items-center gap-2 px-3">
               <span className={`h-7 w-[3px] shrink-0 rounded-sm ${rule}`} />
+              <PlayerPhoto path={row.image_path} name={row.name ?? row.player_id} size={30} />
               <div className="flex min-w-0 flex-col gap-px">
                 <span className="truncate text-[13px] font-semibold text-text">
                   {row.name ?? row.player_id}
                 </span>
-                <span className="truncate text-[10px] text-muted">{row.team ?? DASH}</span>
+                <div className="flex min-w-0 items-center gap-1">
+                  <ClubCrest path={row.crest_path} size={13} />
+                  <span className="truncate text-[10px] text-muted">{row.team ?? DASH}</span>
+                </div>
               </div>
             </div>
             <div className="tnum w-[140px] shrink-0 border-l border-border px-3 text-right text-[13px] font-semibold text-text">

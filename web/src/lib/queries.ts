@@ -102,6 +102,16 @@ export type PlayerRow = {
   next_mv_pct: number | null;
   /** What his average points are worth at his position's going rate, in euros. */
   fair_price: number | null;
+  /** Object paths inside the public `kickbase` Supabase Storage bucket
+   * (migration 021) -- null for every row until a later sync run writes
+   * them; `PlayerPhoto`/`ClubCrest` (`components/PlayerPhoto.tsx`) turn a
+   * path into the public URL, or fall back when there isn't one. */
+  image_path: string | null;
+  crest_path: string | null;
+  /** Kickbase's `st` availability code — 0 is fit. `availability.ts` names
+   * it. Migration 021 moved this up from `web_player_profile` alone onto
+   * every `web_players` row, for the list's fitness dot. */
+  availability: number | null;
   /** Every row the filters match, counted in the same statement as this page. */
   total: number;
 };
@@ -233,8 +243,6 @@ export type PlayerProfile = PlayerRow & {
   season_average: number | null;
   rank_overall: number | null;
   rank_position: number | null;
-  /** Kickbase's `st` availability code — 0 is fit. `availability.ts` names it. */
-  availability: number | null;
   /** How many players carry a rank at all, for the "of N" under each rank. */
   ranked_overall_total: number | null;
   ranked_position_total: number | null;
@@ -454,6 +462,16 @@ export type MarketRow = {
   /** Migration 010: the same two numbers the Players page shows. */
   trend_24h_pct: number | null;
   points_per_million: number | null;
+  /** Migration 021: Kickbase's last-update change in euros, alongside the
+   * existing percent above. */
+  trend_24h_eur: number | null;
+  /** From `web_players`, joined in by `market()` below -- migration 021 put
+   * these two on `web_players`/`web_player_profile` but not on `web_market`
+   * itself (`tests/store/test_web_views.py`'s column-order regression test
+   * locks that), so the market row picks them up at read time instead of
+   * widening the store view. */
+  image_path: string | null;
+  crest_path: string | null;
 };
 
 export const MARKET_SORTS = [
@@ -475,12 +493,20 @@ export const MARKET_SORTS = [
  * Every listing in the newest snapshot, sorted. Unfiltered on purpose: the
  * page narrows it with `expiringWithin`, so the snapshot time and the total
  * come from the same rows even when the filter matches nothing.
+ *
+ * Joins `web_players` back in for `image_path`/`crest_path` -- `web_market`
+ * doesn't carry them (see `MarketRow` above) -- so every sort key must be
+ * qualified with `m.`: most of `MARKET_SORTS` names a column both views
+ * share (`name`, `market_value`, `predicted_ep`, ...), and an unqualified
+ * `order by` over the join would be ambiguous.
  */
 export async function market(opts: { sort: string; dir: "asc" | "desc" }): Promise<MarketRow[]> {
   return sql<MarketRow[]>`
-    select * from rehoboam.web_market
-    order by ${sql.unsafe(opts.sort)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
-             player_id asc
+    select m.*, p.image_path, p.crest_path
+    from rehoboam.web_market m
+    left join rehoboam.web_players p on p.player_id = m.player_id
+    order by ${sql.unsafe(`m.${opts.sort}`)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
+             m.player_id asc
   `;
 }
 

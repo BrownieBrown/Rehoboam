@@ -66,8 +66,14 @@ describe("num", () => {
 
 describe("countdown", () => {
   const now = 1_000_000;
-  it("counts hours down to one decimal", () => {
-    expect(countdown(now + 88200, now)).toBe("24.5 h");
+  it("renders hours and minutes, not a decimal hour figure", () => {
+    expect(countdown(now + 88200, now)).toBe("24 h 30 m");
+  });
+  it("pads single-digit minutes, matching the pixel reference's '2 h 05 m'", () => {
+    expect(countdown(now + 7500, now)).toBe("2 h 05 m");
+  });
+  it("never carries a rounded remainder into '60 m'", () => {
+    expect(countdown(now + 3659, now)).toBe("1 h 00 m");
   });
   it("switches to minutes under an hour", () => {
     expect(countdown(now + 2880, now)).toBe("48 min");
