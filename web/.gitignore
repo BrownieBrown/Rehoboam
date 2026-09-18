@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.env
+.env.local
+next-env.d.ts
+*.tsbuildinfo
+e2e/.auth.json
+playwright-report/
+test-results/

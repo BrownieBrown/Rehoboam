@@ -59,8 +59,14 @@ output.json
 # Web frontend (Node.js)
 web/node_modules/
 web/dist/
+web/.next/
 web/.env
 web/.env.local
+# The blanket Python "lib/" rule above (venv site-packages) also matches any
+# directory literally named "lib" anywhere in the tree, which shadows the
+# Next.js app's own web/src/lib/ — un-ignore it explicitly.
+!web/src/lib/
+!web/src/lib/**
 .serena/
 
 # Bicep compiled ARM templates
