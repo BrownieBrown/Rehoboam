@@ -191,7 +191,7 @@ function FullMarketTable({
             </SortLink>
           </div>
           <div className="w-[110px] shrink-0 px-3 text-right text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-            <SortLink href={link("trend_24h_pct")} active={sort === "trend_24h_pct"} dir={dir}>
+            <SortLink href={link("trend_24h_eur")} active={sort === "trend_24h_eur"} dir={dir}>
               24 h
             </SortLink>
           </div>

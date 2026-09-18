@@ -432,6 +432,7 @@ export const MARKET_SORTS = [
   "next_mv_pct",
   "fair_price",
   "trend_24h_pct",
+  "trend_24h_eur",
   "points_per_million",
   "seller",
   "expires_at",
