@@ -246,14 +246,28 @@ export type PlayerMatch = {
   status: number | null;
   is_home: number | null;
   opponent: string | null;
+  /** ISO-8601 text, not a JS Date: postgres.js would otherwise turn the
+   * view's `timestamptz` column into one, the same reason `playerMv` does
+   * this for its `day`. Null when the stored `match_date` text didn't parse
+   * into a real timestamp -- the row still appears, dashed, not dropped. */
+  match_at: string | null;
 };
 
-/** His newest matches, played or not. */
+/**
+ * His newest *played* matches. `player_match_history` holds the whole
+ * fixture list, future matchdays included, as rows with a real future date,
+ * `status = 0`, `points = 0`; ordering by `season desc, day_number desc`
+ * alone would show next season's remaining fixtures ahead of the matches he
+ * actually played. `match_at is null` keeps a row whose date text never
+ * parsed (unplayed history, or malformed text) rather than hiding it.
+ */
 export async function playerMatches(playerId: string, limit = 12): Promise<PlayerMatch[]> {
   return sql<PlayerMatch[]>`
-    select * from rehoboam.web_player_matches
-    where player_id = ${playerId}
-    order by season desc, day_number desc
+    select season, day_number, match_date, points, minutes, status, is_home, opponent,
+      to_char(match_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as match_at
+    from rehoboam.web_player_matches
+    where player_id = ${playerId} and (match_at is null or match_at <= now())
+    order by match_at desc nulls last, season desc, day_number desc
     limit ${limit}
   `;
 }

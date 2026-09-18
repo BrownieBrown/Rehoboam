@@ -142,6 +142,61 @@ def test_web_player_matches_returns_unplayed_rows_with_opponent_names(store_dsn)
     assert day4["is_home"] == 0
 
 
+def test_match_at_is_parsed_for_past_and_future_rows_and_null_for_junk_text(store_dsn):
+    """Mirrors the live symptom directly: `player_match_history` holds the
+    whole fixture list, including matchdays not yet played, as rows with a
+    real future date (on the live store, Matanović's 2026/2027 matchdays
+    34/33/32 are dated May 2027). One future-dated unplayed row, one
+    past-dated played row, and one row whose date text never parses -- all
+    three still appear, and only the first two get a real `match_at`."""
+    corpus = CorpusStore(dsn=store_dsn)
+    corpus.upsert_players(
+        [
+            {
+                "player_id": "p2",
+                "first_name": None,
+                "last_name": "Player Two",
+                "position": "Forward",
+                "team_id": "1",
+            }
+        ]
+    )
+    corpus.record_match_history(
+        "p2",
+        "1",
+        _perf(
+            [
+                (
+                    "2026/2027",
+                    [
+                        # Played, well in the past.
+                        _m(1, 5, 55, md="2026-08-23T13:30:00Z"),
+                        # Not yet played -- a real date far in the future,
+                        # same shape as the live Matanović rows.
+                        _m(34, 0, 0, minutes="0", md="2027-05-10T13:30:00Z"),
+                        # Junk date text: never parses into a timestamp.
+                        _m(2, 0, 0, minutes="0", md="unknown"),
+                    ],
+                )
+            ]
+        ),
+    )
+    with corpus.connection() as conn:
+        rows = {
+            r["day_number"]: r
+            for r in conn.execute(
+                "select day_number, match_at from rehoboam.web_player_matches "
+                "where player_id = 'p2'"
+            ).fetchall()
+        }
+    now = datetime.now(timezone.utc)
+    assert rows[1]["match_at"] is not None and rows[1]["match_at"] < now
+    assert rows[34]["match_at"] is not None and rows[34]["match_at"] > now
+    # Junk text gives a null match_at, but the row is not dropped.
+    assert 2 in rows
+    assert rows[2]["match_at"] is None
+
+
 def test_appearances_excludes_a_played_row_with_null_points(store_dsn):
     """`points` is `not null` in the live schema (no played row has ever
     carried a null value there), so this relaxes it on this throwaway test
