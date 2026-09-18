@@ -16,4 +16,19 @@ describe("hrefFor", () => {
   it("skips empty values", () => {
     expect(hrefFor("/", { q: "", club: undefined }, {})).toBe("/");
   });
+
+  it("keeps the page when the override opens a player", () => {
+    expect(hrefFor("/", { position: "GK", page: "2" }, { player: "123" })).toBe(
+      "/?position=GK&page=2&player=123",
+    );
+  });
+
+  it("still drops the page for every other override, including closing a player", () => {
+    expect(hrefFor("/", { position: "GK", page: "2", player: "123" }, { player: null })).toBe(
+      "/?position=GK",
+    );
+    expect(hrefFor("/market", { sort: "ask", page: "2" }, { sort: "market_value" })).toBe(
+      "/market?sort=market_value",
+    );
+  });
 });
