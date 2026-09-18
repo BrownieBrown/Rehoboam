@@ -174,6 +174,7 @@ export default async function PlayersPage({
         <PlayerOverlay
           playerId={params.player}
           closeHref={hrefFor("/", params, { player: null })}
+          params={params}
         />
       ) : null}
       <Filters clubs={clubList} params={params} />

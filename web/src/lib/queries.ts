@@ -86,6 +86,10 @@ export type PlayerRow = {
   avg_points: number | null;
   median_points: number | null;
   points_per_million: number | null;
+  /** Last season's average, from `player_table`'s `prev`/`hist` CTEs --
+   * already in every `web_players` row, just never typed until the panel
+   * needed it. */
+  avg_points_prev: number | null;
   appearances: number | null;
   starts: number | null;
   owner: string;

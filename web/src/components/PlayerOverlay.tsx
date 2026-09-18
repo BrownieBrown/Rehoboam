@@ -2,7 +2,8 @@ import Link from "next/link";
 import {
   playerMatches,
   playerMv,
-  playerRow,
+  playerProfile,
+  playerSeasonGrid,
   playerSeasons,
   selfName,
   type PlayerMatch,
@@ -12,9 +13,11 @@ import { Pill } from "@/components/Pill";
 import { FairPrice } from "@/components/FairPrice";
 import { NextMvCell } from "@/components/NextMv";
 import { NEXT_MV_HINT } from "@/lib/next-mv";
-import { sparkline } from "@/lib/sparkline";
-import { matchStatus } from "@/lib/match-status";
-import { DASH, money, num, pct, signedPct, POSITION, type Tone } from "@/lib/format";
+import { chart } from "@/lib/chart";
+import { changes } from "@/lib/mv-changes";
+import { RANGES, rangeDays, rangeLabel, type Range } from "@/lib/mv-range";
+import { hrefFor, type Params } from "@/lib/query-href";
+import { DASH, money, num, pct, signed, signedMoney, POSITION, type Tone } from "@/lib/format";
 
 const TONE: Record<Tone, string> = {
   positive: "text-positive",
@@ -22,30 +25,37 @@ const TONE: Record<Tone, string> = {
   neutral: "text-muted",
 };
 
-// Same hints as the Players/Market table headers -- copied, not imported:
-// those columns keep their own local copies too (see page.tsx / market/page.tsx).
-const APPS_HINT = "Matches played this season, started or came on";
-const STARTS_HINT = "Matches he started";
 const FAIR_PRICE_HINT =
   "What his average points are worth at his position's going rate, from at least three appearances";
 const PPM_HINT = "Season points per million euros of market value";
 
-const CHART_W = 600;
-const CHART_H = 120;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}/;
+// The chart's own coordinate space -- the svg is scaled to fill its box by
+// `viewBox` + `preserveAspectRatio="none"`, so these are arbitrary but fixed.
+const CHART_W = 720;
+const CHART_H = 200;
 
-/** The stored `match_date` is free-form text; only print it when it looks
- * like an ISO date, else a dash rather than a raw, possibly-confusing value. */
-function matchDateCell(matchDate: string | null): string {
-  return matchDate && ISO_DATE.test(matchDate) ? matchDate.slice(0, 10) : DASH;
+// Last changes: how many of the range's day-over-day moves to list.
+const CHANGES_LIMIT = 10;
+
+/** "2025/2026" -> "2025/26": the season label a tile prints beside its value. */
+function seasonLabel(season: string): string {
+  const [start, end] = season.split("/");
+  return end && end.length === 4 ? `${start}/${end.slice(2)}` : season;
 }
 
-function Trend({ value }: { value: number | null }) {
-  const out = signedPct(value);
-  return <span className={TONE[out.tone]}>{out.text}</span>;
+/** "2025/2026" -> "25/26": the short form the form strip uses next to each matchday. */
+function shortSeason(season: string): string {
+  const [start, end] = season.split("/");
+  return end ? `${start.slice(-2)}/${end.slice(-2)}` : season;
 }
 
-function Stat({
+/** A tile's number-vs-zero colour, without its sign -- `signed()` already
+ * computes this; this just borrows its `tone` half. */
+function toneOf(n: number | null): Tone {
+  return signed(n, 0).tone;
+}
+
+function Tile({
   label,
   hint,
   children,
@@ -55,9 +65,37 @@ function Stat({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-1" title={hint}>
+    <div
+      className="flex flex-col gap-1 rounded-lg border border-border bg-surface px-4 py-3"
+      title={hint}
+    >
       <span className="text-[11px] uppercase tracking-[0.08em] text-muted">{label}</span>
-      <div className="tnum text-sm text-text">{children}</div>
+      <div className="tnum text-lg font-semibold text-text">{children}</div>
+    </div>
+  );
+}
+
+function Money({ value }: { value: number | null }) {
+  const out = signedMoney(value);
+  return <span className={TONE[out.tone]}>{out.text}</span>;
+}
+
+/** "Overall" / "Position": a rank on its own, no denominator -- `web_player_profile`
+ * carries `rank_overall`/`rank_position` but not how many players were ranked,
+ * and nothing else the panel queries does either, so showing "of N" here
+ * would be a number this page never actually read. */
+function RankTile({ label, rank }: { label: string; rank: number | null }) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-border bg-surface px-4 py-3">
+      <span className="text-[11px] uppercase tracking-[0.08em] text-muted">{label}</span>
+      {rank === null ? (
+        <div className="flex items-baseline gap-2">
+          <span className="text-lg font-semibold text-muted">{DASH}</span>
+          <span className="text-xs text-muted">not ranked</span>
+        </div>
+      ) : (
+        <span className="tnum text-lg font-semibold text-text"># {rank}</span>
+      )}
     </div>
   );
 }
@@ -82,132 +120,104 @@ function OwnerBadge({ owner, me, listed }: { owner: string; me: string | null; l
   );
 }
 
-/** The opponent's club name with an "H"/"A" marker from `is_home`. The
- * marker is independent of the name: a team missing from `rehoboam.teams`
- * still has a known home/away side, so it must not be lost along with the
- * name. */
-function OpponentCell({ opponent, isHome }: { opponent: string | null; isHome: number | null }) {
-  const side = isHome === 1 ? "H" : isHome === 0 ? "A" : null;
+/** A range filter link in the same look `Filters.tsx`'s chips use. */
+function RangeChip({ href, active, children }: { href: string; active: boolean; children: React.ReactNode }) {
   return (
-    <span className={opponent === null ? "text-muted" : "text-text-dim"}>
-      {opponent ?? DASH}
-      {side ? <span className="text-muted"> ({side})</span> : null}
-    </span>
+    <Link
+      href={href}
+      className={`inline-flex h-7 items-center rounded-[6px] px-2.5 text-xs font-medium ${
+        active ? "bg-accent text-on-accent" : "bg-surface text-text-dim hover:text-text"
+      }`}
+    >
+      {children}
+    </Link>
   );
 }
 
-type Col<T> = { label: string; align: "left" | "right"; cell: (row: T) => React.ReactNode };
-
-/**
- * The one small table both the seasons and matches sections use. Alignment
- * lives on the column descriptor -- the single source both the header cell
- * and the body cell read -- so a header and its column's cells can never
- * disagree about which side they sit on.
- */
-function OverlayTable<T>({
-  columns,
-  rows,
-  rowKey,
-  emptyText,
-}: {
-  columns: Col<T>[];
-  rows: T[];
-  rowKey: (row: T) => string;
-  emptyText: string;
-}) {
-  if (rows.length === 0) {
-    return <p className="text-sm text-muted">{emptyText}</p>;
-  }
+function FormBox({ match }: { match: PlayerMatch }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full border-collapse">
-        <thead>
-          <tr>
-            {columns.map((c) => (
-              <th
-                key={c.label}
-                className={`h-9 whitespace-nowrap border-b border-border-strong px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted ${
-                  c.align === "left" ? "text-left" : "text-right"
-                }`}
-              >
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={rowKey(row)}>
-              {columns.map((c) => (
-                <td
-                  key={c.label}
-                  className={`tnum h-10 whitespace-nowrap border-b border-border px-3 text-sm ${
-                    c.align === "left" ? "text-left" : "text-right"
-                  }`}
-                >
-                  {c.cell(row)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="flex w-20 flex-col items-center gap-1 rounded-lg border border-border bg-surface px-2 py-2">
+      <span className="text-[10px] uppercase tracking-[0.06em] text-muted">MD {match.day_number}</span>
+      <span className="text-[10px] text-muted">{shortSeason(match.season)}</span>
+      <span className={`tnum text-sm font-semibold ${TONE[toneOf(match.points)]}`}>
+        {num(match.points)}
+      </span>
     </div>
   );
 }
 
-const SEASON_COLUMNS: Col<PlayerSeason>[] = [
-  { label: "Season", align: "left", cell: (s) => s.season },
-  { label: "Played", align: "right", cell: (s) => num(s.appearances) },
-  { label: "Starts", align: "right", cell: (s) => num(s.starts) },
-  { label: "Points", align: "right", cell: (s) => num(s.points) },
-  { label: "Average", align: "right", cell: (s) => num(s.avg_points, 1) },
-  { label: "Median", align: "right", cell: (s) => num(s.median_points, 1) },
-  { label: "Best", align: "right", cell: (s) => num(s.best_points) },
-  { label: "Minutes", align: "right", cell: (s) => num(s.minutes) },
-];
-
-const MATCH_COLUMNS: Col<PlayerMatch>[] = [
-  { label: "Season", align: "left", cell: (m) => m.season },
-  { label: "Matchday", align: "right", cell: (m) => num(m.day_number) },
-  { label: "Date", align: "left", cell: (m) => matchDateCell(m.match_date) },
-  {
-    label: "Opponent",
-    align: "left",
-    cell: (m) => <OpponentCell opponent={m.opponent} isHome={m.is_home} />,
-  },
-  { label: "Points", align: "right", cell: (m) => num(m.points) },
-  { label: "Minutes", align: "right", cell: (m) => num(m.minutes) },
-  { label: "Status", align: "left", cell: (m) => matchStatus(m.status) },
-];
+/** One matchday of a season strip -- blank (muted, no number) for a fixture
+ * that hasn't kicked off yet, the same "is it in the future" test
+ * `playerMatches` uses for its own played-only filter. `playerSeasonGrid`
+ * doesn't carry `status`, so a null `match_at` (unparsed date text) is
+ * treated as played rather than hidden -- it is the rarer case, and hiding a
+ * real score behind a blank is the worse mistake of the two. */
+function GridCell({ dayNumber, points, matchAt }: { dayNumber: number; points: number | null; matchAt: string | null }) {
+  const future = matchAt !== null && Date.parse(matchAt) > Date.now();
+  return (
+    <div className="flex h-11 w-11 flex-col items-center justify-center gap-0.5 rounded-md border border-border bg-surface">
+      <span className="text-[9px] uppercase tracking-[0.04em] text-muted">{dayNumber}</span>
+      <span className={future ? "text-xs text-muted" : `tnum text-xs font-semibold ${TONE[toneOf(points)]}`}>
+        {future ? "" : num(points)}
+      </span>
+    </div>
+  );
+}
 
 /**
- * A server-rendered, URL-driven overlay: `playerId` comes from `?player=`,
- * `closeHref` is the same URL with it stripped (`hrefFor(..., { player: null })`
- * — see page.tsx and market/page.tsx). No client JavaScript, so opening and
- * closing are plain navigations.
+ * A server-rendered, full-screen, URL-driven overlay: `playerId` comes from
+ * `?player=`, `closeHref` is the same URL with it stripped, and the chart's
+ * range comes from `?mv=` inside `params` (see page.tsx and market/page.tsx
+ * -- `hrefFor`, `mv-range.ts`). No client JavaScript, so opening, closing and
+ * changing the range are all plain navigations.
  */
 export async function PlayerOverlay({
   playerId,
   closeHref,
+  params,
 }: {
   playerId: string;
   closeHref: string;
+  params: Params;
 }) {
-  const row = await playerRow(playerId);
+  const profile = await playerProfile(playerId);
   // A hand-edited `?player=` naming a player the store doesn't have (or one
   // that has since left the universe) must not break the page under it.
-  if (row === null) return null;
+  if (profile === null) return null;
 
   const [seasons, matches, mv, me] = await Promise.all([
     playerSeasons(playerId),
-    playerMatches(playerId, 12),
-    playerMv(playerId, 180),
+    playerMatches(playerId, 5),
+    playerMv(playerId, rangeDays(params.mv)),
     selfName(),
   ]);
 
-  const pos = POSITION[row.position] ?? { short: row.position, token: "plain" };
-  const spark = sparkline(mv, CHART_W, CHART_H);
+  // Cap at the four newest seasons: `playerSeasonGrid` is one query per
+  // season, and `playerSeasons` can span many years -- fourteen seasons
+  // would fire fourteen extra queries for one overlay.
+  const gridSeasons = seasons.slice(0, 4);
+  const grids = await Promise.all(gridSeasons.map((s) => playerSeasonGrid(playerId, s.season)));
+
+  const pos = POSITION[profile.position] ?? { short: profile.position, token: "plain" };
+  // `closeHref` is `hrefFor(path, params, { player: null })` -- either
+  // `path` alone (no other params survived) or `path?...` -- so splitting on
+  // "?" recovers the page's own base path without a separate prop for it.
+  const basePath = closeHref.split("?")[0];
+  const activeRange: Range = (RANGES as readonly string[]).includes(params.mv ?? "")
+    ? (params.mv as Range)
+    : "3m";
+
+  const latestSeason = seasons[0] ?? null;
+  const medianLabel = latestSeason ? `Median ${seasonLabel(latestSeason.season)}` : "Median";
+
+  const avgMinutes =
+    profile.seconds_played !== null && profile.appearances !== null && profile.appearances > 0
+      ? profile.seconds_played / 60 / profile.appearances
+      : null;
+
+  const out = chart(mv, CHART_W, CHART_H);
+  const recentChanges = changes(mv, CHANGES_LIMIT);
+  const formMatches = [...matches].reverse(); // oldest left
 
   return (
     <>
@@ -215,121 +225,199 @@ export async function PlayerOverlay({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={row.name}
-        className="fixed left-1/2 top-1/2 z-50 max-h-[88vh] w-[min(48rem,92vw)] max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-surface"
+        aria-label={profile.name}
+        className="fixed inset-0 z-50 overflow-y-auto bg-bg"
       >
-        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border bg-surface px-5 py-4">
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <div className="flex items-center gap-2">
-              <h2 className="truncate text-lg font-bold text-text">{row.name}</h2>
-              <Pill tone={pos.token}>{pos.short}</Pill>
+        <div className="mx-auto max-w-6xl px-6 py-6">
+          <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border bg-bg py-4">
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <h2 className="truncate text-2xl font-bold text-text">{profile.name}</h2>
+                <Pill tone={pos.token}>{pos.short}</Pill>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-muted">
+                <span>{profile.team ?? DASH}</span>
+                <OwnerBadge owner={profile.owner} me={me} listed={profile.listed} />
+              </div>
             </div>
-            <div className="flex items-center gap-2 text-sm text-muted">
-              <span>{row.team ?? DASH}</span>
-              <OwnerBadge owner={row.owner} me={me} listed={row.listed} />
-            </div>
-          </div>
-          <Link
-            href={closeHref}
-            className="shrink-0 text-sm font-semibold text-text-dim hover:text-text"
-          >
-            Close
-          </Link>
-        </div>
-
-        <div className="flex flex-col gap-6 p-5">
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-5">
-            <Stat label="Market value">{money(row.market_value)}</Stat>
-            <Stat label="Fair price" hint={FAIR_PRICE_HINT}>
-              <FairPrice price={row.fair_price} marketValue={row.market_value} />
-            </Stat>
-            <Stat label="Next MV" hint={NEXT_MV_HINT}>
-              <NextMvCell pct={row.next_mv_pct} change={row.next_mv_change} />
-            </Stat>
-            <Stat label="24h">
-              <Trend value={row.trend_24h_pct} />
-            </Stat>
-            <Stat label="7d">
-              <Trend value={row.trend_7d_pct} />
-            </Stat>
-            <Stat label="EP">
-              <b className="text-[15px] text-text">{num(row.predicted_ep, 0)}</b>
-            </Stat>
-            <Stat label="P(start)">{pct(row.p_start)}</Stat>
-            <Stat label="Pts / M" hint={PPM_HINT}>
-              {num(row.points_per_million, 2)}
-            </Stat>
-            <Stat label="Played" hint={APPS_HINT}>
-              {num(row.appearances)}
-            </Stat>
-            <Stat label="Starts" hint={STARTS_HINT}>
-              {num(row.starts)}
-            </Stat>
+            <Link
+              href={closeHref}
+              className="shrink-0 text-sm font-semibold text-text-dim hover:text-text"
+            >
+              Close
+            </Link>
           </div>
 
-          <div>
-            <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
-              Market value, last 180 days
-            </h3>
-            {spark ? (
-              <>
-                <svg
-                  role="img"
-                  aria-label="Market value, last 180 days"
-                  viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-                  preserveAspectRatio="none"
-                  className="h-28 w-full text-accent"
-                >
-                  <polyline
-                    points={spark.path}
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    vectorEffect="non-scaling-stroke"
-                  />
-                </svg>
-                <div className="mt-2 flex items-center justify-between text-xs text-muted">
-                  <span>
-                    {spark.first.day} · {money(spark.first.market_value)}
-                  </span>
-                  <span>
-                    {spark.last.day} · {money(spark.last.market_value)}
-                  </span>
+          <div className="flex flex-col gap-8 py-6">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+              <Tile label="Market value">{money(profile.market_value)}</Tile>
+              <Tile label="Total points">{num(profile.points)}</Tile>
+              <Tile label="Ø points">{num(profile.avg_points, 1)}</Tile>
+              <Tile label={medianLabel}>{num(latestSeason?.median_points ?? null, 1)}</Tile>
+              <Tile label="Pts / M" hint={PPM_HINT}>
+                {num(profile.points_per_million, 2)}
+              </Tile>
+              <Tile label="Ø previous season">{num(profile.avg_points_prev, 1)}</Tile>
+              <Tile label="Trend 24 h">
+                <Money value={profile.trend_24h_eur} />
+              </Tile>
+              <Tile label="Trend 1 week">
+                <Money value={profile.trend_7d_eur} />
+              </Tile>
+              <Tile label="Fair value" hint={FAIR_PRICE_HINT}>
+                <FairPrice price={profile.fair_price} marketValue={profile.market_value} />
+              </Tile>
+              <Tile label="Expected points">{num(profile.predicted_ep, 0)}</Tile>
+              <Tile label="Start probability">{pct(profile.p_start)}</Tile>
+              <Tile label="Next update" hint={NEXT_MV_HINT}>
+                <NextMvCell pct={profile.next_mv_pct} change={profile.next_mv_change} />
+              </Tile>
+            </div>
+
+            <div>
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
+                Ranking
+              </h3>
+              <div className="grid grid-cols-2 gap-3 sm:max-w-xs">
+                <RankTile label="Overall" rank={profile.rank_overall} />
+                <RankTile label="Position" rank={profile.rank_position} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
+                Form
+              </h3>
+              {formMatches.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {formMatches.map((m) => (
+                    <FormBox key={`${m.season}-${m.day_number}`} match={m} />
+                  ))}
                 </div>
-              </>
-            ) : mv.length < 2 ? (
-              <p className="text-sm text-muted">
-                Not enough market-value history to draw a line.
-              </p>
-            ) : (
-              <p className="text-sm text-muted">
-                His market value has not moved in the last 180 days.
-              </p>
-            )}
-          </div>
+              ) : (
+                <p className="text-sm text-muted">No matches recorded yet.</p>
+              )}
+              <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-6">
+                <Tile label="Matches">{num(profile.appearances)}</Tile>
+                <Tile label="Ø minutes">{num(avgMinutes, 0)}</Tile>
+                <Tile label="Goals">{num(profile.goals)}</Tile>
+                <Tile label="Assists">{num(profile.assists)}</Tile>
+                <Tile label="Yellow">{num(profile.yellow_cards)}</Tile>
+                <Tile label="Red">{num(profile.red_cards)}</Tile>
+              </div>
+            </div>
 
-          <div>
-            <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
-              Seasons
-            </h3>
-            <OverlayTable
-              columns={SEASON_COLUMNS}
-              rows={seasons}
-              rowKey={(s) => s.season}
-              emptyText="He has not played a match in any recorded season."
-            />
-          </div>
+            <div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">
+                  Market value, {rangeLabel(params.mv)}
+                </h3>
+                <div className="flex items-center gap-1.5">
+                  {RANGES.map((r) => (
+                    <RangeChip
+                      key={r}
+                      href={hrefFor(basePath, params, { mv: r === "3m" ? null : r })}
+                      active={activeRange === r}
+                    >
+                      {r}
+                    </RangeChip>
+                  ))}
+                </div>
+              </div>
+              {out ? (
+                <>
+                  <svg
+                    viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label={`Market value, ${rangeLabel(params.mv)}`}
+                    className="h-48 w-full"
+                  >
+                    <g className="text-accent">
+                      <path d={out.area} fill="currentColor" fillOpacity={0.15} stroke="none" />
+                      <path
+                        d={out.line}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <circle cx={out.high.x} cy={out.high.y} r={4} fill="currentColor" />
+                      <circle cx={out.low.x} cy={out.low.y} r={4} fill="currentColor" />
+                    </g>
+                  </svg>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted sm:grid-cols-4">
+                    <span>
+                      High · {money(out.high.point.market_value)} · {out.high.point.day}
+                    </span>
+                    <span>
+                      Low · {money(out.low.point.market_value)} · {out.low.point.day}
+                    </span>
+                    <span>
+                      First · {money(out.first.market_value)} · {out.first.day}
+                    </span>
+                    <span>
+                      Last · {money(out.last.market_value)} · {out.last.day}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted">
+                  Not enough market-value history in this range to draw a line.
+                </p>
+              )}
+            </div>
 
-          <div>
-            <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
-              Last matches
-            </h3>
-            <OverlayTable
-              columns={MATCH_COLUMNS}
-              rows={matches}
-              rowKey={(m) => `${m.season}-${m.day_number}`}
-              emptyText="No matches recorded yet."
-            />
+            <div>
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
+                Last changes
+              </h3>
+              {recentChanges.length > 0 ? (
+                <div className="flex flex-col gap-1.5">
+                  {recentChanges.map((c) => {
+                    const m = signedMoney(c.change);
+                    return (
+                      <div
+                        key={c.day}
+                        className="flex items-center justify-between border-b border-border py-1 text-sm"
+                      >
+                        <span className="text-text-dim">{c.day}</span>
+                        <span className={`tnum ${TONE[m.tone]}`}>{m.text}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-muted">No market-value moves in this range.</p>
+              )}
+            </div>
+
+            <div>
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
+                Season progress
+              </h3>
+              {gridSeasons.length > 0 ? (
+                <div className="flex flex-col gap-4">
+                  {gridSeasons.map((s: PlayerSeason, i) => (
+                    <div key={s.season}>
+                      <h4 className="mb-2 text-sm font-semibold text-text">{s.season}</h4>
+                      <div className="flex flex-wrap gap-1.5">
+                        {grids[i].map((row) => (
+                          <GridCell
+                            key={row.day_number}
+                            dayNumber={row.day_number}
+                            points={row.points}
+                            matchAt={row.match_at}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted">He has not played a match in any recorded season.</p>
+              )}
+            </div>
           </div>
         </div>
       </div>

@@ -140,6 +140,7 @@ export default async function MarketPage({
         <PlayerOverlay
           playerId={params.player}
           closeHref={hrefFor("/market", params, { player: null })}
+          params={params}
         />
       ) : null}
       <div className="flex flex-wrap items-center gap-4 px-6 py-4">
