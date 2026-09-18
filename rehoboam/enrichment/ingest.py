@@ -22,12 +22,23 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 
 from rehoboam.enrichment.budget import BudgetExhausted
+from rehoboam.enrichment.images import client_from_settings, sync_images
 from rehoboam.enrichment.league_refresh import run_league_refresh
 from rehoboam.enrichment.sweep import fetch_universe
 from rehoboam.services.session_facts import SessionFacts
 from rehoboam.store.corpus_store import CorpusStore
 
 logger = logging.getLogger(__name__)
+
+# Photos/crests are on the CDN + Storage, not the Kickbase API, so they don't
+# spend `IngestBudget`'s request cap -- this caps them separately. 60/run
+# backfills the ~600-player, ~20-team universe over about a week of
+# twice-daily runs without risking the 540s deadline (each row is a small
+# download + optional resize + upload). Only attempted on the twice-daily
+# pass (`league_store is not None` is the same signal that already tells
+# this run apart from the nightly, status-only one, which must not pick up
+# any extra kind of work -- see run_ingestion's `league_store` param).
+IMAGE_SYNC_LIMIT = 60
 
 
 @dataclass
@@ -255,6 +266,22 @@ def run_ingestion(
                         setattr(stats, attr, getattr(stats, attr) + 1)
                     if throttle_seconds:
                         time.sleep(throttle_seconds)
+
+            # Photos/crests, after everything else this pass does. Gated on
+            # `league_store` rather than a new parameter: it's already the
+            # signal that separates this pass from the nightly one, and
+            # `teams` rows (crest sources) only exist once a league refresh
+            # has run at least once. `sync_images` logs its own summary and
+            # never raises, so nothing here needs to survive a bad client.
+            if league_store is not None:
+                try:
+                    from rehoboam.config import get_settings
+
+                    image_client = client_from_settings(get_settings())
+                except Exception:  # noqa: BLE001 -- image sync is never fatal to ingestion
+                    logger.exception("could not build the image storage client")
+                    image_client = None
+                sync_images(store, client=image_client, limit=IMAGE_SYNC_LIMIT, now=budget.now())
     except BudgetExhausted as stop:
         stats.stopped_by = stop.reason
     stats.requests = budget.requests
