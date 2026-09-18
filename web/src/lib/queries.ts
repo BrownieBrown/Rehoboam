@@ -342,6 +342,29 @@ export async function playerMv(playerId: string, days = 180): Promise<PlayerMvPo
   `;
 }
 
+export type PlayerFixture = {
+  season: string;
+  day_number: number;
+  /** ISO-8601 text, not a JS Date — the same reason `playerMatches` does it. */
+  kickoff_at: string | null;
+  is_home: boolean;
+  opponent: string | null;
+  opponent_place: number | null;
+};
+
+/** His next `limit` matches, soonest first. Empty for a player with no club,
+ * and for one whose club has no upcoming fixture stored. */
+export async function playerFixtures(playerId: string, limit = 3): Promise<PlayerFixture[]> {
+  return sql<PlayerFixture[]>`
+    select season, day_number, is_home, opponent, opponent_place,
+      to_char(to_timestamp(kickoff) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as kickoff_at
+    from rehoboam.web_player_fixtures
+    where player_id = ${playerId}
+    order by kickoff asc
+    limit ${limit}::int
+  `;
+}
+
 export type SquadRow = {
   session_id: string;
   legal_formation: string | null;
