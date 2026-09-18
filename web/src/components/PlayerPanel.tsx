@@ -4,6 +4,7 @@ import {
   playerMatches,
   playerMv,
   playerProfile,
+  selfName,
   type PlayerFixture,
 } from "@/lib/queries";
 import { chart } from "@/lib/chart";
@@ -16,6 +17,7 @@ import {
   DASH,
   money,
   num,
+  pct,
   POSITION,
   signed,
   signedMoney,
@@ -73,10 +75,11 @@ const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/** "Sat 13:30" for a kickoff within the next week, "11 Oct" further out --
+/** "Sat 13:30 UTC" for a kickoff within the next week, "11 Oct" further out --
  * both read off the UTC clock, the same convention `format.ts`'s `ago()`
- * uses for the store's clock. `null`/unparsed dates fall back to `DASH`,
- * same as every other missing value on this panel. */
+ * uses for the store's clock, and the near branch marks it explicitly the
+ * same way `ago()` does. `null`/unparsed dates fall back to `DASH`, same as
+ * every other missing value on this panel. */
 function kickoffLabel(iso: string | null, now = Date.now()): string {
   if (iso === null) return DASH;
   const t = Date.parse(iso);
@@ -85,9 +88,21 @@ function kickoffLabel(iso: string | null, now = Date.now()): string {
   if (t - now < 7 * 24 * 3600 * 1000) {
     const hh = String(d.getUTCHours()).padStart(2, "0");
     const mm = String(d.getUTCMinutes()).padStart(2, "0");
-    return `${WEEKDAYS[d.getUTCDay()]} ${hh}:${mm}`;
+    return `${WEEKDAYS[d.getUTCDay()]} ${hh}:${mm} UTC`;
   }
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+}
+
+/** "21 Jun", or "today" for the store's own UTC calendar date -- `day` is a
+ * plain `YYYY-MM-DD` string (see `playerMv`), so "today" is read off the UTC
+ * clock too, the same convention `kickoffLabel` and `format.ts`'s `ago()`
+ * use for the store's clock. Falls back to the raw string on anything that
+ * doesn't parse as `YYYY-MM-DD`, rather than throwing on a stray value. */
+function formatDay(day: string, now = new Date()): string {
+  if (day === now.toISOString().slice(0, 10)) return "today";
+  const [, monthStr, dayStr] = day.split("-");
+  const month = MONTHS[Number(monthStr) - 1];
+  return month ? `${Number(dayStr)} ${month}` : day;
 }
 
 /** A tile's number-vs-zero colour -- `signed()` already computes this; this
@@ -122,11 +137,11 @@ function PhotoPlaceholder({ name }: { name: string }) {
   );
 }
 
-/** Amber pill when the owner name and the free-agent sentinels coincide with
- * what `player_table.owner` reports, plain otherwise -- the same three-way
- * rule the Players page's owner column uses, minus the "is this mine"
- * highlight (that needs `selfName()`, which this panel does not fetch). */
-function OwnerLabel({ owner, listed }: { owner: string; listed: boolean }) {
+/** Amber pill when the owner is us, plain "free agent" for an unowned
+ * player, the owning manager's name otherwise -- the same three-way rule
+ * the Players page's owner column and `PlayerOverlay`'s `OwnerBadge` use. */
+function OwnerLabel({ owner, listed, me }: { owner: string; listed: boolean; me: string | null }) {
+  if (owner === me) return <Pill tone="accent">{owner}</Pill>;
   if (owner === "Kickbase" || owner === "market") {
     return (
       <span className="text-muted">
@@ -274,7 +289,7 @@ function FixtureRow({ fixture }: { fixture: PlayerFixture }) {
       <span className="tnum shrink-0 text-[11px] text-muted">
         {fixture.opponent_place === null ? DASH : ordinal(fixture.opponent_place)}
       </span>
-      <span className="tnum w-[66px] shrink-0 whitespace-nowrap text-right text-[11px] text-text-dim">
+      <span className="tnum w-24 shrink-0 whitespace-nowrap text-right text-[11px] text-text-dim">
         {kickoffLabel(fixture.kickoff_at)}
       </span>
     </div>
@@ -332,10 +347,11 @@ export async function PlayerPanel({
   if (!profile) return null;
 
   const days = rangeDays(params.mv);
-  const [matches, fixtures, mv] = await Promise.all([
+  const [matches, fixtures, mv, me] = await Promise.all([
     playerMatches(playerId, 5),
     playerFixtures(playerId, 3),
     playerMv(playerId, days),
+    selfName(),
   ]);
 
   const pos = POSITION[profile.position] ?? { short: profile.position, token: "plain" };
@@ -386,7 +402,7 @@ export async function PlayerPanel({
               <Pill tone={pos.token}>{pos.short}</Pill>
               <span className="text-text-dim">{profile.team ?? DASH}</span>
               <span className="text-muted">·</span>
-              <OwnerLabel owner={profile.owner} listed={profile.listed} />
+              <OwnerLabel owner={profile.owner} listed={profile.listed} me={me} />
             </div>
           </div>
         </div>
@@ -424,13 +440,14 @@ export async function PlayerPanel({
         />
       </div>
 
-      <div className="grid grid-cols-4 gap-2.5">
+      <div className="grid grid-cols-5 gap-2.5">
         <Tile label="Market value">{money(profile.market_value)}</Tile>
         <Tile label="Expected points" accent>
           {num(profile.predicted_ep, 0)}
         </Tile>
         <Tile label="Ø points">{num(profile.avg_points, 1)}</Tile>
-        <Tile label="Points per million">{num(profile.points_per_million, 2)}</Tile>
+        <Tile label="Points per million">{num(profile.points_per_million, 1)}</Tile>
+        <Tile label="Start probability">{pct(profile.p_start)}</Tile>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -574,10 +591,10 @@ export async function PlayerPanel({
             </svg>
             <div className="flex items-baseline justify-between gap-3">
               <span className="tnum text-[11px] text-muted">
-                Low {money(out.low.point.market_value)} · {out.low.point.day}
+                Low {money(out.low.point.market_value)} · {formatDay(out.low.point.day)}
               </span>
               <span className="tnum text-[11px] text-muted">
-                High {money(out.high.point.market_value)} · {out.high.point.day}
+                High {money(out.high.point.market_value)} · {formatDay(out.high.point.day)}
               </span>
             </div>
           </>

@@ -36,6 +36,12 @@ describe("formEntries", () => {
     expect(formEntries([m(1, 5, 120)], 5)).toHaveLength(5);
   });
 
+  it("pads on the right, after his real matches, not in front of them", () => {
+    const out = formEntries([m(2, 5, 200), m(1, 5, 100)], 5);
+    expect(out.map((e) => e.day_number)).toEqual([1, 2, 0, 0, 0]);
+    expect(out.slice(2).every((e) => e.role === "did not play" && e.points === null)).toBe(true);
+  });
+
   it("never mutates its input", () => {
     const input = [m(1, 5, 10), m(2, 5, 20)];
     const copy = JSON.parse(JSON.stringify(input));

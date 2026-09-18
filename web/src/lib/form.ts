@@ -11,7 +11,10 @@ export type FormEntry = {
 
 /** The newest `count` matchdays, oldest first, padded with empty entries so
  * the strip keeps its shape. Status is the authority on whether he played:
- * 5 started, 3 came on, everything else did not. */
+ * 5 started, 3 came on, everything else did not. Padding goes on the right
+ * (the newest end): a blank cell means "this matchday hasn't happened yet",
+ * so it belongs after his real results, not stacked in front of them as if
+ * he'd missed his earliest matches. */
 export function formEntries(matches: PlayerMatch[], count = 5): FormEntry[] {
   const newest = matches.slice(0, count).reverse();
   const entries: FormEntry[] = newest.map((m) => {
@@ -24,7 +27,7 @@ export function formEntries(matches: PlayerMatch[], count = 5): FormEntry[] {
     };
   });
   while (entries.length < count) {
-    entries.unshift({ season: "", day_number: 0, points: null, role: "did not play" });
+    entries.push({ season: "", day_number: 0, points: null, role: "did not play" });
   }
   return entries;
 }
