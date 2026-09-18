@@ -250,6 +250,35 @@ def test_web_player_mv_returns_one_row_per_day_ascending(store_dsn):
     assert [r["market_value"] for r in rows] == [8_000_000, 9_000_000, 10_000_000]
 
 
+def test_web_player_mv_prefers_the_daily_status_value_over_the_weekly_series(store_dsn):
+    """Migration 017: `mv_series` alone is a weekly-per-player refresh, so a
+    day it shares with `player_status_daily` (refreshed on every ingestion
+    run) must show the daily row's value, as one row -- not two, and not the
+    stale weekly one -- while a day only `mv_series` covers must still
+    appear, since the daily table doesn't reach back that far."""
+    corpus = _seed(store_dsn)
+    # Both sources cover 2026-02-02, with different values: the daily status
+    # row (9_800_000) must win over the weekly series point (9_500_000).
+    corpus.record_mv_series(
+        "p1", {"it": [{"dt": _days_since_epoch(date(2026, 2, 2)), "mv": 9_500_000}]}
+    )
+    corpus.record_status_daily("p1", date(2026, 2, 2), {"mv": 9_800_000}, NOW)
+    # 2026-02-01 exists only in the weekly series -- it must still show up.
+    corpus.record_mv_series(
+        "p1", {"it": [{"dt": _days_since_epoch(date(2026, 2, 1)), "mv": 9_000_000}]}
+    )
+    with corpus.connection() as conn:
+        rows = conn.execute(
+            "select day, market_value from rehoboam.web_player_mv "
+            "where player_id = 'p1' and day in (%s, %s) order by day asc",
+            (date(2026, 2, 1), date(2026, 2, 2)),
+        ).fetchall()
+    assert [(r["day"], r["market_value"]) for r in rows] == [
+        (date(2026, 2, 1), 9_000_000),
+        (date(2026, 2, 2), 9_800_000),
+    ]
+
+
 def test_web_player_mv_uses_the_utc_date_not_the_session_timezone(store_dsn):
     """Every seed above lands at exact UTC midnight, where the session's
     timezone can't move the date -- this host's Postgres session defaults to

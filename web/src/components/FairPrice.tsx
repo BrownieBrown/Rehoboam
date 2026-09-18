@@ -14,14 +14,18 @@ const TONE: Record<Tone, string> = {
 export function FairPrice({
   price,
   marketValue,
+  align = "right",
 }: {
   price: number | null;
   marketValue: number | null;
+  /** Table cells (the default) right-align; the player panel's tile grid
+   * passes "left" so this cell reads like its plain-number neighbours. */
+  align?: "left" | "right";
 }) {
   if (price === null) return <span className="text-muted">{DASH}</span>;
   const gap = marketValue === null ? null : signedMoney(price - marketValue);
   return (
-    <div className="flex flex-col items-end gap-0.5">
+    <div className={`flex flex-col gap-0.5 ${align === "left" ? "items-start" : "items-end"}`}>
       <span className="text-text">{money(price)}</span>
       {gap ? <span className={`text-xs ${TONE[gap.tone]}`}>{gap.text}</span> : null}
     </div>

@@ -134,6 +134,65 @@ function RangeChip({ href, active, children }: { href: string; active: boolean; 
   );
 }
 
+/** The compact per-season table beneath the season strips: everything
+ * `web_player_seasons` gives us, one row per season the store has -- unlike
+ * the strips (capped at four seasons to bound the matchday-grid query
+ * count), this reads the full, uncapped `seasons` array, since the owner
+ * asked for "everything for all seasons we have". */
+const SEASON_TABLE_COLUMNS: {
+  label: string;
+  align: "left" | "right";
+  cell: (s: PlayerSeason) => React.ReactNode;
+}[] = [
+  { label: "Season", align: "left", cell: (s) => s.season },
+  { label: "Played", align: "right", cell: (s) => num(s.appearances) },
+  { label: "Starts", align: "right", cell: (s) => num(s.starts) },
+  { label: "Points", align: "right", cell: (s) => num(s.points) },
+  { label: "Average", align: "right", cell: (s) => num(s.avg_points, 1) },
+  { label: "Median", align: "right", cell: (s) => num(s.median_points, 1) },
+  { label: "Best", align: "right", cell: (s) => num(s.best_points) },
+  { label: "Minutes", align: "right", cell: (s) => num(s.minutes) },
+];
+
+function SeasonTable({ seasons }: { seasons: PlayerSeason[] }) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border bg-surface">
+      <table className="w-full border-collapse">
+        <thead>
+          <tr>
+            {SEASON_TABLE_COLUMNS.map((c) => (
+              <th
+                key={c.label}
+                className={`h-9 whitespace-nowrap border-b border-border-strong px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted ${
+                  c.align === "left" ? "text-left" : "text-right"
+                }`}
+              >
+                {c.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {seasons.map((s) => (
+            <tr key={s.season}>
+              {SEASON_TABLE_COLUMNS.map((c) => (
+                <td
+                  key={c.label}
+                  className={`tnum h-9 whitespace-nowrap border-b border-border px-3 text-sm ${
+                    c.align === "left" ? "text-left" : "text-right"
+                  }`}
+                >
+                  {c.cell(s)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function FormBox({ match }: { match: PlayerMatch }) {
   return (
     <div className="flex w-20 flex-col items-center gap-1 rounded-lg border border-border bg-surface px-2 py-2">
@@ -265,12 +324,20 @@ export async function PlayerOverlay({
                 <Money value={profile.trend_7d_eur} />
               </Tile>
               <Tile label="Fair value" hint={FAIR_PRICE_HINT}>
-                <FairPrice price={profile.fair_price} marketValue={profile.market_value} />
+                <FairPrice
+                  price={profile.fair_price}
+                  marketValue={profile.market_value}
+                  align="left"
+                />
               </Tile>
               <Tile label="Expected points">{num(profile.predicted_ep, 0)}</Tile>
               <Tile label="Start probability">{pct(profile.p_start)}</Tile>
               <Tile label="Next update" hint={NEXT_MV_HINT}>
-                <NextMvCell pct={profile.next_mv_pct} change={profile.next_mv_change} />
+                <NextMvCell
+                  pct={profile.next_mv_pct}
+                  change={profile.next_mv_change}
+                  align="left"
+                />
               </Tile>
             </div>
 
@@ -396,24 +463,29 @@ export async function PlayerOverlay({
               <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.08em] text-muted">
                 Season progress
               </h3>
-              {gridSeasons.length > 0 ? (
-                <div className="flex flex-col gap-4">
-                  {gridSeasons.map((s: PlayerSeason, i) => (
-                    <div key={s.season}>
-                      <h4 className="mb-2 text-sm font-semibold text-text">{s.season}</h4>
-                      <div className="flex flex-wrap gap-1.5">
-                        {grids[i].map((row) => (
-                          <GridCell
-                            key={row.day_number}
-                            dayNumber={row.day_number}
-                            points={row.points}
-                            matchAt={row.match_at}
-                          />
-                        ))}
+              {seasons.length > 0 ? (
+                <>
+                  <div className="flex flex-col gap-4">
+                    {gridSeasons.map((s: PlayerSeason, i) => (
+                      <div key={s.season}>
+                        <h4 className="mb-2 text-sm font-semibold text-text">{s.season}</h4>
+                        <div className="flex flex-wrap gap-1.5">
+                          {grids[i].map((row) => (
+                            <GridCell
+                              key={row.day_number}
+                              dayNumber={row.day_number}
+                              points={row.points}
+                              matchAt={row.match_at}
+                            />
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                  <div className="mt-4">
+                    <SeasonTable seasons={seasons} />
+                  </div>
+                </>
               ) : (
                 <p className="text-sm text-muted">He has not played a match in any recorded season.</p>
               )}

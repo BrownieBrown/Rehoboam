@@ -103,6 +103,7 @@ def test_migrate_creates_every_table_in_the_rehoboam_schema(blank_dsn):
             "014_match_dates.sql",
             "015_player_season_stats.sql",
             "016_player_profile.sql",
+            "017_player_mv_union.sql",
         ]
         assert _tables(conn) == EXPECTED_TABLES
         public = conn.execute(
@@ -115,7 +116,7 @@ def test_migrate_is_idempotent(store_dsn):
     with connect(store_dsn) as conn:
         migrate(conn)
         assert migrate(conn) == []
-        assert applied_versions(conn) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+        assert applied_versions(conn) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
 
 
 def test_identity_columns_accept_explicit_ids_and_continue_after_them(store_dsn):
@@ -195,9 +196,9 @@ def test_migrate_refreshes_the_bot_role_grants_on_new_tables(store_dsn, tmp_path
             conn.execute("create role other_admin")
         conn.execute("grant usage, create on schema rehoboam to other_admin")
         conn.commit()
-        # store_dsn already has versions 1-16 applied from the real
-        # migrations dir; use 017 so this simulated file is genuinely new.
-        (tmp_path / "017_simulated.sql").write_text(
+        # store_dsn already has versions 1-17 applied from the real
+        # migrations dir; use 018 so this simulated file is genuinely new.
+        (tmp_path / "018_simulated.sql").write_text(
             "set role other_admin;\ncreate table rehoboam.t_new (x integer);\nreset role;\n"
         )
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
@@ -230,7 +231,25 @@ def test_an_up_to_date_database_needs_only_select_from_the_bot_role(store_dsn):
         conn.execute(f"set role {ROLE}")
         conn.commit()
         try:
-            assert applied_versions(conn) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+            assert applied_versions(conn) == {
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+            }
             assert migrate(conn) == []
         finally:
             conn.execute("reset role")
@@ -259,9 +278,9 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
         migrate(conn)
         bootstrap(conn, "pw")
         conn.commit()
-        # store_dsn already has versions 1-16 applied from the real
-        # migrations dir; use 017 so this simulated file is genuinely new.
-        (tmp_path / "017_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        # store_dsn already has versions 1-17 applied from the real
+        # migrations dir; use 018 so this simulated file is genuinely new.
+        (tmp_path / "018_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
         conn.execute(f"set role {ROLE}")
         conn.commit()
@@ -272,7 +291,7 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
             assert isinstance(excinfo.value.__cause__, psycopg.errors.InsufficientPrivilege)
         finally:
             conn.execute("reset role")
-        assert applied_versions(conn) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+        assert applied_versions(conn) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
 
 
 def test_migrate_applies_008_with_the_mv_change_column(blank_dsn):
