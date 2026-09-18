@@ -137,6 +137,24 @@ function PhotoPlaceholder({ name }: { name: string }) {
   );
 }
 
+/**
+ * The docked panel's own frame (border, `bg-surface`, padding) with nothing
+ * in it but one muted, centred line -- what stands in for the real panel
+ * whenever there isn't one to show. Two callers, never left to drift apart:
+ * `PlayerPanel` itself renders this when `playerId` names no player the
+ * store has, and the page's own "nothing picked yet" placeholder (Players'
+ * `EmptyPanel`, Market's equivalent) renders it with its own message. Same
+ * frame either way, so the docked area never resizes when the panel swaps
+ * for its placeholder or back.
+ */
+export function PanelPlaceholder({ message }: { message: string }) {
+  return (
+    <div className="flex min-w-0 flex-1 items-center justify-center rounded-lg border border-border bg-surface p-[18px]">
+      <p className="text-sm text-muted">{message}</p>
+    </div>
+  );
+}
+
 /** Amber pill when the owner is us, plain "free agent" for an unowned
  * player, the owning manager's name otherwise -- the same three-way rule
  * the Players page's owner column and `PlayerOverlay`'s `OwnerBadge` use. */
@@ -328,6 +346,13 @@ function RangeChip({
  * the page had. `listing` is Market's own addition (an active ask on this
  * player) — Players never passes it, so the amber strip only ever appears
  * from Market.
+ *
+ * Renders `PanelPlaceholder` -- not `null` -- when `playerId` names no
+ * player the store has, so a hand-edited or stale `?player=` swaps the real
+ * panel for a message in the same frame rather than leaving a hole beside
+ * the list. (It returned `null` when this panel was a full-screen overlay,
+ * where "nothing" was the correct empty state; docked beside a list, nothing
+ * reads as broken layout instead.)
  */
 export async function PlayerPanel({
   playerId,
@@ -340,11 +365,11 @@ export async function PlayerPanel({
   params: Params;
   /** Market passes the one thing it adds; Players passes nothing. */
   listing?: { seller: string; expiresAt: number | null } | null;
-}): Promise<React.ReactElement | null> {
+}): Promise<React.ReactElement> {
   const profile = await playerProfile(playerId);
   // A hand-edited `?player=` naming a player the store doesn't have (or one
   // that has since left the universe) must not break the page under it.
-  if (!profile) return null;
+  if (!profile) return <PanelPlaceholder message="That player isn't in the store." />;
 
   const days = rangeDays(params.mv);
   const [matches, fixtures, mv, me] = await Promise.all([

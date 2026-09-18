@@ -2,12 +2,21 @@ import Link from "next/link";
 import { PLAYER_SORTS, type PlayerRow } from "@/lib/queries";
 import { hrefFor, type Params } from "@/lib/query-href";
 import { sortDir, sortKey } from "@/lib/sort";
-import { DASH, money, num, pct, signedPct, POSITION } from "@/lib/format";
+import { DASH, money, num, pct, signed, signedPct, POSITION } from "@/lib/format";
+
+/** Every key `PLAYER_SORTS` can carry, as a literal union rather than plain
+ * `string` -- what lets `SORT_LABEL` and `rankedFigureText` below be checked
+ * against it exhaustively, so a key added to `PLAYER_SORTS` without a label
+ * or a figure formatter fails the build instead of silently rendering a
+ * blank list header and no figure (REH: fair_value_gap review round 1). */
+type SortKey = (typeof PLAYER_SORTS)[number];
 
 /** Human wording for every `PLAYER_SORTS` key -- the same phrase serves the
  * "Ranked by …" sentence and each sort link below it, so the two can never
- * say different things about the same key. */
-const SORT_LABEL: Record<string, string> = {
+ * say different things about the same key. `Record<SortKey, string>` (not
+ * `Record<string, string>`) means TypeScript rejects this object if it is
+ * missing a key `PLAYER_SORTS` has, or carries one it doesn't. */
+const SORT_LABEL: Record<SortKey, string> = {
   name: "name",
   position: "position",
   market_value: "market value",
@@ -15,6 +24,7 @@ const SORT_LABEL: Record<string, string> = {
   trend_7d_pct: "7d change",
   next_mv_pct: "next MV change",
   fair_price: "fair price",
+  fair_value_gap: "fair value gap",
   points: "points",
   avg_points: "average points",
   median_points: "median points",
@@ -44,7 +54,7 @@ const LABEL_COLOR: Record<string, string> = {
  * every link, the same rule `DataTable`'s own sort links followed. Clicking
  * the active key flips its direction; clicking a different one starts it
  * at desc, same toggle `DataTable` used. */
-function sortHref(basePath: string, params: Params, sort: string, dir: "asc" | "desc", key: string) {
+function sortHref(basePath: string, params: Params, sort: SortKey, dir: "asc" | "desc", key: SortKey) {
   return hrefFor(basePath, params, {
     sort: key,
     dir: key === sort && dir === "desc" ? "asc" : "desc",
@@ -57,13 +67,19 @@ function sortHref(basePath: string, params: Params, sort: string, dir: "asc" | "
  * `name`/`position`/`owner` carry no magnitude worth ranking a number by --
  * the row's own name/position/club text already says it -- so those three
  * show no top figure, just the market value.
+ *
+ * The switch is exhaustive over `SortKey`: the `default` branch assigns
+ * `sort` to a `never`-typed binding, so a `PLAYER_SORTS` key added without a
+ * `case` here fails the build rather than silently falling through to null.
  */
-function rankedFigureText(row: PlayerRow, sort: string): string | null {
+function rankedFigureText(row: PlayerRow, sort: SortKey): string | null {
   switch (sort) {
     case "market_value":
       return money(row.market_value);
     case "fair_price":
       return money(row.fair_price);
+    case "fair_value_gap":
+      return signed(row.fair_value_gap, 1).text;
     case "trend_24h_pct":
       return signedPct(row.trend_24h_pct).text;
     case "trend_7d_pct":
@@ -86,8 +102,14 @@ function rankedFigureText(row: PlayerRow, sort: string): string | null {
       return pct(row.p_start);
     case "predicted_ep":
       return num(row.predicted_ep, 0);
-    default:
+    case "name":
+    case "position":
+    case "owner":
       return null;
+    default: {
+      const exhaustive: never = sort;
+      return exhaustive;
+    }
   }
 }
 
@@ -102,7 +124,7 @@ function Row({
   isSelected: boolean;
   basePath: string;
   params: Params;
-  sort: string;
+  sort: SortKey;
 }) {
   const pos = POSITION[row.position] ?? { short: row.position, token: "plain" };
   const ruleClass = isSelected ? "bg-accent" : (RULE_COLOR[pos.token] ?? "bg-border-strong");
@@ -173,7 +195,7 @@ export function PlayerList({
     <div className="flex min-h-0 w-full flex-col xl:w-[400px] xl:shrink-0">
       <div className="flex flex-col gap-1.5 px-0.5 pb-2.5">
         <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-          Ranked by {SORT_LABEL[sort] ?? sort}
+          Ranked by {SORT_LABEL[sort]}
         </span>
         <div className="flex flex-wrap gap-x-3 gap-y-1">
           {PLAYER_SORTS.map((key) => (
@@ -184,7 +206,7 @@ export function PlayerList({
                 key === sort ? "text-accent" : "text-muted hover:text-text-dim"
               }`}
             >
-              {SORT_LABEL[key] ?? key}
+              {SORT_LABEL[key]}
               {key === sort ? (dir === "desc" ? " ▾" : " ▴") : ""}
             </Link>
           ))}

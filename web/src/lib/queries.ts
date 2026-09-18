@@ -124,7 +124,7 @@ export const PLAYER_SORTS = [
   "predicted_ep",
   "p_start",
   "fair_value_gap",
-];
+] as const;
 
 /** Our own manager name, for the "my squad" filter and the amber owner pill. */
 export async function selfName(): Promise<string | null> {

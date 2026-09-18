@@ -5,7 +5,7 @@ import { sortDir, sortKey } from "@/lib/sort";
 import { clampPage, pageHref, pageOffset, pageSummary, parsePage } from "@/lib/paging";
 import { Filters } from "@/components/Filters";
 import { PlayerList } from "@/components/PlayerList";
-import { PlayerPanel } from "@/components/PlayerPanel";
+import { PanelPlaceholder, PlayerPanel } from "@/components/PlayerPanel";
 import { StatusHeader } from "@/components/StatusHeader";
 import { noForecastNote } from "@/lib/next-mv";
 
@@ -23,15 +23,12 @@ function PageLink({ href, children }: { href: string | null; children: React.Rea
   );
 }
 
-/** What the docked panel shows before a player is picked -- matches
- * `PlayerPanel`'s own frame (border, surface, padding) so swapping between
- * the two never jumps the layout. */
+/** What the docked panel shows before a player is picked -- `PlayerPanel`'s
+ * own `PanelPlaceholder` frame, so this and "that player isn't in the store"
+ * (rendered by `PlayerPanel` itself) can never drift apart into two
+ * different-looking empty states. */
 function EmptyPanel() {
-  return (
-    <div className="flex min-w-0 flex-1 items-center justify-center rounded-lg border border-border bg-surface p-[18px]">
-      <p className="text-sm text-muted">Pick a player to see everything we know about him.</p>
-    </div>
-  );
+  return <PanelPlaceholder message="Pick a player to see everything we know about him." />;
 }
 
 export default async function PlayersPage({
