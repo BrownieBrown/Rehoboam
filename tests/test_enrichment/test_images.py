@@ -172,6 +172,39 @@ def test_the_limit_is_respected(store_dsn):
     assert synced == 2
 
 
+def test_a_changed_row_past_a_fixed_low_id_window_is_still_reached(store_dsn):
+    """Regression: once every row already has SOME path, `ORDER BY (path IS
+    NULL) DESC, id` collapses to plain id order. A SQL `LIMIT` there would
+    return the exact same low-id rows on every run forever, starving a
+    high-id row whose source later changes -- `sync_images` must scan past
+    already-synced rows in Python instead, so a small `limit` still reaches
+    real work anywhere in the table."""
+    for i in range(10):
+        source = f"content/file/{i:02d}.png"
+        _player(
+            store_dsn,
+            f"p{i:02d}",
+            image_source=source,
+            image_path=player_dest_path(f"p{i:02d}", source),
+        )
+    changed_source = "content/file/changed.png"
+    _player(
+        store_dsn,
+        "zz-high-id",
+        image_source=changed_source,
+        image_path="players/zz-high-id-stale.png",
+    )
+    client = FakeClient()
+
+    out = sync_images(CorpusStore(dsn=store_dsn), client=client, limit=2, now=1.0)
+
+    assert out["players"] == 1
+    assert client.fetched == [changed_source]
+    assert _read_player(store_dsn, "zz-high-id")["image_path"] == player_dest_path(
+        "zz-high-id", changed_source
+    )
+
+
 def test_team_crests_sync_without_resizing(store_dsn):
     source = "content/file/crest.svg"
     _team(store_dsn, "t1", crest_source=source, crest_path=None)

@@ -26,11 +26,10 @@ logger = logging.getLogger(__name__)
 
 CDN_BASE = "https://kickbase.b-cdn.net/"
 
-#: The dashboard's Supabase project is fixed (ref qznixprbyldatdjzorbq, see
-#: docs/superpowers/specs/2026-09-16-dashboard-design.md) -- only the write
-#: credential varies, so the Storage endpoint is a constant rather than a
-#: second Settings field. This task adds exactly one: SUPABASE_STORAGE_KEY.
-STORAGE_OBJECT_URL = "https://qznixprbyldatdjzorbq.supabase.co/storage/v1/object"
+#: Not secret -- same value web/.env.example's NEXT_PUBLIC_SUPABASE_URL uses.
+#: `Settings.supabase_url` carries the live value; `client_from_settings`
+#: builds the Storage endpoint from it. Only the write credential
+#: (SUPABASE_STORAGE_KEY) is a secret worth its own field.
 STORAGE_BUCKET = "kickbase"
 
 # sips -Z 160 measured 2026-09-18: 15-18 KB with no visible loss at the sizes
@@ -45,17 +44,25 @@ def _digest(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
 
 
-def _dest_path(prefix: str, id_: str, source: str, *, default_ext: str) -> str:
-    ext = source.rsplit(".", 1)[-1].lower() if "." in source else default_ext
+def _dest_path(prefix: str, id_: str, source: str, *, ext: str) -> str:
     return f"{prefix}/{id_}-{_digest(source)}.{ext}"
 
 
+def _source_ext(source: str, *, default: str) -> str:
+    return source.rsplit(".", 1)[-1].lower() if "." in source else default
+
+
 def player_dest_path(player_id: str, source: str) -> str:
-    return _dest_path("players", player_id, source, default_ext="png")
+    # `_resize_photo` always re-encodes to PNG regardless of the source's own
+    # extension, so the key's extension must say PNG too -- not whatever
+    # Kickbase happened to serve it as.
+    return _dest_path("players", player_id, source, ext="png")
 
 
 def team_dest_path(team_id: str, source: str) -> str:
-    return _dest_path("teams", team_id, source, default_ext="svg")
+    # Crests pass through unmodified, so the key's extension should match
+    # what Kickbase actually served.
+    return _dest_path("teams", team_id, source, ext=_source_ext(source, default="svg"))
 
 
 def _needs_sync(source: str | None, path: str | None, dest: str) -> bool:
@@ -69,8 +76,9 @@ class SupabaseImageClient:
     authenticated upload to the Supabase Storage REST API. Constructing one
     does no I/O -- only `fetch`/`upload` touch the network."""
 
-    def __init__(self, storage_key: str, *, session=None, timeout: float = 10.0):
+    def __init__(self, storage_key: str, *, base_url: str, session=None, timeout: float = 10.0):
         self._key = storage_key
+        self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         if session is not None:
             self._session = session
@@ -85,7 +93,7 @@ class SupabaseImageClient:
         return bytes(resp.content)
 
     def upload(self, dest_path: str, data: bytes, *, content_type: str) -> None:
-        url = f"{STORAGE_OBJECT_URL}/{STORAGE_BUCKET}/{dest_path}"
+        url = f"{self._base_url}/storage/v1/object/{STORAGE_BUCKET}/{dest_path}"
         resp = self._session.post(
             url,
             data=data,
@@ -103,9 +111,14 @@ class SupabaseImageClient:
 def client_from_settings(settings) -> SupabaseImageClient | None:
     """None when SUPABASE_STORAGE_KEY isn't set yet -- `sync_images` no-ops on
     a None client, which is exactly what lets this merge and deploy before
-    the owner creates the bucket and adds the key."""
+    the owner creates the bucket and adds the key. `supabase_url` isn't a
+    secret (same value web/.env.example's NEXT_PUBLIC_SUPABASE_URL uses), so
+    its absence doesn't gate this the way the key does -- Settings always
+    carries a default."""
     key = getattr(settings, "supabase_storage_key", "")
-    return SupabaseImageClient(key) if key else None
+    if not key:
+        return None
+    return SupabaseImageClient(key, base_url=settings.supabase_url)
 
 
 def _resize_photo(data: bytes) -> tuple[bytes, str]:
@@ -120,24 +133,28 @@ def _resize_photo(data: bytes) -> tuple[bytes, str]:
     return out.getvalue(), "image/png"
 
 
-def _player_candidates(conn, limit: int) -> list[dict]:
+def _player_candidates(conn) -> list[dict]:
+    """Every row with a source, never-synced first. No SQL `LIMIT`: the tables
+    are small (~600 players), and a fixed low-id window here would mean that
+    once every row has SOME path (about a week in), the `ORDER BY` collapses
+    to plain id order and a `LIMIT` would return the exact same rows on every
+    run forever -- starving any row past that window whose source later
+    changes. `sync_images` caps the *work*, in Python, with `remaining`."""
     rows = conn.execute(
         "SELECT player_id, image_source, image_path FROM rehoboam.player_universe "
         "WHERE image_source IS NOT NULL "
-        "ORDER BY (image_path IS NULL) DESC, player_id "
-        "LIMIT %s",
-        (limit,),
+        "ORDER BY (image_path IS NULL) DESC, player_id"
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def _team_candidates(conn, limit: int) -> list[dict]:
+def _team_candidates(conn) -> list[dict]:
+    """Same reasoning as `_player_candidates` -- teams too, though the risk is
+    smaller with only ~20 rows."""
     rows = conn.execute(
         "SELECT team_id, crest_source, crest_path FROM rehoboam.teams "
         "WHERE crest_source IS NOT NULL "
-        "ORDER BY (crest_path IS NULL) DESC, team_id "
-        "LIMIT %s",
-        (limit,),
+        "ORDER BY (crest_path IS NULL) DESC, team_id"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -159,7 +176,7 @@ def sync_images(store, *, client, limit: int, now: float) -> dict[str, int]:
     try:
         remaining = max(int(limit), 0)
         with store.connection() as conn:
-            for row in _player_candidates(conn, max(remaining, 0)):
+            for row in _player_candidates(conn):
                 if remaining <= 0:
                     break
                 dest = player_dest_path(row["player_id"], row["image_source"])
@@ -181,7 +198,7 @@ def sync_images(store, *, client, limit: int, now: float) -> dict[str, int]:
                     result["failed"] += 1
                     logger.warning("image sync failed for player %s: %s", row["player_id"], e)
 
-            for row in _team_candidates(conn, max(remaining, 0)):
+            for row in _team_candidates(conn):
                 if remaining <= 0:
                     break
                 dest = team_dest_path(row["team_id"], row["crest_source"])
