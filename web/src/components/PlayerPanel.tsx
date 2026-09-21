@@ -10,6 +10,7 @@ import {
 import { chart } from "@/lib/chart";
 import { formEntries, type FormEntry } from "@/lib/form";
 import { availability } from "@/lib/availability";
+import { fairVerdict } from "@/lib/fair-value";
 import { RANGES, rangeDays, rangeLabel, type Range } from "@/lib/mv-range";
 import { hrefFor, type Params } from "@/lib/query-href";
 import {
@@ -115,6 +116,29 @@ function toneOf(n: number | null): Tone {
 function Money({ value }: { value: number | null }) {
   const out = signedMoney(value);
   return <span className={TONE[out.tone]}>{out.text}</span>;
+}
+
+/** Fair price in exact euros over the verdict -- "cheap +25%", "fair",
+ * "expensive −30%" -- so the number never stands alone as if it were
+ * precise. A dash with the reason when there is none: migration 022 prices
+ * likely starters worth 5 m or more, and nobody else. */
+function FairValue({ price, marketValue }: { price: number | null; marketValue: number | null }) {
+  const verdict = fairVerdict(price, marketValue);
+  if (!verdict) {
+    return (
+      <span className="text-sm text-muted">
+        {DASH} <span className="text-[11px]">likely starters from 5 m only</span>
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-baseline gap-1.5">
+      <span className="tnum text-sm font-semibold text-text">{money(price)}</span>
+      <span className={`tnum text-[11px] font-semibold ${TONE[verdict.tone]}`}>
+        {verdict.label} {signed(verdict.gapPct, 0).text}%
+      </span>
+    </span>
+  );
 }
 
 /**
@@ -526,10 +550,8 @@ export async function PlayerPanel({
                 </span>
               </div>
               <div className="flex flex-col gap-px">
-                <span className="text-[10px] text-muted">Fair value</span>
-                <span className="tnum text-sm font-semibold text-text">
-                  {money(profile.fair_price)}
-                </span>
+                <span className="text-[10px] text-muted">Fair value, for {num(profile.predicted_ep, 0)} pts</span>
+                <FairValue price={profile.fair_price} marketValue={profile.market_value} />
               </div>
             </div>
           </div>

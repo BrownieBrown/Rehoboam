@@ -273,10 +273,43 @@ def test_image_path_and_joined_crest_path_are_selected(store_dsn):
     assert rows["b"]["crest_path"] is None
 
 
+def _prediction(player_id, predicted_ep, p_start):
+    """One live prediction row, shaped like `_seed`'s -- only the three things
+    the fair-value fit reads vary."""
+    return {
+        "session_id": "s",
+        "player_id": player_id,
+        "season": "2026/2027",
+        "day_number": 4,
+        "kickoff": NOW + 86400,
+        "predicted_at": NOW - 100,
+        "predicted_ep": predicted_ep,
+        "p_status": {1: 0.0, 3: round(1 - p_start, 2), 4: 0.0, 5: p_start},
+        "rate": 80.0,
+        "prev_status": 5,
+        "live_status": 0,
+        "position": "Defender",
+        "team_id": "7",
+        "owned": False,
+        "listed": False,
+        "in_best_11": False,
+        "live_ep": None,
+        "data_grade": "A",
+        "app": "cli",
+        "dry_run": True,
+        "backfill": False,
+    }
+
+
 def _fair_price_seed(dsn):
-    """Two defenders with three appearances each, plus one with a single big
-    game. Two points define the position's line exactly, so each of the two
-    gets his own market value back as a fair price."""
+    """Two defenders who are likely to start, plus one who is not. Two points
+    define the position's line exactly -- in both directions, since two points
+    correlate perfectly -- so each of the two gets his own market value back
+    as a fair price and a gap of zero.
+
+    The third is migration 022's whole point turned into a fixture: three
+    appearances averaging 145 (the old definition priced exactly this far
+    above his market value), an expected 30, and unlikely to start."""
     corpus = CorpusStore(dsn=dsn)
     corpus.upsert_players(
         [
@@ -285,46 +318,65 @@ def _fair_price_seed(dsn):
             {"player_id": "d3", "last_name": "Dee Three", "position": "Defender", "team_id": "7"},
         ]
     )
-    # 60 points a game and 20 points a game, three games each.
     corpus.record_match_history(
-        "d1", "7", _perf([("2026/2027", [_m(1, 5, 60), _m(2, 5, 60), _m(3, 5, 60)])])
+        "d3", "7", _perf([("2026/2027", [_m(1, 5, 145), _m(2, 5, 145), _m(3, 5, 145)])])
     )
-    corpus.record_match_history(
-        "d2", "7", _perf([("2026/2027", [_m(1, 5, 20), _m(2, 5, 20), _m(3, 5, 20)])])
-    )
-    # One appearance, a huge score: the line would price him absurdly.
-    corpus.record_match_history("d3", "7", _perf([("2026/2027", [_m(1, 5, 200)])]))
-    for pid, mv in (("d1", 20_000_000), ("d2", 4_000_000), ("d3", 1_000_000)):
+    for pid, mv in (("d1", 20_000_000), ("d2", 4_000_000), ("d3", 11_000_000)):
         corpus.record_status_daily(
             pid, date.today(), {"st": 0, "prob": 1, "mv": mv, "tid": "7", "tfhmvt": 0}, NOW
         )
+    CalibrationStore(dsn=dsn).write_predictions(
+        [_prediction("d1", 90.0, 0.8), _prediction("d2", 40.0, 0.8), _prediction("d3", 30.0, 0.2)]
+    )
     return LeagueStore(dsn=dsn)
 
 
-def test_fair_price_is_what_his_average_is_worth_at_his_positions_rate(store_dsn):
+def test_fair_price_is_what_his_expected_points_cost_at_his_position(store_dsn):
     league = _fair_price_seed(store_dsn)
     rows = {r["player_id"]: r for r in league.player_table()}
     d1, d2 = rows["d1"], rows["d2"]
-    assert d1["appearances"] == 3 and float(d1["avg_points"]) == 60.0
     assert abs(d1["fair_price"] - d1["market_value"]) <= 1
     assert round(float(d1["fair_value_gap"]), 1) == 0.0
-    assert abs(d2["fair_price"] - d2["market_value"]) <= 1
+    # d2 defines the line with him, so he sits on it too (his PRICE is
+    # withheld under 5 m -- see the test below).
+    assert round(float(d2["fair_value_gap"]), 1) == 0.0
 
 
-def test_fair_price_needs_three_appearances(store_dsn):
-    """One huge game must not price a player: the gap in points still shows,
-    but the euro price says nothing until there is a season behind it."""
+def test_fair_price_ignores_a_hot_season_average(store_dsn):
+    """Migration 022: a big average over a few games prices nobody. Read off
+    the line the two starters define (3.125 points per million), 145 points
+    would have been worth 37.6 m against his 11 m market value."""
     league = _fair_price_seed(store_dsn)
     d3 = {r["player_id"]: r for r in league.player_table()}["d3"]
-    assert d3["appearances"] == 1 and float(d3["avg_points"]) == 200.0
-    assert d3["fair_price"] is None
-    assert d3["fair_value_gap"] is not None
+    assert d3["appearances"] == 3 and float(d3["avg_points"]) == 145.0
+    assert d3["fair_price"] is None and d3["fair_value_gap"] is None
 
 
-def test_fair_price_is_absent_without_any_average(store_dsn):
+def test_an_unlikely_starter_does_not_tilt_the_line(store_dsn):
+    """d3 (30 expected points at 11 m) sits far off the starters' line; were he
+    in the fit, d1 and d2 would no longer get their own market value back."""
+    league = _fair_price_seed(store_dsn)
+    rows = {r["player_id"]: r for r in league.player_table()}
+    assert float(rows["d3"]["p_start"]) < 0.5
+    assert abs(rows["d1"]["fair_price"] - 20_000_000) <= 1
+    assert round(float(rows["d2"]["fair_value_gap"]), 1) == 0.0
+
+
+def test_fair_price_is_not_quoted_under_five_million(store_dsn):
+    """d2 sits exactly on the line at 4 m, so the line WOULD return his own
+    price -- it is withheld because under 5 m the measured miss was 2-4x. His
+    gap in points is not a ratio and still shows."""
+    league = _fair_price_seed(store_dsn)
+    d2 = {r["player_id"]: r for r in league.player_table()}["d2"]
+    assert d2["market_value"] == 4_000_000
+    assert d2["fair_price"] is None
+    assert round(float(d2["fair_value_gap"]), 1) == 0.0
+
+
+def test_fair_price_is_absent_without_a_prediction(store_dsn):
     league = _seed(store_dsn)
-    c = {r["player_id"]: r for r in league.player_table()}["c"]
-    assert c["avg_points"] is None and c["fair_price"] is None
+    b = {r["player_id"]: r for r in league.player_table()}["b"]
+    assert b["predicted_ep"] is None and b["fair_price"] is None and b["fair_value_gap"] is None
 
 
 def test_filters_and_order(store_dsn):
