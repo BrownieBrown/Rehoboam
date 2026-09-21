@@ -4,26 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rehoboam is a bot for KICKBASE (fantasy football/soccer platform). The goal is to **win the league** — which means maximizing matchday points, not market value profits.
+Rehoboam is a bot for KICKBASE (fantasy football/soccer platform). The goal is a bot that **runs the team on its own** — trading for good players and trading for profit, setting the lineup — and wins its weekly matchups. Matchups are won with matchday points, so points are the objective and profit is what buys them.
 
 ## How Kickbase Works (What Actually Wins)
 
-**Game mode: Seasonal, Total Points.** The league champion is whoever accumulates the most total points across the entire season. There is no head-to-head, no captain mechanic, no vice-captain. Every matchday point counts equally toward the final ranking.
+**Game mode: matchups.** Every matchday is a matchup against another manager, and the table is decided by matchups won — *not* by total points across the season (corrected by the owner 2026-09-21; this file said "Seasonal, Total Points, no head-to-head" before, and it was wrong). More points still means more wins, so the weekly aim is unchanged: the best eleven we can field, every matchday. There is no captain mechanic and no vice-captain.
 
-Kickbase tracks 100+ in-game actions per match and converts them to fantasy points in real-time. **You win by scoring more total matchday points than your opponents over the full season.**
+**Hard reset after the winter break.** Every manager starts again with a team from zero. The first half's squad and standing are throwaway: the cost of the bot trading badly before winter is capped, and the reset is the date that matters — the bot should reach it already trading on its own and already calibrated, not start learning then.
+
+Kickbase tracks 100+ in-game actions per match and converts them to fantasy points in real-time. **You win a matchday by scoring more points than the manager you are drawn against.**
 
 ### Scoring Rules That Matter
 
-- **Total points across the season** determine the winner. Consistency every single matchday is what wins.
+- **Matchups won** determine the table; cumulative points do not. Do not reason about "points behind the leader". Consistency every single matchday is what wins matchups.
 - **Empty lineup position = -100 points penalty**. Always fill every slot.
 - **Negative budget at kickoff = ZERO points for the entire matchday**. Budget must be >= 0 when games start.
-- **No captain mechanic** in Seasonal/Total Points mode. All 11 starters score equally.
+- **No captain mechanic**. All 11 starters score equally.
 - **Double gameweeks**: Players from teams with 2 matches accumulate points from both games.
 - **10 formations available**: Tactical flexibility to maximize points from your best performers.
 
 ### What This Means for the Bot
 
-Since every matchday point accumulates toward the season total, the winning strategy is:
+Since every matchup is won on that matchday's points, the winning strategy is:
 
 1. **Maximize expected points every single matchday** — pick the best starting 11 for THIS week's fixtures
 1. **Acquire high-scoring players** — buy players who score the most matchday points, even if "overpriced" by market value
@@ -302,7 +304,7 @@ The bot was built as a **market value trader** — buy undervalued players, ride
 ### Guiding principles going forward
 
 1. **Every feature should answer: "does this help score more matchday points?"** If not, it's low priority.
-1. **No captain in our mode (Seasonal/Total Points).** All 11 starters score equally. Focus on having the best possible starting 11 every week.
+1. **No captain in our mode.** All 11 starters score equally. Focus on having the best possible starting 11 every week.
 1. **Don't over-engineer market analysis.** Simple "buy good scorers, sell bad scorers" beats sophisticated market-value prediction for winning leagues.
 1. **Budget is a constraint, not an objective.** Profit from trades is only useful if it lets you buy better point-scorers. Don't hold a declining player "because they might recover value" if they're dragging matchday scores down.
 1. **The bot should tell the user what to do THIS WEEK.** Captain pick, lineup, and one or two trades max. Not a wall of 15 analyses.
