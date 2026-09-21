@@ -34,12 +34,12 @@ def api():
 
 
 @pytest.fixture
-def trader(api, tmp_path, monkeypatch):
+def trader(api, tmp_path, store_dsn, monkeypatch):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.chdir(tmp_path)
     t = AutoTrader(api=api, settings=Settings(), dry_run=False)
-    t.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    t.learner = BidLearner(dsn=store_dsn)
     t.execution = ExecutionService(api=api, tracker=MagicMock(), dry_run=False)
     return t
 
@@ -218,8 +218,10 @@ class TestTheAutoApproveMachineryIsGone:
 
         assert not hasattr(Settings(), "emergency_auto_approve_hours")
 
-    def test_no_due_auto_approvals_reader(self, tmp_path):
-        assert not hasattr(BidLearner(db_path=tmp_path / "b.db"), "due_auto_approvals")
+    def test_no_due_auto_approvals_reader(self):
+        # On the class, not an instance: the store's learner needs a live
+        # database to construct, and the question is only whether it exists.
+        assert not hasattr(BidLearner, "due_auto_approvals")
 
     def test_the_session_has_no_auto_approval_step(self):
         assert not hasattr(AutoTrader, "_process_due_auto_approvals")

@@ -402,7 +402,7 @@ def _ten_short_one_forward(team_ids=None):
         + [_player(f"m{i}", "Midfielder") for i in range(4)]
         + [_player("fwd0", "Forward")]
     )
-    for player, team_id in zip(squad, team_ids or [f"club-{p.id}" for p in squad]):
+    for player, team_id in zip(squad, team_ids or [f"club-{p.id}" for p in squad], strict=True):
         player.team_id = team_id
     return squad
 

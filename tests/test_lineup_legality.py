@@ -51,6 +51,7 @@ class _Api:
     def __init__(self, squad):
         self._squad = squad
         self.lineups: list[tuple[str, list[str]]] = []
+        self.bought: list[str] = []
 
     def get_squad(self, league):
         return list(self._squad)
@@ -64,6 +65,10 @@ class _Api:
     def set_lineup(self, league, formation, player_ids):
         self.lineups.append((formation, list(player_ids)))
         return {}
+
+    def buy_player(self, league, player, price):
+        self.bought.append(player.id)
+        return True
 
 
 def _scores(squad):
@@ -208,23 +213,6 @@ class TestTheFillTargetsTheOpenPosition:
         assert gap_after(["Defender"]) == 1
 
 
-class _ProposalSpy:
-    """The emergency fill proposes rather than buys since REH-114."""
-
-    def __init__(self):
-        self.calls: list[tuple[str, int]] = []
-
-    def __call__(
-        self, league, rec, ctx, *, bid=None, auto_approve_at=None, waive_trend_floor=False
-    ):
-        self.calls.append((rec.player.id, int(bid if bid is not None else rec.recommended_bid)))
-        return True
-
-    @property
-    def ids(self) -> list[str]:
-        return [c[0] for c in self.calls]
-
-
 def _gated_rec(pid: str, position: str, ep: float, price: int, bid: int | None = None):
     """A buy rec the real `_build_buy_gate` can read: it needs `market_value`
     and `team_id`, which the display-only namespace above does not carry."""
@@ -271,7 +259,7 @@ class TestTheReservesWalkHonoursTheGap:
     """A reserve is only a reserve while it still closes something.
 
     The basket refuses a buy that closes no slot; the walk behind it used to
-    not, so a second midfielder could be proposed for a shortfall only a
+    not, so a second midfielder could be bought for a shortfall only a
     forward can close — the same EUR-for-nothing the seventh defender was.
     """
 
@@ -286,14 +274,13 @@ class TestTheReservesWalkHonoursTheGap:
         ]
         api = _Api(squad)
         trader = _trader(api, monkeypatch, tmp_path)
-        trader._propose_buy = spy = _ProposalSpy()
 
         with patch.object(AutoTrader, "_is_wash_trade", return_value=False):
             results = trader._run_emergency_squad_fill(
                 LEAGUE, _gated_ctx(squad, recs, 12_929_567), squad, slots_short=2
             )
 
-        assert spy.ids == ["m1"], "the second midfielder closes nothing"
+        assert api.bought == ["m1"], "the second midfielder closes nothing"
         assert sum(1 for r in results if r.success) == 1
 
     def test_a_saturated_reserve_is_never_reached_when_the_closer_is_refused(
@@ -309,15 +296,16 @@ class TestTheReservesWalkHonoursTheGap:
         ]
         api = _Api(squad)
         trader = _trader(api, monkeypatch, tmp_path)
-        trader._propose_buy = spy = _ProposalSpy()
 
         with patch.object(AutoTrader, "_is_wash_trade", return_value=False):
             results = trader._run_emergency_squad_fill(
                 LEAGUE, _gated_ctx(squad, recs, 12_929_567), squad, slots_short=1
             )
 
-        assert spy.ids == []
-        assert results == []
+        # The refused closer is reported, not discarded — but nothing reached
+        # the API and nothing succeeded.
+        assert api.bought == []
+        assert not any(r.success for r in results)
 
 
 class TestAFullSquadCannotBuyItsWayOut:
@@ -330,7 +318,7 @@ class TestAFullSquadCannotBuyItsWayOut:
     does not do swaps.
     """
 
-    def test_a_full_unfieldable_squad_proposes_nothing_and_says_why(
+    def test_a_full_unfieldable_squad_buys_nothing_and_says_why(
         self, monkeypatch, tmp_path, caplog
     ):
         """GK 2, DEF 8, MID 5, FW 0 — fifteen players, one short at Forward
@@ -340,7 +328,6 @@ class TestAFullSquadCannotBuyItsWayOut:
         recs = [_gated_rec("f1", "Forward", 70.0, 1_000_000)]
         api = _Api(squad)
         trader = _trader(api, monkeypatch, tmp_path)
-        trader._propose_buy = spy = _ProposalSpy()
 
         with (
             patch.object(AutoTrader, "_is_wash_trade", return_value=False),
@@ -350,7 +337,8 @@ class TestAFullSquadCannotBuyItsWayOut:
                 LEAGUE, _gated_ctx(squad, recs, 12_929_567), squad, slots_short=1
             )
 
-        assert spy.ids == []
+        # A full squad is refused before any candidate is tried.
+        assert api.bought == []
         assert results == []
         assert any(
             "emergency-fill: squad full (15/15) and unfieldable" in m for m in caplog.messages
