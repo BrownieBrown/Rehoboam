@@ -11,6 +11,23 @@ when there is no live forecast (overnight included, until the morning run
 writes tomorrow's). Calibration & health shows how those forecasts have
 scored against "no change".
 
+League shows the managers we play against -- standing, last matchday, team
+value, the best eleven expected scores each one owns, transfer result -- and
+docks one manager's squad, matchdays and latest transfers beside the table
+(`?manager=`). It reads `rehoboam.web_managers`, `web_manager_matchdays`,
+`web_manager_transfers` and `web_ownership` (migration `023_web_league.sql`,
+which must be applied before the page is deployed; without it `/league`
+errors, the other pages don't).
+
+`Fair value` is what the market usually pays, at his position, for a likely
+starter we expect this many points from (migration
+`022_fair_price_from_expected_points.sql`). It is quoted only for players with
+a start probability of 50% or more and a market value of 5,000,000 or more,
+and even there it typically misses by a quarter to a third -- so the site
+never shows it bare: `src/lib/fair-value.ts` turns it into a verdict against
+his market value, and is the one place that decides how big a difference
+counts.
+
 The site is **read-only and names no table**. Every query in
 `src/lib/queries.ts` reads one of seven views —
 `rehoboam.web_players`, `rehoboam.web_squad`, `rehoboam.web_session_summary`,

@@ -8,11 +8,12 @@ const ENTRIES: { href: string; label: string }[] = [
   { href: "/", label: "Players" },
   { href: "/squad", label: "Squad & lineup" },
   { href: "/market", label: "Market" },
+  { href: "/league", label: "League" },
   { href: "/health", label: "Calibration & health" },
 ];
 
 /**
- * The `(app)` layout renders one Sidebar beside all four data pages without
+ * The `(app)` layout renders one Sidebar beside all five data pages without
  * knowing which — there is no server-side pathname in a shared layout short
  * of a middleware header this task doesn't own — so `current` is an optional
  * override and, absent one, this is the one piece of the shell that reads

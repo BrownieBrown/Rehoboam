@@ -1,163 +1,105 @@
-.PHONY: help install install-dev install-web dev api web build lint format typecheck test clean
+.DEFAULT_GOAL := help
+.PHONY: help install install-web dev web-build web-start web-check \
+	status auto-dry lint format typecheck security check test test-cov clean
 
-# Use python -m pip for portability
-PIP := python3 -m pip
-PYTHON := python3
+WEB  := web
+PORT ?= 3000
 
-# Default target
 help:
-	@echo "Rehoboam - KICKBASE Trading Bot"
+	@echo "Rehoboam - KICKBASE bot + dashboard"
 	@echo ""
-	@echo "Usage: make [target]"
+	@echo "Dashboard (web/, Next.js):"
+	@echo "  dev           Start the dashboard on http://localhost:$(PORT) (PORT=3001 to change)"
+	@echo "  web-build     Production build + secret-bundle guard"
+	@echo "  web-start     Serve the production build"
+	@echo "  web-check     Typecheck, lint and unit-test the dashboard"
 	@echo ""
 	@echo "Setup:"
-	@echo "  install       Install Python dependencies"
-	@echo "  install-dev   Install Python dev dependencies"
-	@echo "  install-web   Install frontend dependencies"
-	@echo "  install-all   Install everything"
+	@echo "  install       uv sync --extra dev"
+	@echo "  install-web   npm install in web/"
 	@echo ""
-	@echo "Development:"
-	@echo "  dev           Run both API and frontend (requires tmux)"
-	@echo "  api           Run FastAPI backend only"
-	@echo "  web           Run React frontend only"
-	@echo "  cli           Run the CLI (rehoboam --help)"
+	@echo "Bot:"
+	@echo "  status        Read-only diagnostic (what auto would do)"
+	@echo "  auto-dry      Simulate one trading session"
 	@echo ""
-	@echo "Code Quality:"
-	@echo "  lint          Run ruff linter"
-	@echo "  format        Format code with black and ruff"
-	@echo "  typecheck     Run mypy type checker"
-	@echo "  security      Run bandit security scan"
-	@echo "  check         Run all checks (lint, typecheck, security)"
+	@echo "Code quality:"
+	@echo "  lint | format | typecheck | security | check"
+	@echo "  test | test-cov"
 	@echo ""
-	@echo "Testing:"
-	@echo "  test          Run all tests"
-	@echo "  test-cov      Run tests with coverage"
-	@echo ""
-	@echo "Build:"
-	@echo "  build         Build frontend for production"
-	@echo "  build-api     Build Python package"
-	@echo ""
-	@echo "Utilities:"
-	@echo "  clean         Remove build artifacts"
-	@echo "  analyze       Run rehoboam analyze"
-	@echo "  trade-dry     Run dry-run trading"
+	@echo "  clean         Remove build artifacts (keeps node_modules and .venv)"
 
 # ============================================================================
-# Setup
+# Dashboard
+# ============================================================================
+
+# The dashboard reads the REAL store through DATABASE_URL, and an empty
+# ALLOWED_EMAILS locks everyone out — so refuse to start without .env.local
+# rather than boot into a login page that can never succeed.
+$(WEB)/.env.local:
+	@echo "Missing $(WEB)/.env.local — copy $(WEB)/.env.example and fill in the four values."
+	@exit 1
+
+$(WEB)/node_modules: $(WEB)/package-lock.json
+	cd $(WEB) && npm install
+	@touch $@
+
+install-web: $(WEB)/node_modules
+
+dev: $(WEB)/.env.local $(WEB)/node_modules
+	cd $(WEB) && npm run dev -- --port $(PORT)
+
+web-build: $(WEB)/.env.local $(WEB)/node_modules
+	cd $(WEB) && npm run build
+
+web-start: web-build
+	cd $(WEB) && npm run start -- --port $(PORT)
+
+web-check: $(WEB)/node_modules
+	cd $(WEB) && npm run typecheck && npm run lint && npm test
+
+# ============================================================================
+# Bot
 # ============================================================================
 
 install:
-	$(PIP) install -e .
+	uv sync --extra dev
 
-install-dev:
-	$(PIP) install -e ".[dev]"
+status:
+	uv run rehoboam status
 
-install-web:
-	$(PIP) install -e ".[web]"
-	cd web && npm install
-
-install-all: install-dev install-web
-	@echo "All dependencies installed"
+auto-dry:
+	uv run rehoboam auto --dry-run
 
 # ============================================================================
-# Development
-# ============================================================================
-
-api:
-	$(PYTHON) -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-
-web:
-	cd web && npm run dev
-
-# Run both API and frontend (requires tmux)
-dev:
-	@if command -v tmux >/dev/null 2>&1; then \
-		tmux new-session -d -s rehoboam 'make api' \; \
-			split-window -h 'make web' \; \
-			attach; \
-	else \
-		echo "tmux not installed. Run 'make api' and 'make web' in separate terminals."; \
-	fi
-
-cli:
-	rehoboam --help
-
-# ============================================================================
-# Code Quality
+# Code quality
 # ============================================================================
 
 lint:
-	$(PYTHON) -m ruff check rehoboam/ api/ --fix
+	uv run ruff check rehoboam/ --fix
 
 format:
-	$(PYTHON) -m black rehoboam/ api/
-	$(PYTHON) -m ruff check rehoboam/ api/ --fix
+	uv run black rehoboam/
+	uv run ruff check rehoboam/ --fix
 
 typecheck:
-	$(PYTHON) -m mypy rehoboam/ api/ --ignore-missing-imports
+	uv run mypy rehoboam/ --ignore-missing-imports
 
 security:
-	$(PYTHON) -m bandit -r rehoboam/ api/ -c pyproject.toml
+	uv run bandit -r rehoboam/ -c pyproject.toml
 
 check: lint typecheck security
-	@echo "All checks passed"
-
-# ============================================================================
-# Testing
-# ============================================================================
 
 test:
-	$(PYTHON) -m pytest
+	uv run pytest
 
 test-cov:
-	$(PYTHON) -m pytest --cov=rehoboam --cov-report=html --cov-report=term
-
-# ============================================================================
-# Build
-# ============================================================================
-
-build:
-	cd web && npm run build
-
-build-api:
-	$(PYTHON) -m build
+	uv run pytest --cov=rehoboam --cov-report=html --cov-report=term
 
 # ============================================================================
 # Utilities
 # ============================================================================
 
 clean:
-	rm -rf build/
-	rm -rf dist/
-	rm -rf *.egg-info/
-	rm -rf .pytest_cache/
-	rm -rf .mypy_cache/
-	rm -rf .ruff_cache/
-	rm -rf htmlcov/
-	rm -rf web/dist/
-	rm -rf web/node_modules/
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-
-analyze:
-	rehoboam analyze
-
-trade-dry:
-	rehoboam trade --max 5
-
-# ============================================================================
-# Deployment helpers
-# ============================================================================
-
-deploy-check:
-	@echo "Pre-deployment checklist:"
-	@echo "1. Backend (Railway):"
-	@echo "   - Set KICKBASE_EMAIL"
-	@echo "   - Set KICKBASE_PASSWORD"
-	@echo "   - Set JWT_SECRET (generate with: openssl rand -hex 32)"
-	@echo "   - Set CORS_ORIGINS to your Vercel URL"
-	@echo ""
-	@echo "2. Frontend (Vercel):"
-	@echo "   - Set VITE_API_URL to your Railway URL"
-	@echo ""
-	@echo "Generate a JWT secret:"
-	@openssl rand -hex 32
+	rm -rf build/ dist/ *.egg-info/ .pytest_cache/ .mypy_cache/ .ruff_cache/ htmlcov/
+	rm -rf $(WEB)/.next
+	find . -type d -name __pycache__ -not -path "./.venv/*" -exec rm -rf {} + 2>/dev/null || true

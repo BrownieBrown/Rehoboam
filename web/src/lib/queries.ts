@@ -591,3 +591,126 @@ export async function sessions(limit = 30): Promise<SessionRow[]> {
     limit ${limit}
   `;
 }
+
+export type LeagueManager = {
+  manager_id: string;
+  name: string;
+  is_self: boolean;
+  /** The matchday the standing below was read after. */
+  day_number: number | null;
+  rank_overall: number | null;
+  total_points: number | null;
+  rank_matchday: number | null;
+  matchday_points: number | null;
+  points_behind_leader: number | null;
+  team_value: number | null;
+  squad_size: number | null;
+  squad_value: number | null;
+  /** His eleven highest expected scores, any positions: a ceiling, not a lineup. */
+  top11_ep: number | null;
+  on_market: number | null;
+  transfer_pnl: number | null;
+  matchday_wins: number | null;
+  buys_7d: number;
+  sells_7d: number;
+};
+
+export const LEAGUE_SORTS = [
+  "rank_overall",
+  "total_points",
+  "matchday_points",
+  "team_value",
+  "top11_ep",
+  "squad_size",
+  "transfer_pnl",
+  "matchday_wins",
+  "buys_7d",
+] as const;
+
+/** Every manager in the league, one row each, from `web_managers`. */
+export async function leagueManagers(opts: {
+  sort: string;
+  dir: "asc" | "desc";
+}): Promise<LeagueManager[]> {
+  // sql.unsafe(opts.sort): see `players()` -- safe only behind sortKey().
+  return sql<LeagueManager[]>`
+    select * from rehoboam.web_managers
+    order by ${sql.unsafe(opts.sort)} ${opts.dir === "asc" ? sql`asc` : sql`desc`} nulls last,
+             manager_id asc
+  `;
+}
+
+export async function leagueManager(managerId: string): Promise<LeagueManager | null> {
+  const [row] = await sql<LeagueManager[]>`
+    select * from rehoboam.web_managers where manager_id = ${managerId}
+  `;
+  return row ?? null;
+}
+
+export type ManagerSquadRow = {
+  player_id: string;
+  player_name: string | null;
+  team: string | null;
+  position: string | null;
+  market_value: number | null;
+  gain_loss: number | null;
+  on_market: boolean | null;
+  predicted_ep: number | null;
+  p_start: number | null;
+  points: number | null;
+  avg_points: number | null;
+  availability: number | null;
+  image_path: string | null;
+  crest_path: string | null;
+};
+
+/** One manager's newest squad, best expected score first. */
+export async function managerSquad(managerId: string): Promise<ManagerSquadRow[]> {
+  return sql<ManagerSquadRow[]>`
+    select player_id, player_name, team, position, market_value, gain_loss, on_market,
+           predicted_ep, p_start, points, avg_points, availability, image_path, crest_path
+    from rehoboam.web_ownership
+    where manager_id = ${managerId}
+    order by predicted_ep desc nulls last, market_value desc nulls last, player_id
+  `;
+}
+
+export type ManagerMatchday = {
+  day_number: number;
+  matchday_points: number | null;
+  rank_matchday: number | null;
+  total_points: number | null;
+  rank_overall: number | null;
+};
+
+export async function managerMatchdays(managerId: string): Promise<ManagerMatchday[]> {
+  return sql<ManagerMatchday[]>`
+    select day_number, matchday_points, rank_matchday, total_points, rank_overall
+    from rehoboam.web_manager_matchdays
+    where manager_id = ${managerId}
+    order by day_number
+  `;
+}
+
+export type ManagerTransfer = {
+  /** Epoch seconds, the clock `ago()` reads. */
+  transfer_at: number;
+  player_id: string;
+  player_name: string | null;
+  team: string | null;
+  position: string | null;
+  kind: "buy" | "sell" | null;
+  price: number | null;
+  market_value_now: number | null;
+};
+
+export async function managerTransfers(managerId: string, limit = 12): Promise<ManagerTransfer[]> {
+  return sql<ManagerTransfer[]>`
+    select extract(epoch from transfer_at)::float8 as transfer_at,
+           player_id, player_name, team, position, kind, price, market_value_now
+    from rehoboam.web_manager_transfers
+    where manager_id = ${managerId}
+    order by transfer_at desc
+    limit ${limit}
+  `;
+}

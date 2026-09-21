@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/auth";
+import { fairVerdict } from "@/lib/fair-value";
 import { market, shellFacts, MARKET_SORTS, type MarketRow } from "@/lib/queries";
 import { sortDir, sortKey } from "@/lib/sort";
 import { Pill } from "@/components/Pill";
@@ -58,17 +59,14 @@ function MoneyTone({ value }: { value: number | null }) {
  * -- "vs MV", never "vs ask": the ask column is gone, and fair value only
  * ever gets compared to what the market actually values him at. */
 function FairValueCell({ price, marketValue }: { price: number | null; marketValue: number | null }) {
-  if (price === null) return <span className="text-sm text-muted">{DASH}</span>;
-  const gap =
-    marketValue !== null && marketValue !== 0
-      ? signed(((price - marketValue) / marketValue) * 100, 0)
-      : null;
+  const verdict = fairVerdict(price, marketValue);
+  if (!verdict) return <span className="text-sm text-muted">{DASH}</span>;
   return (
     <div className="flex flex-col items-end gap-px">
       <span className="tnum text-[14px] text-text-dim">{money(price)}</span>
-      {gap ? (
-        <span className={`tnum text-[11px] font-semibold ${TONE[gap.tone]}`}>{gap.text} % vs MV</span>
-      ) : null}
+      <span className={`tnum text-[11px] font-semibold ${TONE[verdict.tone]}`}>
+        {verdict.label} {signed(verdict.gapPct, 0).text}%
+      </span>
     </div>
   );
 }
