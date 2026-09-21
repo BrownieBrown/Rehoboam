@@ -223,7 +223,8 @@ class TestReconcileSquadCostBasis:
     def test_a_learning_failure_never_raises_into_the_session(self, learner, tracker, store_dsn):
         """Every tracker method is best-effort; a broken DB must not stop trading."""
         with connect(store_dsn) as conn:
-            conn.execute("DROP TABLE rehoboam.manager_transfers")
+            # CASCADE: the League tab's views (migration 023) read this table.
+            conn.execute("DROP TABLE rehoboam.manager_transfers CASCADE")
 
         result = tracker.reconcile_squad_cost_basis(
             [FakePlayer("p1", "David", "Raum")], manager_id=US
