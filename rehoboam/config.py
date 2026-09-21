@@ -563,6 +563,29 @@ class Settings(BaseSettings):
         ),
     )
 
+    supabase_url: str = Field(
+        default="https://qznixprbyldatdjzorbq.supabase.co",
+        description=(
+            "The Supabase project's public API URL -- not a secret, the same value "
+            "web/.env.example's NEXT_PUBLIC_SUPABASE_URL uses. `enrichment/images.py` builds "
+            "the Storage endpoint from this instead of hardcoding it, so pointing at a "
+            "different project (or a local Supabase) needs no code change. Env: SUPABASE_URL."
+        ),
+    )
+
+    supabase_storage_key: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Write key for the public Supabase Storage bucket `kickbase`, in the project "
+            "SUPABASE_URL names (spec 2026-09-18 player panel, task 10). Empty means the "
+            "credential doesn't exist yet: `enrichment/images.sync_images` no-ops cleanly "
+            "(zero network calls, nothing written) so this PR can merge and deploy before "
+            "the owner creates the bucket and adds the key. Never logged. "
+            "Env: SUPABASE_STORAGE_KEY."
+        ),
+    )
+
     ingest_stale_after_hours: float = Field(
         default=20.0,
         description=(

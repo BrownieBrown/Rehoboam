@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { DASH, money } from "@/lib/format";
 import type { ShellFacts } from "@/lib/queries";
 
 const ENTRIES: { href: string; label: string }[] = [
@@ -11,17 +10,6 @@ const ENTRIES: { href: string; label: string }[] = [
   { href: "/market", label: "Market" },
   { href: "/health", label: "Calibration & health" },
 ];
-
-/**
- * "not attempted" only for a real session row whose `lineup_result` is empty.
- * With no session row at all (none has run, or the store did not answer)
- * nothing is known, so the card shows a dash rather than a skipped lineup.
- */
-function humanizeLineup(facts: ShellFacts): string {
-  if (facts.lastSessionAt === null) return DASH;
-  if (!facts.lineupResult) return "not attempted";
-  return facts.lineupResult.replace("_", " ");
-}
 
 /**
  * The `(app)` layout renders one Sidebar beside all four data pages without
@@ -57,21 +45,9 @@ export function Sidebar({ facts, current }: { facts: ShellFacts; current?: strin
         </nav>
       </div>
 
-      <div className="rounded-lg border border-border bg-surface p-3 text-xs">
-        <dl className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <dt className="text-muted">Lineup</dt>
-            <dd className="text-text-dim">{humanizeLineup(facts)}</dd>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <dt className="text-muted">Budget</dt>
-            <dd className="tnum text-text-dim">{money(facts.budget)}</dd>
-          </div>
-        </dl>
-        {facts.lastSessionAt !== null && facts.stale ? (
-          <p className="mt-2 text-negative">Session data is over 14 h old.</p>
-        ) : null}
-      </div>
+      {facts.lastSessionAt !== null && facts.stale ? (
+        <p className="px-1 text-xs text-negative">Session data is over 14 h old.</p>
+      ) : null}
     </aside>
   );
 }

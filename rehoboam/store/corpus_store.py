@@ -196,22 +196,33 @@ class CorpusStore:
         self, player_id: str, day: date, details: dict[str, Any], fetched_at: float
     ) -> int:
         """One row per player per day; a second fetch the same day replaces it,
-        so the row always carries the latest reading before kickoff."""
+        so the row always carries the latest reading before kickoff. Also carries
+        the photo path (`image_source`) onto `player_universe` in the same
+        transaction — it is a player-identity fact, not a daily reading, so it
+        lives on the players table rather than being repeated on every status row."""
         r = _rows.status_row(player_id, day, details, fetched_at)
         with self.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO rehoboam.player_status_daily (
                     player_id, day, status, lineup_probability, market_value, mv_change,
-                    team_id, fetched_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    team_id, fetched_at, goals, assists, yellow_cards, red_cards,
+                    seconds_played, season_points, season_average
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (player_id, day) DO UPDATE SET
                     status = excluded.status,
                     lineup_probability = excluded.lineup_probability,
                     market_value = excluded.market_value,
                     mv_change = excluded.mv_change,
                     team_id = excluded.team_id,
-                    fetched_at = excluded.fetched_at
+                    fetched_at = excluded.fetched_at,
+                    goals = excluded.goals,
+                    assists = excluded.assists,
+                    yellow_cards = excluded.yellow_cards,
+                    red_cards = excluded.red_cards,
+                    seconds_played = excluded.seconds_played,
+                    season_points = excluded.season_points,
+                    season_average = excluded.season_average
                 """,
                 (
                     r["player_id"],
@@ -222,7 +233,23 @@ class CorpusStore:
                     r["mv_change"],
                     r["team_id"],
                     r["fetched_at"],
+                    r["goals"],
+                    r["assists"],
+                    r["yellow_cards"],
+                    r["red_cards"],
+                    r["seconds_played"],
+                    r["season_points"],
+                    r["season_average"],
                 ),
+            )
+            conn.execute(
+                """
+                INSERT INTO rehoboam.player_universe (player_id, image_source)
+                VALUES (%s, %s)
+                ON CONFLICT (player_id) DO UPDATE SET
+                    image_source = coalesce(excluded.image_source, rehoboam.player_universe.image_source)
+                """,
+                (r["player_id"], r["image_source"]),
             )
         return 1
 
@@ -405,7 +432,9 @@ class CorpusStore:
         with self.connection() as conn:
             row = conn.execute(
                 "SELECT player_id, day, status, lineup_probability, market_value, mv_change, "
-                "team_id, fetched_at FROM rehoboam.player_status_daily "
+                "team_id, fetched_at, goals, assists, yellow_cards, red_cards, "
+                "seconds_played, season_points, season_average "
+                "FROM rehoboam.player_status_daily "
                 "WHERE player_id = %s AND day = %s",
                 (str(player_id), day),
             ).fetchone()

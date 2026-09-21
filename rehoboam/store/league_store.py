@@ -56,7 +56,7 @@ _TABLE_COLUMNS = (
     "goal_difference",
     "updated_at",
 )
-_TEAM_COLUMNS = ("team_id", "name", "short_name", "updated_at")
+_TEAM_COLUMNS = ("team_id", "name", "short_name", "updated_at", "crest_source")
 
 
 def _upsert_sql(table: str, columns: tuple[str, ...], key: tuple[str, ...]) -> str:

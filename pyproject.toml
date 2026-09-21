@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "azure-storage-blob>=12.19.0",  # Prod state debugging via fetch-azure-state
     "psycopg[binary]>=3.2",  # the store: Supabase Postgres via the transaction pooler
+    "pillow>=10.0.0",  # resize player photos before they're stored (enrichment/images.py)
 ]
 
 [project.optional-dependencies]
