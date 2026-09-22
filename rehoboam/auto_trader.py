@@ -45,6 +45,10 @@ class AutoTradeSession:
     lineup: list[tuple[str, float, str | None]] = field(default_factory=list)
     session_id: str = ""
     integrity_failures: list = field(default_factory=list)
+    #: Offers the session placed itself, and candidates the gate or Kickbase
+    #: refused (spec §1). `trades` counts executions; these count decisions.
+    offers_placed: int = 0
+    offers_refused: int = 0
 
 
 @dataclass
@@ -171,8 +175,8 @@ def _max_flip_hold_days(
     return max(1, days_until_match - 1)
 
 
-def _is_too_falling_to_propose(trend_7d_pct: float | None, settings) -> bool:
-    """True when a market value is sliding too steeply to ask about (REH-117).
+def _is_too_falling_to_buy(trend_7d_pct: float | None, settings) -> bool:
+    """True when a market value is sliding too steeply to buy (REH-117).
 
     Absence is not evidence: most market candidates have little or no MV
     history, and `None` must not block them.
@@ -201,8 +205,17 @@ def _club_name(player, score=None) -> str:
     return f"club {tid}" if tid else "unknown club"
 
 
-def _proposal_line(proposal_id: str, rec, bid: int, trend: float | None, risks: list[str]):
-    """Everything the overview shows, from data the pipeline already has.
+def _offer_line(
+    offer_id: str,
+    rec,
+    bid: int,
+    trend: float | None,
+    risks: list[str],
+    *,
+    outcome: str,
+    detail: str,
+):
+    """Everything the board shows, from data the pipeline already has.
 
     `PlayerScore` carries position, lineup probability, minutes trend, average
     points and next opponent; `BuyRecommendation` carries the roster impact.
@@ -211,23 +224,23 @@ def _proposal_line(proposal_id: str, rec, bid: int, trend: float | None, risks: 
     actual hole was at striker (REH-117).
     """
     from .config import POSITION_MINIMUMS
-    from .notify.overview import ProposalLine
+    from .notify.overview import OfferLine
 
     player = rec.player
     score = getattr(rec, "score", None)
     position = getattr(score, "position", "") or getattr(player, "position", "") or ""
     impact = getattr(rec, "roster_impact", "") or ""
-    return ProposalLine(
-        proposal_id=proposal_id,
+    return OfferLine(
+        offer_id=offer_id,
         name=f"{player.first_name} {player.last_name}".strip() or player.last_name,
         bid=int(bid),
         ep=float(getattr(score, "expected_points", 0.0) or 0.0),
         marginal_gain=float(getattr(rec, "marginal_ep_gain", 0.0) or 0.0),
+        outcome=outcome,
+        detail=detail,
         position=position,
         club=_club_name(player, score),
         market_value=int(getattr(player, "market_value", 0) or 0),
-        # The emergency fill executes (spec §1); nothing proposed is an emergency.
-        is_emergency=False,
         fills_gap=impact == "fills_gap",
         trend_7d_pct=trend,
         season_avg=(
@@ -359,6 +372,8 @@ class EPSessionContext:
     #: once per session (Task 5), then reported by every non-emergency buy
     #: gate for the rest of the session. None means no session-wide refusal.
     session_refusal: str | None = None
+    offers_placed: int = 0
+    offers_refused: int = 0
 
 
 class AutoTrader:
@@ -416,9 +431,23 @@ class AutoTrader:
         from .learning import LearningTracker
 
         self.learner = BidLearner()
-        # REH-117: one message per session, not one per player. Collected here
-        # and sent once by `_send_proposal_overview`.
-        self._session_proposals: list = []
+        # One message per session, not one per offer (REH-117). Every attempted
+        # buy appends an `OfferLine` here; `_send_session_board` sends it once.
+        self._session_board: list = []
+        # Snapshotted once per session, right after the context builds, so the
+        # board's header reflects the wallet BEFORE anything moved rather than
+        # a derivation that only accounts for plain offers.
+        self._session_budget_before: int | None = None
+        # Open offers already on the wallet before this session touched
+        # anything — Kickbase counts them toward the squad cap but does not
+        # deduct them from the budget it reports, so the board's header shows
+        # them separately rather than silently folding them into "after".
+        self._session_open_offers_before: int | None = None
+        # Every player id this session has offered on, plain buy or emergency
+        # fill alike — so a later phase in the same session (or its refresh
+        # from the live API, which cannot see an offer this session just
+        # placed) does not bid on the same player twice.
+        self._session_offer_ids: set[str] = set()
         self._session_batch_id: str = ""
         # None until a session starts (`run_full_session`) or a caller drives
         # `_build_session_context` directly (tests) — every write site guards
@@ -894,7 +923,7 @@ class AutoTrader:
         except Exception:
             logger.warning("integrity: could not print the board", exc_info=True)
 
-        # Dry runs mirror `_send_proposal_overview`: preview locally, never
+        # Dry runs mirror `_send_session_board`: preview locally, never
         # page. Recording the row and the failures above still happens --
         # only the outbound alert is gated on `dry_run`.
         if (
@@ -1000,25 +1029,32 @@ class AutoTrader:
         if canceled:
             console.print(f"[yellow]Canceled {canceled} bid(s) that no longer make sense[/yellow]")
 
-    def _propose_buy(self, league, rec, ctx, *, bid: int | None = None) -> bool:
-        """Record and send a proposal instead of buying. True if recorded.
+    def _execute_buy(self, league, rec, ctx, *, free_slots: int) -> AutoTradeResult | None:
+        """Place the offer for a plain squad-improvement buy, and keep the case.
 
-        The proposal is recorded FIRST and sent second, so a Telegram outage
-        loses the notification but not the decision — it still surfaces in the
-        daily email.
+        Spec §1: one execution path. The trend floor still applies, the case is
+        still rendered (`render_proposal` — now the record of what was done and
+        why), and then `ExecutionService.buy` runs the safety gate and places
+        the offer. The `trade_proposals` row is written AFTER the fact as
+        'executed' / 'refused' / 'failed', so the board and the daily summary
+        report what happened rather than what was asked.
 
-        ``bid`` overrides `rec.recommended_bid` for callers that price the buy
-        themselves — the emergency basket lowers some picks toward the asking
-        price so one more slot fits (REH-113), and the proposal must show the
-        number that will actually be offered.
+        Returns None when the trend floor skipped the player (nothing was
+        attempted), else the execution result — the caller appends it to the
+        session's results so `trades=`, `total_spent` and the board see it.
+
+        ``free_slots`` is the caller's count of open squad slots (open bids
+        already deducted); the gate refuses a buy into a full squad.
         """
         import uuid
 
         from .notify.render import render_proposal
         from .services.bid_ceiling import tier_for_marginal_gain
+        from .services.execution import BudgetSafetyError
 
-        proposal_id = uuid.uuid4().hex[:12]
+        offer_id = uuid.uuid4().hex[:12]
         player = rec.player
+        bid_amount = int(rec.recommended_bid)
         trend = None
         try:
             from .trader import Trader
@@ -1029,20 +1065,19 @@ class AutoTrader:
                 .trend_7d_pct
             )
         except Exception:
-            logger.debug("proposal: no trend for %s", player.id, exc_info=True)
+            logger.debug("buy: no trend for %s", player.id, exc_info=True)
 
-        too_falling = _is_too_falling_to_propose(trend, self.settings)
-        if too_falling:
+        if _is_too_falling_to_buy(trend, self.settings):
             console.print(
-                f"[dim]Skip {player.last_name} — market value falling " f"{trend:.1f}%/7d[/dim]"
+                f"[dim]Skip {player.last_name} — market value falling {trend:.1f}%/7d[/dim]"
             )
             logger.info(
-                "proposal-skip player=%s trend=%.1f%% below %.1f%% floor",
+                "buy-skip player=%s trend=%.1f%% below %.1f%% floor",
                 player.id,
                 trend,
                 float(self.settings.max_falling_trend_pct_to_buy),
             )
-            return False
+            return None
 
         # The emergency fill used to waive the floor above (2026-09-15: Baack at
         # -40%/7d was the only affordable body and was skipped). It no longer
@@ -1055,10 +1090,10 @@ class AutoTrader:
                 "scored on the position prior."
             )
 
-        message = render_proposal(
+        case = render_proposal(
             player_name=f"{player.first_name} {player.last_name}".strip(),
             club=getattr(player, "team_name", "") or "unknown club",
-            bid=int(bid if bid is not None else rec.recommended_bid),
+            bid=bid_amount,
             market_value=int(player.market_value),
             ep=float(rec.score.expected_points),
             displaced_name=getattr(rec, "replaces_player_name", None) or "the weakest starter",
@@ -1069,33 +1104,82 @@ class AutoTrader:
             risks=risks,
         )
 
-        bid_amount = int(bid if bid is not None else rec.recommended_bid)
+        # A buy that only works by selling someone first carries its sell plan
+        # on the bid; `resolve_auctions` runs those sells if we win. Buy first,
+        # sell after — never sell before securing the player.
+        sell_plan = getattr(rec, "sell_plan", None)
+        sp_ids = (
+            [entry.player_id for entry in sell_plan.players_to_sell]
+            if sell_plan and getattr(sell_plan, "players_to_sell", None)
+            else None
+        )
 
-        # Collected before the dry-run exit so `status` renders the message
-        # Marco would actually receive, rather than a line saying one exists.
-        self._session_proposals.append(_proposal_line(proposal_id, rec, bid_amount, trend, risks))
-
-        if self.dry_run:
-            console.print(
-                f"[yellow]DRY RUN - would propose {player.last_name} "
-                f"for EUR {bid_amount:,}[/yellow]"
+        try:
+            result = self.execution.buy(
+                league,
+                player,
+                bid_amount,
+                getattr(rec, "reason", "") or "EP upgrade",
+                sell_plan_player_ids=sp_ids,
+                current_budget=ctx.current_budget,
+                days_until_match=ctx.matchday_phase.days_until_match,
+                gate=_build_buy_gate(
+                    settings=self.settings,
+                    ctx=ctx,
+                    player=player,
+                    # The phase's allowance, not the wallet — see `BuyGate`.
+                    spendable_budget=int(ctx.flip_budget),
+                    free_slots=free_slots,
+                    marginal_ep_gain=rec.marginal_ep_gain,
+                ),
             )
-            return True
+        except BudgetSafetyError as exc:
+            # Live mode raises here; one unaffordable candidate must cost
+            # itself, not every offer this loop already placed (they live in
+            # `results`, not in this call).
+            result = AutoTradeResult(
+                success=False,
+                player_name=f"{player.first_name} {player.last_name}".strip(),
+                action="BUY",
+                price=bid_amount,
+                reason=getattr(rec, "reason", "") or "EP upgrade",
+                timestamp=time.time(),
+                error=str(exc),
+            )
 
-        # REH-99: record the tier the bid was sized under. Approval recomputes
-        # the ceiling from it against the *live* market value, so a proposal is
-        # re-checked as the world is at approval time rather than waved through
-        # on the stale number it was priced at.
+        gate_prefix = "safety gate refused: "
+        if result.success:
+            outcome, status, detail = "placed", "executed", ""
+            ctx.offers_placed += 1
+            self._session_offer_ids.add(str(player.id))
+        elif (result.error or "").startswith(gate_prefix):
+            outcome, status = "refused", "refused"
+            detail = (result.error or "")[len(gate_prefix) :]
+            ctx.offers_refused += 1
+        else:
+            outcome, status = "failed", "failed"
+            detail = result.error or "unknown error"
+            ctx.offers_refused += 1
+
+        # Collected before the dry-run exit so `status` shows the board Marco
+        # would receive rather than a line saying one exists.
+        self._session_board.append(
+            _offer_line(offer_id, rec, bid_amount, trend, risks, outcome=outcome, detail=detail)
+        )
+        if self.dry_run:
+            # ExecutionService already printed DRY RUN; nothing is recorded.
+            return result
+
         tier = tier_for_marginal_gain(
             float(rec.marginal_ep_gain),
             must_have=self.settings.bid_tier_must_have,
             strong=self.settings.bid_tier_strong_upgrade,
             solid=self.settings.bid_tier_solid_upgrade,
         )
-
+        message = case if not detail else f"{case}\n\n{outcome.upper()}\n  {detail}"
         try:
             self.learner.record_proposal(
-                proposal_id=proposal_id,
+                proposal_id=offer_id,
                 player_id=player.id,
                 player_name=player.last_name,
                 bid=bid_amount,
@@ -1103,78 +1187,82 @@ class AutoTrader:
                 message=message,
                 tier=tier.value,
                 batch_id=self._session_batch_id,
+                status=status,
             )
         except Exception:
-            logger.exception("proposal: could not record %s", proposal_id)
-            return False
+            logger.exception("buy: could not record %s", offer_id)
 
-        # REH-117: no send here. Six separate messages could not show that the
-        # proposals compete for one wallet, and on 2026-08-31 approving two of
-        # them stranded the other four on "budget would go negative". The
-        # session collects the board and sends it once, in `_send_proposal_overview`.
         logger.info(
-            "proposal recorded id=%s player=%s bid=%d batch=%s",
-            proposal_id,
+            "offer %s id=%s player=%s bid=%d batch=%s%s",
+            status,
+            offer_id,
             player.id,
             bid_amount,
             self._session_batch_id,
+            f" — {detail}" if detail else "",
         )
-        return True
+        return result
 
-    def _send_proposal_overview(self, league, ctx) -> None:
-        """Send the session's whole proposal board as one message (REH-117).
+    def _send_session_board(self, league, ctx) -> None:
+        """Send what this session did with the wallet, as one message (spec §1).
 
-        Called once, at the end, so the message can show what the proposals do
-        to each other. Six separate messages could not: on 2026-08-31 approving
-        two of them consumed the wallet and the other four died on "budget
-        would go negative".
-
-        Best-effort — a delivery failure must not fail the session. The
-        proposals are already recorded, so the daily summary's keyboard remains
-        a way to act on them (REH-106).
+        Once, at the end, after every offer has been placed or refused. Nothing
+        here asks for a decision — there is no button — it is the record.
+        Best-effort: a delivery failure must not fail the session; the rows in
+        `trade_proposals` are the durable record and the daily summary reads
+        them.
         """
-        if not self._session_proposals:
+        if not self._session_board:
             return
 
-        from .notify.overview import render_proposal_overview, split_by_budget
-        from .notify.telegram import send_overview
+        from .notify.overview import render_session_board
+        from .notify.telegram import send_message
 
-        budget = int(getattr(ctx, "current_budget", 0) or 0)
-        recommended, alternatives = split_by_budget(self._session_proposals, budget)
-        text = render_proposal_overview(
+        placed = [line for line in self._session_board if line.outcome == "placed"]
+        refused = [line for line in self._session_board if line.outcome != "placed"]
+        spend = sum(line.bid for line in placed)
+        # The opening budget is snapshotted once per session; every session
+        # move (plain offers, pairs, flips) has decremented ctx.current_budget
+        # since, so `budget_after` is derived from the snapshot and this
+        # session's own offers rather than read back off ctx — the fallback
+        # only serves direct callers that never built a session.
+        budget_before = (
+            int(self._session_budget_before)
+            if self._session_budget_before is not None
+            else int(getattr(ctx, "current_budget", 0) or 0) + spend
+        )
+        open_offers_before = int(self._session_open_offers_before or 0)
+        text = render_session_board(
             squad_size=len(getattr(ctx, "squad", []) or []),
             squad_cap=SQUAD_CAP,
-            budget=budget,
-            recommended=recommended,
-            alternatives=alternatives,
+            budget_before=budget_before,
+            budget_after=budget_before - spend,
+            open_offers_before=open_offers_before,
+            placed=placed,
+            refused=refused,
         )
         console.print(text)
         if self.dry_run:
-            console.print("[yellow]DRY RUN - overview not sent[/yellow]")
+            console.print("[yellow]DRY RUN - board not sent[/yellow]")
             return
 
-        delivered = send_overview(
-            self.settings.telegram_bot_token,
-            self.settings.telegram_chat_id,
-            text,
-            batch_id=self._session_batch_id,
-            recommended_count=len(recommended),
-            alternatives=[(line.proposal_id, line.name) for line in alternatives],
+        delivered = send_message(
+            self.settings.telegram_bot_token, self.settings.telegram_chat_id, text
         )
         logger.info(
-            "proposal-overview batch=%s proposals=%d recommended=%d "
-            "spend=%d budget=%d delivered=%s",
+            "session-board batch=%s placed=%d refused=%d spend=%d budget_after=%d "
+            "open_offers_before=%d delivered=%s",
             self._session_batch_id,
-            len(self._session_proposals),
-            len(recommended),
-            sum(line.bid for line in recommended),
-            budget,
+            len(placed),
+            len(refused),
+            spend,
+            budget_before - spend,
+            open_offers_before,
             delivered,
         )
         if not delivered:
             logger.warning(
-                "proposal overview %s recorded but NOT delivered; the proposals "
-                "are actionable only from the daily summary",
+                "session board %s not delivered; the trade_proposals rows are the record",
                 self._session_batch_id,
             )
 
@@ -1237,58 +1325,6 @@ class AutoTrader:
             if (ends := _parse_iso(md.get("ed"))) is not None and ends < now
         ]
         return max(finished) if finished else None
-
-    def _has_pending_proposal(
-        self,
-        player_id: str,
-        *,
-        max_age_days: float = 3.0,
-        rejected_age_days: float = 14.0,
-    ) -> bool:
-        """True if this player was recently proposed and should not be re-sent.
-
-        The bot runs twice a day; without this guard it would re-send the same
-        proposal every run until it was actioned. Two windows, because the two
-        states mean different things:
-
-        - ``pending`` — Marco has not answered. Suppress for ``max_age_days``,
-          then let it through again: proposal expiry is not implemented, so an
-          unbounded guard would let one ignored proposal block a player forever.
-        - ``rejected`` — Marco said no. That is an answer, and re-asking twelve
-          hours later is exactly the daily-nagging this whole branch exists to
-          stop. Suppress for much longer, but still not forever, because the
-          price and the player's form both move.
-
-        Any other status (``approved``/``executed``/``failed``) does not
-        suppress: the buy either happened or definitively did not, and a fresh
-        proposal is the right response to a fresh situation.
-        """
-        now = time.time()
-        pending_cutoff = now - max_age_days * 86400.0
-        rejected_cutoff = now - rejected_age_days * 86400.0
-        try:
-            for p in self.learner.proposals_for_player(str(player_id)):
-                created = float(p.get("created_at") or 0.0)
-                status = p.get("status")
-                if status == "pending" and created >= pending_cutoff:
-                    return True
-                if status == "rejected" and created >= rejected_cutoff:
-                    return True
-            return False
-        except Exception:
-            logger.warning("proposal: could not read proposals", exc_info=True)
-            return False
-
-    @staticmethod
-    def _needs_sell_plan(obj) -> bool:
-        """True if this buy only works by selling someone first.
-
-        Proposals carry no sell plan, so such a buy would be refused by the safety
-        gate after approval. Skip it rather than send a proposal that cannot be
-        honoured.
-        """
-        sell_plan = getattr(obj, "sell_plan", None)
-        return bool(sell_plan and getattr(sell_plan, "players_to_sell", None))
 
     def run_unified_trade_phase(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Execute all qualifying trades from a single ranked candidate list.
@@ -1394,7 +1430,6 @@ class AutoTrader:
         current_squad_size = len(fresh_squad)
         active_bid_count = len(fresh_bids)
         available_slots = _available_squad_slots(current_squad_size, active_bid_count)
-        proposed_slots = 0  # slots reserved by proposals nobody has approved yet
         ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
         ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
@@ -1403,6 +1438,18 @@ class AutoTrader:
             ctx.matchday_phase.phase, ctx.current_budget, pending_bid_total, max_debt
         )
         ctx.my_bid_amounts = {p.id: p.user_offer_price for p in fresh_bids}
+        # An offer this session already placed (plain buy or emergency fill)
+        # may not be visible on `fresh_bids` yet — in dry-run the API never
+        # saw it at all — so the rebuild above can silently drop it. Keep it
+        # present (amount is a placeholder; only presence matters here) so
+        # the "already have active bid" skip below still fires.
+        for pid in self._session_offer_ids:
+            ctx.my_bid_amounts.setdefault(pid, 1)
+        # `_build_buy_gate`'s club-limit count reads ctx.squad + ctx.my_bids;
+        # without this refresh it stays the pre-session snapshot forever, so a
+        # second offer on the same session's club can push past the limit
+        # while the gate still sees room.
+        ctx.my_bids = list(fresh_bids)
 
         console.print(
             f"[cyan]📋 Squad: {current_squad_size} + {active_bid_count} bids = "
@@ -1504,6 +1551,11 @@ class AutoTrader:
                         f"[dim]Skip {obj.player.last_name} — already have active bid[/dim]"
                     )
                     continue
+                if str(obj.player.id) in self._session_offer_ids:
+                    console.print(
+                        f"[dim]Skip {obj.player.last_name} — offered on this session already[/dim]"
+                    )
+                    continue
                 if obj.recommended_bid > ctx.flip_budget:
                     console.print(
                         f"[yellow]Cannot afford {obj.player.last_name} "
@@ -1511,40 +1563,32 @@ class AutoTrader:
                     )
                     continue
 
-                if self._has_pending_proposal(obj.player.id):
-                    console.print(
-                        f"[dim]Skip {obj.player.last_name} — proposal already awaiting approval[/dim]"
-                    )
-                    continue
-
-                if self._needs_sell_plan(obj):
-                    console.print(
-                        f"[dim]Skip {obj.player.last_name} — needs a sell plan, "
-                        f"cannot be proposed[/dim]"
-                    )
-                    logger.info("proposal-skip: %s needs a sell plan", obj.player.last_name)
-                    continue
-
-                if self._propose_buy(league, obj, ctx):
-                    console.print(
-                        f"[cyan]Proposed {obj.player.last_name} — awaiting approval[/cyan]"
-                    )
-                    available_slots -= 1
-                    proposed_slots += 1
+                result = self._execute_buy(league, obj, ctx, free_slots=available_slots)
+                if result is None:
+                    continue  # trend floor — nothing attempted
+                results.append(result)
+                if result.success:
+                    ctx.executed_trade_count += 1
+                    self.daily_spend += obj.recommended_bid
                     ctx.flip_budget -= obj.recommended_bid
+                    ctx.current_budget -= obj.recommended_bid
+                    # Kickbase counts an open offer toward the squad cap.
+                    available_slots -= 1
+                    # This offer is now held for the rest of THIS session too —
+                    # the club-limit gate and the "already have active bid"
+                    # skip must both see it on the very next candidate, not
+                    # only after the next session's refresh.
+                    ctx.my_bids = list(ctx.my_bids) + [obj.player]
+                    ctx.my_bid_amounts[obj.player.id] = obj.recommended_bid
                 continue
 
             elif kind == "pair":
-                # Don't sell a player unnecessarily if there are open slots —
-                # the same target should appear as a plain buy candidate instead.
-                #
-                # `proposed_slots` is added back deliberately. A proposal is not
-                # a commitment: nobody has approved it and no money has moved.
-                # Counting it as a filled slot would mean that merely PROPOSING
-                # a buy is what switches on the autonomous sell-then-buy pair
-                # path — the bot would start selling squad players off the back
-                # of a decision Marco has not made yet.
-                if available_slots + proposed_slots > 0:
+                # Don't sell a player unnecessarily while there is an open slot —
+                # the same target appears as a plain buy candidate instead. An
+                # offer this session placed has taken its slot (Kickbase counts
+                # open offers toward the cap), so pairs run once the squad is
+                # full. PR 3's squad plan tightens this to "floor met and full".
+                if available_slots > 0:
                     continue
                 if ctx.my_bid_amounts.get(obj.buy_player.id, 0) > 0:
                     console.print(
@@ -1795,6 +1839,9 @@ class AutoTrader:
             logger.warning(msg)
             return results
 
+        # `_build_buy_gate`'s club-limit count reads `ctx.squad`; the caller
+        # re-fetched the squad into `fresh_squad` but never wrote it back.
+        ctx.squad = list(fresh_squad)
         buy_recs = ctx.ep_result.get("buy_recs", [])
         if not buy_recs:
             console.print("[red]No buy candidates available — cannot fill emergency slots[/red]")
@@ -1986,6 +2033,24 @@ class AutoTrader:
                 ),
             )
             results.append(result)
+            # The fill's offers reach the board and the session counters too
+            # — before this, an emergency pick never showed up on the board
+            # or in `offers_placed`/`offers_refused`, mirroring `_execute_buy`.
+            if result.success:
+                outcome, detail = "placed", ""
+                ctx.offers_placed += 1
+                self._session_offer_ids.add(str(rec.player.id))
+            elif (result.error or "").startswith("safety gate refused: "):
+                outcome, detail = "refused", (result.error or "")[len("safety gate refused: ") :]
+                ctx.offers_refused += 1
+            else:
+                outcome, detail = "failed", (result.error or "unknown error")
+                ctx.offers_refused += 1
+            self._session_board.append(
+                _offer_line(
+                    uuid.uuid4().hex[:12], rec, bid, None, [], outcome=outcome, detail=detail
+                )
+            )
             if not result.success:
                 continue
             bought += 1
@@ -1995,6 +2060,11 @@ class AutoTrader:
             budget_remaining -= bid
             self.daily_spend += bid
             gap_positions.discard(rec.player.position)
+            # Mirror the plain-buy branch: this offer is held for the rest of
+            # THIS session too, so the club-limit gate sees it on the very
+            # next candidate rather than only after the next refresh.
+            ctx.my_bids = list(ctx.my_bids) + [rec.player]
+            ctx.my_bid_amounts[rec.player.id] = bid
 
         console.print(f"[green]✓ Emergency fill: bought {bought}/{slots_short} player(s)[/green]")
         logger.info(
@@ -2386,7 +2456,10 @@ class AutoTrader:
 
         # REH-117: one batch per session, so "Approve all" can take the set
         # that was chosen to fit the budget together.
-        self._session_proposals = []
+        self._session_board = []
+        self._session_budget_before = None
+        self._session_open_offers_before = None
+        self._session_offer_ids = set()
         self._session_batch_id = uuid.uuid4().hex[:12]
 
         # Task 5: an early row, written before anything that could fail. A
@@ -2505,6 +2578,11 @@ class AutoTrader:
         # Step 2: Build session context (single EP pipeline + trends + matchday phase)
         try:
             ctx = self._build_session_context(league)
+            # Snapshot the wallet BEFORE anything this session moves — the
+            # board's header reads this rather than re-deriving it, since a
+            # derivation from `placed` alone misses trade pairs and flips.
+            self._session_budget_before = int(ctx.current_budget)
+            self._session_open_offers_before = sum(int(v or 0) for v in ctx.my_bid_amounts.values())
         except Exception as e:
             error_msg = f"EP pipeline failed: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
@@ -2742,7 +2820,7 @@ class AutoTrader:
         # Step 8: Set optimal lineup using EP pipeline scores from the session.
         # Players acquired mid-session (if any) are scored by the v2 fallback
         # inside _set_optimal_lineup.
-        self._send_proposal_overview(league, ctx)
+        self._send_session_board(league, ctx)
 
         lineup = (
             self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
@@ -2769,6 +2847,7 @@ class AutoTrader:
         console.print(
             f"Trades: {len([r for r in trade_results if r.success])}/{len(trade_results)}"
         )
+        console.print(f"Offers: {ctx.offers_placed} placed, {ctx.offers_refused} refused")
         console.print(f"Total spent: €{total_spent:,}")
         console.print(f"Total earned: €{total_earned:,}")
         net_color = "green" if net_change >= 0 else "red"
@@ -2781,6 +2860,7 @@ class AutoTrader:
 
         logger.info(
             "session-end duration=%.1fs mode=%s phase=%s sells=%d trades=%d/%d "
+            "offers=%d refused=%d "
             "spent=%d earned=%d net=%d errors=%d",
             end_time - start_time,
             self.settings.trading_mode,
@@ -2788,6 +2868,8 @@ class AutoTrader:
             len([r for r in sell_results if r.success and r.action == "SELL"]),
             len([r for r in trade_results if r.success]),
             len(trade_results),
+            ctx.offers_placed,
+            ctx.offers_refused,
             total_spent,
             total_earned,
             net_change,
@@ -2810,6 +2892,8 @@ class AutoTrader:
             lineup=lineup,
             session_id=self._session_batch_id,
             integrity_failures=integrity_failures,
+            offers_placed=ctx.offers_placed,
+            offers_refused=ctx.offers_refused,
         )
 
     def _finish_lineup_only(
@@ -2837,7 +2921,7 @@ class AutoTrader:
         locked path spends nothing.
         """
         console.print(f"[yellow]{reason} — setting lineup only, no trading[/yellow]")
-        self._send_proposal_overview(league, ctx)
+        self._send_session_board(league, ctx)
         lineup = (
             self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
             or []
@@ -2848,13 +2932,15 @@ class AutoTrader:
         end_time = time.time()
         logger.info(
             "session-end duration=%.1fs mode=%s phase=%s sells=%d trades=%d/%d "
-            "spent=%d earned=%d net=%d errors=%d | %s",
+            "offers=%d refused=%d spent=%d earned=%d net=%d errors=%d | %s",
             end_time - start_time,
             self.settings.trading_mode,
             ctx.matchday_phase.phase,
             len([r for r in sell_results if r.success and r.action == "SELL"]),
             len([r for r in trade_results if r.success]),
             len(trade_results),
+            ctx.offers_placed,
+            ctx.offers_refused,
             total_spent,
             total_earned,
             total_earned - total_spent,
@@ -2876,6 +2962,8 @@ class AutoTrader:
             lineup=lineup,
             session_id=self._session_batch_id,
             integrity_failures=integrity_failures,
+            offers_placed=ctx.offers_placed,
+            offers_refused=ctx.offers_refused,
         )
 
     def _set_optimal_lineup(
