@@ -154,3 +154,29 @@ class TestOfferLine:
         import dataclasses
 
         assert "is_emergency" not in {f.name for f in dataclasses.fields(OfferLine)}
+
+
+class TestDebtRecoveryOnTheBoard:
+    def test_the_recovery_line_appears_only_when_something_was_sold(self):
+        text = render_session_board(
+            squad_size=11,
+            squad_cap=15,
+            budget_before=-5_000_000,
+            budget_after=1_000_000,
+            recovered=6_000_000,
+            placed=[],
+            refused=[],
+        )
+        assert "DEBT RECOVERY SOLD EUR 6,000,000 before kickoff" in text
+        assert "BUDGET EUR -5,000,000 -> EUR 1,000,000" in text
+
+    def test_no_recovery_line_when_nothing_was_sold(self):
+        text = render_session_board(
+            squad_size=11,
+            squad_cap=15,
+            budget_before=BUDGET_BEFORE,
+            budget_after=BUDGET_BEFORE,
+            placed=[],
+            refused=[],
+        )
+        assert "DEBT RECOVERY" not in text

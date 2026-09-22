@@ -14,10 +14,27 @@ class TestComputeFlipBudget:
         assert _compute_flip_budget("locked", 10_000_000, 0, 5_000_000) == 0
 
     def test_moderate_phase_subtracts_pending_bids(self):
-        assert _compute_flip_budget("moderate", 20_000_000, 5_000_000, 10_000_000) == 15_000_000
+        assert _compute_flip_budget("moderate", 20_000_000, 5_000_000, 0) == 15_000_000
 
-    def test_moderate_phase_ignores_max_debt(self):
-        assert _compute_flip_budget("moderate", 10_000_000, 0, 99_000_000) == 10_000_000
+    def test_moderate_phase_adds_max_debt_like_aggressive(self):
+        """Marco, 2026-09-22: "it can go into minus until gameday, always".
+        The locked window repays the debt (`_run_debt_recovery`), so 2-4 days
+        out is no longer a no-debt zone."""
+        assert _compute_flip_budget("moderate", 10_000_000, 0, 99_000_000) == 109_000_000
+        assert _compute_flip_budget("moderate", 10_000_000, 2_000_000, 15_000_000) == (
+            _compute_flip_budget("aggressive", 10_000_000, 2_000_000, 15_000_000)
+        )
+
+    def test_an_unknown_schedule_allows_no_new_debt(self):
+        """Neither the schedule nor /myeleven gave a kickoff: the phase is a
+        fallback, and the recovery (gated on the day count) could never fire
+        before a kickoff the bot cannot see — so no NEW debt, as before."""
+        assert (
+            _compute_flip_budget(
+                "moderate", 10_000_000, 2_000_000, 99_000_000, schedule_known=False
+            )
+            == 8_000_000
+        )
 
     def test_aggressive_phase_adds_max_debt(self):
         assert _compute_flip_budget("aggressive", 10_000_000, 2_000_000, 15_000_000) == 23_000_000
