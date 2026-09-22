@@ -174,10 +174,17 @@ class TestLineupOnlySkipsEveryTradingStep:
         assert not r.bid_eval.called
         assert r.lineup.call_count == 1
 
-    def test_the_emergency_fill_still_runs(self, tmp_path, monkeypatch):
-        r = _run(_short_squad(), "lineup_only", tmp_path, monkeypatch)
+    def test_the_emergency_fill_still_runs_on_the_last_day(self, tmp_path, monkeypatch):
+        r = _run(_short_squad(), "lineup_only", tmp_path, monkeypatch, phase="locked", days=1)
         assert r.fill.called
         assert r.fill.call_args.args[3] == 1
+        assert r.lineup.call_count == 1
+
+    def test_the_emergency_fill_waits_while_kickoff_is_days_away(self, tmp_path, monkeypatch):
+        # 2026-09-22: ten players, seventeen days to kickoff, and the fill bought
+        # a falling non-starter at +overbid. The last day is the emergency.
+        r = _run(_short_squad(), "lineup_only", tmp_path, monkeypatch, days=4)
+        assert not r.fill.called
         assert r.lineup.call_count == 1
 
     def test_locked_phase_still_exits_after_the_lineup(self, tmp_path, monkeypatch):
