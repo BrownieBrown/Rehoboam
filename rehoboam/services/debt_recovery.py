@@ -17,8 +17,12 @@ single formula:
 3. bench players held at a loss, smallest loss first, slumping prices last;
 4. starters held at a loss, the same way.
 
-A player whose position is at its formation minimum is never sold: that
-would trade the debt for an empty slot. Pure, so every tier is testable.
+A player whose position is at its formation minimum goes last of all, and
+only when nothing else covers the debt: the emergency fill, which runs right
+after the recovery, buys the slot back with the money the sale freed, and
+even an unfilled slot (-100) beats a negative wallet at kickoff (zero for the
+whole matchday). Marco, 2026-09-22: "the bot can trade below eleven if it
+makes sense and he fills the slots." Pure, so every tier is testable.
 """
 
 from __future__ import annotations
@@ -67,6 +71,9 @@ class DebtPlan:
     sells: list[DebtCandidate]
     shortfall: int
     recovered: int
+    #: The subset of ``sells`` that takes a position below its formation
+    #: minimum — the emergency fill has to buy those slots back.
+    below_minimum: list[DebtCandidate]
 
     @property
     def remaining(self) -> int:
@@ -103,21 +110,35 @@ def plan_debt_recovery(
     counted (rule I3's definition). ``position_counts`` is the squad's head
     count per position; it is copied and decremented as sells are planned so
     the second sale at a position sees the first.
+
+    Two passes in the same order: first everyone whose sale keeps his
+    position at or above its minimum; then, only if the debt still stands,
+    the players a formation needs — the fill buys those slots back.
     """
     need = max(0, int(shortfall))
     sells: list[DebtCandidate] = []
+    below_minimum: list[DebtCandidate] = []
     recovered = 0
     if need == 0:
-        return DebtPlan(sells=sells, shortfall=need, recovered=0)
+        return DebtPlan(sells=sells, shortfall=need, recovered=0, below_minimum=below_minimum)
 
     counts = dict(position_counts)
-    for cand in sorted(candidates, key=_sacrifice_key):
-        if recovered >= need:
-            break
-        minimum = POSITION_MINIMUMS.get(cand.position, 0)
-        if counts.get(cand.position, 0) <= minimum:
-            continue
-        sells.append(cand)
-        recovered += cand.sell_value
-        counts[cand.position] = counts.get(cand.position, 0) - 1
-    return DebtPlan(sells=sells, shortfall=need, recovered=recovered)
+    ordered = sorted(candidates, key=_sacrifice_key)
+    for last_resort in (False, True):
+        for cand in ordered:
+            if recovered >= need:
+                break
+            if cand in sells:
+                continue
+            minimum = POSITION_MINIMUMS.get(cand.position, 0)
+            at_minimum = counts.get(cand.position, 0) <= minimum
+            if at_minimum != last_resort:
+                continue
+            if counts.get(cand.position, 0) <= 0:
+                continue
+            sells.append(cand)
+            if at_minimum:
+                below_minimum.append(cand)
+            recovered += cand.sell_value
+            counts[cand.position] = counts.get(cand.position, 0) - 1
+    return DebtPlan(sells=sells, shortfall=need, recovered=recovered, below_minimum=below_minimum)
