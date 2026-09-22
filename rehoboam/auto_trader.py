@@ -1953,9 +1953,7 @@ class AutoTrader:
             # 0 FW the first midfielder closes one and the second closes
             # none — only a forward closes what is left — and buying him
             # anyway is the seventh defender again, one position over.
-            if _gap_after(bought_positions + [rec.player.position]) >= _gap_after(
-                bought_positions
-            ):
+            if _gap_after(bought_positions + [rec.player.position]) >= _gap_after(bought_positions):
                 console.print(
                     f"[dim]Skip {rec.player.last_name} — "
                     f"{rec.player.position} closes no remaining lineup slot[/dim]"
