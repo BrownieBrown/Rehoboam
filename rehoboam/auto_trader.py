@@ -1844,7 +1844,7 @@ class AutoTrader:
         I3's definition of covered).
 
         Who goes is `services/debt_recovery.plan_debt_recovery`'s call —
-        profits first, slumping starters last, position minimums never.
+        profits first, slumping starters last, position minimums as the last resort (the fill refills).
         """
         from .formation import get_position_counts, select_best_eleven
         from .services.debt_recovery import DebtCandidate, plan_debt_recovery
@@ -1911,10 +1911,18 @@ class AutoTrader:
                 for c in plan.sells
             ),
         )
+        if plan.below_minimum:
+            names = ", ".join(f"{c.name} ({c.position})" for c in plan.below_minimum)
+            msg = (
+                f"Debt recovery sells below a position minimum: {names} — "
+                "the emergency fill buys the slot(s) back this session"
+            )
+            console.print(f"[bold yellow]{msg}[/bold yellow]")
+            logger.warning("debt-recovery %s", msg)
         if not plan.covered:
             msg = (
-                f"Debt recovery cannot cover EUR {plan.remaining:,} without breaching a "
-                "position minimum — the wallet stays negative"
+                f"Debt recovery cannot cover EUR {plan.remaining:,} even selling the whole "
+                "squad — the wallet stays negative"
             )
             console.print(f"[bold red]{msg}[/bold red]")
             logger.error("debt-recovery %s", msg)

@@ -159,13 +159,14 @@ class TestItStopsWhenCovered:
         assert plan.recovered == sum(c.market_value for c in plan.sells)
 
 
-class TestPositionMinimumsAreNeverBreached:
-    def test_the_last_goalkeeper_is_never_sold(self):
+class TestPositionMinimumsGoLast:
+    def test_the_last_goalkeeper_is_not_sold_while_anyone_else_covers(self):
         """One GK is the formation minimum; selling him is an empty slot at
-        -100 on top of whatever the debt would have cost."""
+        -100 on top of whatever the debt would have cost — so he goes last."""
         squad = _eleven(gk=_c("gk", "Goalkeeper", mv=50_000_000, buy=1_000_000, starter=True))
         plan = plan_debt_recovery(squad, shortfall=1, position_counts=_counts(*squad))
         assert "gk" not in [c.player_id for c in plan.sells]
+        assert plan.below_minimum == []
 
     def test_the_minimum_is_tracked_as_sells_are_planned(self):
         """Four defenders, minimum three: the plan may sell one, never two."""
@@ -184,12 +185,35 @@ class TestPositionMinimumsAreNeverBreached:
             )
             for c in squad
         ]
-        plan = plan_debt_recovery(squad, shortfall=100_000_000, position_counts=_counts(*squad))
+        # 30m is covered by the first pass: one defender (1m), then the
+        # loss-making others above their minimums (two midfielders and a
+        # forward, 10m each) — never a second defender while anyone is left.
+        plan = plan_debt_recovery(squad, shortfall=30_000_000, position_counts=_counts(*squad))
         assert sum(1 for c in plan.sells if c.position == "Defender") == 1
+        assert plan.below_minimum == []
 
-    def test_a_protected_player_stays_out_even_when_the_debt_is_not_covered(self):
+    def test_a_protected_player_is_sold_when_nothing_else_covers(self):
+        """Marco, 2026-09-22: the bot may trade below eleven if it fills the
+        slots. An unfilled slot is -100; a negative wallet at kickoff is zero
+        for the whole matchday. The fill runs right after and buys it back."""
         squad = [_c("gk", "Goalkeeper", mv=50_000_000, buy=1_000_000, starter=True)]
         plan = plan_debt_recovery(squad, shortfall=1_000_000, position_counts=_counts(*squad))
-        assert plan.sells == []
+        assert [c.player_id for c in plan.sells] == ["gk"]
+        assert [c.player_id for c in plan.below_minimum] == ["gk"]
+        assert plan.covered is True
+
+    def test_the_last_resort_keeps_the_same_order(self):
+        """Among players at their minimum, profit still beats a slump loss."""
+        squad = [
+            _c("gk_loss", "Goalkeeper", mv=10_000_000, buy=20_000_000, trend=-5.0, starter=True),
+            _c("fw_profit", "Forward", mv=10_000_000, buy=5_000_000, starter=True),
+        ]
+        plan = plan_debt_recovery(squad, shortfall=1, position_counts=_counts(*squad))
+        assert [c.player_id for c in plan.sells] == ["fw_profit"]
+
+    def test_it_stops_at_an_empty_squad_and_reports_the_rest(self):
+        squad = [_c("gk", "Goalkeeper", mv=1_000_000, buy=1_000_000, starter=True)]
+        plan = plan_debt_recovery(squad, shortfall=5_000_000, position_counts=_counts(*squad))
+        assert [c.player_id for c in plan.sells] == ["gk"]
         assert plan.covered is False
-        assert plan.remaining == 1_000_000
+        assert plan.remaining == 4_000_000
