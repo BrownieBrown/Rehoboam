@@ -386,7 +386,52 @@ class SmartBidding:
         overbid_pct += league_competitive_level
         overbid_pct += demand_adjustment
 
-        # Trend-based overbid reduction
+        # Try EP-specific learned overbid if available. It REPLACES the stack
+        # above as the base of the bid — and only the base. The trend factor
+        # and the contested bump below apply to whichever base won.
+        #
+        # The previous call here passed kwargs that didn't match the method
+        # signature and treated the dict return as a number, so every bid
+        # since the method was added went through with the EP-bid learner
+        # silently disabled by the surrounding `except Exception`. Result:
+        # `auction_outcomes` data accumulated but never influenced bids
+        # (REH-30).
+        #
+        # Until 2026-09-22 the override ran LAST, after the trend scaling, and
+        # so undid it. Itakura, session 9c0a6a742dba: market value down 19.4%
+        # in a week, the stack cut 25% to 7.5%, the override put 32.3% back
+        # (`stack=7.5% learned=32.3% applied=32.3%`) and the bot offered
+        # 8,752,708 for a grade-C defender scored on the position prior.
+        # Marco cancelled it by hand. A falling market value is the league
+        # pricing in something we have not seen yet; no EP-derived number is a
+        # reason to ignore that.
+        if self.bid_learner:
+            try:
+                learned = self.bid_learner.get_ep_recommended_overbid(
+                    asking_price=asking_price,
+                    marginal_ep_gain=marginal_ep_gain,
+                    market_value=market_value,
+                    budget_ceiling=budget_ceiling,
+                )
+                learned_pct = learned.get("recommended_overbid_pct", 0.0)
+                if learned_pct > 0:
+                    stack_pct = overbid_pct
+                    overbid_pct = learned_pct
+                    logger.info(
+                        "ep-bid learned-override player=%s stack=%.1f%% "
+                        "learned=%.1f%% (before trend and ceiling) | %s",
+                        player_id,
+                        stack_pct,
+                        learned_pct,
+                        learned.get("reason", ""),
+                    )
+            except Exception:
+                logger.exception(
+                    "ep-bid learned-override failed for player=%s — using stack default",
+                    player_id,
+                )
+
+        # Trend-based overbid reduction — applied to the learned base too.
         if trend_change_pct is not None:
             if trend_change_pct < -10:
                 overbid_pct *= 0.3
@@ -406,41 +451,6 @@ class SmartBidding:
         # The ceiling comes from the ONE policy the safety gate enforces.
         max_overbid = self._max_overbid_pct(ep_tier, market_value)
         overbid_pct = min(overbid_pct, max_overbid)
-
-        # Try EP-specific learned overbid if available.
-        #
-        # The previous call here passed kwargs that didn't match the method
-        # signature and treated the dict return as a number, so every bid
-        # since the method was added went through with the EP-bid learner
-        # silently disabled by the surrounding `except Exception`. Result:
-        # `auction_outcomes` data accumulated but never influenced bids
-        # (REH-30).
-        if self.bid_learner:
-            try:
-                learned = self.bid_learner.get_ep_recommended_overbid(
-                    asking_price=asking_price,
-                    marginal_ep_gain=marginal_ep_gain,
-                    market_value=market_value,
-                    budget_ceiling=budget_ceiling,
-                )
-                learned_pct = learned.get("recommended_overbid_pct", 0.0)
-                if learned_pct > 0:
-                    stack_pct = overbid_pct
-                    overbid_pct = min(learned_pct, max_overbid)
-                    logger.info(
-                        "ep-bid learned-override player=%s stack=%.1f%% "
-                        "learned=%.1f%% applied=%.1f%% | %s",
-                        player_id,
-                        stack_pct,
-                        learned_pct,
-                        overbid_pct,
-                        learned.get("reason", ""),
-                    )
-            except Exception:
-                logger.exception(
-                    "ep-bid learned-override failed for player=%s — using stack default",
-                    player_id,
-                )
 
         # Calculate raw bid from overbid percentage
         overbid_amount = int(asking_price * (overbid_pct / 100))

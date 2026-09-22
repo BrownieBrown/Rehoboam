@@ -506,6 +506,20 @@ class Settings(BaseSettings):
         default=25.0,
         description="Overbid ceiling for a strong upgrade.",
     )
+    overbid_price_bands: str = Field(
+        default="",
+        description=(
+            "Price-band caps on the overbid ceiling, '<market value>:<max pct>' "
+            "entries separated by commas, e.g. '5000000:35,15000000:20'. The "
+            "band a market value falls in caps the tier percentage from above; "
+            "it never raises one. Empty means off. `rehoboam derive-ceilings` "
+            "proposes values from the auction ledger and refuses below 30 "
+            "winners — paste its line here by hand after reading n. Why: the "
+            "tiers size a bid by how much a player improves OUR eleven, but what "
+            "wins depends on his price (2026-09-21: at 15m+ we bid +24–26%, "
+            "winners paid a median of +9%)."
+        ),
+    )
     overbid_pct_must_have: float = Field(
         default=35.0,
         description=(
@@ -691,7 +705,7 @@ class Settings(BaseSettings):
         same policy object rather than each assembling their own from loose
         fields — which is how the 8%/20% split arose in the first place.
         """
-        from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier
+        from rehoboam.services.bid_ceiling import BidCeilingPolicy, Tier, parse_price_bands
 
         return BidCeilingPolicy(
             floor_eur=self.overbid_floor_eur,
@@ -701,6 +715,7 @@ class Settings(BaseSettings):
                 Tier.STRONG: self.overbid_pct_strong,
                 Tier.MUST_HAVE: self.overbid_pct_must_have,
             },
+            price_bands=parse_price_bands(self.overbid_price_bands),
         )
 
 

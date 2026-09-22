@@ -250,6 +250,28 @@ def availability_probs(
     )
 
 
+#: Kickbase status code for "started" — the last-played status of a regular starter.
+_STARTED_STATUS = 5
+
+
+def cold_start_starter_ep() -> dict[str, float]:
+    """Position → the EP the fitted models give an UNKNOWN regular starter there.
+
+    `compose_ep` with no quality key falls back to the position prior, and a
+    last-played status of "started" gives the starter's availability. That is
+    the scorer's own answer to "what is a defender I know nothing about worth,
+    if he plays?" — 74.9 for a defender, 68.4 for a midfielder on 2026-09-22 —
+    and it is the replacement level a candidate filling an EMPTY squad slot is
+    measured against (`DecisionEngine`, `best_eleven_gain`). Measured against
+    0.0 instead, every cold-start body was a must-have.
+    """
+    availability, rate, _meta = _models()
+    return {
+        position: float(compose_ep(None, _STARTED_STATUS, position, availability, rate))
+        for position in rate.position_prior
+    }
+
+
 def compose_ep(
     player_id: str | None,
     prev_status: int | None,

@@ -1174,6 +1174,104 @@ def backtest_mv(
     )
 
 
+@app.command("derive-ceilings")
+def derive_ceilings(
+    since: str = typer.Option(
+        "2026-08-20", "--since", help="Count auctions from this date (YYYY-MM-DD)"
+    ),
+    bands: str = typer.Option("0,5000000,15000000", "--bands", help="Band lower bounds in euros"),
+    min_winners: int = typer.Option(
+        30, "--min-winners", help="Refuse to propose below this many winners"
+    ),
+):
+    """Propose price-band overbid caps from the auction ledger (read-only).
+
+    Autonomous-wallet spec §5. The tiers size a bid by how much a player
+    improves OUR eleven; what it takes to WIN depends on his price. This
+    prints, per market-value band, how many auctions we entered, how many we
+    won, what we bid over market value and what the winners paid (p25/p50/p75),
+    and proposes each band's p75 as its cap. Below --min-winners it prints the
+    table and proposes nothing: a thin sample must not move real-money caps.
+
+    Changes nothing. Paste the proposed line into .env / the Function's app
+    settings as OVERBID_PRICE_BANDS by hand, after reading n.
+    """
+    from datetime import datetime
+
+    from .services.ceiling_derivation import AuctionRow, derive_price_bands
+    from .store import connect
+
+    try:
+        since_ts = datetime.strptime(since, "%Y-%m-%d").timestamp()
+    except ValueError as e:
+        console.print(f"[red]--since must be YYYY-MM-DD: {e}[/red]")
+        raise typer.Exit(code=1) from e
+    lowers = [int(x) for x in bands.split(",") if x.strip()]
+
+    _ensure_store()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT market_value, asking_price, our_overbid_pct, won, winning_overbid_pct
+            FROM rehoboam.auction_outcomes
+            WHERE timestamp >= %s
+            """,
+            (since_ts,),
+        ).fetchall()
+    auctions = [
+        AuctionRow(
+            market_value=int(r["market_value"] or r["asking_price"] or 0),
+            our_overbid_pct=float(r["our_overbid_pct"] or 0.0),
+            won=bool(r["won"]),
+            winning_overbid_pct=(
+                float(r["winning_overbid_pct"]) if r["winning_overbid_pct"] is not None else None
+            ),
+        )
+        for r in rows
+    ]
+    report = derive_price_bands(auctions, bands=lowers, min_winners=min_winners)
+
+    def _pct(v: float | None) -> str:
+        return "—" if v is None else f"{v:+.1f}%"
+
+    table = Table(title=f"Auctions since {since} by market-value band (n={len(auctions)})")
+    for column in (
+        "Band from",
+        "Auctions",
+        "Won",
+        "With winner",
+        "We bid (median)",
+        "Winners p25",
+        "p50",
+        "p75",
+    ):
+        table.add_column(column, justify="right")
+    for b in report.bands:
+        table.add_row(
+            f"EUR {b.lower:,}",
+            str(b.n_auctions),
+            str(b.n_won),
+            str(b.n_with_winner),
+            _pct(b.our_median),
+            _pct(b.winner_p25),
+            _pct(b.winner_p50),
+            _pct(b.winner_p75),
+        )
+    console.print(table)
+
+    if report.env_line is None:
+        console.print(
+            f"[yellow]{report.n_winners} auctions carry a winner's price; "
+            f"{report.min_winners} are needed before a proposal. Nothing proposed.[/yellow]"
+        )
+        return
+    console.print(f"[cyan]{report.n_winners} winners. Proposed caps (each band's p75):[/cyan]")
+    console.print(f"  {report.env_line}")
+    console.print(
+        "[dim]Read-only. Apply by setting OVERBID_PRICE_BANDS in .env / the app settings.[/dim]"
+    )
+
+
 @app.command("diagnose-flips")
 def diagnose_flips(
     learner_db: Path = typer.Option(

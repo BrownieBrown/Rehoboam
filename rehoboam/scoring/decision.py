@@ -6,6 +6,8 @@ builds sell plans to fund purchases, and ranks squad players by expendability.
 """
 
 import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 from rehoboam.config import (
     INSTANT_SELL_PCT,
@@ -30,6 +32,72 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class BestElevenGain:
+    """What adding one candidate does to the best eleven."""
+
+    gain: float
+    displaced_ids: frozenset[str]
+    fills_empty_slot: bool
+    reference_ep: float | None  # the replacement level the gap fill was measured against
+
+
+def best_eleven_gain(
+    squad: list,
+    score_map: dict[str, float],
+    candidate_player,
+    candidate_ep: float,
+    replacement_ep: Mapping[str, float] | None = None,
+) -> BestElevenGain:
+    """The marginal EP of adding *candidate_player*, gap-aware.
+
+    The ONE place the bot measures a candidate against the eleven: both
+    `DecisionEngine.calculate_marginal_ep` and `plan_buys` call it, so the
+    number a buy is ranked by and the number it is bid on cannot drift.
+
+    **An empty slot is not a 0.0-point starter.** With ten players every
+    candidate "displaces the weakest starter (0.0)", so his gain is his whole
+    EP. On 2026-09-22 (session 9c0a6a742dba) that made three defenders scored
+    on the position prior — Itakura, Kosugi, Mensah, all 74.9, data grade C —
+    clear the must-have bar of 62.5 and get bid at up to +35%. Nothing about
+    them was must-have; the slot was empty.
+
+    When the candidate enters the eleven without pushing anyone out, his gain
+    is measured against ``replacement_ep[position]`` — what the scorer gives
+    an unknown regular starter there (`cold_start_starter_ep`). A player
+    indistinguishable from that prior gains nothing; one who beats it by 46
+    points is a strong upgrade, not a must-have. Without a map, or for a
+    position the map lacks, the old rule stands.
+    """
+    current_best = select_best_eleven(squad, score_map)
+    current_total = sum(score_map.get(p.id, 0.0) for p in current_best)
+    current_ids = {p.id for p in current_best}
+
+    augmented = list(squad) + [candidate_player]
+    aug_map = dict(score_map)
+    aug_map[candidate_player.id] = candidate_ep
+    new_best = select_best_eleven(augmented, aug_map)
+    new_total = sum(aug_map.get(p.id, 0.0) for p in new_best)
+    new_ids = {p.id for p in new_best}
+
+    gain = max(0.0, new_total - current_total)
+    displaced = frozenset(current_ids - new_ids - {candidate_player.id})
+    entered = candidate_player.id in new_ids
+    fills_empty_slot = entered and gain > 0 and not displaced
+
+    reference: float | None = None
+    if fills_empty_slot and replacement_ep:
+        reference = replacement_ep.get(getattr(candidate_player, "position", "") or "")
+        if reference is not None:
+            gain = max(0.0, candidate_ep - float(reference))
+    return BestElevenGain(
+        gain=gain,
+        displaced_ids=displaced,
+        fills_empty_slot=fills_empty_slot,
+        reference_ep=reference,
+    )
+
+
 class DecisionEngine:
     """EP-based decision engine for buy/sell recommendations.
 
@@ -38,6 +106,9 @@ class DecisionEngine:
         min_ep_upgrade: Minimum marginal EP gain required to recommend a buy.
         target_ep_bar:  Absolute EP a player must clear to count as a target
             worth a squad slot, independent of marginal gain. 0.0 disables it.
+        replacement_ep: Position → the EP of an unknown regular starter there.
+            A candidate who fills an EMPTY slot is measured against this, not
+            against 0.0 (see `best_eleven_gain`). None keeps the old rule.
     """
 
     def __init__(
@@ -45,10 +116,12 @@ class DecisionEngine:
         min_ep_to_buy: float = 35.0,
         min_ep_upgrade: float = 40.0,
         target_ep_bar: float = 0.0,
+        replacement_ep: Mapping[str, float] | None = None,
     ) -> None:
         self.min_ep_to_buy = min_ep_to_buy
         self.min_ep_upgrade = min_ep_upgrade
         self.target_ep_bar = target_ep_bar
+        self.replacement_ep = replacement_ep
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -85,27 +158,21 @@ class DecisionEngine:
         Returns a :class:`~rehoboam.scoring.models.MarginalEPResult`.
         """
         score_map = self.select_lineup(squad_scores)
+        current_total = sum(score_map.get(p.id, 0.0) for p in select_best_eleven(squad, score_map))
 
-        # Current best-11
-        current_best = select_best_eleven(squad, score_map)
-        current_total = sum(score_map.get(p.id, 0.0) for p in current_best)
-        current_best_ids = {p.id for p in current_best}
+        measured = best_eleven_gain(
+            squad,
+            score_map,
+            candidate_player,
+            candidate_score.expected_points,
+            self.replacement_ep,
+        )
+        marginal_gain = measured.gain
+        new_total = current_total + marginal_gain
 
-        # Augmented squad with candidate
-        augmented_squad = list(squad) + [candidate_player]
-        augmented_score_map = dict(score_map)
-        augmented_score_map[candidate_score.player_id] = candidate_score.expected_points
-
-        new_best = select_best_eleven(augmented_squad, augmented_score_map)
-        new_total = sum(augmented_score_map.get(p.id, 0.0) for p in new_best)
-        new_best_ids = {p.id for p in new_best}
-
-        marginal_gain = max(0.0, new_total - current_total)
-
-        # Find who was displaced: was in old best-11 but not in new, and is not
-        # the candidate itself.
-        displaced_ids = current_best_ids - new_best_ids - {candidate_score.player_id}
-        displaced_player_id: str | None = next(iter(displaced_ids), None)
+        # Who was displaced: in the old best-11 but not the new, and not the
+        # candidate himself. Empty when the candidate filled an empty slot.
+        displaced_player_id: str | None = next(iter(sorted(measured.displaced_ids)), None)
 
         # Resolve displaced player name from squad
         displaced_player_name: str | None = None
@@ -117,6 +184,8 @@ class DecisionEngine:
                     f"{displaced_player.first_name} {displaced_player.last_name}"
                 )
             displaced_player_ep = score_map.get(displaced_player_id, 0.0)
+        elif measured.reference_ep is not None:
+            displaced_player_ep = float(measured.reference_ep)
 
         return MarginalEPResult(
             player_id=candidate_score.player_id,
@@ -127,6 +196,8 @@ class DecisionEngine:
             replaces_player_id=displaced_player_id if marginal_gain > 0 else None,
             replaces_player_name=displaced_player_name if marginal_gain > 0 else None,
             replaces_player_ep=displaced_player_ep,
+            fills_empty_slot=measured.fills_empty_slot,
+            replacement_ep=measured.reference_ep,
         )
 
     def build_sell_plan(
@@ -398,6 +469,8 @@ class DecisionEngine:
                 marginal = mep.marginal_ep_gain
                 replaces_id = mep.replaces_player_id
                 replaces_name = mep.replaces_player_name
+                replaces_ep: float | None = mep.replaces_player_ep
+                fills_empty_slot = mep.fills_empty_slot
             else:
                 # No squad data — treat as pure EP gain.
                 #
@@ -424,6 +497,8 @@ class DecisionEngine:
                 marginal = ps.expected_points
                 replaces_id = None
                 replaces_name = None
+                replaces_ep = None
+                fills_empty_slot = False
 
             # Dead-weight guard: if buying this player would saturate their
             # position (e.g. 2nd GK when max fieldable is 1), force a sell
@@ -539,6 +614,8 @@ class DecisionEngine:
                     roster_bonus=roster_bonus,
                     reason="; ".join(reason_parts),
                     sell_plan=forced_sell_plan,
+                    replaces_player_ep=replaces_ep,
+                    fills_empty_slot=fills_empty_slot,
                 )
             )
 
@@ -574,6 +651,7 @@ class DecisionEngine:
             budget=budget,
             squad=squad_list,
             lineup_map=lineup_map,
+            replacement_ep=self.replacement_ep,
         )
         top = final_recs[:top_n]
         logger.info(
@@ -973,6 +1051,7 @@ def plan_buys(
     budget: float,
     squad: list,
     lineup_map: dict[str, float],
+    replacement_ep: Mapping[str, float] | None = None,
 ) -> list:
     """Order buy recommendations for a *budget*, not for a single pick.
 
@@ -1003,7 +1082,6 @@ def plan_buys(
     Returns the chosen plan first, in execution order, followed by everything
     unaffordable ranked by raw gain so nothing is silently lost.
     """
-    from rehoboam.formation import select_best_eleven
 
     def _cost(rec) -> int:
         return int(getattr(rec.player, "price", 0) or getattr(rec.player, "market_value", 0) or 0)
@@ -1018,21 +1096,21 @@ def plan_buys(
         spend_left = float(budget)
 
         while remaining and working_squad:
-            current_best = select_best_eleven(working_squad, working_map)
-            current_total = sum(working_map.get(p.id, 0.0) for p in current_best)
-
             best_rec, best_gain, best_key = None, 0.0, 0.0
             for rec in remaining:
                 cost = _cost(rec)
                 if cost <= 0 or cost > spend_left:
                     continue
-                augmented = working_squad + [rec.player]
-                aug_map = dict(working_map)
-                aug_map[rec.player.id] = rec.score.expected_points
-                gain = (
-                    sum(aug_map.get(p.id, 0.0) for p in select_best_eleven(augmented, aug_map))
-                    - current_total
-                )
+                # The same gap-aware measure `calculate_marginal_ep` uses; a
+                # private re-implementation here would hand the first pick
+                # into an empty slot his full EP back as the gain.
+                gain = best_eleven_gain(
+                    working_squad,
+                    working_map,
+                    rec.player,
+                    rec.score.expected_points,
+                    replacement_ep,
+                ).gain
                 if gain <= 0:
                     continue
                 key = gain / (cost / 1_000_000) if prefer_efficiency else gain

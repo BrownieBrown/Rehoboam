@@ -21,6 +21,8 @@ def render_proposal(
     budget_before: int,
     trend_7d_pct: float | None,
     risks: list[str],
+    fills_empty_slot: bool = False,
+    position: str = "",
 ) -> str:
     """The three questions Marco asked for, each as its own section."""
     overbid_str = f"+{(bid / market_value - 1.0) * 100.0:.1f}%" if market_value > 0 else "unknown"
@@ -34,7 +36,12 @@ def render_proposal(
         f"  EP {ep:.1f}. {club}.",
         "",
         "WHY IT IMPROVES THE LINEUP",
-        f"  Displaces {displaced_name} ({displaced_ep:.1f}) in the best eleven.",
+        (
+            f"  Fills an empty slot; measured against an unknown {position or 'starter'} "
+            f"starter ({displaced_ep:.1f}), not against nobody."
+            if fills_empty_slot
+            else f"  Displaces {displaced_name} ({displaced_ep:.1f}) in the best eleven."
+        ),
         f"  Net gain {marginal_gain:+.1f} points per matchday.",
         "",
         "WHY THIS PRICE",

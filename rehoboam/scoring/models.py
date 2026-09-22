@@ -74,6 +74,10 @@ class BuyRecommendation:
     recommended_bid: int | None = None
     sell_plan: "SellPlan | None" = None  # Paired sell plan when buy exceeds budget
     metadata: dict | None = None
+    #: EP of the starter displaced, or of the replacement-level reference when
+    #: the buy fills an empty slot (`fills_empty_slot`). The board prints it.
+    replaces_player_ep: float | None = None
+    fills_empty_slot: bool = False
 
 
 @dataclass
@@ -118,6 +122,11 @@ class MarginalEPResult:
     replaces_player_id: str | None
     replaces_player_name: str | None
     replaces_player_ep: float
+    #: True when the candidate walked into an empty slot rather than pushing a
+    #: starter out. His gain is then measured against ``replacement_ep`` — the
+    #: scorer's cold-start starter at his position — not against 0.0.
+    fills_empty_slot: bool = False
+    replacement_ep: float | None = None
 
 
 @dataclass
