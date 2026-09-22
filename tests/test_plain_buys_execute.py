@@ -37,12 +37,12 @@ def api():
 
 
 @pytest.fixture
-def trader(api, tmp_path, monkeypatch):
+def trader(api, tmp_path, store_dsn, monkeypatch):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.chdir(tmp_path)
     t = AutoTrader(api=api, settings=Settings(), dry_run=False)
-    t.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+    t.learner = BidLearner(dsn=store_dsn)
     t.tracker = LearningTracker(t.learner)
     t.execution = ExecutionService(api=api, tracker=t.tracker, dry_run=False)
     return t
@@ -260,13 +260,13 @@ class TestASellPlanRidesOnTheBid:
 
 class TestDryRunSpendsAndRecordsNothing:
     def test_it_calls_no_api_writes_no_row_sends_nothing_but_shows_the_board(
-        self, api, tmp_path, monkeypatch
+        self, api, tmp_path, store_dsn, monkeypatch
     ):
         monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
         monkeypatch.setenv("KICKBASE_PASSWORD", "test")
         monkeypatch.chdir(tmp_path)
         dry = AutoTrader(api=api, settings=Settings(), dry_run=True)
-        dry.learner = BidLearner(db_path=tmp_path / "bid_learning.db")
+        dry.learner = BidLearner(dsn=store_dsn)
         rec = _rec()
         ctx = _ctx(rec)
 
