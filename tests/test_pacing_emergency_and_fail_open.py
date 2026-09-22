@@ -114,6 +114,60 @@ class TestEmergencyExemption:
         assert result["pacing"] is not None
 
 
+class TestTheEmergencyIsOnlyTheLastDay:
+    """2026-09-22: a short squad seventeen days from kickoff is not an emergency.
+
+    The relaxed candidate filters (EP floor 10, no target bar, no upgrade
+    threshold, no pacing, top 8) are the price of the last day. Earlier than
+    that the ordinary pipeline recommends the ordinary way, so the slot is
+    closed by a player who passes the ordinary bars at an ordinary bid.
+    """
+
+    def test_a_short_squad_days_out_is_recommended_the_ordinary_way(self, tmp_path, monkeypatch):
+        api, trader = _trader_with_mock_api(tmp_path, monkeypatch)
+        _quiet_api(api)
+        api.get_squad.return_value = list(_EMERGENCY_SQUAD)
+        api.get_my_bids.return_value = []
+
+        result = trader.get_ep_recommendations(league=SimpleNamespace(id="L"), days_until_match=17)
+
+        assert result["emergency"] is False
+        assert result["pacing"] is not None
+
+    def test_a_short_squad_on_the_last_day_is_the_emergency(self, tmp_path, monkeypatch):
+        api, trader = _trader_with_mock_api(tmp_path, monkeypatch)
+        _quiet_api(api)
+        api.get_squad.return_value = list(_EMERGENCY_SQUAD)
+        api.get_my_bids.return_value = []
+
+        result = trader.get_ep_recommendations(league=SimpleNamespace(id="L"), days_until_match=1)
+
+        assert result["emergency"] is True
+        assert result["pacing"] is None
+
+    def test_without_a_day_count_the_trader_asks_the_schedule(self, tmp_path, monkeypatch):
+        """`_quiet_api` makes the matchdays lookup fail, so the schedule is
+        unknown -- which fails toward the emergency, as REH-112 requires."""
+        api, trader = _trader_with_mock_api(tmp_path, monkeypatch)
+        _quiet_api(api)
+        api.get_squad.return_value = list(_EMERGENCY_SQUAD)
+        api.get_my_bids.return_value = []
+
+        result = trader.get_ep_recommendations(league=SimpleNamespace(id="L"))
+
+        assert result["emergency"] is True
+
+    def test_a_fieldable_squad_is_never_the_emergency(self, tmp_path, monkeypatch):
+        api, trader = _trader_with_mock_api(tmp_path, monkeypatch)
+        _quiet_api(api)
+        api.get_squad.return_value = list(_FIELDABLE_SQUAD)
+        api.get_my_bids.return_value = []
+
+        result = trader.get_ep_recommendations(league=SimpleNamespace(id="L"), days_until_match=1)
+
+        assert result["emergency"] is False
+
+
 class TestFailOpenGuardCoversTheWholeBlock:
     """Finding 5."""
 

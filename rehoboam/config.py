@@ -172,6 +172,19 @@ class Settings(BaseSettings):
             "formation.can_fill_starting_eleven — decoupled from this value."
         ),
     )
+    emergency_fill_days: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "The emergency fill -- the 'buy almost anything' path for a squad "
+            "that cannot field a legal eleven -- may only spend this many days "
+            "before kickoff or closer (an unknown schedule always counts). "
+            "Earlier than that the ordinary trading phases close the slot with "
+            "players that pass the ordinary bars at ordinary bids. 2026-09-22: "
+            "ten players, seventeen days to kickoff, and the fill bought a "
+            "falling non-starter at +overbid. See services/emergency_window.py."
+        ),
+    )
     min_upgrade_value_score_diff: float = Field(
         default=15.0,
         description="Minimum value score difference to consider a replacement an upgrade",

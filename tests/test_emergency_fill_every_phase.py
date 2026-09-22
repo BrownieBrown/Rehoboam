@@ -115,14 +115,21 @@ def _run(phase: str, days: int | None, squad, tmp_path, monkeypatch):
     return fill
 
 
-class TestTheEmergencyFillIsNotGatedOnPhase:
+class TestTheEmergencyFillIsGatedOnTheDayCountNotThePhase:
+    """The fill answers the day count, not the phase label (2026-09-22).
+
+    It is the "buy almost anything" path, and it earns that only on the last
+    day before kickoff, when no other buy path can still close the slot. With
+    the schedule unknown it still runs: that is the 2026-08-31 state REH-112
+    was written for, and a fail-safe fails toward fielding an eleven.
+    """
+
     @pytest.mark.parametrize(
         ("phase", "days"),
         [
             ("moderate", None),  # the 2026-08-31 state: no fixture visible
-            ("moderate", 3),
-            ("aggressive", 6),
             ("matchday_in_progress", 0),
+            ("locked", 0),
             ("locked", 1),  # must keep working, not regress
         ],
     )
@@ -131,6 +138,27 @@ class TestTheEmergencyFillIsNotGatedOnPhase:
 
         assert fill.called, f"emergency fill never ran in phase {phase!r}"
         assert fill.call_args.args[3] == 4, "should buy the 4 players an eleven needs"
+
+    @pytest.mark.parametrize(
+        ("phase", "days"),
+        [
+            ("moderate", 2),
+            ("moderate", 3),
+            ("aggressive", 6),
+            ("aggressive", 17),  # 2026-09-22: the international break, Seol bought at +overbid
+        ],
+    )
+    def test_a_short_squad_with_days_to_go_is_left_to_the_trading_phases(
+        self, phase, days, tmp_path, monkeypatch, caplog
+    ):
+        with caplog.at_level("INFO", logger="rehoboam.auto_trader"):
+            fill = _run(phase, days, _squad_of_seven(), tmp_path, monkeypatch)
+
+        assert not fill.called, f"emergency fill ran {days}d out in phase {phase!r}"
+        assert any(
+            "squad short" in r.getMessage() and "emergency fill waits" in r.getMessage()
+            for r in caplog.records
+        ), "the session must say why the slot stays open"
 
     @pytest.mark.parametrize("phase", ["moderate", "aggressive", "locked"])
     def test_a_fieldable_squad_never_triggers_the_fill(self, phase, tmp_path, monkeypatch):
@@ -168,7 +196,9 @@ class TestTheEmergencyBuySurvivesTheUnifiedTradePhaseRebind:
 
         squad = _squad_of_seven()
         trader = AutoTrader(api=_Api(squad), settings=Settings(), dry_run=True)
-        ctx = _context("moderate", 3, squad)
+        # A non-locked phase in which the fill still runs: the unknown
+        # schedule (2026-09-22 moved the fill to the last day otherwise).
+        ctx = _context("moderate", None, squad)
 
         emergency_buy = AutoTradeResult(
             success=True,

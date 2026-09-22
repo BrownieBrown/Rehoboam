@@ -17,6 +17,7 @@ has been removed.
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from rich.console import Console
 
@@ -33,12 +34,19 @@ from .formation import can_fill_starting_eleven
 from .kickbase_client import League
 from .kickoff import NextKickoff, fixtures_from_myeleven, next_fixture_from_matchdays
 from .matchup_analyzer import MatchupAnalyzer
+from .services.emergency_window import emergency_fill_due
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
 
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+
+#: "The caller did not say" for `days_until_match` -- distinct from None,
+#: which is a real answer (the schedule is unknown) and fails toward the
+#: emergency. A missing argument asks the schedule instead.
+_UNSET: object = object()
 
 
 def _determine_emergency(squad: list) -> tuple[bool, str]:
@@ -307,7 +315,9 @@ class Trader:
         )
         return PacingContext(reserve=reserve, open_offers=open_offers)
 
-    def get_ep_recommendations(self, league: League) -> dict:
+    def get_ep_recommendations(
+        self, league: League, *, days_until_match: int | None | object = _UNSET
+    ) -> dict:
         """Run the EP scoring pipeline and return structured recommendations.
 
         Returns a dict with keys:
@@ -325,9 +335,31 @@ class Trader:
 
         # Emergency mode — see _determine_emergency for why this is a
         # position-aware fieldability check, not a headcount comparison.
-        is_emergency, emergency_reason = _determine_emergency(squad)
+        #
+        # And a day-count check on top (2026-09-22): the emergency relaxes
+        # every buy filter below (EP floor 10, no target bar, no upgrade
+        # threshold, no pacing, top 8), which is the price of the LAST day
+        # before kickoff, not of a short squad seventeen days out. The session
+        # normally hands the day count in, so the phase decision and this one
+        # read the same kickoff; a caller without one asks the schedule.
+        days_to_match: int | None = (
+            self.get_days_until_match(league)
+            if days_until_match is _UNSET
+            else cast("int | None", days_until_match)
+        )
+        squad_short, shortfall_reason = _determine_emergency(squad)
+        is_emergency = squad_short and emergency_fill_due(
+            days_to_match, window_days=self.settings.emergency_fill_days
+        )
         if is_emergency:
-            console.print(f"[bold red]⚠ FORMATION EMERGENCY — {emergency_reason}[/bold red]")
+            console.print(f"[bold red]⚠ FORMATION EMERGENCY — {shortfall_reason}[/bold red]")
+        elif squad_short:
+            console.print(
+                f"[yellow]Squad short — {shortfall_reason}; kickoff in "
+                f"{days_to_match}d, so the ordinary buy filters apply and the "
+                f"emergency fill waits for the last "
+                f"{self.settings.emergency_fill_days}d[/yellow]"
+            )
 
         market_players_list = self.api.get_market(league)
         market_payload = getattr(self.api, "last_market_payload", None)
@@ -797,6 +829,10 @@ class Trader:
             "lineup_map": lineup_map,
             "budget": current_budget,
             "squad_size": squad_size,
+            # Whether the buy recs above were built with the relaxed emergency
+            # filters -- true only for a short squad inside the emergency
+            # window (services/emergency_window.py).
+            "emergency": is_emergency,
             "squad_players": squad_player_map,
             "market_players": market_player_map,
             "market_scores": {s.player_id: s for s in market_scores},
@@ -818,14 +854,19 @@ class Trader:
             "competitor_squads": competitor_squads,
         }
 
-    def get_ep_recommendations_with_trends(self, league) -> dict:
+    def get_ep_recommendations_with_trends(
+        self, league, *, days_until_match: int | None | object = _UNSET
+    ) -> dict:
         """get_ep_recommendations + trend-aware bid calculation.
 
         Fetches market-value trend for each buy rec / trade pair and recomputes
         the EP bid with trend_change_pct populated. Without this, every EP bid
         gets the `*= 0.6` conservative penalty from `calculate_ep_bid`.
+
+        ``days_until_match`` is passed through to `get_ep_recommendations`,
+        which decides from it whether a short squad is an emergency today.
         """
-        result = self.get_ep_recommendations(league)
+        result = self.get_ep_recommendations(league, days_until_match=days_until_match)
         current_budget = int(result.get("budget", 0))
         # REH-85: reuse the context built inside get_ep_recommendations rather
         # than rebuilding it here — a rebuild would be a second get_my_bids

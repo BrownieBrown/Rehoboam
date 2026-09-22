@@ -13,6 +13,7 @@ from .config import INSTANT_SELL_PCT
 from .kickoff import NextKickoff
 from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
+from .services.emergency_window import emergency_fill_due
 from .services.execution import LOCKOUT_DAYS
 from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
@@ -591,8 +592,10 @@ class AutoTrader:
 
         console.print(f"[cyan]📅 {phase.reason}[/cyan]")
 
-        # Single EP pipeline call with trend data
-        ep_result = trader.get_ep_recommendations_with_trends(league)
+        # Single EP pipeline call with trend data. The day count goes along
+        # so the pipeline's emergency decision reads the same kickoff as the
+        # phase above (services/emergency_window.py), and not a second lookup.
+        ep_result = trader.get_ep_recommendations_with_trends(league, days_until_match=days)
 
         # Fetch bids and squad
         my_bids = self.api.get_my_bids(league)
@@ -2867,9 +2870,39 @@ class AutoTrader:
         # standing -400 — with the fill unreachable. That `else` is
         # conservative about *spending*, which is right; the -100 is not
         # spending, and the fail-safe has to fail toward fielding an eleven.
+        #
+        # Every phase, but not every DAY (2026-09-22). The fill is the "buy
+        # almost anything" path -- relaxed filters, the leftover spent as
+        # overbid -- and that is the price of the last day before kickoff,
+        # when the locked phase has stood every other buy path down. On
+        # 2026-09-22 it ran seventeen days out, in the aggressive phase, and
+        # bought a falling non-starter at +overbid while the ordinary trade
+        # phase below could have closed the slot properly. So the shortfall
+        # is answered by `emergency_fill_due`: the last `emergency_fill_days`
+        # days, or an unknown schedule (the 2026-08-31 state above).
         fresh_squad = self.api.get_squad(league)
         slots_short = _emergency_slots_short(fresh_squad)
-        if slots_short > 0:
+        fill_due = emergency_fill_due(
+            ctx.matchday_phase.days_until_match,
+            window_days=self.settings.emergency_fill_days,
+        )
+        if slots_short > 0 and not fill_due:
+            console.print(
+                f"[yellow]Squad short by {slots_short} (squad {len(fresh_squad)}), kickoff in "
+                f"{ctx.matchday_phase.days_until_match}d — the trading phases fill it; "
+                f"the emergency fill waits for the last "
+                f"{self.settings.emergency_fill_days}d.[/yellow]"
+            )
+            logger.info(
+                "squad short by %d (squad=%d) days_to_match=%s phase=%s — "
+                "emergency fill waits for the last %dd; the trading phases fill it",
+                slots_short,
+                len(fresh_squad),
+                ctx.matchday_phase.days_until_match,
+                ctx.matchday_phase.phase,
+                self.settings.emergency_fill_days,
+            )
+        if slots_short > 0 and fill_due:
             from .formation import can_fill_starting_eleven
 
             reason = can_fill_starting_eleven(fresh_squad)["reason"]
