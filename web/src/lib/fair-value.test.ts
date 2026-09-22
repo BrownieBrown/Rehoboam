@@ -20,4 +20,17 @@ describe("fairVerdict", () => {
   it("calls an exact match fair", () => {
     expect(fairVerdict(10_000_000, 10_000_000)).toMatchObject({ label: "fair", tone: "neutral" });
   });
+
+  it("stays fair inside the noise band, either side", () => {
+    expect(fairVerdict(13_400_000, 10_000_000)).toMatchObject({ label: "fair", tone: "neutral" });
+    expect(fairVerdict(6_600_000, 10_000_000)).toMatchObject({ label: "fair", tone: "neutral" });
+  });
+
+  it("calls him cheap or expensive from the band outwards", () => {
+    expect(fairVerdict(13_500_000, 10_000_000)).toMatchObject({ label: "cheap", tone: "positive" });
+    expect(fairVerdict(6_500_000, 10_000_000)).toMatchObject({
+      label: "expensive",
+      tone: "negative",
+    });
+  });
 });
