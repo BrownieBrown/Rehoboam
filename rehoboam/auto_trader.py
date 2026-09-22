@@ -268,8 +268,11 @@ def _compute_flip_budget(
     """
     if phase == "locked":
         return 0
-    if phase == "moderate":
-        return current_budget - pending_bid_total
+    # Moderate (2-4 days out) used to allow no new debt, on the premise that
+    # nothing would recover it in time. Since 2026-09-22 the locked window
+    # sells the wallet back to zero itself (`_run_debt_recovery`), so the
+    # allowance is the same in every trading phase: Marco's rule is "it can go
+    # into minus until gameday, always".
     return current_budget + max_debt - pending_bid_total
 
 
@@ -1802,6 +1805,113 @@ class AutoTrader:
         verdict = gate.check(player_id=pair.buy_player.id, bid=int(pair.recommended_bid))
         return None if verdict.ok else "; ".join(verdict.reasons)
 
+    def _run_debt_recovery(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
+        """Sell until the wallet, net of open offers, is back at zero.
+
+        Runs only in the locked window (the last two days before kickoff),
+        because a negative budget at kickoff is zero points for the whole
+        matchday while a negative budget between rounds is how the bot buys
+        players it cannot yet afford. Open offers count as spent: one that is
+        won after this session and before kickoff drains the wallet too (rule
+        I3's definition of covered).
+
+        Who goes is `services/debt_recovery.plan_debt_recovery`'s call —
+        profits first, slumping starters last, position minimums never.
+        """
+        from .formation import get_position_counts, select_best_eleven
+        from .services.debt_recovery import DebtCandidate, plan_debt_recovery
+        from .trader import Trader
+
+        open_offers = sum(int(v or 0) for v in (ctx.my_bid_amounts or {}).values())
+        shortfall = open_offers - int(ctx.current_budget)
+        if shortfall <= 0:
+            return []
+
+        console.print(
+            f"\n[bold red]💳 Debt recovery — wallet EUR {int(ctx.current_budget):,} "
+            f"with EUR {open_offers:,} in open offers: EUR {shortfall:,} short of "
+            f"zero at kickoff[/bold red]"
+        )
+        squad = self.api.get_squad(league)
+        squad_scores = ctx.ep_result.get("squad_scores") or []
+        score_map = {s.player_id: float(s.expected_points) for s in squad_scores}
+        best_ids = {p.id for p in select_best_eleven(squad, score_map)}
+        trader = Trader(
+            self.api,
+            self.settings,
+            bid_learner=self.learner,
+            activity_feed_learner=self.activity_feed_learner,
+        )
+
+        by_id = {p.id: p for p in squad}
+        candidates: list[DebtCandidate] = []
+        for p in squad:
+            try:
+                trend = trader.trend_service.get_trend(p.id, p.market_value, league.id).trend_7d_pct
+            except Exception:
+                trend = None
+            buy_price = int(getattr(p, "buy_price", 0) or 0)
+            candidates.append(
+                DebtCandidate(
+                    player_id=p.id,
+                    name=f"{p.first_name} {p.last_name}".strip(),
+                    position=p.position,
+                    market_value=int(p.market_value),
+                    buy_price=buy_price if buy_price > 0 else None,
+                    expected_points=score_map.get(p.id, 0.0),
+                    in_best_eleven=p.id in best_ids,
+                    trend_7d_pct=trend,
+                )
+            )
+
+        plan = plan_debt_recovery(
+            candidates, shortfall=shortfall, position_counts=get_position_counts(squad)
+        )
+        logger.warning(
+            "debt-recovery budget=%d open_offers=%d shortfall=%d sells=%d recovered=%d "
+            "remaining=%d | %s",
+            int(ctx.current_budget),
+            open_offers,
+            shortfall,
+            len(plan.sells),
+            plan.recovered,
+            plan.remaining,
+            ", ".join(
+                f"{c.name}@{c.sell_value:,}"
+                f"({'+' if (c.profit_pct or 0) >= 0 else ''}{(c.profit_pct or 0):.0f}%"
+                f"{', starter' if c.in_best_eleven else ''})"
+                for c in plan.sells
+            ),
+        )
+        if not plan.covered:
+            msg = (
+                f"Debt recovery cannot cover EUR {plan.remaining:,} without breaching a "
+                "position minimum — the wallet stays negative"
+            )
+            console.print(f"[bold red]{msg}[/bold red]")
+            logger.error("debt-recovery %s", msg)
+
+        results: list[AutoTradeResult] = []
+        for cand in plan.sells:
+            player = by_id[cand.player_id]
+            pct = cand.profit_pct
+            why = (
+                f"Debt recovery before kickoff — {'+' if (pct or 0) >= 0 else ''}"
+                f"{(pct or 0):.1f}% vs cost basis"
+                if pct is not None
+                else "Debt recovery before kickoff — no cost basis"
+            )
+            result = self.execution.instant_sell(league, player, why)
+            results.append(result)
+            if result.success:
+                ctx.current_budget += cand.sell_value
+                ctx.squad = [p for p in ctx.squad if p.id != cand.player_id]
+        console.print(
+            f"[green]✓ Debt recovery: sold {len([r for r in results if r.success])}/"
+            f"{len(plan.sells)}, wallet now EUR {int(ctx.current_budget):,}[/green]"
+        )
+        return results
+
     def _run_emergency_squad_fill(
         self,
         league,
@@ -2691,6 +2801,20 @@ class AutoTrader:
         except Exception:
             logger.exception("record_team_value_snapshot failed (non-fatal)")
 
+        # Step 2b: in the locked window a negative wallet is zero points for
+        # the entire matchday — worse than anything the fill below can fix.
+        # Sell back to zero FIRST, so the fill can refill any slot this frees
+        # with money that is actually there. Every phase before this one may
+        # run a debt (`_compute_flip_budget`); this is where it is repaid.
+        if ctx.matchday_phase.phase == "locked":
+            try:
+                sell_results.extend(self._run_debt_recovery(league, ctx))
+            except Exception as e:
+                error_msg = f"Debt recovery failed: {e!s}"
+                console.print(f"[red]{error_msg}[/red]")
+                errors.append(error_msg)
+                logger.exception("debt recovery failed")
+
         # Step 3: A squad that cannot field a legal eleven is an emergency in
         # EVERY phase (REH-112). This used to sit inside the `locked` branch
         # below, so it could only run when the phase detector had found an
@@ -2756,7 +2880,7 @@ class AutoTrader:
 
         # Step 4: Trend-aware profit selling
         try:
-            sell_results = self.run_profit_sell_phase(league, ctx)
+            sell_results.extend(self.run_profit_sell_phase(league, ctx))
         except Exception as e:
             error_msg = f"Sell monitoring error: {e!s}"
             console.print(f"[red]{error_msg}[/red]")
