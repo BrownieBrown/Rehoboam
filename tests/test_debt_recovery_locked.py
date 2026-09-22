@@ -95,7 +95,7 @@ def _context(phase: str, days: int | None, squad, budget: int, offers: dict | No
     )
 
 
-def _run(phase, days, budget, tmp_path, monkeypatch, *, offers=None, mode="full"):
+def _run(phase, days, budget, tmp_path, monkeypatch, *, offers=None, mode="full", dry_run=False):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.setenv("TRADING_MODE", mode)
@@ -103,7 +103,7 @@ def _run(phase, days, budget, tmp_path, monkeypatch, *, offers=None, mode="full"
 
     squad = _squad()
     api = _api(squad)
-    trader = AutoTrader(api=api, settings=Settings(), dry_run=False)
+    trader = AutoTrader(api=api, settings=Settings(), dry_run=dry_run)
     ctx = _context(phase, days, squad, budget, offers)
 
     sold_before_fill: list[int] = []
@@ -155,6 +155,14 @@ class TestTheLockedWindowRepaysTheDebt:
         assert api.sell_player_instant.call_count == 2
         assert sold_before_fill == [2]
 
+    def test_a_round_in_progress_a_day_before_the_next_kickoff_repays_too(
+        self, tmp_path, monkeypatch
+    ):
+        """The phase is then called `matchday_in_progress`, not `locked`; the
+        gate reads the day count, like the buy lockout does."""
+        api, _, _, _ = _run("matchday_in_progress", 1, -5_000_000, tmp_path, monkeypatch)
+        assert api.sell_player_instant.call_count == 1
+
     def test_it_runs_in_lineup_only_mode_too(self, tmp_path, monkeypatch):
         """Zero points at kickoff is a rule, not a trade — like the Top-5
         forced sale, it is not something the mode switches off."""
@@ -167,9 +175,24 @@ class TestItStaysOutOfTheWayOtherwise:
         api, _, _, _ = _run("locked", 1, 2_000_000, tmp_path, monkeypatch)
         assert api.sell_player_instant.call_count == 0
 
-    @pytest.mark.parametrize(("phase", "days"), [("aggressive", 6), ("moderate", 3)])
+    @pytest.mark.parametrize(
+        ("phase", "days"),
+        [("aggressive", 6), ("moderate", 3), ("matchday_in_progress", 4)],
+    )
     def test_debt_is_allowed_to_stand_before_the_locked_window(
         self, phase, days, tmp_path, monkeypatch
     ):
         api, _, _, _ = _run(phase, days, -5_000_000, tmp_path, monkeypatch)
         assert api.sell_player_instant.call_count == 0
+
+    def test_an_unknown_schedule_never_sells(self, tmp_path, monkeypatch):
+        """No kickoff in sight is not "kickoff imminent"; the wallet is
+        protected by refusing new debt instead (`_compute_flip_budget`)."""
+        api, _, _, _ = _run("moderate", None, -5_000_000, tmp_path, monkeypatch)
+        assert api.sell_player_instant.call_count == 0
+
+    def test_a_dry_run_sells_nothing_for_real(self, tmp_path, monkeypatch):
+        api, ctx, session, _ = _run("locked", 1, -5_000_000, tmp_path, monkeypatch, dry_run=True)
+        assert api.sell_player_instant.call_count == 0
+        # ...but the simulated sale is reported like every dry-run trade.
+        assert [r.action for r in session.lineup_trades if r.success] == ["SELL"]

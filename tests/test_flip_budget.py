@@ -25,6 +25,17 @@ class TestComputeFlipBudget:
             _compute_flip_budget("aggressive", 10_000_000, 2_000_000, 15_000_000)
         )
 
+    def test_an_unknown_schedule_allows_no_new_debt(self):
+        """Neither the schedule nor /myeleven gave a kickoff: the phase is a
+        fallback, and the recovery (gated on the day count) could never fire
+        before a kickoff the bot cannot see — so no NEW debt, as before."""
+        assert (
+            _compute_flip_budget(
+                "moderate", 10_000_000, 2_000_000, 99_000_000, schedule_known=False
+            )
+            == 8_000_000
+        )
+
     def test_aggressive_phase_adds_max_debt(self):
         assert _compute_flip_budget("aggressive", 10_000_000, 2_000_000, 15_000_000) == 23_000_000
 

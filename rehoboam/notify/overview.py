@@ -132,6 +132,7 @@ def render_session_board(
     budget_before: int,
     budget_after: int,
     open_offers_before: int = 0,
+    recovered: int = 0,
     placed: list[OfferLine],
     refused: list[OfferLine],
 ) -> str:
@@ -155,6 +156,10 @@ def render_session_board(
         lines.append(
             f"OPEN OFFERS BEFORE THIS SESSION EUR {open_offers_before:,} "
             "(not deducted by Kickbase)"
+        )
+    if recovered > 0:
+        lines.append(
+            f"DEBT RECOVERY SOLD EUR {recovered:,} before kickoff (counted in the wallet above)"
         )
     lines.append("")
 

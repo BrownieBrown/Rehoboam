@@ -13,6 +13,7 @@ from .config import INSTANT_SELL_PCT
 from .kickoff import NextKickoff
 from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
+from .services.execution import LOCKOUT_DAYS
 from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
@@ -258,21 +259,34 @@ def _offer_line(
 
 
 def _compute_flip_budget(
-    phase: str, current_budget: int, pending_bid_total: int, max_debt: int
+    phase: str,
+    current_budget: int,
+    pending_bid_total: int,
+    max_debt: int,
+    *,
+    schedule_known: bool = True,
 ) -> int:
     """Free budget for flip trading, by matchday phase.
 
     Shared by session-context build and the trade-phase refresh so both
     call sites agree on the formula after sells/bid-cancels mutate the
     inputs mid-session.
+
+    Moderate (2-4 days out) used to allow no new debt, on the premise that
+    nothing would recover it in time. Since 2026-09-22 the locked window
+    sells the wallet back to zero itself (`_run_debt_recovery`), so the
+    allowance is the same in every trading phase: Marco's rule is "it can go
+    into minus until gameday, always".
+
+    ``schedule_known`` is False when neither the schedule nor `/myeleven`
+    gave a kickoff. Then the phase is a fallback, not a measurement, and the
+    recovery — gated on the day count — could never fire before a kickoff
+    the bot cannot see; so no NEW debt, exactly as the old moderate rule.
     """
     if phase == "locked":
         return 0
-    # Moderate (2-4 days out) used to allow no new debt, on the premise that
-    # nothing would recover it in time. Since 2026-09-22 the locked window
-    # sells the wallet back to zero itself (`_run_debt_recovery`), so the
-    # allowance is the same in every trading phase: Marco's rule is "it can go
-    # into minus until gameday, always".
+    if not schedule_known:
+        return current_budget - pending_bid_total
     return current_budget + max_debt - pending_bid_total
 
 
@@ -441,6 +455,9 @@ class AutoTrader:
         # board's header reflects the wallet BEFORE anything moved rather than
         # a derivation that only accounts for plain offers.
         self._session_budget_before: int | None = None
+        # What the debt recovery sold for this session; the board's wallet
+        # arithmetic adds it back, since it otherwise only knows offers.
+        self._session_recovered: int = 0
         # Open offers already on the wallet before this session touched
         # anything — Kickbase counts them toward the squad cap but does not
         # deduct them from the budget it reports, so the board's header shows
@@ -587,7 +604,13 @@ class AutoTrader:
         # Calculate flip budget based on matchday phase
         max_debt = int(team_value * (self.settings.max_debt_pct_of_team_value / 100))
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
-        flip_budget = _compute_flip_budget(phase.phase, current_budget, pending_bid_total, max_debt)
+        flip_budget = _compute_flip_budget(
+            phase.phase,
+            current_budget,
+            pending_bid_total,
+            max_debt,
+            schedule_known=phase.days_until_match is not None,
+        )
 
         # Kickbase counts open bids toward the 15-player cap, so the
         # committed headcount is squad + pending bids, not squad alone.
@@ -1239,7 +1262,8 @@ class AutoTrader:
             squad_size=len(getattr(ctx, "squad", []) or []),
             squad_cap=SQUAD_CAP,
             budget_before=budget_before,
-            budget_after=budget_before - spend,
+            budget_after=budget_before + self._session_recovered - spend,
+            recovered=self._session_recovered,
             open_offers_before=open_offers_before,
             placed=placed,
             refused=refused,
@@ -1259,7 +1283,7 @@ class AutoTrader:
             len(placed),
             len(refused),
             spend,
-            budget_before - spend,
+            budget_before + self._session_recovered - spend,
             open_offers_before,
             delivered,
         )
@@ -1438,7 +1462,11 @@ class AutoTrader:
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
         max_debt = int(ctx.team_value * (self.settings.max_debt_pct_of_team_value / 100))
         ctx.flip_budget = _compute_flip_budget(
-            ctx.matchday_phase.phase, ctx.current_budget, pending_bid_total, max_debt
+            ctx.matchday_phase.phase,
+            ctx.current_budget,
+            pending_bid_total,
+            max_debt,
+            schedule_known=ctx.matchday_phase.days_until_match is not None,
         )
         ctx.my_bid_amounts = {p.id: p.user_offer_price for p in fresh_bids}
         # An offer this session already placed (plain buy or emergency fill)
@@ -1906,6 +1934,7 @@ class AutoTrader:
             if result.success:
                 ctx.current_budget += cand.sell_value
                 ctx.squad = [p for p in ctx.squad if p.id != cand.player_id]
+                self._session_recovered += cand.sell_value
         console.print(
             f"[green]✓ Debt recovery: sold {len([r for r in results if r.success])}/"
             f"{len(plan.sells)}, wallet now EUR {int(ctx.current_budget):,}[/green]"
@@ -2568,6 +2597,7 @@ class AutoTrader:
         # that was chosen to fit the budget together.
         self._session_board = []
         self._session_budget_before = None
+        self._session_recovered = 0
         self._session_open_offers_before = None
         self._session_offer_ids = set()
         self._session_batch_id = uuid.uuid4().hex[:12]
@@ -2806,7 +2836,12 @@ class AutoTrader:
         # Sell back to zero FIRST, so the fill can refill any slot this frees
         # with money that is actually there. Every phase before this one may
         # run a debt (`_compute_flip_budget`); this is where it is repaid.
-        if ctx.matchday_phase.phase == "locked":
+        # Gated on the DAY COUNT like `ExecutionService.buy`'s lockout guard,
+        # not on the phase label: `matchday_in_progress` can also sit within a
+        # day of the next kickoff, and an unknown schedule (None) must not
+        # pretend to be either.
+        days_left = ctx.matchday_phase.days_until_match
+        if days_left is not None and days_left <= LOCKOUT_DAYS:
             try:
                 sell_results.extend(self._run_debt_recovery(league, ctx))
             except Exception as e:
