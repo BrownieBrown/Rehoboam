@@ -30,6 +30,7 @@ import pytest
 from rehoboam.auto_trader import AutoTrader, EPSessionContext, MatchdayPhase
 from rehoboam.config import Settings
 from rehoboam.kickbase_client import Player
+from rehoboam.services.execution import AutoTradeResult
 
 LEAGUE = SimpleNamespace(id="1933872", name="PUMARUDEL")
 
@@ -149,3 +150,48 @@ class TestTheEmergencyFillIsNotGatedOnPhase:
         fill = _run("locked", 1, _squad_of_seven(), tmp_path, monkeypatch)
 
         assert fill.call_count == 1
+
+
+class TestTheEmergencyBuySurvivesTheUnifiedTradePhaseRebind:
+    """Step 7 used to do `trade_results = self.run_unified_trade_phase(...)`,
+
+    REBINDING the list Step 3's emergency fill had already extended. In any
+    non-locked phase (moderate/aggressive) that erased the emergency buy from
+    `total_spent`, the session-end log line, and `AutoTradeSession.profit_trades`
+    — the list the daily Telegram summary reads.
+    """
+
+    def test_a_moderate_session_keeps_the_emergency_buy_in_its_results(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.chdir(tmp_path)
+
+        squad = _squad_of_seven()
+        trader = AutoTrader(api=_Api(squad), settings=Settings(), dry_run=True)
+        ctx = _context("moderate", 3, squad)
+
+        emergency_buy = AutoTradeResult(
+            success=True,
+            player_name="Fill",
+            action="BUY",
+            price=4_000_000,
+            reason="Emergency lineup fill (squad short by 1)",
+            timestamp=0.0,
+        )
+
+        with (
+            patch.object(AutoTrader, "_build_session_context", return_value=ctx),
+            patch.object(AutoTrader, "_run_emergency_squad_fill", return_value=[emergency_buy]),
+            patch.object(AutoTrader, "run_profit_sell_phase", return_value=[]),
+            patch.object(AutoTrader, "optimize_and_execute_squad", return_value=[]),
+            patch.object(AutoTrader, "run_unified_trade_phase", return_value=[]),
+            patch.object(AutoTrader, "_set_optimal_lineup", return_value=[]),
+        ):
+            session = trader.run_full_session(LEAGUE)
+
+        assert emergency_buy in session.profit_trades
+        assert session.total_spent == 4_000_000
+        assert (
+            sum(r.price for r in session.profit_trades if r.success and r.action == "BUY")
+            == 4_000_000
+        )

@@ -73,35 +73,30 @@ KLEINDIENST = _listing("849", "Kleindienst", market_value=19_038_891, our_bid=24
 
 def _evaluate(listing, tiers):
     evaluator = BidEvaluator(_FakeApi([listing]), _settings())
-    return evaluator.evaluate_active_bids(
-        LEAGUE, player_trends={}, for_profit=True, bid_tiers=tiers
-    )[0]
+    return evaluator.evaluate_active_bids(LEAGUE, player_trends={}, bid_tiers=tiers)[0]
 
 
-class TestABidIsJudgedByItsOwnCeiling:
+class TestABidIsHeldWhateverItsCeiling:
+    """REH-111 judged a bid by the tier it was priced under. The autonomous-
+    wallet spec (§2) stops judging price after placement at all; the tier now
+    matters for the ledger and the reason line, never for cancellation."""
+
     def test_a_must_have_bid_at_its_ceiling_is_kept(self):
-        """+30% is the must_have ceiling, so it is not 'too expensive'."""
         result = _evaluate(KLEINDIENST, {"849": Tier.MUST_HAVE.value})
 
         assert result.recommendation == "KEEP", result.reason
 
-    def test_a_marginal_bid_above_its_ceiling_is_still_cancelled(self):
-        """The guard must still fire — this is not a licence to overpay."""
+    def test_a_marginal_bid_above_its_ceiling_is_kept_too(self):
+        """The 2026-08-30 Kleindienst cancellation, now a no-op at every tier."""
         result = _evaluate(KLEINDIENST, {"849": Tier.MARGINAL.value})
 
-        assert result.recommendation == "CANCEL"
-        assert "over market value" in result.reason
+        assert result.recommendation == "KEEP", result.reason
 
     @pytest.mark.parametrize("tier", list(Tier))
-    def test_no_tier_is_cancelled_at_its_own_ceiling(self, tier):
-        """The agreement property, across every tier the bidder can assign."""
-        policy = _settings().bid_ceiling_policy()
-        mv = 19_038_891
-        listing = _listing("849", "Kleindienst", market_value=mv, our_bid=policy.max_bid(mv, tier))
+    def test_the_tier_is_named_in_the_reason(self, tier):
+        result = _evaluate(KLEINDIENST, {"849": tier.value})
 
-        result = _evaluate(listing, {"849": tier.value})
-
-        assert result.recommendation == "KEEP", result.reason
+        assert tier.value in result.reason
 
 
 class TestTheTierSurvivesTheRoundTrip:
