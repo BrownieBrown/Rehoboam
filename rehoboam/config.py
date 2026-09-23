@@ -506,6 +506,45 @@ class Settings(BaseSettings):
         default=25.0,
         description="Overbid ceiling for a strong upgrade.",
     )
+    # The win curve (2026-09-23): bid the premium the league's winners actually
+    # paid in the player's price band, by tier, instead of a stack of typed
+    # constants. Evidence: `rehoboam.transfer_premiums` (migration 024).
+    bid_curve_enabled: bool = Field(
+        default=True,
+        description=(
+            "Size the overbid from the league's winning premiums per price band "
+            "(`services/win_curve.py`). Off, or when the store has too little "
+            "evidence, the bidder falls back to its static stack."
+        ),
+    )
+    bid_curve_lookback_days: int = Field(
+        default=365,
+        description="How far back the winning premiums are read; Kickbase keeps 365 days of MV.",
+    )
+    bid_curve_min_sample: int = Field(
+        default=30,
+        description=(
+            "Priced buys a band needs before its own curve is trusted; a thinner "
+            "band borrows the pooled curve, and a pooled curve thinner than this "
+            "yields no curve at all."
+        ),
+    )
+    bid_curve_bands: str = Field(
+        default="0,5000000,15000000",
+        description="Band lower bounds in euros the curve is read in.",
+    )
+    bid_curve_q_must_have: float = Field(
+        default=0.75,
+        description="Quantile of winning premiums a must-have bids at (beats 3 of 4 winners).",
+    )
+    bid_curve_q_strong: float = Field(
+        default=0.50, description="Quantile a strong upgrade bids at (the median winner)."
+    )
+    bid_curve_q_solid: float = Field(default=0.25, description="Quantile a solid upgrade bids at.")
+    bid_curve_q_marginal: float = Field(
+        default=0.0,
+        description="Quantile a marginal candidate bids at: the cheapest winning bid, i.e. the floor.",
+    )
     overbid_price_bands: str = Field(
         default="",
         description=(
@@ -697,6 +736,19 @@ class Settings(BaseSettings):
     smtp_user: str = Field(default="", repr=False, description="SMTP username.")
     smtp_password: str = Field(default="", repr=False, description="SMTP password or app password.")
     alert_email_to: str = Field(default="", description="Recipient of the daily summary.")
+
+    def curve_bands(self) -> list[int]:
+        """The price bands the win curve is read in (`bid_curve_bands`)."""
+        return sorted({int(x) for x in self.bid_curve_bands.split(",") if x.strip()})
+
+    def curve_quantiles(self) -> dict[str, float]:
+        """Tier → the quantile of winning premiums it bids at."""
+        return {
+            "must_have": self.bid_curve_q_must_have,
+            "strong_upgrade": self.bid_curve_q_strong,
+            "solid_upgrade": self.bid_curve_q_solid,
+            "marginal": self.bid_curve_q_marginal,
+        }
 
     def bid_ceiling_policy(self):
         """The configured bid ceiling, as one value (REH-99).

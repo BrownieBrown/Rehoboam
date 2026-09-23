@@ -68,7 +68,7 @@ class CeilingReport:
         return f"OVERBID_PRICE_BANDS={body}"
 
 
-def _percentile(values: Sequence[float], q: float) -> float:
+def percentile(values: Sequence[float], q: float) -> float:
     """Linear interpolation between order statistics (numpy's default)."""
     xs = sorted(values)
     if len(xs) == 1:
@@ -118,9 +118,9 @@ def derive_price_bands(
             BandReport(
                 lower=lower,
                 n_winners=len(premiums),
-                winner_p25=_percentile(premiums, 0.25) if premiums else None,
-                winner_p50=_percentile(premiums, 0.50) if premiums else None,
-                winner_p75=_percentile(premiums, 0.75) if premiums else None,
+                winner_p25=percentile(premiums, 0.25) if premiums else None,
+                winner_p50=percentile(premiums, 0.50) if premiums else None,
+                winner_p75=percentile(premiums, 0.75) if premiums else None,
                 n_our_bids=len(mine),
                 n_our_wins=sum(1 for b in mine if b.won),
                 our_median=median(b.our_overbid_pct for b in mine) if mine else None,
