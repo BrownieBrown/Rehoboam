@@ -1131,6 +1131,8 @@ class AutoTrader:
             budget_before=int(ctx.current_budget),
             trend_7d_pct=trend,
             risks=risks,
+            fills_empty_slot=bool(getattr(rec, "fills_empty_slot", False)),
+            position=str(getattr(player, "position", "") or ""),
         )
 
         # A buy that only works by selling someone first carries its sell plan

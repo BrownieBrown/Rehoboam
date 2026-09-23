@@ -1174,6 +1174,187 @@ def backtest_mv(
     )
 
 
+@app.command("derive-ceilings")
+def derive_ceilings(
+    since: str = typer.Option(
+        "2025-07-29", "--since", help="Count transfers from this date (YYYY-MM-DD)"
+    ),
+    bands: str = typer.Option("0,5000000,15000000", "--bands", help="Band lower bounds in euros"),
+    min_winners: int = typer.Option(
+        30, "--min-winners", help="Refuse to propose below this many priced buys"
+    ),
+):
+    """Propose price-band overbid caps from what the league's buyers paid (read-only).
+
+    Rival offers are never visible; completed transfers are. Every buy in the
+    league, priced against the market value in force that day
+    (`transfer_premiums`, migration 024), says what it took to win that
+    listing. This prints, per market-value band, the premium the winners paid
+    (p25/p50/p75) beside our own bids from the auction ledger, and proposes
+    each band's p75 as its cap. Below --min-winners it prints the table and
+    proposes nothing: a thin sample must not move real-money caps.
+
+    Changes nothing. Paste the proposed line into .env / the Function's app
+    settings as OVERBID_PRICE_BANDS by hand, after reading n.
+    """
+    from .services.ceiling_derivation import derive_price_bands
+    from .store import connect
+    from .store.transfer_study import our_bids_since, winners_since
+
+    since_ts = _parse_day(since)
+    lowers = [int(x) for x in bands.split(",") if x.strip()]
+
+    _ensure_store()
+    with connect() as conn:
+        winners = winners_since(conn, since_ts)
+        ours = our_bids_since(conn, since_ts)
+    report = derive_price_bands(winners, bands=lowers, min_winners=min_winners, our_bids=ours)
+
+    table = Table(
+        title=f"Buys since {since} by market-value band (league {len(winners)}, ours {len(ours)})"
+    )
+    for column in (
+        "Band from",
+        "League buys",
+        "Paid p25",
+        "p50",
+        "p75",
+        "Our bids",
+        "Won",
+        "We bid (median)",
+    ):
+        table.add_column(column, justify="right")
+    for b in report.bands:
+        table.add_row(
+            f"EUR {b.lower:,}",
+            str(b.n_winners),
+            _pct(b.winner_p25),
+            _pct(b.winner_p50),
+            _pct(b.winner_p75),
+            str(b.n_our_bids),
+            str(b.n_our_wins),
+            _pct(b.our_median),
+        )
+    console.print(table)
+
+    if report.env_line is None:
+        console.print(
+            f"[yellow]{report.n_winners} priced buys; {report.min_winners} are needed "
+            f"before a proposal. Nothing proposed.[/yellow]"
+        )
+        return
+    console.print(f"[cyan]{report.n_winners} priced buys. Proposed caps (each band's p75):[/cyan]")
+    console.print(f"  {report.env_line}")
+    console.print(
+        "[dim]Read-only. Apply by setting OVERBID_PRICE_BANDS in .env / the app settings.[/dim]"
+    )
+
+
+@app.command("transfer-study")
+def transfer_study(
+    season: str = typer.Option("", "--season", help="One season, e.g. 2026/2027 (default: all)"),
+    bands: str = typer.Option("0,5000000,15000000", "--bands", help="Band lower bounds in euros"),
+):
+    """What the league paid, and what it got: every buy since 2021, read-only.
+
+    Two tables from `transfer_outcomes` (migration 024). Per season and
+    market-value band: how many buys, the premium paid over the market value
+    in force (median, p75), the player's points per match over the five
+    matches that followed, how many were resold and at a profit, the median
+    realised profit and days held. Then per manager: the same, ranked by
+    realised profit. Premiums exist from 2025-07-29 (Kickbase keeps one year
+    of market values); points and resales reach back to 2021.
+    """
+    from .store import connect
+    from .store.transfer_study import study_by_band, study_by_manager
+
+    lowers = [int(x) for x in bands.split(",") if x.strip()]
+    chosen = season.strip() or None
+
+    _ensure_store()
+    with connect() as conn:
+        by_band = study_by_band(conn, bands=lowers, season=chosen)
+        by_manager = study_by_manager(conn, season=chosen)
+
+    def _band(value) -> str:
+        return "unpriced" if int(value) < 0 else f"EUR {int(value):,}+"
+
+    def _num(value, fmt="{:,.0f}") -> str:
+        return "—" if value is None else fmt.format(float(value))
+
+    table = Table(title="What the league paid, and what it got — by season and band")
+    for column in (
+        "Season",
+        "Band",
+        "Buys",
+        "Priced",
+        "Paid p50",
+        "p75",
+        "Pts/match p50",
+        "Resold",
+        "At profit",
+        "Profit p50",
+        "Held d p50",
+    ):
+        table.add_column(column, justify="right")
+    for r in by_band:
+        table.add_row(
+            r["season"],
+            _band(r["band"]),
+            str(r["buys"]),
+            str(r["priced"]),
+            _pct(r["premium_p50"]),
+            _pct(r["premium_p75"]),
+            _num(r["points_p50"], "{:.1f}"),
+            str(r["resold"]),
+            str(r["resold_at_profit"]),
+            _num(r["profit_p50"]),
+            _num(r["held_p50"], "{:.0f}"),
+        )
+    console.print(table)
+
+    managers = Table(title=f"Managers — {chosen or 'all seasons'}, ranked by realised profit")
+    for column in (
+        "Manager",
+        "Buys",
+        "Paid p50",
+        "Pts/match p50",
+        "Spent",
+        "Resold",
+        "At profit",
+        "Realised profit",
+    ):
+        managers.add_column(column, justify="right")
+    for r in by_manager:
+        name = f"{r['manager']}{' (us)' if r['is_self'] else ''}"
+        managers.add_row(
+            name,
+            str(r["buys"]),
+            _pct(r["premium_p50"]),
+            _num(r["points_p50"], "{:.1f}"),
+            _num(r["spent"]),
+            str(r["resold"]),
+            str(r["resold_at_profit"]),
+            _num(r["realised_profit"]),
+        )
+    console.print(managers)
+    console.print("[dim]Read-only. Premiums from 2025-07-29; points and resales from 2021.[/dim]")
+
+
+def _parse_day(text: str) -> float:
+    from datetime import datetime
+
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").timestamp()
+    except ValueError as e:
+        console.print(f"[red]--since must be YYYY-MM-DD: {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+
+def _pct(value) -> str:
+    return "—" if value is None else f"{float(value):+.1f}%"
+
+
 @app.command("diagnose-flips")
 def diagnose_flips(
     learner_db: Path = typer.Option(

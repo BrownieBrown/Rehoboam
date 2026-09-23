@@ -722,6 +722,18 @@ class Trader:
         # use it; position counting happens directly on squad_scores.
         roster_context: dict = {}
 
+        # An empty slot is measured against an unknown starter at the position,
+        # not against 0.0 — see `best_eleven_gain`. A failure here would quietly
+        # restore the full-EP gain (every cold-start body a must-have), so it
+        # is logged loudly rather than swallowed.
+        try:
+            from .scoring.v2.adapter import cold_start_starter_ep
+
+            replacement_ep = cold_start_starter_ep()
+        except Exception:
+            logger.exception("replacement level unavailable — gap fills measured against 0.0")
+            replacement_ep = None
+
         engine = DecisionEngine(
             # Fallbacks are real-points values (REH-55). The old 30.0 / 5.0 were
             # 0-100 index thresholds — leaving them here would silently disable
@@ -729,6 +741,7 @@ class Trader:
             min_ep_to_buy=getattr(self.settings, "min_expected_points_to_buy", 35.0),
             min_ep_upgrade=getattr(self.settings, "min_ep_upgrade_threshold", 40.0),
             target_ep_bar=getattr(self.settings, "target_ep_bar", 0.0),
+            replacement_ep=replacement_ep,
         )
 
         # Always compute both buy recs and trade pairs so the unified trade

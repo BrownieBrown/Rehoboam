@@ -25,9 +25,53 @@ have won none; the lowest winning overbid was 8.4%.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+
+#: Price bands: ``((lower_market_value, max_pct), ...)`` sorted by lower bound.
+#: The band a market value falls in caps the tier percentage from above.
+PriceBands = tuple[tuple[int, float], ...]
+
+
+def parse_price_bands(raw: str) -> PriceBands:
+    """Parse ``OVERBID_PRICE_BANDS``: ``"5000000:35,15000000:20"``.
+
+    Each entry is ``<lower market value in euros>:<max overbid pct>``. Empty
+    means no bands — the tier percentage alone. Order does not matter; the
+    result is sorted by lower bound. Malformed input raises ``ValueError`` so a
+    typo fails at startup, not at bid time.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ()
+    bands: dict[int, float] = {}
+    for entry in text.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            lower_s, pct_s = entry.split(":")
+            lower, pct = int(lower_s.strip()), float(pct_s.strip())
+        except ValueError as e:
+            raise ValueError(
+                f"OVERBID_PRICE_BANDS entry {entry!r} is not '<market value>:<pct>'"
+            ) from e
+        if lower < 0 or pct < 0:
+            raise ValueError(f"OVERBID_PRICE_BANDS entry {entry!r} must not be negative")
+        if lower in bands:
+            raise ValueError(f"OVERBID_PRICE_BANDS names the band at {lower} twice")
+        bands[lower] = pct
+    return tuple(sorted(bands.items()))
+
+
+def price_band_pct(market_value: int, price_bands: Sequence[tuple[int, float]]) -> float | None:
+    """The band cap for this market value, or None when no band covers it."""
+    cap: float | None = None
+    for lower, pct in price_bands:
+        if market_value >= lower:
+            cap = pct
+    return cap
 
 
 class Tier(str, Enum):
@@ -71,12 +115,20 @@ def max_allowed_bid(
     tier: Tier | str | None,
     floor_eur: int,
     tier_pcts: Mapping[Tier, float],
+    price_bands: Sequence[tuple[int, float]] = (),
 ) -> int:
     """The highest bid permitted for this player, in euros.
 
     Returns 0 for a non-positive market value: `check_buy` reports that as its
     own failure, and this must not hand back a spendable ceiling computed from
     a nonsense input.
+
+    **The price band caps the tier from above.** The tier says how much a
+    player is worth to us; the band says what it takes to win at his price.
+    Measured 2026-09-21 on `auction_outcomes`: at 15m+ we bid +24–26% and the
+    winners paid a median of +9%; under 5m we bid +13–15% and winners paid
+    +59%. A band only ever lowers a ceiling, so the tiers keep their
+    discipline at the cheap end and the euro floor stays.
     """
     if market_value <= 0:
         return 0
@@ -89,6 +141,9 @@ def max_allowed_bid(
             resolved = FALLBACK_TIER
 
     pct = tier_pcts.get(resolved, tier_pcts[FALLBACK_TIER])
+    band = price_band_pct(market_value, price_bands)
+    if band is not None:
+        pct = min(pct, band)
     return market_value + max(floor_eur, int(market_value * pct / 100.0))
 
 
@@ -103,6 +158,7 @@ class BidCeilingPolicy:
 
     floor_eur: int
     tier_pcts: Mapping[Tier, float]
+    price_bands: PriceBands = ()
 
     def max_bid(self, market_value: int, tier: Tier | str | None) -> int:
         """The highest bid permitted for this player, in euros."""
@@ -111,4 +167,5 @@ class BidCeilingPolicy:
             tier=tier,
             floor_eur=self.floor_eur,
             tier_pcts=self.tier_pcts,
+            price_bands=self.price_bands,
         )
