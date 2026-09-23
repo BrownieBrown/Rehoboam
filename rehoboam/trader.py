@@ -54,6 +54,12 @@ console = Console()
 _UNSET: object = object()
 
 
+def _grade_of(score) -> str | None:
+    """The score's data-quality grade, or None when it carries none."""
+    quality = getattr(score, "data_quality", None)
+    return getattr(quality, "grade", None) if quality is not None else None
+
+
 def _pair_alternatives(pairs: list) -> dict[str, float]:
     """For each swap's buy, the best other swap buying the same position."""
     by_position: dict[str, list[tuple[str, float]]] = {}
@@ -938,6 +944,7 @@ class Trader:
                     forecast_change_pct=self.mv_forecasts.get(rec.player.id),
                     urgent=urgent,
                     alternative_gain=alternatives.get(rec.player.id),
+                    data_grade=_grade_of(rec.score),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -975,6 +982,7 @@ class Trader:
                     forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
                     urgent=urgent,
                     alternative_gain=alternatives.get(pair.buy_player.id),
+                    data_grade=_grade_of(pair.buy_score),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1085,6 +1093,7 @@ class Trader:
                     forecast_change_pct=self.mv_forecasts.get(rec.player.id),
                     urgent=bool(result.get("urgent", False)),
                     alternative_gain=result.get("alternative_gains", {}).get(rec.player.id),
+                    data_grade=_grade_of(rec.score),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1127,6 +1136,7 @@ class Trader:
                     forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
                     urgent=bool(result.get("urgent", False)),
                     alternative_gain=result.get("alternative_gains", {}).get(pair.buy_player.id),
+                    data_grade=_grade_of(pair.buy_score),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:

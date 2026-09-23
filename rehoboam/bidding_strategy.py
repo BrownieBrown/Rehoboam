@@ -338,6 +338,7 @@ class SmartBidding:
         forecast_change_pct: float | None = None,
         urgent: bool = False,
         alternative_gain: float | None = None,
+        data_grade: str | None = None,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -378,6 +379,11 @@ class SmartBidding:
                 candidates at this position — what the bot gets if it loses
                 this listing. Winning is worth the gain over it, not the whole
                 gain (`services/value_bid.py`). None: unknown, treated as 0.
+            data_grade: The score's data-quality grade ("A" = fitted history).
+                Only a must-have the model has actually fitted is exempt from
+                the break-even cap; one scored on the position prior (grade C,
+                or unknown) is capped like a strong upgrade, because its
+                "gain" is a guess and the league likely knows what we don't.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -567,12 +573,17 @@ class SmartBidding:
         # pay past it — the board names the expected resale. Only ever lowers
         # a bid: under 5m the measured premium is inflated by the player's own
         # rise during the listing, so it must never be read as "pay more".
+        # Itakura, 2026-09-23: a swap "gain" of 63.5 points on a grade-C prior
+        # (no fitted history) was priced at 16m of worth and bid to the
+        # ceiling; only his falling trend saved it. The exemption is for a
+        # must-have the model has seen, not one it is guessing at.
+        exempt_from_cap = ep_tier == "must_have" and data_grade == "A"
         break_even = None
         expected_resale = None
         if self.profit_curve is not None:
             try:
                 break_even = self.profit_curve.break_even(int(market_value))
-                if ep_tier != "must_have" and break_even is not None:
+                if not exempt_from_cap and break_even is not None:
                     if overbid_pct > break_even.premium_pct:
                         logger.info(
                             "ep-bid break-even player=%s tier=%s premium=%.1f%% -> %.1f%% "
@@ -732,13 +743,18 @@ class SmartBidding:
             )
         if forecast_applied is not None:
             reasoning_parts.append(f"next update forecast {forecast_applied:+.1f}%")
-        if break_even is not None and ep_tier != "must_have":
+        if break_even is not None and not exempt_from_cap:
             reasoning_parts.append(
                 f"capped at break-even +{break_even.premium_pct:.1f}% "
                 f"(median resale {break_even.resale_profit_pct_at:+.1f}% past it, "
                 f"n={break_even.sample})"
+                + (
+                    f" — must-have on data grade {data_grade or '?'}, not fitted"
+                    if ep_tier == "must_have"
+                    else ""
+                )
             )
-        if expected_resale is not None and ep_tier == "must_have":
+        if expected_resale is not None and exempt_from_cap:
             reasoning_parts.append(f"expected resale {expected_resale:+.1f}% at this premium")
         if offer_count >= 2:
             reasoning_parts.append(f"contested ({offer_count} offers)")
