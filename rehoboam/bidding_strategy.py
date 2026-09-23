@@ -120,6 +120,17 @@ def _contested_skip_reason(
     return None
 
 
+#: Tier -> the quantile of the league's winning premiums that tier bids at.
+#: A must-have beats three of four listings that changed hands in its band;
+#: a marginal candidate bids the cheapest winning premium, i.e. the floor.
+DEFAULT_CURVE_QUANTILES = {
+    "must_have": 0.75,
+    "strong_upgrade": 0.50,
+    "solid_upgrade": 0.25,
+    "marginal": 0.0,
+}
+
+
 def _contested_overbid_bump(ep_tier: str, offer_count: int) -> float:
     """Extra overbid percentage to apply when we're contested but committing.
 
@@ -180,8 +191,12 @@ class SmartBidding:
         tier_solid_upgrade: float = TIER_SOLID_UPGRADE,
         full_commit_gain: float = BID_FULL_COMMIT_GAIN,  # gain earning max budget share
         ceiling_policy=None,  # REH-99: the ceiling the safety gate enforces
+        win_curve=None,  # services.win_curve.WinCurve: what the league's winners paid
+        curve_quantiles: dict[str, float] | None = None,  # tier -> quantile on that curve
     ):
         self.ceiling_policy = ceiling_policy
+        self.win_curve = win_curve
+        self.curve_quantiles = dict(curve_quantiles or DEFAULT_CURVE_QUANTILES)
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
         self.high_value_threshold = high_value_threshold
@@ -223,6 +238,73 @@ class SmartBidding:
             return self.elite_max_overbid_pct if ep_tier == "must_have" else self.max_overbid_pct
         ceiling = self.ceiling_policy.max_bid(int(market_value), ep_tier)
         return max(0.0, (ceiling - market_value) / market_value * 100.0)
+
+    def _stack_overbid(
+        self,
+        *,
+        tier_bonus: float,
+        confidence: float,
+        league_competitive_level: float,
+        demand_adjustment: float,
+        asking_price: int,
+        marginal_ep_gain: float,
+        market_value: int,
+        budget_ceiling: int,
+        player_id: str | None,
+    ) -> float:
+        """The pre-curve bid base: typed constants plus the learned override.
+
+        Kept as the fallback for when the store holds too little evidence for
+        a curve (or none: the replay, a fresh league). Base 5% + tier bonus +
+        confidence bonus + league activity + demand, then, when
+        `bid_learner.get_ep_recommended_overbid` returns a positive number,
+        that number REPLACES the stack as the base.
+
+        Until 2026-09-22 the override ran LAST, after the trend scaling, and
+        so undid it. Itakura, session 9c0a6a742dba: market value down 19.4%
+        in a week, the stack cut 25% to 7.5%, the override put 32.3% back
+        (`stack=7.5% learned=32.3% applied=32.3%`) and the bot offered
+        8,752,708 for a grade-C defender scored on the position prior.
+        Marco cancelled it by hand. The trend factor now applies to whichever
+        base won, in `calculate_ep_bid`.
+        """
+        overbid_pct = self.default_overbid_pct + tier_bonus
+        if confidence >= 0.9:
+            overbid_pct += 5.0
+        elif confidence >= 0.7:
+            overbid_pct += 3.0
+        overbid_pct += league_competitive_level
+        overbid_pct += demand_adjustment
+
+        # The previous call here passed kwargs that didn't match the method
+        # signature and treated the dict return as a number, so every bid
+        # since the method was added went through with the EP-bid learner
+        # silently disabled by the surrounding `except Exception` (REH-30).
+        if self.bid_learner:
+            try:
+                learned = self.bid_learner.get_ep_recommended_overbid(
+                    asking_price=asking_price,
+                    marginal_ep_gain=marginal_ep_gain,
+                    market_value=market_value,
+                    budget_ceiling=budget_ceiling,
+                )
+                learned_pct = learned.get("recommended_overbid_pct", 0.0)
+                if learned_pct > 0:
+                    logger.info(
+                        "ep-bid learned-override player=%s stack=%.1f%% "
+                        "learned=%.1f%% (before trend and ceiling) | %s",
+                        player_id,
+                        overbid_pct,
+                        learned_pct,
+                        learned.get("reason", ""),
+                    )
+                    overbid_pct = learned_pct
+            except Exception:
+                logger.exception(
+                    "ep-bid learned-override failed for player=%s — using stack default",
+                    player_id,
+                )
+        return overbid_pct
 
     def calculate_ep_bid(
         self,
@@ -374,64 +456,50 @@ class SmartBidding:
             except Exception:
                 pass
 
-        # Base overbid: 5% default + tier bonus + confidence bonus
-        overbid_pct = self.default_overbid_pct + tier_bonus
-
-        if confidence >= 0.9:
-            overbid_pct += 5.0
-        elif confidence >= 0.7:
-            overbid_pct += 3.0
-
-        # Apply league competitive + demand adjustments
-        overbid_pct += league_competitive_level
-        overbid_pct += demand_adjustment
-
-        # Try EP-specific learned overbid if available. It REPLACES the stack
-        # above as the base of the bid — and only the base. The trend factor
-        # and the contested bump below apply to whichever base won.
-        #
-        # The previous call here passed kwargs that didn't match the method
-        # signature and treated the dict return as a number, so every bid
-        # since the method was added went through with the EP-bid learner
-        # silently disabled by the surrounding `except Exception`. Result:
-        # `auction_outcomes` data accumulated but never influenced bids
-        # (REH-30).
-        #
-        # Until 2026-09-22 the override ran LAST, after the trend scaling, and
-        # so undid it. Itakura, session 9c0a6a742dba: market value down 19.4%
-        # in a week, the stack cut 25% to 7.5%, the override put 32.3% back
-        # (`stack=7.5% learned=32.3% applied=32.3%`) and the bot offered
-        # 8,752,708 for a grade-C defender scored on the position prior.
-        # Marco cancelled it by hand. A falling market value is the league
-        # pricing in something we have not seen yet; no EP-derived number is a
-        # reason to ignore that.
-        if self.bid_learner:
+        # The win curve (2026-09-23): the premium the league's winners actually
+        # paid in this price band, at the quantile the tier bids at. It is the
+        # base of the bid when there is evidence; the stack below is the
+        # fallback when there is not (no store, thin sample, curve disabled).
+        # Measured on 1,397 buys: the median winner paid +8-10% in every band
+        # and the 15m+ p75 was +18.4%, while the stack reached 35%.
+        curve_point = None
+        if self.win_curve is not None:
             try:
-                learned = self.bid_learner.get_ep_recommended_overbid(
-                    asking_price=asking_price,
-                    marginal_ep_gain=marginal_ep_gain,
-                    market_value=market_value,
-                    budget_ceiling=budget_ceiling,
+                curve_point = self.win_curve.premium_at(
+                    int(market_value), self.curve_quantiles.get(ep_tier, 0.0)
                 )
-                learned_pct = learned.get("recommended_overbid_pct", 0.0)
-                if learned_pct > 0:
-                    stack_pct = overbid_pct
-                    overbid_pct = learned_pct
-                    logger.info(
-                        "ep-bid learned-override player=%s stack=%.1f%% "
-                        "learned=%.1f%% (before trend and ceiling) | %s",
-                        player_id,
-                        stack_pct,
-                        learned_pct,
-                        learned.get("reason", ""),
-                    )
             except Exception:
-                logger.exception(
-                    "ep-bid learned-override failed for player=%s — using stack default",
-                    player_id,
-                )
+                logger.exception("win curve failed for player=%s — using the stack", player_id)
+                curve_point = None
 
-        # Trend-based overbid reduction — applied to the learned base too.
+        if curve_point is not None:
+            overbid_pct = curve_point.premium_pct
+            logger.info(
+                "ep-bid curve player=%s tier=%s q=%.2f premium=%.1f%% band=%d n=%d pooled=%s",
+                player_id,
+                ep_tier,
+                curve_point.quantile,
+                curve_point.premium_pct,
+                curve_point.band_lower,
+                curve_point.sample,
+                curve_point.pooled,
+            )
+        else:
+            overbid_pct = self._stack_overbid(
+                tier_bonus=tier_bonus,
+                confidence=confidence,
+                league_competitive_level=league_competitive_level,
+                demand_adjustment=demand_adjustment,
+                asking_price=asking_price,
+                marginal_ep_gain=marginal_ep_gain,
+                market_value=market_value,
+                budget_ceiling=budget_ceiling,
+                player_id=player_id,
+            )
+
+        # Trend-based overbid reduction — applied to the curve and the learned
+        # base too. A falling market value is the league pricing in something
+        # we have not seen yet; no evidence of what wins overrides that.
         if trend_change_pct is not None:
             if trend_change_pct < -10:
                 overbid_pct *= 0.3
@@ -451,7 +519,6 @@ class SmartBidding:
         # The ceiling comes from the ONE policy the safety gate enforces.
         max_overbid = self._max_overbid_pct(ep_tier, market_value)
         overbid_pct = min(overbid_pct, max_overbid)
-
         # Calculate raw bid from overbid percentage
         overbid_amount = int(asking_price * (overbid_pct / 100))
         overbid_amount = self._round_to_increment(overbid_amount)
@@ -529,6 +596,11 @@ class SmartBidding:
         ]
         if is_dgw:
             reasoning_parts.append("DGW")
+        if curve_point is not None:
+            reasoning_parts.append(
+                f"curve p{int(round(curve_point.quantile * 100))} of {curve_point.sample} "
+                f"{'league' if curve_point.pooled else 'band'} buys"
+            )
         if offer_count >= 2:
             reasoning_parts.append(f"contested ({offer_count} offers)")
         if sell_plan:

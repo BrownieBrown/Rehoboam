@@ -137,6 +137,13 @@ class Trader:
         self.bidding = SmartBidding(
             bid_learner=bid_learner,
             activity_feed_learner=activity_feed_learner,
+            # 2026-09-23: the premium the league's winners actually paid in the
+            # player's price band, by tier. None (no store, thin evidence,
+            # `BID_CURVE_ENABLED=false`) leaves the static stack in charge.
+            win_curve=self._load_win_curve(bid_learner, settings),
+            curve_quantiles=(
+                settings.curve_quantiles() if hasattr(settings, "curve_quantiles") else None
+            ),
             # Real-points marginal-gain bands, overridable from `.env` so they
             # can be re-tuned mid-season once the live market gives evidence.
             tier_must_have=getattr(settings, "bid_tier_must_have", TIER_MUST_HAVE),
@@ -152,6 +159,42 @@ class Trader:
     # ------------------------------------------------------------------
     # Matchday timing
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_win_curve(bid_learner, settings):
+        """The league's winning premiums per price band, from `transfer_premiums`.
+
+        One query per Trader, best-effort: a failure is logged loudly and the
+        bidder falls back to its typed stack, which is exactly the bidder
+        that overbid on 2026-09-22 — so the log line is the alarm.
+        """
+        if bid_learner is None or not getattr(settings, "bid_curve_enabled", True):
+            return None
+        try:
+            import time
+
+            from .services.win_curve import WinCurve
+            from .store.transfer_study import winners_since
+
+            lookback = int(getattr(settings, "bid_curve_lookback_days", 365))
+            with bid_learner.connection() as conn:
+                rows = winners_since(conn, time.time() - lookback * 86400)
+            curve = WinCurve.from_rows(
+                rows,
+                bands=settings.curve_bands(),
+                min_sample=int(getattr(settings, "bid_curve_min_sample", 30)),
+            )
+            logger.info(
+                "win curve: %d priced league buys in the last %dd, bands=%s, min_sample=%d",
+                curve.total,
+                lookback,
+                list(curve.bands),
+                curve.min_sample,
+            )
+            return curve
+        except Exception:
+            logger.exception("win curve unavailable — bidding from the static stack")
+            return None
 
     def next_kickoff(self, league, *, now: datetime | None = None) -> NextKickoff:
         """The next kickoff, schedule-first with `/myeleven` as the cross-check.
