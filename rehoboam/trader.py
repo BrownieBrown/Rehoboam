@@ -16,6 +16,7 @@ has been removed.
 """
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -39,6 +40,10 @@ from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
 
 logger = logging.getLogger(__name__)
+
+#: (store, settings) -> (loaded_at, win curve, profit curve). See Trader._load_curves.
+_CURVE_CACHE: dict = {}
+_CURVE_CACHE_TTL_S = 3600.0
 
 console = Console()
 
@@ -134,16 +139,19 @@ class Trader:
         self.history_cache = ValueHistoryCache()
         self.trend_service = TrendService(self.api.client, self.history_cache)
         self.matchup_analyzer = MatchupAnalyzer()
+        # 2026-09-23: the premium the league's winners actually paid in the
+        # player's price band (win curve) and where paying more stops paying
+        # back (profit curve). None (no store, thin evidence, disabled) leaves
+        # the static stack in charge.
+        win_curve, profit_curve = self._load_curves(bid_learner, settings)
         self.bidding = SmartBidding(
             bid_learner=bid_learner,
             activity_feed_learner=activity_feed_learner,
-            # 2026-09-23: the premium the league's winners actually paid in the
-            # player's price band, by tier. None (no store, thin evidence,
-            # `BID_CURVE_ENABLED=false`) leaves the static stack in charge.
-            win_curve=self._load_win_curve(bid_learner, settings),
+            win_curve=win_curve,
             curve_quantiles=(
                 settings.curve_quantiles() if hasattr(settings, "curve_quantiles") else None
             ),
+            profit_curve=profit_curve,
             # Real-points marginal-gain bands, overridable from `.env` so they
             # can be re-tuned mid-season once the live market gives evidence.
             tier_must_have=getattr(settings, "bid_tier_must_have", TIER_MUST_HAVE),
@@ -161,40 +169,68 @@ class Trader:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _load_win_curve(bid_learner, settings):
-        """The league's winning premiums per price band, from `transfer_premiums`.
+    def _load_curves(bid_learner, settings):
+        """(win curve, profit curve) from the store, cached per process for an hour.
 
-        One query per Trader, best-effort: a failure is logged loudly and the
-        bidder falls back to its typed stack, which is exactly the bidder
-        that overbid on 2026-09-22 — so the log line is the alarm.
+        The win curve is what the league's winners paid per price band
+        (`transfer_premiums`); the profit curve is where paying more stops
+        paying back (`transfer_outcomes`). Both are best-effort: a failure is
+        logged loudly and the bidder falls back to its typed stack, which is
+        exactly the bidder that overbid on 2026-09-22 — the log line is the
+        alarm. A session builds several Traders, so the two queries are cached
+        by store and settings rather than run each time.
         """
-        if bid_learner is None or not getattr(settings, "bid_curve_enabled", True):
-            return None
+        if bid_learner is None:
+            return None, None
+        want_win = bool(getattr(settings, "bid_curve_enabled", True))
+        want_profit = bool(getattr(settings, "bid_profit_cap_enabled", True))
+        if not (want_win or want_profit):
+            return None, None
+        key = (
+            str(getattr(bid_learner, "dsn", "")),
+            int(getattr(settings, "bid_curve_lookback_days", 365)),
+            tuple(settings.curve_bands()) if hasattr(settings, "curve_bands") else (),
+            int(getattr(settings, "bid_curve_min_sample", 30)),
+            float(getattr(settings, "bid_profit_step_pct", 3.0)),
+            int(getattr(settings, "bid_profit_min_sample", 10)),
+            want_win,
+            want_profit,
+        )
+        cached = _CURVE_CACHE.get(key)
+        if cached is not None and time.time() - cached[0] < _CURVE_CACHE_TTL_S:
+            return cached[1], cached[2]
         try:
-            import time
-
+            from .services.profit_curve import ProfitCurve
             from .services.win_curve import WinCurve
-            from .store.transfer_study import winners_since
+            from .store.transfer_study import outcomes_since, winners_since
 
-            lookback = int(getattr(settings, "bid_curve_lookback_days", 365))
+            since = time.time() - key[1] * 86400
+            bands = list(key[2]) or [0]
+            win_curve = profit_curve = None
             with bid_learner.connection() as conn:
-                rows = winners_since(conn, time.time() - lookback * 86400)
-            curve = WinCurve.from_rows(
-                rows,
-                bands=settings.curve_bands(),
-                min_sample=int(getattr(settings, "bid_curve_min_sample", 30)),
-            )
+                if want_win:
+                    win_curve = WinCurve.from_rows(
+                        winners_since(conn, since), bands=bands, min_sample=key[3]
+                    )
+                if want_profit:
+                    profit_curve = ProfitCurve.from_rows(
+                        outcomes_since(conn, since),
+                        bands=bands,
+                        step_pct=key[4],
+                        min_sample=key[5],
+                    )
             logger.info(
-                "win curve: %d priced league buys in the last %dd, bands=%s, min_sample=%d",
-                curve.total,
-                lookback,
-                list(curve.bands),
-                curve.min_sample,
+                "bid curves: win=%s priced league buys, profit=%s, last %dd, bands=%s",
+                win_curve.total if win_curve is not None else "off",
+                "on" if profit_curve is not None else "off",
+                key[1],
+                bands,
             )
-            return curve
+            _CURVE_CACHE[key] = (time.time(), win_curve, profit_curve)
+            return win_curve, profit_curve
         except Exception:
-            logger.exception("win curve unavailable — bidding from the static stack")
-            return None
+            logger.exception("bid curves unavailable — bidding from the static stack")
+            return None, None
 
     def next_kickoff(self, league, *, now: datetime | None = None) -> NextKickoff:
         """The next kickoff, schedule-first with `/myeleven` as the cross-check.
