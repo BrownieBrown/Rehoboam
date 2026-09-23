@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 METHOD = "momentum-v1"
@@ -81,6 +81,24 @@ def reading_window(fetched_at: float) -> tuple[date, str] | None:
         return (local.date(), PRE)
     if t >= POST_START:
         return (local.date(), POST)
+    return None
+
+
+def next_update_day(now: float) -> date | None:
+    """The Berlin day whose ~22:00 market-value update is the next one ahead.
+
+    Before the cutoff the day's own update is still ahead; from 22:30 it has
+    landed and the next one is tomorrow's; in between the answer is unknown
+    (the reading may or may not include it), and the bidder uses no forecast.
+    This is what a bid placed now should be judged against: the auction
+    settles after at least one more update.
+    """
+    local = datetime.fromtimestamp(now, tz=BERLIN)
+    t = local.time()
+    if t < PRE_CUTOFF:
+        return local.date()
+    if t >= POST_START:
+        return local.date() + timedelta(days=1)
     return None
 
 

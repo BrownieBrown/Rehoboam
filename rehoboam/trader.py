@@ -144,6 +144,7 @@ class Trader:
         # back (profit curve). None (no store, thin evidence, disabled) leaves
         # the static stack in charge.
         win_curve, profit_curve = self._load_curves(bid_learner, settings)
+        self.mv_forecasts: dict[str, float] = self._load_forecasts(bid_learner, settings)
         self.bidding = SmartBidding(
             bid_learner=bid_learner,
             activity_feed_learner=activity_feed_learner,
@@ -152,6 +153,7 @@ class Trader:
                 settings.curve_quantiles() if hasattr(settings, "curve_quantiles") else None
             ),
             profit_curve=profit_curve,
+            urgency_bump=float(getattr(settings, "bid_curve_urgency_bump", 0.15)),
             # Real-points marginal-gain bands, overridable from `.env` so they
             # can be re-tuned mid-season once the live market gives evidence.
             tier_must_have=getattr(settings, "bid_tier_must_have", TIER_MUST_HAVE),
@@ -167,6 +169,37 @@ class Trader:
     # ------------------------------------------------------------------
     # Matchday timing
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_forecasts(bid_learner, settings) -> dict[str, float]:
+        """player_id -> forecast move (percent) at the next market-value update.
+
+        Empty in the ambiguous window around the update, when the forecast is
+        off, or when anything fails: no forecast means no adjustment. Cached
+        per process for an hour, keyed by the update day.
+        """
+        if bid_learner is None or not getattr(settings, "bid_forecast_enabled", True):
+            return {}
+        try:
+            from .services.mv_forecast import next_update_day
+            from .store.mv_forecast_store import MvForecastStore
+
+            day = next_update_day(time.time())
+            if day is None:
+                logger.info("bid forecast: inside the update window — no forecast applied")
+                return {}
+            key = ("forecast", str(getattr(bid_learner, "dsn", "")), day.isoformat())
+            cached = _CURVE_CACHE.get(key)
+            if cached is not None and time.time() - cached[0] < _CURVE_CACHE_TTL_S:
+                return cached[1]
+            fractions = MvForecastStore(dsn=getattr(bid_learner, "dsn", None)).forecasts_for(day)
+            forecasts = {pid: 100.0 * f for pid, f in fractions.items()}
+            logger.info("bid forecast: %d players forecast for the %s update", len(forecasts), day)
+            _CURVE_CACHE[key] = (time.time(), forecasts)
+            return forecasts
+        except Exception:
+            logger.exception("bid forecast unavailable — no adjustment")
+            return {}
 
     @staticmethod
     def _load_curves(bid_learner, settings):
@@ -429,6 +462,13 @@ class Trader:
         squad_short, shortfall_reason = _determine_emergency(squad)
         is_emergency = squad_short and emergency_fill_due(
             days_to_match, window_days=self.settings.emergency_fill_days
+        )
+        # Urgent: cannot field eleven and kickoff is close — every tier reads
+        # the win curve higher (an empty slot is -100; see SmartBidding).
+        urgent = bool(
+            squad_short
+            and days_to_match is not None
+            and days_to_match <= int(getattr(self.settings, "bid_curve_urgency_days", 3))
         )
         if is_emergency:
             console.print(f"[bold red]⚠ FORMATION EMERGENCY — {shortfall_reason}[/bold red]")
@@ -864,6 +904,8 @@ class Trader:
                     player_id=rec.player.id,
                     is_dgw=rec.score.is_dgw,
                     pacing=pacing,
+                    forecast_change_pct=self.mv_forecasts.get(rec.player.id),
+                    urgent=urgent,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -898,6 +940,8 @@ class Trader:
                     player_id=pair.buy_player.id,
                     is_dgw=pair.buy_score.is_dgw,
                     pacing=pacing,
+                    forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
+                    urgent=urgent,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -929,6 +973,7 @@ class Trader:
             "market_players": market_player_map,
             "market_scores": {s.player_id: s for s in market_scores},
             "competitor_player_ids": competitor_player_ids,
+            "urgent": urgent,
             # REH-85: surfaced so get_ep_recommendations_with_trends can reuse
             # this session's context instead of rebuilding it — a rebuild
             # would mean a second get_my_bids call and could yield a
@@ -1003,6 +1048,8 @@ class Trader:
                     has_aggressive_competitors=has_whales,
                     is_dgw=rec.score.is_dgw,
                     pacing=pacing,
+                    forecast_change_pct=self.mv_forecasts.get(rec.player.id),
+                    urgent=bool(result.get("urgent", False)),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1042,6 +1089,8 @@ class Trader:
                     has_aggressive_competitors=has_whales,
                     is_dgw=pair.buy_score.is_dgw,
                     pacing=pacing,
+                    forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
+                    urgent=bool(result.get("urgent", False)),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:

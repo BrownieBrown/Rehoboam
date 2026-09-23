@@ -81,6 +81,20 @@ class MvForecastStore:
             )
             return cur.rowcount
 
+    def forecasts_for(self, day: date) -> dict[str, float]:
+        """player_id -> predicted change (fraction of base) for the update on `day`.
+
+        Only unscored rows: a scored forecast describes an update that has
+        already landed, and a bid must not discount it twice.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT player_id, predicted_pct FROM rehoboam.mv_forecasts "
+                "WHERE target_day = %s AND scored_at IS NULL AND predicted_pct IS NOT NULL",
+                (day,),
+            ).fetchall()
+        return {r["player_id"]: float(r["predicted_pct"]) for r in rows}
+
     def pending(self, before: date) -> list[dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute(

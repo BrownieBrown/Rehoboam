@@ -541,6 +541,24 @@ class Settings(BaseSettings):
         default=0.50, description="Quantile a strong upgrade bids at (the median winner)."
     )
     bid_curve_q_solid: float = Field(default=0.25, description="Quantile a solid upgrade bids at.")
+    bid_curve_urgency_days: int = Field(
+        default=3,
+        description=(
+            "With the squad unable to field eleven and kickoff within this many "
+            "days, every tier reads the win curve `bid_curve_urgency_bump` higher."
+        ),
+    )
+    bid_curve_urgency_bump: float = Field(
+        default=0.15, description="Quantile added to each tier's read when urgent (cap 0.95)."
+    )
+    bid_forecast_enabled: bool = Field(
+        default=True,
+        description=(
+            "Judge the premium against the market value after the next nightly "
+            "update, using `mv_forecasts`; a falling forecast lowers the bid, a "
+            "rising one changes nothing."
+        ),
+    )
     bid_curve_q_marginal: float = Field(
         default=0.0,
         description="Quantile a marginal candidate bids at: the cheapest winning bid, i.e. the floor.",
