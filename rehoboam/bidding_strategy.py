@@ -130,6 +130,8 @@ DEFAULT_CURVE_QUANTILES = {
     "marginal": 0.0,
 }
 
+from .services.value_bid import EMPTY_SLOT_PENALTY_POINTS, optimal_premium  # noqa: E402
+
 #: When the squad cannot field eleven and kickoff is close, every tier reads
 #: the win curve this much higher up: an empty slot is -100 points, and the
 #: emergency fill on the last day buys almost anything at any price anyway.
@@ -201,11 +203,13 @@ class SmartBidding:
         curve_quantiles: dict[str, float] | None = None,  # tier -> quantile on that curve
         profit_curve=None,  # services.profit_curve.ProfitCurve: where paying more stops paying back
         urgency_bump: float = DEFAULT_URGENCY_BUMP,  # quantile added when urgent
+        eur_per_point: float | None = None,  # what the league pays per expected point
     ):
         self.ceiling_policy = ceiling_policy
         self.win_curve = win_curve
         self.profit_curve = profit_curve
         self.urgency_bump = float(urgency_bump)
+        self.eur_per_point = float(eur_per_point) if eur_per_point else None
         self.curve_quantiles = dict(curve_quantiles or DEFAULT_CURVE_QUANTILES)
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -333,6 +337,7 @@ class SmartBidding:
         pacing: PacingContext | None = None,
         forecast_change_pct: float | None = None,
         urgent: bool = False,
+        alternative_gain: float | None = None,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -366,9 +371,13 @@ class SmartBidding:
                 auction settles after that update, so a falling forecast
                 lowers the premium to what it will be worth then. Applied
                 downward only — the gate checks against today's value.
-            urgent: The squad cannot field eleven and kickoff is close. Each
-                tier reads the win curve at a higher quantile, because losing
-                the auction now costs the -100 of an empty slot.
+            urgent: The squad cannot field eleven and kickoff is close. Winning
+                is worth the -100 of an empty slot more (value bid), or each
+                tier reads the win curve at a higher quantile (fallback).
+            alternative_gain: The best marginal gain among the other viable
+                candidates at this position — what the bot gets if it loses
+                this listing. Winning is worth the gain over it, not the whole
+                gain (`services/value_bid.py`). None: unknown, treated as 0.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -482,18 +491,51 @@ class SmartBidding:
         # fallback when there is not (no store, thin sample, curve disabled).
         # Measured on 1,397 buys: the median winner paid +8-10% in every band
         # and the 15m+ p75 was +18.4%, while the stack reached 35%.
+        # The value bid (2026-09-23): the premium that maximises F(p) x (what
+        # winning is worth - what it costs), where the worth is the gain over
+        # the next-best alternative priced at what the league pays per point,
+        # and an empty slot adds its -100 when urgent. Without a price per
+        # point or a unique gain, the curve is read at the tier's quantile.
         curve_point = None
+        value_point = None
         if self.win_curve is not None:
             try:
-                quantile = self.curve_quantiles.get(ep_tier, 0.0)
-                if urgent:
-                    quantile = min(URGENT_MAX_QUANTILE, quantile + self.urgency_bump)
-                curve_point = self.win_curve.premium_at(int(market_value), quantile)
+                if self.eur_per_point is not None:
+                    unique_gain = float(marginal_ep_gain) - float(alternative_gain or 0.0)
+                    if urgent:
+                        unique_gain += EMPTY_SLOT_PENALTY_POINTS
+                    value_point = optimal_premium(
+                        self.win_curve,
+                        market_value=int(market_value),
+                        unique_gain_pts=unique_gain,
+                        eur_per_point=self.eur_per_point,
+                    )
+                if value_point is None:
+                    quantile = self.curve_quantiles.get(ep_tier, 0.0)
+                    if urgent:
+                        quantile = min(URGENT_MAX_QUANTILE, quantile + self.urgency_bump)
+                    curve_point = self.win_curve.premium_at(int(market_value), quantile)
             except Exception:
                 logger.exception("win curve failed for player=%s — using the stack", player_id)
                 curve_point = None
+                value_point = None
 
-        if curve_point is not None:
+        if value_point is not None:
+            overbid_pct = value_point.premium_pct
+            logger.info(
+                "ep-bid value player=%s tier=%s unique_gain=%+.1f (alt %+.1f, urgent=%s) "
+                "worth=%d premium=%.1f%% win_share=%.2f ev=%d",
+                player_id,
+                ep_tier,
+                value_point.unique_gain_pts,
+                float(alternative_gain or 0.0),
+                urgent,
+                int(value_point.value_eur),
+                value_point.premium_pct,
+                value_point.win_share,
+                int(value_point.expected_value_eur),
+            )
+        elif curve_point is not None:
             overbid_pct = curve_point.premium_pct
             logger.info(
                 "ep-bid curve player=%s tier=%s q=%.2f premium=%.1f%% band=%d n=%d pooled=%s",
@@ -675,7 +717,14 @@ class SmartBidding:
         ]
         if is_dgw:
             reasoning_parts.append("DGW")
-        if curve_point is not None:
+        if value_point is not None:
+            reasoning_parts.append(
+                f"value bid: unique gain {value_point.unique_gain_pts:+.1f} pts "
+                f"(next best {float(alternative_gain or 0.0):+.1f}"
+                f"{', empty slot +100' if urgent else ''}) worth EUR "
+                f"{int(value_point.value_eur):,}, wins {value_point.win_share:.0%} of listings"
+            )
+        elif curve_point is not None:
             reasoning_parts.append(
                 f"curve p{int(round(curve_point.quantile * 100))} of {curve_point.sample} "
                 f"{'league' if curve_point.pooled else 'band'} buys"

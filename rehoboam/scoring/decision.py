@@ -98,6 +98,26 @@ def best_eleven_gain(
     )
 
 
+def alternative_gains(recs: list) -> dict[str, float]:
+    """For each buy recommendation, the best marginal gain among the OTHER
+    candidates at the same position — what the bot gets if it loses this one.
+
+    Winning a listing is worth the gain over that runner-up, not the whole
+    gain (`services/value_bid.py`). A candidate with no other viable
+    candidate at his position is unique: alternative 0.0.
+    """
+    by_position: dict[str, list[tuple[str, float]]] = {}
+    for rec in recs:
+        pos = str(getattr(rec.player, "position", "") or "")
+        by_position.setdefault(pos, []).append((rec.player.id, float(rec.marginal_ep_gain)))
+    out: dict[str, float] = {}
+    for pos, entries in by_position.items():
+        for pid, _gain in entries:
+            others = [g for other, g in entries if other != pid]
+            out[pid] = max(others) if others else 0.0
+    return out
+
+
 class DecisionEngine:
     """EP-based decision engine for buy/sell recommendations.
 

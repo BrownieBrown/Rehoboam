@@ -130,3 +130,30 @@ def study_by_manager(
         (season, season),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def eur_per_point(
+    conn: psycopg.Connection, *, min_market_value: int = 5_000_000, min_r2: float = 0.3
+) -> float | None:
+    """What the league pays per expected point: the price-on-points slope.
+
+    The same fit `player_table.fair_price` rests on (migration 022): likely
+    starters (`p_start >= 0.5`) from `min_market_value` up, price regressed
+    on predicted EP. None when the fit is too loose (r^2 below `min_r2`) or
+    too thin — a bad price per point would misprice every bid.
+    """
+    row = conn.execute(
+        """
+        select count(*) as n,
+               regr_slope(market_value, predicted_ep) as slope,
+               regr_r2(market_value, predicted_ep) as r2
+        from rehoboam.player_table
+        where p_start >= 0.5 and market_value >= %s and predicted_ep is not null
+        """,
+        (int(min_market_value),),
+    ).fetchone()
+    if not row or (row["n"] or 0) < 30 or row["slope"] is None or row["r2"] is None:
+        return None
+    if float(row["r2"]) < min_r2 or float(row["slope"]) <= 0:
+        return None
+    return float(row["slope"])
