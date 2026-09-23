@@ -551,6 +551,20 @@ class Settings(BaseSettings):
     bid_curve_urgency_bump: float = Field(
         default=0.15, description="Quantile added to each tier's read when urgent (cap 0.95)."
     )
+    bid_value_enabled: bool = Field(
+        default=True,
+        description=(
+            "Choose the premium that maximises expected value: the win share at "
+            "that premium times the gain over the next-best candidate, priced at "
+            "what the league pays per expected point (`services/value_bid.py`). "
+            "Off, or without a usable price per point, the curve is read at the "
+            "tier's quantile."
+        ),
+    )
+    bid_value_min_r2: float = Field(
+        default=0.3,
+        description="Minimum r^2 of the price-on-points fit before its slope prices a bid.",
+    )
     bid_forecast_enabled: bool = Field(
         default=True,
         description=(

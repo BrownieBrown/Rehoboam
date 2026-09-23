@@ -54,6 +54,23 @@ console = Console()
 _UNSET: object = object()
 
 
+def _pair_alternatives(pairs: list) -> dict[str, float]:
+    """For each swap's buy, the best other swap buying the same position."""
+    by_position: dict[str, list[tuple[str, float]]] = {}
+    for pair in pairs:
+        buy = getattr(pair, "buy_player", None)
+        if buy is None:
+            continue
+        pos = str(getattr(buy, "position", "") or "")
+        by_position.setdefault(pos, []).append((buy.id, float(getattr(pair, "ep_gain", 0.0))))
+    out: dict[str, float] = {}
+    for entries in by_position.values():
+        for pid, _gain in entries:
+            others = [g for other, g in entries if other != pid]
+            out[pid] = max(others) if others else 0.0
+    return out
+
+
 def _determine_emergency(squad: list) -> tuple[bool, str]:
     """Is the squad in a lineup emergency? Position-aware, not headcount-based.
 
@@ -143,7 +160,7 @@ class Trader:
         # player's price band (win curve) and where paying more stops paying
         # back (profit curve). None (no store, thin evidence, disabled) leaves
         # the static stack in charge.
-        win_curve, profit_curve = self._load_curves(bid_learner, settings)
+        win_curve, profit_curve, eur_per_point = self._load_curves(bid_learner, settings)
         self.mv_forecasts: dict[str, float] = self._load_forecasts(bid_learner, settings)
         self.bidding = SmartBidding(
             bid_learner=bid_learner,
@@ -154,6 +171,7 @@ class Trader:
             ),
             profit_curve=profit_curve,
             urgency_bump=float(getattr(settings, "bid_curve_urgency_bump", 0.15)),
+            eur_per_point=eur_per_point,
             # Real-points marginal-gain bands, overridable from `.env` so they
             # can be re-tuned mid-season once the live market gives evidence.
             tier_must_have=getattr(settings, "bid_tier_must_have", TIER_MUST_HAVE),
@@ -214,11 +232,12 @@ class Trader:
         by store and settings rather than run each time.
         """
         if bid_learner is None:
-            return None, None
+            return None, None, None
         want_win = bool(getattr(settings, "bid_curve_enabled", True))
         want_profit = bool(getattr(settings, "bid_profit_cap_enabled", True))
+        want_value = want_win and bool(getattr(settings, "bid_value_enabled", True))
         if not (want_win or want_profit):
-            return None, None
+            return None, None, None
         key = (
             str(getattr(bid_learner, "dsn", "")),
             int(getattr(settings, "bid_curve_lookback_days", 365)),
@@ -228,18 +247,20 @@ class Trader:
             int(getattr(settings, "bid_profit_min_sample", 10)),
             want_win,
             want_profit,
+            want_value,
+            float(getattr(settings, "bid_value_min_r2", 0.3)),
         )
         cached = _CURVE_CACHE.get(key)
         if cached is not None and time.time() - cached[0] < _CURVE_CACHE_TTL_S:
-            return cached[1], cached[2]
+            return cached[1], cached[2], cached[3]
         try:
             from .services.profit_curve import ProfitCurve
             from .services.win_curve import WinCurve
-            from .store.transfer_study import outcomes_since, winners_since
+            from .store.transfer_study import eur_per_point, outcomes_since, winners_since
 
             since = time.time() - key[1] * 86400
             bands = list(key[2]) or [0]
-            win_curve = profit_curve = None
+            win_curve = profit_curve = price_per_point = None
             with bid_learner.connection() as conn:
                 if want_win:
                     win_curve = WinCurve.from_rows(
@@ -252,18 +273,22 @@ class Trader:
                         step_pct=key[4],
                         min_sample=key[5],
                     )
+                if want_value:
+                    price_per_point = eur_per_point(conn, min_r2=key[9])
             logger.info(
-                "bid curves: win=%s priced league buys, profit=%s, last %dd, bands=%s",
+                "bid curves: win=%s priced league buys, profit=%s, eur/point=%s, "
+                "last %dd, bands=%s",
                 win_curve.total if win_curve is not None else "off",
                 "on" if profit_curve is not None else "off",
+                f"{price_per_point:,.0f}" if price_per_point else "none (quantile read)",
                 key[1],
                 bands,
             )
-            _CURVE_CACHE[key] = (time.time(), win_curve, profit_curve)
-            return win_curve, profit_curve
+            _CURVE_CACHE[key] = (time.time(), win_curve, profit_curve, price_per_point)
+            return win_curve, profit_curve, price_per_point
         except Exception:
             logger.exception("bid curves unavailable — bidding from the static stack")
-            return None, None
+            return None, None, None
 
     def next_kickoff(self, league, *, now: datetime | None = None) -> NextKickoff:
         """The next kickoff, schedule-first with `/myeleven` as the cross-check.
@@ -438,7 +463,7 @@ class Trader:
             competitor_player_ids
         """
         from .scoring.collector import DataCollector
-        from .scoring.decision import DecisionEngine
+        from .scoring.decision import DecisionEngine, alternative_gains
         from .scoring.v2.adapter import score_player_v2
 
         # --- 1. Fetch squad and market ---
@@ -891,6 +916,12 @@ class Trader:
         )
 
         # --- 5. Compute EP-based bid amounts ---
+        # What the bot gets if it loses each listing: the best other viable
+        # candidate at the position (`alternative_gains`), and for a swap the
+        # best other swap buying that position. The value bid pays for the
+        # gain over that, not the whole gain.
+        alternatives = alternative_gains(buy_recs)
+        alternatives.update(_pair_alternatives(trade_pairs))
         for rec in buy_recs:
             try:
                 bid_rec = self.bidding.calculate_ep_bid(
@@ -906,6 +937,7 @@ class Trader:
                     pacing=pacing,
                     forecast_change_pct=self.mv_forecasts.get(rec.player.id),
                     urgent=urgent,
+                    alternative_gain=alternatives.get(rec.player.id),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -942,6 +974,7 @@ class Trader:
                     pacing=pacing,
                     forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
                     urgent=urgent,
+                    alternative_gain=alternatives.get(pair.buy_player.id),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -974,6 +1007,7 @@ class Trader:
             "market_scores": {s.player_id: s for s in market_scores},
             "competitor_player_ids": competitor_player_ids,
             "urgent": urgent,
+            "alternative_gains": alternatives,
             # REH-85: surfaced so get_ep_recommendations_with_trends can reuse
             # this session's context instead of rebuilding it — a rebuild
             # would mean a second get_my_bids call and could yield a
@@ -1050,6 +1084,7 @@ class Trader:
                     pacing=pacing,
                     forecast_change_pct=self.mv_forecasts.get(rec.player.id),
                     urgent=bool(result.get("urgent", False)),
+                    alternative_gain=result.get("alternative_gains", {}).get(rec.player.id),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1091,6 +1126,7 @@ class Trader:
                     pacing=pacing,
                     forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
                     urgent=bool(result.get("urgent", False)),
+                    alternative_gain=result.get("alternative_gains", {}).get(pair.buy_player.id),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:

@@ -6,6 +6,7 @@ import pytest
 
 from rehoboam.store import connect
 from rehoboam.store.transfer_study import (
+    eur_per_point,
     our_bids_since,
     outcomes_since,
     study_by_band,
@@ -71,3 +72,8 @@ def test_outcomes_carry_the_resale_as_a_share_of_price(store_dsn):
     assert len(outcomes) == 2
     assert sorted(o.premium_pct for o in outcomes) == pytest.approx([-8.33, 10.0], abs=0.01)
     assert all(o.profit_pct == pytest.approx(18.18, abs=0.01) for o in outcomes)
+
+
+def test_eur_per_point_is_none_until_the_table_carries_a_fit(store_dsn):
+    with connect(store_dsn) as conn:
+        assert eur_per_point(conn) is None
