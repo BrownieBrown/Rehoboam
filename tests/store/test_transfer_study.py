@@ -7,6 +7,7 @@ import pytest
 from rehoboam.store import connect
 from rehoboam.store.transfer_study import (
     our_bids_since,
+    outcomes_since,
     study_by_band,
     study_by_manager,
     winners_since,
@@ -60,3 +61,13 @@ def test_the_manager_study_ranks_by_realised_profit(store_dsn):
     assert rival["buys"] == 2
     assert rival["realised_profit"] == 4_000_000  # both buys map to the one sale
     assert rows[1]["is_self"] is True
+
+
+def test_outcomes_carry_the_resale_as_a_share_of_price(store_dsn):
+    _seed(store_dsn)
+    with connect(store_dsn) as conn:
+        outcomes = outcomes_since(conn, 0)
+    # The rival's two p1 buys at 11m, both resold at 13m: +18.18% of price.
+    assert len(outcomes) == 2
+    assert sorted(o.premium_pct for o in outcomes) == pytest.approx([-8.33, 10.0], abs=0.01)
+    assert all(o.profit_pct == pytest.approx(18.18, abs=0.01) for o in outcomes)

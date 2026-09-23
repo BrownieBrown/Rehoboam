@@ -193,9 +193,11 @@ class SmartBidding:
         ceiling_policy=None,  # REH-99: the ceiling the safety gate enforces
         win_curve=None,  # services.win_curve.WinCurve: what the league's winners paid
         curve_quantiles: dict[str, float] | None = None,  # tier -> quantile on that curve
+        profit_curve=None,  # services.profit_curve.ProfitCurve: where paying more stops paying back
     ):
         self.ceiling_policy = ceiling_policy
         self.win_curve = win_curve
+        self.profit_curve = profit_curve
         self.curve_quantiles = dict(curve_quantiles or DEFAULT_CURVE_QUANTILES)
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -497,6 +499,42 @@ class SmartBidding:
                 player_id=player_id,
             )
 
+        # The cost of winning (2026-09-23): past the band's break-even premium
+        # the median resale loses money, and points do not rise with the
+        # premium. A buy below must-have is a hold that may be churned, so it
+        # is capped there; a must-have is bought for points and may knowingly
+        # pay past it — the board names the expected resale. Only ever lowers
+        # a bid: under 5m the measured premium is inflated by the player's own
+        # rise during the listing, so it must never be read as "pay more".
+        break_even = None
+        expected_resale = None
+        if self.profit_curve is not None:
+            try:
+                break_even = self.profit_curve.break_even(int(market_value))
+                if ep_tier != "must_have" and break_even is not None:
+                    if overbid_pct > break_even.premium_pct:
+                        logger.info(
+                            "ep-bid break-even player=%s tier=%s premium=%.1f%% -> %.1f%% "
+                            "(median resale %+.1f%% past it, n=%d, band=%d)",
+                            player_id,
+                            ep_tier,
+                            overbid_pct,
+                            break_even.premium_pct,
+                            break_even.resale_profit_pct_at,
+                            break_even.sample,
+                            break_even.band_lower,
+                        )
+                        overbid_pct = min(overbid_pct, break_even.premium_pct)
+                    else:
+                        break_even = None  # did not bind; nothing to report
+                expected_resale = self.profit_curve.expected_resale_pct(
+                    int(market_value), overbid_pct
+                )
+            except Exception:
+                logger.exception("profit curve failed for player=%s — uncapped", player_id)
+                break_even = None
+                expected_resale = None
+
         # Trend-based overbid reduction — applied to the curve and the learned
         # base too. A falling market value is the league pricing in something
         # we have not seen yet; no evidence of what wins overrides that.
@@ -601,6 +639,14 @@ class SmartBidding:
                 f"curve p{int(round(curve_point.quantile * 100))} of {curve_point.sample} "
                 f"{'league' if curve_point.pooled else 'band'} buys"
             )
+        if break_even is not None and ep_tier != "must_have":
+            reasoning_parts.append(
+                f"capped at break-even +{break_even.premium_pct:.1f}% "
+                f"(median resale {break_even.resale_profit_pct_at:+.1f}% past it, "
+                f"n={break_even.sample})"
+            )
+        if expected_resale is not None and ep_tier == "must_have":
+            reasoning_parts.append(f"expected resale {expected_resale:+.1f}% at this premium")
         if offer_count >= 2:
             reasoning_parts.append(f"contested ({offer_count} offers)")
         if sell_plan:

@@ -545,6 +545,21 @@ class Settings(BaseSettings):
         default=0.0,
         description="Quantile a marginal candidate bids at: the cheapest winning bid, i.e. the floor.",
     )
+    # The cost of winning (2026-09-23): the premium past which the median resale
+    # in the band loses money (`services/profit_curve.py`, from
+    # `rehoboam.transfer_outcomes`). Caps every tier below must-have; only ever
+    # lowers a bid.
+    bid_profit_cap_enabled: bool = Field(
+        default=True,
+        description="Cap non-must-have bids at the band's break-even premium.",
+    )
+    bid_profit_step_pct: float = Field(
+        default=3.0, description="Width of the premium buckets the break-even is read in."
+    )
+    bid_profit_min_sample: int = Field(
+        default=10,
+        description="Resold buys a bucket needs before it can declare the crossing.",
+    )
     overbid_price_bands: str = Field(
         default="",
         description=(

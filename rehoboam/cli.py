@@ -1198,8 +1198,9 @@ def derive_ceilings(
     settings as OVERBID_PRICE_BANDS by hand, after reading n.
     """
     from .services.ceiling_derivation import derive_price_bands
+    from .services.profit_curve import ProfitCurve
     from .store import connect
-    from .store.transfer_study import our_bids_since, winners_since
+    from .store.transfer_study import our_bids_since, outcomes_since, winners_since
 
     since_ts = _parse_day(since)
     lowers = [int(x) for x in bands.split(",") if x.strip()]
@@ -1208,7 +1209,9 @@ def derive_ceilings(
     with connect() as conn:
         winners = winners_since(conn, since_ts)
         ours = our_bids_since(conn, since_ts)
+        outcomes = outcomes_since(conn, since_ts)
     report = derive_price_bands(winners, bands=lowers, min_winners=min_winners, our_bids=ours)
+    profit = ProfitCurve.from_rows(outcomes, bands=lowers)
 
     table = Table(
         title=f"Buys since {since} by market-value band (league {len(winners)}, ours {len(ours)})"
@@ -1219,23 +1222,30 @@ def derive_ceilings(
         "Paid p25",
         "p50",
         "p75",
+        "Break-even",
         "Our bids",
         "Won",
         "We bid (median)",
     ):
         table.add_column(column, justify="right")
     for b in report.bands:
+        crossing = profit.break_even(b.lower)
         table.add_row(
             f"EUR {b.lower:,}",
             str(b.n_winners),
             _pct(b.winner_p25),
             _pct(b.winner_p50),
             _pct(b.winner_p75),
+            "none" if crossing is None else f"+{crossing.premium_pct:.0f}%",
             str(b.n_our_bids),
             str(b.n_our_wins),
             _pct(b.our_median),
         )
     console.print(table)
+    console.print(
+        "[dim]Break-even: the premium past which the band's median resale loses money "
+        "(transfer_outcomes). Bids below must-have are capped there.[/dim]"
+    )
 
     if report.env_line is None:
         console.print(

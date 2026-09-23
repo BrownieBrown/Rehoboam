@@ -13,6 +13,7 @@ from typing import Any
 import psycopg
 
 from rehoboam.services.ceiling_derivation import OurBid, WinnerRow
+from rehoboam.services.profit_curve import OutcomeRow
 
 
 def winners_since(conn: psycopg.Connection, since_epoch: float) -> list[WinnerRow]:
@@ -28,6 +29,32 @@ def winners_since(conn: psycopg.Connection, since_epoch: float) -> list[WinnerRo
         (since_epoch,),
     ).fetchall()
     return [WinnerRow(int(r["mv_at_transfer"]), float(r["premium_pct"])) for r in rows]
+
+
+def outcomes_since(conn: psycopg.Connection, since_epoch: float) -> list[OutcomeRow]:
+    """Every priced buy in the league since `since_epoch` with its resale result, ours excluded."""
+    rows = conn.execute(
+        """
+        select mv_at_transfer, premium_pct, price, realised_profit
+        from rehoboam.transfer_outcomes
+        where premium_pct is not null
+          and not is_self
+          and transferred_at >= to_timestamp(%s)
+        """,
+        (since_epoch,),
+    ).fetchall()
+    return [
+        OutcomeRow(
+            int(r["mv_at_transfer"]),
+            float(r["premium_pct"]),
+            (
+                100.0 * float(r["realised_profit"]) / float(r["price"])
+                if r["realised_profit"] is not None and r["price"]
+                else None
+            ),
+        )
+        for r in rows
+    ]
 
 
 def our_bids_since(conn: psycopg.Connection, since_epoch: float) -> list[OurBid]:
