@@ -111,7 +111,7 @@ def alternative_gains(recs: list) -> dict[str, float]:
         pos = str(getattr(rec.player, "position", "") or "")
         by_position.setdefault(pos, []).append((rec.player.id, float(rec.marginal_ep_gain)))
     out: dict[str, float] = {}
-    for pos, entries in by_position.items():
+    for entries in by_position.values():
         for pid, _gain in entries:
             others = [g for other, g in entries if other != pid]
             out[pid] = max(others) if others else 0.0
