@@ -130,6 +130,12 @@ DEFAULT_CURVE_QUANTILES = {
     "marginal": 0.0,
 }
 
+#: When the squad cannot field eleven and kickoff is close, every tier reads
+#: the win curve this much higher up: an empty slot is -100 points, and the
+#: emergency fill on the last day buys almost anything at any price anyway.
+DEFAULT_URGENCY_BUMP = 0.15
+URGENT_MAX_QUANTILE = 0.95
+
 
 def _contested_overbid_bump(ep_tier: str, offer_count: int) -> float:
     """Extra overbid percentage to apply when we're contested but committing.
@@ -194,10 +200,12 @@ class SmartBidding:
         win_curve=None,  # services.win_curve.WinCurve: what the league's winners paid
         curve_quantiles: dict[str, float] | None = None,  # tier -> quantile on that curve
         profit_curve=None,  # services.profit_curve.ProfitCurve: where paying more stops paying back
+        urgency_bump: float = DEFAULT_URGENCY_BUMP,  # quantile added when urgent
     ):
         self.ceiling_policy = ceiling_policy
         self.win_curve = win_curve
         self.profit_curve = profit_curve
+        self.urgency_bump = float(urgency_bump)
         self.curve_quantiles = dict(curve_quantiles or DEFAULT_CURVE_QUANTILES)
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -323,6 +331,8 @@ class SmartBidding:
         has_aggressive_competitors: bool = False,
         is_dgw: bool = False,
         pacing: PacingContext | None = None,
+        forecast_change_pct: float | None = None,
+        urgent: bool = False,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -351,6 +361,14 @@ class SmartBidding:
             pacing: REH-85 capital pacing. When given, caps the bid so the
                 reserve survives it — the budget needed to make the moves the
                 squad still requires. None disables pacing entirely.
+            forecast_change_pct: The nightly forecast's expected move of this
+                player's market value at the next update, in percent. The
+                auction settles after that update, so a falling forecast
+                lowers the premium to what it will be worth then. Applied
+                downward only — the gate checks against today's value.
+            urgent: The squad cannot field eleven and kickoff is close. Each
+                tier reads the win curve at a higher quantile, because losing
+                the auction now costs the -100 of an empty slot.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -467,9 +485,10 @@ class SmartBidding:
         curve_point = None
         if self.win_curve is not None:
             try:
-                curve_point = self.win_curve.premium_at(
-                    int(market_value), self.curve_quantiles.get(ep_tier, 0.0)
-                )
+                quantile = self.curve_quantiles.get(ep_tier, 0.0)
+                if urgent:
+                    quantile = min(URGENT_MAX_QUANTILE, quantile + self.urgency_bump)
+                curve_point = self.win_curve.premium_at(int(market_value), quantile)
             except Exception:
                 logger.exception("win curve failed for player=%s — using the stack", player_id)
                 curve_point = None
@@ -534,6 +553,28 @@ class SmartBidding:
                 logger.exception("profit curve failed for player=%s — uncapped", player_id)
                 break_even = None
                 expected_resale = None
+
+        # The next update (2026-09-23): the auction settles after tonight's
+        # market-value move, so the premium is judged against the value then.
+        # A falling forecast lowers the bid to the same premium on tomorrow's
+        # value; a rising one changes nothing, because the safety gate checks
+        # the ceiling against today's value and a bid above it would be
+        # refused (REH-99: what the bidder proposes, the gate executes).
+        forecast_applied = None
+        if forecast_change_pct is not None and forecast_change_pct < 0:
+            before = overbid_pct
+            overbid_pct = max(
+                0.0,
+                ((1.0 + overbid_pct / 100.0) * (1.0 + forecast_change_pct / 100.0) - 1.0) * 100.0,
+            )
+            forecast_applied = forecast_change_pct
+            logger.info(
+                "ep-bid forecast player=%s next update %+.1f%%: premium %.1f%% -> %.1f%%",
+                player_id,
+                forecast_change_pct,
+                before,
+                overbid_pct,
+            )
 
         # Trend-based overbid reduction — applied to the curve and the learned
         # base too. A falling market value is the league pricing in something
@@ -638,7 +679,10 @@ class SmartBidding:
             reasoning_parts.append(
                 f"curve p{int(round(curve_point.quantile * 100))} of {curve_point.sample} "
                 f"{'league' if curve_point.pooled else 'band'} buys"
+                + (" (urgent)" if urgent else "")
             )
+        if forecast_applied is not None:
+            reasoning_parts.append(f"next update forecast {forecast_applied:+.1f}%")
         if break_even is not None and ep_tier != "must_have":
             reasoning_parts.append(
                 f"capped at break-even +{break_even.premium_pct:.1f}% "

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from rehoboam.services.mv_forecast import BERLIN, Forecast, Score
+from rehoboam.services.mv_forecast import BERLIN, SCORED, Forecast, Score
 from rehoboam.store import connect
 from rehoboam.store.corpus_store import CorpusStore
 from rehoboam.store.mv_forecast_store import MvForecastStore
@@ -155,3 +155,18 @@ def test_daily_series_splits_each_player_at_gaps(store_dsn):
     )
     corpus.record_mv_series("b", {"it": [{"dt": 20000, "mv": 7}, {"dt": 20001, "mv": 8}]})
     assert MvForecastStore(dsn=store_dsn).daily_series() == [[1, 2], [3], [7, 8]]
+
+
+def test_forecasts_for_returns_only_unscored_rows_for_that_day(store_dsn):
+    store = MvForecastStore(dsn=store_dsn)
+    store.upsert_forecasts(
+        [_forecast("a", D17, change=-300_000), _forecast("b", D17), _forecast("c", D16)],
+        made_at=MORNING_17,
+        method="t",
+    )
+    store.record_outcomes(
+        [("b", D17, Score(SCORED, 90_000, 0.009))], scored_at=MORNING_17 + 86_400
+    )
+    got = store.forecasts_for(D17)
+    assert set(got) == {"a"}
+    assert got["a"] == -0.03
