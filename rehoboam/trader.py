@@ -1126,9 +1126,7 @@ class Trader:
                     pacing=pacing,
                     forecast_change_pct=self.mv_forecasts.get(pair.buy_player.id),
                     urgent=bool(result.get("urgent", False)),
-                    alternative_gain=result.get("alternative_gains", {}).get(
-                        pair.buy_player.id
-                    ),
+                    alternative_gain=result.get("alternative_gains", {}).get(pair.buy_player.id),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
