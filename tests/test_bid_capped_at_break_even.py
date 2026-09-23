@@ -38,7 +38,7 @@ def _profit_curve():
     return ProfitCurve.from_rows(rows, bands=BANDS)
 
 
-def _bid(bidder, *, market_value=20_000_000, gain=50.0, trend=0.0):
+def _bid(bidder, *, market_value=20_000_000, gain=50.0, trend=0.0, grade="A"):
     return bidder.calculate_ep_bid(
         asking_price=market_value,
         market_value=market_value,
@@ -49,6 +49,7 @@ def _bid(bidder, *, market_value=20_000_000, gain=50.0, trend=0.0):
         player_id="p",
         trend_change_pct=trend,
         offer_count=0,
+        data_grade=grade,
     )
 
 
@@ -79,15 +80,37 @@ class TestTheCapBinds:
         assert rec.overbid_pct <= 3.0 + 0.2
 
 
-class TestAMustHaveMayKnowinglyPayPastIt:
-    def test_a_must_have_is_not_capped(self):
-        rec = _bid(_bidder(), gain=75.0)  # p75 = 12.25%
+class TestAFittedMustHaveMayKnowinglyPayPastIt:
+    def test_a_must_have_on_fitted_history_is_not_capped(self):
+        rec = _bid(_bidder(), gain=75.0, grade="A")  # p75 = 12.25%
         assert rec.overbid_pct == pytest.approx(12.25, abs=0.2)
         assert "capped" not in rec.reasoning
 
     def test_the_board_names_the_expected_resale(self):
-        rec = _bid(_bidder(), gain=75.0)  # 12.25% falls in the 12..15 bucket: -12%
+        rec = _bid(_bidder(), gain=75.0, grade="A")  # 12.25% falls in the 12..15 bucket: -12%
         assert "expected resale -12.0% at this premium" in rec.reasoning
+
+
+class TestAMustHaveOnThePriorIsCapped:
+    """Itakura, 2026-09-23: a 63.5-point swap gain on a grade-C prior was
+    priced at 16m of worth and bid to the ceiling; only his falling trend
+    saved it. A guess is not a must-have."""
+
+    def test_a_grade_c_must_have_is_capped_like_a_strong_upgrade(self):
+        rec = _bid(_bidder(), gain=75.0, grade="C")
+        assert rec.overbid_pct == pytest.approx(3.0, abs=0.2)
+        assert "capped at break-even +3.0%" in rec.reasoning
+        assert "must-have on data grade C, not fitted" in rec.reasoning
+
+    def test_an_unknown_grade_is_treated_as_unfitted(self):
+        rec = _bid(_bidder(), gain=75.0, grade=None)
+        assert rec.overbid_pct == pytest.approx(3.0, abs=0.2)
+        assert "data grade ?" in rec.reasoning
+
+    def test_the_cap_does_not_touch_a_grade_c_must_have_under_the_crossing(self):
+        # 5-15m: solid p25 is 9.5%, crossing 12% — nothing to cap, nothing to say.
+        rec = _bid(_bidder(), market_value=8_000_000, gain=30.0, grade="C")
+        assert "capped" not in rec.reasoning
 
 
 class TestNothingElseChanges:
