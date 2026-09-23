@@ -78,6 +78,9 @@ EXPECTED_TABLES = {
     "web_managers",
     "web_manager_matchdays",
     "web_manager_transfers",
+    # what it took to win, what the buy was worth (024)
+    "transfer_premiums",
+    "transfer_outcomes",
 }
 
 
@@ -116,6 +119,7 @@ def test_migrate_creates_every_table_in_the_rehoboam_schema(blank_dsn):
             "021_player_images.sql",
             "022_fair_price_from_expected_points.sql",
             "023_web_league.sql",
+            "024_transfer_premiums.sql",
         ]
         assert _tables(conn) == EXPECTED_TABLES
         public = conn.execute(
@@ -152,6 +156,7 @@ def test_migrate_is_idempotent(store_dsn):
             21,
             22,
             23,
+            24,
         }
 
 
@@ -233,8 +238,8 @@ def test_migrate_refreshes_the_bot_role_grants_on_new_tables(store_dsn, tmp_path
         conn.execute("grant usage, create on schema rehoboam to other_admin")
         conn.commit()
         # store_dsn already has versions 1-23 applied from the real
-        # migrations dir; use 024 so this simulated file is genuinely new.
-        (tmp_path / "024_simulated.sql").write_text(
+        # migrations dir; use 025 so this simulated file is genuinely new.
+        (tmp_path / "025_simulated.sql").write_text(
             "set role other_admin;\ncreate table rehoboam.t_new (x integer);\nreset role;\n"
         )
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
@@ -291,6 +296,7 @@ def test_an_up_to_date_database_needs_only_select_from_the_bot_role(store_dsn):
                 21,
                 22,
                 23,
+                24,
             }
             assert migrate(conn) == []
         finally:
@@ -321,8 +327,8 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
         bootstrap(conn, "pw")
         conn.commit()
         # store_dsn already has versions 1-23 applied from the real
-        # migrations dir; use 024 so this simulated file is genuinely new.
-        (tmp_path / "024_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        # migrations dir; use 025 so this simulated file is genuinely new.
+        (tmp_path / "025_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
         conn.execute(f"set role {ROLE}")
         conn.commit()
@@ -357,6 +363,7 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
             21,
             22,
             23,
+            24,
         }
 
 

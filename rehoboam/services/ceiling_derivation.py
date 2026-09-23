@@ -1,13 +1,20 @@
-"""Propose price-band overbid caps from the auction ledger (`derive-ceilings`).
+"""Propose price-band overbid caps from what the league's buyers paid (`derive-ceilings`).
 
-Pure: the command reads `auction_outcomes`, hands the rows here, prints the
-report and changes nothing. The values go into `OVERBID_PRICE_BANDS` by hand.
+Pure: the command reads the store, hands the rows here, prints the report and
+changes nothing. The values go into `OVERBID_PRICE_BANDS` by hand.
 
-A band's proposal is the 75th percentile of what winners paid over market
-value in that band — a bid there beats three of four winning bids — and the
-whole proposal is withheld below `min_winners` auctions carrying a winner's
-price, because a thin week's sample must not move real-money caps without
-someone reading `n`. The table is printed either way.
+Rival offers are never visible on Kickbase. What is visible, afterwards, is
+every transfer: buyer, price and date. Priced against the market value in
+force that day (`rehoboam.transfer_premiums`, migration 024) each buy says
+what it took to win that listing. That is the evidence here — not only the
+auctions WE entered (`auction_outcomes`), which are printed beside it so our
+own bidding can be compared with the league's.
+
+A band's proposal is the 75th percentile of the premium winners paid in that
+band — a bid there beats three of four winning bids — and the whole proposal
+is withheld below `min_winners` priced buys, because a thin sample must not
+move real-money caps without someone reading `n`. The table is printed either
+way.
 """
 
 from __future__ import annotations
@@ -18,23 +25,32 @@ from statistics import median
 
 
 @dataclass(frozen=True)
-class AuctionRow:
+class WinnerRow:
+    """One completed buy in the league, priced against the day's market value."""
+
+    market_value: int
+    premium_pct: float
+
+
+@dataclass(frozen=True)
+class OurBid:
+    """One auction we entered, from `auction_outcomes`."""
+
     market_value: int
     our_overbid_pct: float
     won: bool
-    winning_overbid_pct: float | None
 
 
 @dataclass(frozen=True)
 class BandReport:
     lower: int
-    n_auctions: int
-    n_won: int
-    n_with_winner: int
-    our_median: float | None
+    n_winners: int
     winner_p25: float | None
     winner_p50: float | None
     winner_p75: float | None
+    n_our_bids: int
+    n_our_wins: int
+    our_median: float | None
 
 
 @dataclass(frozen=True)
@@ -63,52 +79,58 @@ def _percentile(values: Sequence[float], q: float) -> float:
     return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
 
 
+def band_of(market_value: int, lowers: Sequence[int]) -> int | None:
+    """The band a market value falls in; None below the first band."""
+    chosen: int | None = None
+    for lower in lowers:
+        if market_value >= lower:
+            chosen = lower
+    return chosen
+
+
 def derive_price_bands(
-    rows: Sequence[AuctionRow],
+    winners: Sequence[WinnerRow],
     *,
     bands: Sequence[int],
     min_winners: int,
+    our_bids: Sequence[OurBid] = (),
 ) -> CeilingReport:
     lowers = sorted({int(b) for b in bands})
     if not lowers:
         raise ValueError("at least one band lower bound is required")
 
-    def band_of(mv: int) -> int:
-        chosen = lowers[0]
-        for lower in lowers:
-            if mv >= lower:
-                chosen = lower
-        return chosen
-
-    grouped: dict[int, list[AuctionRow]] = {lower: [] for lower in lowers}
-    for row in rows:
-        if row.market_value < lowers[0]:
-            continue
-        grouped[band_of(row.market_value)].append(row)
+    won: dict[int, list[float]] = {lower: [] for lower in lowers}
+    ours: dict[int, list[OurBid]] = {lower: [] for lower in lowers}
+    for w in winners:
+        band = band_of(w.market_value, lowers)
+        if band is not None:
+            won[band].append(w.premium_pct)
+    for b in our_bids:
+        band = band_of(b.market_value, lowers)
+        if band is not None:
+            ours[band].append(b)
 
     reports: list[BandReport] = []
-    n_winners = 0
     for lower in lowers:
-        group = grouped[lower]
-        winners = [r.winning_overbid_pct for r in group if r.winning_overbid_pct is not None]
-        ours = [r.our_overbid_pct for r in group]
-        n_winners += len(winners)
+        premiums = won[lower]
+        mine = ours[lower]
         reports.append(
             BandReport(
                 lower=lower,
-                n_auctions=len(group),
-                n_won=sum(1 for r in group if r.won),
-                n_with_winner=len(winners),
-                our_median=median(ours) if ours else None,
-                winner_p25=_percentile(winners, 0.25) if winners else None,
-                winner_p50=_percentile(winners, 0.50) if winners else None,
-                winner_p75=_percentile(winners, 0.75) if winners else None,
+                n_winners=len(premiums),
+                winner_p25=_percentile(premiums, 0.25) if premiums else None,
+                winner_p50=_percentile(premiums, 0.50) if premiums else None,
+                winner_p75=_percentile(premiums, 0.75) if premiums else None,
+                n_our_bids=len(mine),
+                n_our_wins=sum(1 for b in mine if b.won),
+                our_median=median(b.our_overbid_pct for b in mine) if mine else None,
             )
         )
 
+    n_winners = sum(r.n_winners for r in reports)
     proposal: dict[int, float] | None = None
     if n_winners >= min_winners:
-        proposal = {b.lower: b.winner_p75 for b in reports if b.winner_p75 is not None}
+        proposal = {r.lower: r.winner_p75 for r in reports if r.winner_p75 is not None}
 
     return CeilingReport(
         bands=tuple(reports),
