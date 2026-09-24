@@ -112,6 +112,11 @@ export type PlayerRow = {
    * it. Migration 021 moved this up from `web_player_profile` alone onto
    * every `web_players` row, for the list's fitness dot. */
   availability: number | null;
+  /** Where he stands at his position, league-wide (migration 026,
+   * `player_ranks`): by points per appearance among players who have played
+   * this season (null until he has), and by this week's expected points. */
+  avg_points_rank_pos: number | null;
+  ep_rank_pos: number | null;
   /** Every row the filters match, counted in the same statement as this page. */
   total: number;
 };
@@ -134,6 +139,7 @@ export const PLAYER_SORTS = [
   "predicted_ep",
   "p_start",
   "fair_value_gap",
+  "avg_points_rank_pos",
 ] as const;
 
 /** Our own manager name, for the "my squad" filter and the amber owner pill. */

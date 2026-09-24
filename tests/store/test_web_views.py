@@ -192,6 +192,9 @@ def test_web_players_column_order_is_unchanged_plus_the_appended_columns(store_d
         "image_path",
         "crest_path",
         "availability",
+        # where he stands at his position (026)
+        "avg_points_rank_pos",
+        "ep_rank_pos",
     ]
 
 
