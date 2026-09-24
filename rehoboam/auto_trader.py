@@ -11,6 +11,7 @@ from rich.console import Console
 
 from .config import INSTANT_SELL_PCT
 from .kickoff import NextKickoff
+from .learning.tracker import FlipIntent
 from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
 from .services.emergency_window import emergency_fill_due
@@ -295,6 +296,24 @@ def _compute_flip_budget(
 # safety-relevant number in different modules is how REH-99's 8%/20% split
 # happened; the name is kept here because callers and tests already use it.
 SQUAD_CAP = pacing_squad_cap
+
+
+def _flip_worsens_fieldability(squad: list, player) -> bool:
+    """Would buying this flip leave the squad less able to field eleven?
+
+    The guard used to demand that squad-plus-flip *can* field eleven, which a
+    nine-man squad can never satisfy — so below ten players every flip was
+    "unfieldable" and the profit side was dead by construction (2026-09-24,
+    two rising-trend flips dropped at 9/15). Adding a player never removes a
+    body, so the honest question is relative: only a squad that can field
+    eleven today and could not afterwards is made worse. Marco's rule is that
+    the bot may trade below eleven when it makes sense.
+    """
+    from .formation import validate_formation
+
+    before = validate_formation(list(squad))["can_field_eleven"]
+    after = validate_formation(list(squad) + [player])["can_field_eleven"]
+    return bool(before and not after)
 
 
 def _available_squad_slots(squad_size: int, open_bid_count: int, cap: int = SQUAD_CAP) -> int:
@@ -1523,7 +1542,6 @@ class AutoTrader:
                     respect_matchday=self.settings.flip_hold_respects_matchday,
                 )
 
-                from .formation import validate_formation
                 from .scoring.decision import _would_create_dead_weight
 
                 skipped_long_hold = 0
@@ -1538,11 +1556,9 @@ class AutoTrader:
                     if max_hold_days is not None and opp.hold_days > max_hold_days:
                         skipped_long_hold += 1
                         continue
-                    # Fieldability guard: don't buy a flip that would make the
-                    # squad unable to field a valid starting 11.
-                    hypothetical = list(fresh_squad) + [opp.player]
-                    fieldability = validate_formation(hypothetical)
-                    if not fieldability["can_field_eleven"]:
+                    # Fieldability guard, relative: refuse only a flip that
+                    # leaves the squad less able to field eleven than today.
+                    if _flip_worsens_fieldability(fresh_squad, opp.player):
                         skipped_unfieldable += 1
                         continue
                     # Dead-weight guard: don't flip-buy a player whose position
@@ -1783,6 +1799,13 @@ class AutoTrader:
                     f"Flip: +{opp.expected_appreciation:.0f}% in {opp.hold_days}d",
                     current_budget=ctx.current_budget,
                     days_until_match=ctx.matchday_phase.days_until_match,
+                    # The mark that makes this a flip from bid to sale: the
+                    # sell loop reads it off the purchase record and trades
+                    # the player on flip rules however the squad looks.
+                    flip=FlipIntent(
+                        target_pct=float(opp.expected_appreciation),
+                        max_hold_days=int(opp.hold_days),
+                    ),
                     # No marginal EP gain to band: a flip is bought to resell,
                     # not to improve the eleven. That resolves to the tightest
                     # ceiling, which is the right answer — the round-trip toll
@@ -2411,11 +2434,107 @@ class AutoTrader:
         trend_7d_by_id: dict[str, float | None] = {}
 
         sell_candidates = []
+
+        # Marked flips first (2026-09-24). A player bought to resell is traded
+        # on flip rules however the squad looks around him — in particular he
+        # is NOT protected by the best-eleven gate below, which at nine
+        # players covers the whole squad and used to make a flip unsellable
+        # for as long as the squad was short. The mark comes from the
+        # purchase record (`FlipIntent` → `tracked_purchases.intent`).
+        # Rules, per Marco: sell at the trend-adjusted target or at the
+        # stop-loss (no replacement required — a flip is not a starter by
+        # intent); the hold limit is reported, never a trigger.
+        flip_rows: dict[str, dict] = {}
+        if profit_sells_enabled:
+            try:
+                found = self.learner.get_tracked_purchases(intent="flip")
+            except Exception:
+                logger.warning("marked flips unavailable — selling on squad rules", exc_info=True)
+                found = None
+            # Best-effort like every learner read: anything but a real mapping
+            # (a failed lookup, a stub) means "no marked flips", never a crash.
+            flip_rows = dict(found) if isinstance(found, dict) else {}
+        for player in squad:
+            row = flip_rows.get(player.id)
+            if row is None:
+                continue
+
+            held_too_briefly, hours_held = self._was_recently_bought(player.id)
+            if held_too_briefly:
+                console.print(
+                    f"[dim]Hold-period guard {player.last_name} (flip) — held "
+                    f"{hours_held:.1f}h (< {self._min_hold_seconds() / 3600:.0f}h min)[/dim]"
+                )
+                continue
+
+            pos_min = POSITION_MINIMUMS.get(player.position, 0)
+            if position_counts.get(player.position, 0) <= pos_min:
+                console.print(
+                    f"[dim]Protected {player.last_name} (flip, {player.position}) — "
+                    f"at position minimum ({pos_min})[/dim]"
+                )
+                continue
+
+            buy_price = int(player.buy_price or 0) or int(row.get("buy_price") or 0)
+            if buy_price <= 0:
+                continue
+            profit = player.market_value - buy_price
+            profit_pct = (profit / buy_price) * 100
+
+            try:
+                trend_7d = trader.trend_service.get_trend(
+                    player.id, player.market_value, league.id
+                ).trend_7d_pct
+            except Exception:
+                trend_7d = None
+            trend_7d_by_id[player.id] = trend_7d
+
+            target = self._sell_threshold_for_trend(trend_7d)
+            days_held = (
+                (time.time() - float(row["buy_date"])) / 86_400 if row.get("buy_date") else None
+            )
+            max_hold = row.get("max_hold_days")
+            overdue = days_held is not None and max_hold is not None and days_held > max_hold
+            trend_info = f", trend {trend_7d:+.1f}%/wk" if trend_7d is not None else ""
+            logger.info(
+                "flip-held player=%s profit_pct=%.1f target=%.1f days_held=%s max_hold=%s",
+                player.id,
+                profit_pct,
+                target,
+                f"{days_held:.1f}" if days_held is not None else None,
+                max_hold,
+            )
+            if profit_pct >= target:
+                sell_candidates.append(
+                    (
+                        player,
+                        profit_pct,
+                        f"Flip target ({target:.0f}%) hit: +{profit_pct:.1f}% "
+                        f"(€{profit:,}{trend_info})",
+                    )
+                )
+            elif profit_pct <= self.settings.max_loss_pct and self._can_loss_sell_with_replacement(
+                trend_7d
+            ):
+                sell_candidates.append(
+                    (
+                        player,
+                        profit_pct,
+                        f"Flip stop-loss ({self.settings.max_loss_pct:.0f}%): "
+                        f"{profit_pct:.1f}% (€{profit:,}{trend_info})",
+                    )
+                )
+            elif overdue:
+                console.print(
+                    f"[dim]Flip {player.last_name} past its {max_hold}d hold at "
+                    f"{profit_pct:+.1f}% — holding for the target or the stop-loss[/dim]"
+                )
+
         # Profit-taking and loss-cutting: the flip behaviour, and the only
         # part of this method REH-71's switch governs.
         if profit_sells_enabled:
             for player in squad:
-                if player.id in best_11_ids:
+                if player.id in best_11_ids or player.id in flip_rows:
                     continue
 
                 if not player.buy_price or player.buy_price <= 0:
@@ -2500,7 +2619,7 @@ class AutoTrader:
 
         already_selling = {p.id for p, _, _ in sell_candidates}
         for player in squad:
-            if player.id in best_11_ids or player.id in already_selling:
+            if player.id in best_11_ids or player.id in already_selling or player.id in flip_rows:
                 continue
             if not player.buy_price or player.buy_price <= 0:
                 continue

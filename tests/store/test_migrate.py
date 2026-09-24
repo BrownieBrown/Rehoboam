@@ -120,6 +120,7 @@ def test_migrate_creates_every_table_in_the_rehoboam_schema(blank_dsn):
             "022_fair_price_from_expected_points.sql",
             "023_web_league.sql",
             "024_transfer_premiums.sql",
+            "025_flip_intent.sql",
         ]
         assert _tables(conn) == EXPECTED_TABLES
         public = conn.execute(
@@ -157,6 +158,7 @@ def test_migrate_is_idempotent(store_dsn):
             22,
             23,
             24,
+            25,
         }
 
 
@@ -237,9 +239,9 @@ def test_migrate_refreshes_the_bot_role_grants_on_new_tables(store_dsn, tmp_path
             conn.execute("create role other_admin")
         conn.execute("grant usage, create on schema rehoboam to other_admin")
         conn.commit()
-        # store_dsn already has versions 1-23 applied from the real
-        # migrations dir; use 025 so this simulated file is genuinely new.
-        (tmp_path / "025_simulated.sql").write_text(
+        # store_dsn already has every real migration applied; use a version
+        # past the newest real one so this simulated file is genuinely new.
+        (tmp_path / "026_simulated.sql").write_text(
             "set role other_admin;\ncreate table rehoboam.t_new (x integer);\nreset role;\n"
         )
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
@@ -297,6 +299,7 @@ def test_an_up_to_date_database_needs_only_select_from_the_bot_role(store_dsn):
                 22,
                 23,
                 24,
+                25,
             }
             assert migrate(conn) == []
         finally:
@@ -326,9 +329,9 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
         migrate(conn)
         bootstrap(conn, "pw")
         conn.commit()
-        # store_dsn already has versions 1-23 applied from the real
-        # migrations dir; use 025 so this simulated file is genuinely new.
-        (tmp_path / "025_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        # store_dsn already has every real migration applied; use a version
+        # past the newest real one so this simulated file is genuinely new.
+        (tmp_path / "026_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
         conn.execute(f"set role {ROLE}")
         conn.commit()
@@ -364,6 +367,7 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
             22,
             23,
             24,
+            25,
         }
 
 

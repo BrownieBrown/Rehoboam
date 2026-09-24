@@ -48,6 +48,21 @@ def _iso_to_epoch(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+@dataclass(frozen=True)
+class FlipIntent:
+    """Why a buy is a profit flip, written at the only moment it is certain.
+
+    Carried on the pending bid, copied onto the purchase record when the
+    auction is won, and read by the sell loop for as long as the player is
+    held. Both numbers are reports: the sell loop trades a marked flip on the
+    trend-adjusted target and the stop-loss, never on the hold running out
+    (Marco, 2026-09-24).
+    """
+
+    target_pct: float
+    max_hold_days: int
+
+
 class LearningTracker:
     """Persists trade outcomes for the adaptive bidding feedback loop.
 
@@ -69,12 +84,18 @@ class LearningTracker:
         our_bid: int,
         sell_plan_player_ids: list[str] | None = None,
         tier: str | None = None,
+        flip: FlipIntent | None = None,
     ) -> None:
         """Record a freshly-placed bid as pending (outcome TBD).
 
         If the buy has a paired sell_plan (players to sell after winning to
         recover budget), persist their IDs here so resolve_auctions can
         execute the sells when we detect we won the auction.
+
+        ``flip`` marks the bid as a profit flip; every other bid is a points
+        buy. The mark rides the pending row into ``tracked_purchases`` on a
+        win (``_track_purchase``), which is how the sell loop later tells a
+        flip from a starter without inferring it from the squad shape.
         """
         try:
             asking_price = player.price
@@ -90,6 +111,9 @@ class LearningTracker:
                 market_value=getattr(player, "market_value", 0),
                 sell_plan_player_ids=sell_plan_player_ids,
                 tier=tier,
+                intent="flip" if flip is not None else "points",
+                target_pct=flip.target_pct if flip is not None else None,
+                max_hold_days=flip.max_hold_days if flip is not None else None,
             )
         except Exception as e:
             logger.warning("Failed to record bid placement: %s", e)
@@ -168,6 +192,9 @@ class LearningTracker:
                 buy_price=bid_data["our_bid"],
                 buy_date=bid_data["timestamp"],
                 source="real",
+                intent=bid_data.get("intent"),
+                target_pct=bid_data.get("target_pct"),
+                max_hold_days=bid_data.get("max_hold_days"),
             )
         except Exception as e:
             logger.warning("Failed to track purchase: %s", e)
