@@ -227,6 +227,9 @@ class BidLearner:
         player_value_score: float | None = None,
         sell_plan_player_ids: list[str] | None = None,
         tier: str | None = None,
+        intent: str | None = None,
+        target_pct: float | None = None,
+        max_hold_days: int | None = None,
     ) -> None:
         """Record a freshly placed bid as pending (outcome TBD).
 
@@ -238,9 +241,10 @@ class BidLearner:
                 """
                 INSERT INTO rehoboam.pending_bids (
                     player_id, player_name, our_bid, asking_price,
-                    our_overbid_pct, timestamp, market_value, player_value_score, tier
+                    our_overbid_pct, timestamp, market_value, player_value_score, tier,
+                    intent, target_pct, max_hold_days
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (player_id) DO UPDATE SET
                     player_name = excluded.player_name,
                     our_bid = excluded.our_bid,
@@ -249,7 +253,10 @@ class BidLearner:
                     timestamp = excluded.timestamp,
                     market_value = excluded.market_value,
                     player_value_score = excluded.player_value_score,
-                    tier = excluded.tier
+                    tier = excluded.tier,
+                    intent = excluded.intent,
+                    target_pct = excluded.target_pct,
+                    max_hold_days = excluded.max_hold_days
                 """,
                 (
                     player_id,
@@ -261,6 +268,9 @@ class BidLearner:
                     market_value,
                     player_value_score,
                     tier,
+                    intent,
+                    target_pct,
+                    max_hold_days,
                 ),
             )
             # Sell-plan rows are replaced wholesale: an upsert on pending_bids
@@ -284,7 +294,7 @@ class BidLearner:
                 """
                 SELECT player_id, player_name, our_bid, asking_price,
                        our_overbid_pct, timestamp, market_value, player_value_score,
-                       tier
+                       tier, intent, target_pct, max_hold_days
                 FROM rehoboam.pending_bids
                 ORDER BY timestamp ASC
             """
@@ -326,39 +336,74 @@ class BidLearner:
         buy_price: int,
         buy_date: float,
         source: str | None = None,
+        intent: str | None = None,
+        target_pct: float | None = None,
+        max_hold_days: int | None = None,
     ) -> None:
         """Record a player we now hold, with its cost basis.
 
         Re-buying overwrites the existing row — the latest cost basis
-        wins so flip P&L always reflects the most recent purchase.
+        wins so flip P&L always reflects the most recent purchase, and the
+        latest intent with it: a player re-bought as a flip is a flip.
         """
         with self.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO rehoboam.tracked_purchases (
-                    player_id, player_name, buy_price, buy_date, source
+                    player_id, player_name, buy_price, buy_date, source,
+                    intent, target_pct, max_hold_days
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (player_id) DO UPDATE SET
                     player_name = excluded.player_name,
                     buy_price = excluded.buy_price,
                     buy_date = excluded.buy_date,
-                    source = excluded.source
+                    source = excluded.source,
+                    intent = excluded.intent,
+                    target_pct = excluded.target_pct,
+                    max_hold_days = excluded.max_hold_days
                 """,
-                (player_id, player_name, buy_price, buy_date, source),
+                (
+                    player_id,
+                    player_name,
+                    buy_price,
+                    buy_date,
+                    source,
+                    intent,
+                    target_pct,
+                    max_hold_days,
+                ),
             )
 
     def get_tracked_purchase(self, player_id: str) -> dict[str, Any] | None:
         with self.connection() as conn:
             row = conn.execute(
                 """
-                SELECT player_id, player_name, buy_price, buy_date, source
+                SELECT player_id, player_name, buy_price, buy_date, source,
+                       intent, target_pct, max_hold_days
                 FROM rehoboam.tracked_purchases
                 WHERE player_id = %s
             """,
                 (player_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def get_tracked_purchases(self, *, intent: str) -> dict[str, dict[str, Any]]:
+        """Every held purchase made with this intent, keyed by player id.
+
+        One query for the sell loop instead of one per squad player.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT player_id, player_name, buy_price, buy_date, source,
+                       intent, target_pct, max_hold_days
+                FROM rehoboam.tracked_purchases
+                WHERE intent = %s
+            """,
+                (intent,),
+            ).fetchall()
+        return {row["player_id"]: dict(row) for row in rows}
 
     def delete_tracked_purchase(self, player_id: str) -> None:
         with self.connection() as conn:

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from rich.console import Console
 
 from ..learning import LearningTracker
+from ..learning.tracker import FlipIntent
 from .safety_gate import BuyGate
 
 console = Console()
@@ -83,8 +84,14 @@ class ExecutionService:
         current_budget: int,
         days_until_match: int | None,
         gate: BuyGate,
+        flip: FlipIntent | None = None,
     ) -> AutoTradeResult:
         """Place a buy offer at the given price.
+
+        ``flip`` marks a profit flip so the purchase record says why the
+        player was bought; the sell loop trades a marked flip on its own
+        rules whatever the squad looks like around it. Every other buy is a
+        points buy.
 
         If the buy has a paired sell_plan (bench players to sell after winning
         the auction to recover budget), pass their IDs here. They'll be
@@ -175,6 +182,7 @@ class ExecutionService:
                 # than by a flip's. A profit flip carries `tier=None` and keeps
                 # being judged as a flip, which is correct.
                 tier=getattr(gate.tier, "value", gate.tier),
+                flip=flip,
             ),
         )
 
