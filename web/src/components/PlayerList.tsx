@@ -36,6 +36,7 @@ const SORT_LABEL: Record<SortKey, string> = {
   owner: "owner",
   predicted_ep: "expected points",
   p_start: "start probability",
+  avg_points_rank_pos: "rank at position (points per appearance)",
 };
 
 const RULE_COLOR: Record<string, string> = {
@@ -113,6 +114,8 @@ function rankedFigureText(row: PlayerRow, sort: SortKey): string | null {
       return pct(row.p_start);
     case "predicted_ep":
       return num(row.predicted_ep, 0);
+    case "avg_points_rank_pos":
+      return row.avg_points_rank_pos == null ? DASH : `#${num(row.avg_points_rank_pos, 0)}`;
     case "name":
     case "position":
     case "owner":

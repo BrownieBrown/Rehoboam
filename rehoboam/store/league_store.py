@@ -201,6 +201,26 @@ class LeagueStore:
             ).fetchall()
         return [r["team_id"] for r in rows]
 
+    def position_ranks(self, player_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Where each of these players stands at his position (`player_ranks`).
+
+        One query for the sell loop; a player missing from the view (not in
+        the universe yet) is simply absent from the result.
+        """
+        if not player_ids:
+            return {}
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT player_id, position, appearances, avg_points_rank_pos,
+                       points_rank_pos, ep_rank_pos, mv_rank_pos, position_size
+                FROM rehoboam.player_ranks
+                WHERE player_id = ANY(%s)
+                """,
+                (list(player_ids),),
+            ).fetchall()
+        return {r["player_id"]: dict(r) for r in rows}
+
     def player_table(
         self,
         *,

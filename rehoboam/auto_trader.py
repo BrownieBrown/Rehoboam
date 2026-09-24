@@ -19,6 +19,7 @@ from .services.execution import LOCKOUT_DAYS
 from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
+from .services.rank_sell import RankSellInput, rank_sell_reason
 from .services.safety_gate import BuyGate, club_counts
 from .services.session_facts import IntegrityFailure, SessionFacts
 from .store.calibration_store import CalibrationStore
@@ -2675,6 +2676,77 @@ class AutoTrader:
                         f"{profit_pct:+.1f}% (€{profit:,}), freeing slot",
                     )
                 )
+
+        # Rank sells (2026-09-24, `services/rank_sell`): sell more often when
+        # he is not a top player at his position, and always when he is out
+        # for weeks. A points decision, not a profit one -- it is not gated on
+        # `enable_profit_sells`, reads no cost basis, and so also covers the
+        # player without one. Marked flips have their own rules above.
+        if getattr(self.settings, "sell_rank_enabled", False):
+            already_selling = {p.id for p, _, _ in sell_candidates}
+            rank_pool = [p for p in squad if p.id not in already_selling and p.id not in flip_rows]
+            try:
+                ranks = self._league_store.position_ranks([p.id for p in rank_pool])
+            except Exception:
+                logger.warning(
+                    "position ranks unavailable — no rank sells this session", exc_info=True
+                )
+                ranks = None
+            ranks = dict(ranks) if isinstance(ranks, dict) else {}
+            phase = getattr(ctx, "matchday_phase", None)
+            days_until_match = getattr(phase, "days_until_match", None)
+            for player in rank_pool:
+                row = ranks.get(player.id)
+                if row is None:
+                    continue
+                held_too_briefly, _ = self._was_recently_bought(player.id)
+                if held_too_briefly:
+                    continue
+                pos_min = POSITION_MINIMUMS.get(player.position, 0)
+                if position_counts.get(player.position, 0) <= pos_min:
+                    continue
+                if player.id in trend_7d_by_id:
+                    trend_7d = trend_7d_by_id[player.id]
+                else:
+                    try:
+                        trend_7d = trader.trend_service.get_trend(
+                            player.id, player.market_value, league.id
+                        ).trend_7d_pct
+                    except Exception:
+                        trend_7d = None
+                    trend_7d_by_id[player.id] = trend_7d
+                reason = rank_sell_reason(
+                    RankSellInput(
+                        status=getattr(player, "status", None),
+                        avg_points_rank_pos=row.get("avg_points_rank_pos"),
+                        ep_rank_pos=row.get("ep_rank_pos"),
+                        appearances=row.get("appearances"),
+                        trend_7d_pct=trend_7d,
+                        in_best_eleven=player.id in best_11_ids,
+                        days_until_match=days_until_match,
+                    ),
+                    floor=int(self.settings.sell_rank_floor),
+                    min_appearances=int(self.settings.sell_rank_min_appearances),
+                    min_days_for_starter=int(self.settings.min_days_to_match_for_starter_swap),
+                )
+                logger.info(
+                    "rank-sell player=%s avg_rank=%s ep_rank=%s apps=%s status=%s starter=%s "
+                    "verdict=%s",
+                    player.id,
+                    row.get("avg_points_rank_pos"),
+                    row.get("ep_rank_pos"),
+                    row.get("appearances"),
+                    getattr(player, "status", None),
+                    player.id in best_11_ids,
+                    reason or "hold",
+                )
+                if reason is None:
+                    continue
+                buy_price = int(getattr(player, "buy_price", 0) or 0)
+                profit_pct = (
+                    (player.market_value - buy_price) / buy_price * 100 if buy_price > 0 else 0.0
+                )
+                sell_candidates.append((player, profit_pct, f"Rank sell: {reason}"))
 
         if not sell_candidates:
             console.print("[dim]No players meet sell criteria[/dim]")

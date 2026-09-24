@@ -322,6 +322,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Sell more often when he is not a top player at his position (2026-09-24,
+    # `services/rank_sell`). Rank = points per appearance among players who
+    # have played this season, league-wide, per position (`player_ranks`).
+    sell_rank_enabled: bool = Field(
+        default=True,
+        description="Sell a held player outside the top N at his position by points per appearance",
+    )
+    sell_rank_floor: int = Field(
+        default=30,
+        description="The N: a held player ranked below this at his position is sold",
+    )
+    sell_rank_min_appearances: int = Field(
+        default=2,
+        description="Appearances a held player needs before his rank is trusted",
+    )
+
     min_days_to_match_for_starter_swap: int = Field(
         default=3,
         description=(
