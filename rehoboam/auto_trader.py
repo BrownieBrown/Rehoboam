@@ -1461,15 +1461,17 @@ class AutoTrader:
         # Sort by EP gain descending — trade pairs compete directly with plain buys
         candidates.sort(key=lambda x: x[1], reverse=True)
 
-        if not candidates:
-            console.print("[dim]No actionable opportunities[/dim]")
-            return results
-
-        console.print(
-            f"[cyan]📋 {len(candidates)} candidates "
-            f"({sum(1 for c in candidates if c[0] == 'buy')} buys, "
-            f"{sum(1 for c in candidates if c[0] == 'pair')} trade pairs)[/cyan]"
-        )
+        # No early exit here (2026-09-25): an empty EP list used to end the
+        # phase before the flip search below ever ran, so on a market with
+        # nothing worth buying for points the one thing worth buying for money
+        # (Becker, +16% over 14d, 163 points a game) was never looked at. The
+        # phase decides it has nothing to do only after both searches.
+        if candidates:
+            console.print(
+                f"[cyan]📋 {len(candidates)} candidates "
+                f"({sum(1 for c in candidates if c[0] == 'buy')} buys, "
+                f"{sum(1 for c in candidates if c[0] == 'pair')} trade pairs)[/cyan]"
+            )
 
         # Refresh squad, bids, and budget — sell monitoring, squad optimization,
         # and bid compliance/evaluation can all mutate these between ctx build
@@ -1587,6 +1589,10 @@ class AutoTrader:
                     console.print(f"[dim]Skipped {skipped_wash} flip(s) — wash-trade block[/dim]")
             except Exception as e:
                 console.print(f"[yellow]Profit flip search failed: {e}[/yellow]")
+
+        if not candidates and not profit_flip_candidates:
+            console.print("[dim]No actionable opportunities[/dim]")
+            return results
 
         for kind, _ep_val, obj in candidates:
             if ctx.executed_trade_count >= effective_limit:
