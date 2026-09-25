@@ -268,3 +268,93 @@ class TestFlipBuyBlockGate:
         assert mock_execute.call_args[0][1].player.id == "p1"
         assert mock_execute.call_args[0][1].recommended_bid == 1_000_000
         assert mock_execute.call_args.kwargs["free_slots"] >= 1
+
+
+class TestFlipSearchRunsWithoutEpCandidates:
+    """2026-09-25: two sessions ended with "No actionable opportunities" before
+    the flip search ran, because the phase exited early on an empty EP list.
+    Becker (+16% over 14d, 163 points a game) sat on the market both times."""
+
+    @staticmethod
+    def _empty_ctx() -> EPSessionContext:
+        phase = MatchdayPhase(
+            days_until_match=14,
+            phase="aggressive",
+            max_trades=15,
+            allow_flips=True,
+            reason="test",
+        )
+        return EPSessionContext(
+            ep_result={"buy_recs": [], "trade_pairs": []},
+            matchday_phase=phase,
+            my_bids=[],
+            my_bid_amounts={},
+            squad=[],
+            current_budget=5_000_000,
+            team_value=20_000_000,
+            flip_budget=5_000_000,
+        )
+
+    def test_the_flip_search_runs_when_the_ep_pipeline_has_nothing(self, trader):
+        trader.settings.enable_flip_buys = True
+        TestFlipBuyBlockGate._configure_trader(trader)
+
+        with patch("rehoboam.trader.Trader.find_profit_opportunities") as mock_find:
+            mock_find.return_value = []
+            results = trader.run_unified_trade_phase(
+                league=SimpleNamespace(id="L"), ctx=self._empty_ctx()
+            )
+
+        mock_find.assert_called_once()
+        assert results == []
+
+    def test_a_flip_found_that_way_is_bought(self, trader):
+        trader.settings.enable_flip_buys = True
+        TestFlipBuyBlockGate._configure_trader(trader)
+        trader.api.get_market.return_value = []
+        opp = SimpleNamespace(
+            player=SimpleNamespace(
+                id="becker",
+                first_name="Finn",
+                last_name="Becker",
+                position="Forward",
+                team_id="t1",
+                market_value=16_330_630,
+                price=16_330_630,
+                status=0,
+            ),
+            buy_price=16_330_630,
+            expected_appreciation=16.2,
+            hold_days=7,
+            risk_score=0.0,
+        )
+        ctx = self._empty_ctx()
+        ctx.current_budget = 6_802_304
+        ctx.team_value = 124_134_929
+        ctx.flip_budget = 81_283_261
+        trader.api.get_team_info.return_value = {
+            "budget": 6_802_304,
+            "team_value": 124_134_929,
+        }
+
+        with (
+            patch("rehoboam.trader.Trader.find_profit_opportunities", return_value=[opp]),
+            patch.object(trader.execution, "buy", wraps=trader.execution.buy) as mock_buy,
+        ):
+            trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
+
+        assert mock_buy.call_count == 1
+        assert mock_buy.call_args.args[1].id == "becker"
+        assert mock_buy.call_args.kwargs["flip"].target_pct == 16.2
+
+    def test_nothing_at_all_still_says_so(self, trader):
+        trader.settings.enable_flip_buys = False
+        TestFlipBuyBlockGate._configure_trader(trader)
+
+        with patch("rehoboam.trader.Trader.find_profit_opportunities") as mock_find:
+            results = trader.run_unified_trade_phase(
+                league=SimpleNamespace(id="L"), ctx=self._empty_ctx()
+            )
+
+        mock_find.assert_not_called()
+        assert results == []
