@@ -62,3 +62,26 @@ class TestTheSwitch:
     def test_turned_off_the_target_rule_is_back(self):
         assert _why(12.0, 2.0, exit_on_turn=False) == "Flip target (10%) hit: +12.0%"
         assert _why(5.0, -1.2, exit_on_turn=False) is None
+
+
+class TestTheRuleTag:
+    """Every flip sale is tagged with the rule that fired, so a win rate
+    per rule can be read off `flip_outcomes` instead of guessed."""
+
+    def test_tags(self):
+        from rehoboam.services.flip_exit import exit_rule_tag
+
+        assert (
+            exit_rule_tag("Flip exit at the turn: last night -1.2%, +5.0% vs cost (EUR 1)")
+            == "turn"
+        )
+        assert exit_rule_tag("Flip stop-loss (-15%): -16.0% (EUR -1)") == "stop_loss"
+        assert exit_rule_tag("Flip target (10%) hit: +12.0%") == "target"
+        assert (
+            exit_rule_tag("Deferred sell plan — recovering budget after winning auction")
+            == "sell_plan"
+        )
+        assert exit_rule_tag("Debt recovery before kickoff — no cost basis") == "debt_recovery"
+        assert exit_rule_tag("Outside the top 30 at position on both measures") == "rank"
+        assert exit_rule_tag("Squad optimization — forced sell to recover budget") == "other"
+        assert exit_rule_tag(None) is None

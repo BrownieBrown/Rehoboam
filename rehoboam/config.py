@@ -269,6 +269,44 @@ class Settings(BaseSettings):
         default=3,
         description="How many nightly readings the market-drift gate reads. Env: FLIP_MARKET_DRIFT_NIGHTS.",
     )
+    flip_max_fraction_of_float: float = Field(
+        default=0.34,
+        description=(
+            "A flip may be at most this share of the float (free cash plus what "
+            "is parked in marked flips; a negative wallet is no float). Measured "
+            "68% wins, median +10.9%, p25 -5.5%: a fractional-Kelly stake. "
+            "Env: FLIP_MAX_FRACTION_OF_FLOAT."
+        ),
+    )
+    flip_max_open: int = Field(
+        default=3,
+        description="At most this many flips open at once (held plus pending bids). Env: FLIP_MAX_OPEN.",
+    )
+    flip_breaker_loss_eur: int = Field(
+        default=10_000_000,
+        description=(
+            "No new flips once realised flip losses over FLIP_BREAKER_DAYS reach "
+            "this. Env: FLIP_BREAKER_LOSS_EUR."
+        ),
+    )
+    flip_breaker_days: int = Field(
+        default=14, description="The breaker's window in days. Env: FLIP_BREAKER_DAYS."
+    )
+    flip_min_last_move_pct: float = Field(
+        default=0.5,
+        description=(
+            "A flip's last nightly move must be at least this (percent): a rise "
+            "that slowed to nothing is a run at its end. Env: FLIP_MIN_LAST_MOVE_PCT."
+        ),
+    )
+    flip_max_decel_ratio: float = Field(
+        default=0.5,
+        description=(
+            "No flip when the last nightly move is below this share of the move "
+            "before it (a rise that halved overnight). 0 turns it off. "
+            "Env: FLIP_MAX_DECEL_RATIO."
+        ),
+    )
     flip_buys_require_rising_trend: bool = Field(
         default=True,
         description=(

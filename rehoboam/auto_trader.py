@@ -17,6 +17,7 @@ from .services import AutoTradeResult, ExecutionService
 from .services.emergency_window import emergency_fill_due
 from .services.execution import LOCKOUT_DAYS
 from .services.flip_exit import flip_exit_reason
+from .services.flip_sizing import flip_size_reason
 from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
@@ -1802,6 +1803,10 @@ class AutoTrader:
             console.print(
                 f"\n[bold cyan]💰 Profit Flips ({len(profit_flip_candidates)} candidates)[/bold cyan]"
             )
+            # The stake (2026-10-07): a slice of the float, never debt, and
+            # a few names at most. `services/flip_sizing` holds the rule;
+            # the ledger reads are best-effort (unreadable = nothing open).
+            held_flip_value, open_flips = self._open_flip_exposure(ctx)
             for opp in profit_flip_candidates:
                 if ctx.executed_trade_count >= effective_limit:
                     break
@@ -1812,6 +1817,20 @@ class AutoTrader:
                 if ctx.my_bid_amounts.get(opp.player.id, 0) > 0:
                     continue
                 if opp.buy_price > ctx.flip_budget:
+                    continue
+                too_big = flip_size_reason(
+                    int(opp.buy_price),
+                    cash=int(ctx.current_budget),
+                    held_flip_value=held_flip_value,
+                    open_flips=open_flips,
+                    max_fraction=float(getattr(self.settings, "flip_max_fraction_of_float", 0.34)),
+                    max_open=int(getattr(self.settings, "flip_max_open", 3)),
+                )
+                if too_big is not None:
+                    console.print(
+                        f"[yellow]Flip {opp.player.last_name} not sized: {too_big}[/yellow]"
+                    )
+                    logger.info("flip sizing player=%s refused: %s", opp.player.id, too_big)
                     continue
                 # REH-85 Finding 2: a flip is discretionary spend, and design
                 # §3 says pacing applies to it same as a plain buy -- capital
@@ -1857,6 +1876,8 @@ class AutoTrader:
                     ),
                 )
                 results.append(result)
+                if result.success:
+                    open_flips += 1
                 if result.success:
                     ctx.executed_trade_count += 1
                     self.daily_spend += opp.buy_price
@@ -1978,6 +1999,28 @@ class AutoTrader:
                 max(0, shortfall),
             )
         return shortfall
+
+    def _open_flip_exposure(self, ctx: EPSessionContext) -> tuple[int, int]:
+        """(market value parked in held marked flips, flips open = held + pending bids)."""
+        held_value, open_count = 0, 0
+        try:
+            held = self.learner.get_tracked_purchases(intent="flip")
+            held = dict(held) if isinstance(held, dict) else {}
+        except Exception:
+            held = {}
+        by_id = {str(getattr(p, "id", "")): p for p in (ctx.squad or [])}
+        for pid in held:
+            player = by_id.get(str(pid))
+            if player is not None:
+                held_value += int(getattr(player, "market_value", 0) or 0)
+                open_count += 1
+        try:
+            rows = self.learner.get_pending_bids()
+            rows = list(rows) if isinstance(rows, list) else []
+        except Exception:
+            rows = []
+        open_count += sum(1 for r in rows if (r.get("intent") or "") == "flip")
+        return held_value, open_count
 
     def _run_debt_recovery(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Sell until the wallet, net of open offers, is back at zero.

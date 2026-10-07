@@ -49,6 +49,8 @@ class ProfitTrader:
         max_risk_score: float = 50.0,
         max_overpay_pct: float = 1.0,
         require_rising_trend: bool = True,
+        min_last_move_pct: float = 0.0,
+        max_decel_ratio: float = 0.0,
     ):
         """
         Args:
@@ -66,6 +68,12 @@ class ProfitTrader:
         self.max_risk_score = max_risk_score
         self.max_overpay_pct = max_overpay_pct
         self.require_rising_trend = require_rising_trend
+        # Entry strength (2026-10-07): the last nightly move must be at
+        # least this, and at least this share of the move before it. Tietz
+        # at +0.2% a night after +1.2% ten nights earlier was a run at its
+        # end, not one to join. Both default to 0 = off.
+        self.min_last_move_pct = float(min_last_move_pct)
+        self.max_decel_ratio = float(max_decel_ratio)
 
     def _entry_price(self, player, forecast_pct: float | None) -> int:
         """What the flip bids: the overpay cap, lifted to the forecast value.
@@ -207,6 +215,19 @@ class ProfitTrader:
                         forecast is not None and forecast < 0
                     ):
                         turned_filtered += 1
+                        continue
+                    if last_move is not None and last_move < self.min_last_move_pct:
+                        turned_filtered += 1
+                        continue
+                    prev_move = trend.get("trend_1d_prev_pct")
+                    if (
+                        last_move is not None
+                        and prev_move is not None
+                        and prev_move > 0
+                        and self.max_decel_ratio > 0
+                        and last_move < self.max_decel_ratio * prev_move
+                    ):
+                        turned_filtered += 1  # the rise halved overnight: slowing to a stop
                         continue
                 elif self.require_rising_trend:
                     # Every branch below is a bet that the market is wrong —

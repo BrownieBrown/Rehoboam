@@ -36,3 +36,24 @@ def flip_exit_reason(
     if profit_pct >= target_pct:
         return f"Flip target ({target_pct:.0f}%) hit: {profit_pct:+.1f}%"
     return None
+
+
+_RULE_PREFIXES = (
+    ("Flip exit at the turn", "turn"),
+    ("Flip stop-loss", "stop_loss"),
+    ("Flip target", "target"),
+    ("Deferred sell plan", "sell_plan"),
+    ("Debt recovery", "debt_recovery"),
+    ("Outside the top", "rank"),
+    ("Out for weeks", "rank"),
+)
+
+
+def exit_rule_tag(reason: str | None) -> str | None:
+    """The short tag of the rule behind a sale reason, for `flip_outcomes.exit_rule`."""
+    if reason is None:
+        return None
+    for prefix, tag in _RULE_PREFIXES:
+        if reason.startswith(prefix):
+            return tag
+    return "other"

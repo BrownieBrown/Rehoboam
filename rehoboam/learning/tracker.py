@@ -26,6 +26,13 @@ from .entry_context import EntryContext, entry_context
 logger = logging.getLogger(__name__)
 
 
+def _exit_rule_tag(reason: str | None) -> str | None:
+    """Lazy: `services` imports `ExecutionService`, which imports this module."""
+    from ..services.flip_exit import exit_rule_tag
+
+    return exit_rule_tag(reason)
+
+
 @dataclass(frozen=True)
 class CostBasisReconciliation:
     """What one `reconcile_squad_cost_basis` pass managed to close.
@@ -480,6 +487,8 @@ class LearningTracker:
                 trend_pct_at_buy=entry.trend_pct_at_buy,
                 mv_at_buy=entry.mv_at_buy,
                 pct_below_peak_30d_at_buy=entry.pct_below_peak_30d_at_buy,
+                intent=purchase.get("intent"),
+                exit_rule=_exit_rule_tag(reason),
             )
             self.bid_learner.record_flip(outcome)
             self.bid_learner.delete_tracked_purchase(player.id)

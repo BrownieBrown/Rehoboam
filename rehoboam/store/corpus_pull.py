@@ -43,7 +43,9 @@ create table if not exists flip_outcomes (
     was_injured integer not null default 0,
     trend_pct_at_buy real,
     mv_at_buy integer,
-    pct_below_peak_30d_at_buy real
+    pct_below_peak_30d_at_buy real,
+    intent text,
+    exit_rule text
 );
 create table if not exists matchday_lineup_results (
     league_id text not null,

@@ -83,6 +83,9 @@ class FlipOutcome:
     trend_pct_at_buy: float | None = None
     mv_at_buy: int | None = None
     pct_below_peak_30d_at_buy: float | None = None
+    # 2026-10-07: why he was bought and which rule sold him.
+    intent: str | None = None
+    exit_rule: str | None = None
 
 
 # --- EP overbid recommender (REH-89) --------------------------------------
@@ -179,9 +182,10 @@ class BidLearner:
                 INSERT INTO rehoboam.flip_outcomes (
                     player_id, player_name, buy_price, sell_price, profit, profit_pct,
                     hold_days, buy_date, sell_date, trend_at_buy, average_points, position,
-                    was_injured, trend_pct_at_buy, mv_at_buy, pct_below_peak_30d_at_buy
+                    was_injured, trend_pct_at_buy, mv_at_buy, pct_below_peak_30d_at_buy,
+                    intent, exit_rule
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (player_id, buy_date) DO NOTHING
                 """,
                 (
@@ -201,9 +205,29 @@ class BidLearner:
                     outcome.trend_pct_at_buy,
                     outcome.mv_at_buy,
                     outcome.pct_below_peak_30d_at_buy,
+                    outcome.intent,
+                    outcome.exit_rule,
                 ),
             )
             return cur.rowcount > 0
+
+    def flip_realised_since(self, since: float, *, intent: str = "flip") -> int:
+        """Realised profit of the flips sold since ``since`` (epoch), in euros.
+
+        The drawdown breaker's input (2026-10-07). Only sales of purchases
+        made with ``intent`` count: a points buy sold by the debt recovery is
+        not a flip result.
+        """
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(profit), 0) AS total
+                FROM rehoboam.flip_outcomes
+                WHERE sell_date >= %s AND intent = %s
+                """,
+                (float(since), intent),
+            ).fetchone()
+        return int(row["total"] or 0) if row else 0
 
     # ------------------------------------------------------------------
     # Operational state: pending bids + tracked purchases
@@ -290,22 +314,18 @@ class BidLearner:
     def get_pending_bids(self) -> list[dict[str, Any]]:
         """Return all pending bids, oldest first, with their sell plans inlined."""
         with self.connection() as conn:
-            rows = conn.execute(
-                """
+            rows = conn.execute("""
                 SELECT player_id, player_name, our_bid, asking_price,
                        our_overbid_pct, timestamp, market_value, player_value_score,
                        tier, intent, target_pct, max_hold_days
                 FROM rehoboam.pending_bids
                 ORDER BY timestamp ASC
-            """
-            ).fetchall()
+            """).fetchall()
 
-            sell_plan_rows = conn.execute(
-                """
+            sell_plan_rows = conn.execute("""
                 SELECT pending_bid_player_id, sell_player_id
                 FROM rehoboam.pending_bid_sell_plans
-            """
-            ).fetchall()
+            """).fetchall()
 
         sell_plans: dict[str, list[str]] = {}
         for r in sell_plan_rows:
@@ -930,13 +950,11 @@ class BidLearner:
         filled = 0
         window = float(window_days) * 86400.0
         with self.connection() as conn:
-            pending = conn.execute(
-                """
+            pending = conn.execute("""
                 SELECT id, player_id, timestamp, our_bid, asking_price, player_name
                 FROM rehoboam.auction_outcomes
                 WHERE won = 0 AND winning_bid IS NULL
-                """
-            ).fetchall()
+                """).fetchall()
             for row in pending:
                 row_id = row["id"]
                 player_id = row["player_id"]
@@ -1017,8 +1035,7 @@ class BidLearner:
         noise.
         """
         with self.connection() as conn:
-            rows = conn.execute(
-                """
+            rows = conn.execute("""
                 SELECT player_id, player_name, our_bid, winning_bid, timestamp,
                        our_bid - winning_bid AS margin
                 FROM rehoboam.auction_outcomes
@@ -1027,8 +1044,7 @@ class BidLearner:
                   AND winning_bid > 0
                   AND our_bid > winning_bid
                 ORDER BY margin DESC
-                """
-            ).fetchall()
+                """).fetchall()
         return [dict(r) for r in rows]
 
     def record_manager_transfers(self, rows: list[dict]) -> int:
@@ -1387,16 +1403,14 @@ class BidLearner:
         clamped to [0.5, 1.2]; defaults to 1.0 when data is insufficient.
         """
         with self.connection() as conn:
-            row = conn.execute(
-                """
+            row = conn.execute("""
                 SELECT COUNT(*) AS n,
                        AVG(mo.actual_points)::float8 AS avg_actual,
                        AVG(mo.predicted_ep)::float8 AS avg_predicted
                 FROM rehoboam.matchday_outcomes mo
                 INNER JOIN rehoboam.auction_outcomes ao ON ao.player_id = mo.player_id
                 WHERE ao.won = 1 AND mo.predicted_ep > 0
-                """
-            ).fetchone()
+                """).fetchone()
 
         if not row:
             return 1.0
