@@ -120,12 +120,15 @@ class TestTheOrderOfSacrifice:
         plan = plan_debt_recovery(squad, shortfall=1, position_counts=_counts(*squad))
         assert [c.player_id for c in plan.sells] == ["flat"]
 
-    def test_within_losses_the_smaller_loss_share_goes_first(self):
+    def test_within_losses_the_sale_proportionate_to_the_debt_goes_first(self):
+        """Until 2026-10-07 the shallower loss went first, whatever its size
+        — the key that sold a 35m player for a 2.7m gap. The loss is sunk
+        either way; the sale that leaves the least cash to spare goes."""
         deep = _c("deep", mv=5_000_000, buy=10_000_000)
         shallow = _c("shallow", mv=9_500_000, buy=10_000_000)
         squad = _eleven() + [deep, shallow]
         plan = plan_debt_recovery(squad, shortfall=1, position_counts=_counts(*squad))
-        assert [c.player_id for c in plan.sells] == ["shallow"]
+        assert [c.player_id for c in plan.sells] == ["deep"]
 
     def test_an_unknown_cost_basis_counts_as_neither_profit_nor_loss(self):
         """No evidence of a loss: it sorts at the bottom of the profit tier,
@@ -189,7 +192,7 @@ class TestPositionMinimumsGoLast:
         # loss-making others above their minimums (two midfielders and a
         # forward, 10m each) — never a second defender while anyone is left.
         plan = plan_debt_recovery(squad, shortfall=30_000_000, position_counts=_counts(*squad))
-        assert sum(1 for c in plan.sells if c.position == "Defender") == 1
+        assert sum(1 for c in plan.sells if c.position == "Defender") <= 1
         assert plan.below_minimum == []
 
     def test_a_protected_player_is_sold_when_nothing_else_covers(self):
@@ -273,3 +276,124 @@ class TestWithdrawingBidsFirst:
             plan_bid_withdrawals([OpenBid("f", 3_000_000, "flip", None)], shortfall=0).withdraw
             == []
         )
+
+
+class TestTheSmallestSufficientSacrifice:
+    """2026-10-07 22:00, the first locked window ever run with debt: wallet
+    -9.5m, Poreba sold first (+2%), 2.66m still owed — and the planner sold
+    Pavlović (35.1m, the squad's best player, EP 117) because he was the
+    shallowest non-slumping loss. Moore (7.1m) and Scally (3.6m) would each
+    have covered it alone; both were ranked behind him for a negative
+    7-day trend. The planner now asks what is still owed and takes the
+    sale that covers it with the fewest expected points lost; the squad's
+    top player goes only when nothing else can."""
+
+    @staticmethod
+    def _tonight():
+        return [
+            _c("flekken", "Goalkeeper", mv=11_697_069, buy=None, ep=75.3, starter=True),
+            _c(
+                "raum",
+                "Defender",
+                mv=28_456_277,
+                buy=40_717_295,
+                ep=119.0,
+                starter=True,
+                trend=0.97,
+            ),
+            _c(
+                "bornauw",
+                "Defender",
+                mv=7_991_727,
+                buy=7_491_206,
+                ep=17.6,
+                starter=True,
+                trend=26.0,
+            ),
+            _c(
+                "scally",
+                "Defender",
+                mv=3_603_731,
+                buy=4_150_783,
+                ep=61.8,
+                starter=True,
+                trend=-11.3,
+            ),
+            _c(
+                "pavlovic",
+                "Midfielder",
+                mv=35_100_242,
+                buy=38_336_318,
+                ep=117.0,
+                starter=True,
+                trend=0.84,
+            ),
+            _c(
+                "burger",
+                "Midfielder",
+                mv=19_457_764,
+                buy=24_526_411,
+                ep=114.7,
+                starter=True,
+                trend=1.03,
+            ),
+            _c(
+                "moore",
+                "Midfielder",
+                mv=7_110_679,
+                buy=7_212_762,
+                ep=68.3,
+                starter=True,
+                trend=-8.9,
+            ),
+            _c(
+                "poreba",
+                "Midfielder",
+                mv=6_858_463,
+                buy=6_722_770,
+                ep=75.2,
+                starter=True,
+                trend=0.28,
+            ),
+            _c(
+                "demirovic",
+                "Forward",
+                mv=10_837_548,
+                buy=20_110_500,
+                ep=77.9,
+                starter=True,
+                trend=-4.66,
+            ),
+        ]
+
+    def test_tonights_shortfall_costs_poreba_and_moore_not_pavlovic(self):
+        # Scally sits at the defender minimum, so Moore (7.1m) is the
+        # proportionate second sale for the 2.66m still owed after Poreba.
+        squad = self._tonight()
+        plan = plan_debt_recovery(squad, shortfall=9_516_359, position_counts=_counts(*squad))
+        assert [c.player_id for c in plan.sells] == ["poreba", "moore"]
+        assert plan.covered
+
+    def test_a_single_sale_that_covers_beats_piling_up_small_ones(self):
+        smalls = [_c(f"s{i}", mv=4_000_000, buy=5_000_000, ep=30.0, starter=True) for i in range(3)]
+        one = _c("one", mv=12_000_000, buy=15_000_000, ep=40.0, starter=True)
+        squad = _eleven() + smalls + [one]
+        plan = plan_debt_recovery(squad, shortfall=12_000_000, position_counts=_counts(*squad))
+        assert [c.player_id for c in plan.sells] == ["one"]
+
+    def test_among_sales_that_cover_the_fewest_points_lost_goes(self):
+        big_ep = _c("star", mv=20_000_000, buy=22_000_000, ep=120.0, starter=True)
+        small_ep = _c("sub", mv=5_000_000, buy=6_000_000, ep=40.0, starter=True, trend=-9.0)
+        squad = _eleven() + [big_ep, small_ep]
+        plan = plan_debt_recovery(squad, shortfall=3_000_000, position_counts=_counts(*squad))
+        assert [c.player_id for c in plan.sells] == ["sub"]
+
+    def test_the_top_player_goes_only_when_nothing_else_covers(self):
+        # Raum (EP 119) is the squad's top player in this fixture. Everyone
+        # else sums to 102.7m: at 100m he stays, at 110m he goes last.
+        squad = self._tonight()
+        plan = plan_debt_recovery(squad, shortfall=100_000_000, position_counts=_counts(*squad))
+        assert "raum" not in [c.player_id for c in plan.sells]
+        plan = plan_debt_recovery(squad, shortfall=110_000_000, position_counts=_counts(*squad))
+        ids = [c.player_id for c in plan.sells]
+        assert ids[-1] == "raum"

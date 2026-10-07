@@ -124,11 +124,19 @@ def plan_debt_recovery(
 
     counts = dict(position_counts)
     ordered = sorted(candidates, key=_sacrifice_key)
-    for last_resort in (False, True):
+    # The squad's top player (2026-10-07: Pavlović, EP 117, sold for a
+    # 2.7m gap) is sold for debt only when nothing else can cover it —
+    # after even the position-minimum players, whom the fill buys back.
+    top_id = (
+        max(candidates, key=lambda c: c.expected_points).player_id if len(candidates) > 1 else None
+    )
+
+    def _eligible(last_resort: bool, allow_top: bool) -> list[DebtCandidate]:
+        out = []
         for cand in ordered:
-            if recovered >= need:
-                break
             if cand in sells:
+                continue
+            if cand.player_id == top_id and not allow_top:
                 continue
             minimum = POSITION_MINIMUMS.get(cand.position, 0)
             at_minimum = counts.get(cand.position, 0) <= minimum
@@ -136,12 +144,72 @@ def plan_debt_recovery(
                 continue
             if counts.get(cand.position, 0) <= 0:
                 continue
-            sells.append(cand)
-            if at_minimum:
-                below_minimum.append(cand)
-            recovered += cand.sell_value
-            counts[cand.position] = counts.get(cand.position, 0) - 1
+            out.append(cand)
+        return out
+
+    def _take(cand: DebtCandidate, last_resort: bool) -> None:
+        nonlocal recovered
+        sells.append(cand)
+        if last_resort:
+            below_minimum.append(cand)
+        recovered += cand.sell_value
+        counts[cand.position] = counts.get(cand.position, 0) - 1
+
+    for last_resort, allow_top in ((False, False), (True, False), (False, True), (True, True)):
+        while recovered < need:
+            pool = _eligible(last_resort, allow_top)
+            if not pool:
+                break
+            best = _best_covering_subset(pool, need - recovered, counts, last_resort)
+            if best:
+                for cand in best:
+                    _take(cand, last_resort)
+                break
+            _take(pool[0], last_resort)
     return DebtPlan(sells=sells, shortfall=need, recovered=recovered, below_minimum=below_minimum)
+
+
+def _best_covering_subset(
+    pool: list[DebtCandidate], owed: int, counts: dict[str, int], last_resort: bool
+) -> list[DebtCandidate] | None:
+    """The smallest sufficient sacrifice: up to three sales that cover
+    ``owed``, chosen by (worst tier among them, cash to spare, expected
+    points lost, the sacrifice order). None when no such set exists, and
+    the caller accumulates in sacrifice order instead.
+
+    Why cash to spare before points: on 2026-10-07 the order alone sold a
+    35m player for a 2.7m gap because he was the shallowest non-slumping
+    loss. A sale proportionate to the debt is the thing a person would
+    have asked for first; the tier keeps profits ahead of losses.
+    """
+    from itertools import combinations
+
+    best: tuple | None = None
+    best_set: list[DebtCandidate] | None = None
+    for size in (1, 2, 3):
+        for combo in combinations(pool, size):
+            total = sum(c.sell_value for c in combo)
+            if total < owed:
+                continue
+            if not last_resort:
+                # Two sales at one position must not breach its minimum.
+                per_pos: dict[str, int] = {}
+                for c in combo:
+                    per_pos[c.position] = per_pos.get(c.position, 0) + 1
+                if any(
+                    counts.get(pos, 0) - n < POSITION_MINIMUMS.get(pos, 0)
+                    for pos, n in per_pos.items()
+                ):
+                    continue
+            key = (
+                max(_sacrifice_key(c)[0] for c in combo),
+                total - owed,
+                sum(c.expected_points for c in combo),
+                tuple(sorted(_sacrifice_key(c) for c in combo)),
+            )
+            if best is None or key < best:
+                best, best_set = key, list(combo)
+    return best_set
 
 
 # ---------------------------------------------------------------------------
