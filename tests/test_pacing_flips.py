@@ -74,6 +74,8 @@ def _configure(trader):
     # current_budget -- keeping the pace_cap arithmetic in each test legible
     # instead of entangled with a second Settings field.
     trader.settings.max_debt_pct_of_team_value = 0.0
+    # Likewise the flip stake (2026-10-07): sized in its own tests.
+    trader.settings.flip_max_fraction_of_float = 1.0
 
 
 def _ctx(pacing_ctx) -> EPSessionContext:

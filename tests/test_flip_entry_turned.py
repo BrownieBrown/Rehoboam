@@ -112,3 +112,49 @@ class TestTheTraderHandsTheForecastsToTheFlipSearch:
         ):
             trader.find_profit_opportunities(SimpleNamespace(id="L", name="x"))
         assert find.call_args.kwargs["player_forecasts"] == {"1": -3.0}
+
+
+class TestTheRiseMustStillHaveStrength:
+    """Tietz, 2026-10-07: +1.2% a night ten nights ago, +0.2% last night.
+    A rise that has slowed to nothing is a run at its end, not one to join."""
+
+    def _trader(self):
+        return ProfitTrader(min_profit_pct=5.0, min_last_move_pct=0.5, max_decel_ratio=0.5)
+
+    def test_a_last_move_below_the_floor_is_not_a_flip(self):
+        t = self._trader()
+        assert (
+            _find_with(
+                t,
+                _player(1_000_000, 1_000_000),
+                _trend("rising", 12.0, trend_1d_pct=0.2, trend_1d_prev_pct=0.3),
+            )
+            == []
+        )
+
+    def test_a_rise_that_halved_overnight_is_not_a_flip(self):
+        t = self._trader()
+        assert (
+            _find_with(
+                t,
+                _player(1_000_000, 1_000_000),
+                _trend("rising", 12.0, trend_1d_pct=1.0, trend_1d_prev_pct=3.0),
+            )
+            == []
+        )
+
+    def test_a_steady_rise_is(self):
+        t = self._trader()
+        assert _find_with(
+            t,
+            _player(1_000_000, 1_000_000),
+            _trend("rising", 12.0, trend_1d_pct=2.0, trend_1d_prev_pct=2.5),
+        )
+
+    def test_the_night_before_last_is_reported_by_the_trend(self):
+        values = [1_000_000] * 8 + [1_030_000, 1_050_000, 1_060_000]
+        history = {"it": [{"dt": i, "mv": v} for i, v in enumerate(values)]}
+        ta = TrendService.analyze(history, 1_060_000)
+        assert ta.trend_1d_pct == pytest.approx(0.95, abs=0.01)
+        assert ta.trend_1d_prev_pct == pytest.approx(1.94, abs=0.01)
+        assert "trend_1d_prev_pct" in ta.to_dict()

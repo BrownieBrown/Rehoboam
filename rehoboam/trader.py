@@ -1222,12 +1222,30 @@ class Trader:
                     "market drift unavailable — the flip window stays open", exc_info=True
                 )
                 drift = None
-        return flip_gate_reason(
+        gate = flip_gate_reason(
             days_until_match=days_until_match,
             market_drift_pct=drift,
             max_days_to_kickoff=int(getattr(self.settings, "flip_max_days_to_kickoff", 10)),
             drift_min_pct=0.0,
         )
+        if gate is not None:
+            return gate
+        # The drawdown breaker: realised flip losses over the last days.
+        if self.bid_learner is not None:
+            from .services.flip_breaker import breaker_reason
+
+            days = int(getattr(self.settings, "flip_breaker_days", 14))
+            try:
+                realised = self.bid_learner.flip_realised_since(time.time() - days * 86_400)
+            except Exception:
+                logger.warning("flip breaker: realised P&L unreadable — not tripped", exc_info=True)
+                realised = None
+            return breaker_reason(
+                realised,
+                loss_limit_eur=int(getattr(self.settings, "flip_breaker_loss_eur", 10_000_000)),
+                days=days,
+            )
+        return None
 
     def find_profit_opportunities(self, league: League) -> list:
         """Find short-hold profit flip candidates (buy low, sell high).
@@ -1283,6 +1301,8 @@ class Trader:
             max_risk_score=60.0,
             max_overpay_pct=self.settings.max_flip_overpay_pct,
             require_rising_trend=self.settings.flip_buys_require_rising_trend,
+            min_last_move_pct=float(getattr(self.settings, "flip_min_last_move_pct", 0.0)),
+            max_decel_ratio=float(getattr(self.settings, "flip_max_decel_ratio", 0.0)),
         )
 
         max_opps = 5 if flip_budget < current_budget else 10

@@ -42,6 +42,7 @@ class TrendAnalysis:
 
     # Multi-window % changes
     trend_1d_pct: float = 0.0  # the last nightly move (2026-10-07: a turned rise)
+    trend_1d_prev_pct: float = 0.0  # the move the night before (a slowing rise)
     trend_7d_pct: float = 0.0
     trend_14d_pct: float = 0.0
     trend_30d_pct: float = 0.0
@@ -84,6 +85,7 @@ class TrendAnalysis:
             "trend": self.trend,
             "trend_pct": self.trend_14d_pct,
             "trend_1d_pct": self.trend_1d_pct,
+            "trend_1d_prev_pct": self.trend_1d_prev_pct,
             "trend_7d_pct": self.trend_7d_pct,
             "trend_14d_pct": self.trend_14d_pct,
             "trend_30d_pct": self.trend_30d_pct,
@@ -291,8 +293,10 @@ class TrendService:
         # newest point to `current`. Either way: one night, not a window.
         if values[-1] == current:
             trend_1d = pct_change(values[-2], current)
+            trend_1d_prev = pct_change(values[-3], values[-2]) if n >= 3 else 0.0
         else:
             trend_1d = pct_change(values[-1], current)
+            trend_1d_prev = pct_change(values[-2], values[-1])
         trend_7d = pct_change(values[-min(7, n)], current) if n >= 2 else 0.0
         trend_14d = pct_change(values[-min(14, n)], current) if n >= 2 else 0.0
         trend_30d = pct_change(values[-min(30, n)], current) if n >= 2 else 0.0
@@ -350,6 +354,7 @@ class TrendService:
             trend=trend,
             # Multi-window
             trend_1d_pct=round(trend_1d, 2),
+            trend_1d_prev_pct=round(trend_1d_prev, 2),
             trend_7d_pct=round(trend_7d, 2),
             trend_14d_pct=round(trend_14d, 2),
             trend_30d_pct=round(trend_30d, 2),

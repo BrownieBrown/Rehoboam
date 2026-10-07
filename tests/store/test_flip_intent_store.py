@@ -63,3 +63,54 @@ def test_a_cost_basis_recovered_from_the_feed_has_no_intent(learner):
 
     assert learner.get_tracked_purchase("p2")["intent"] is None
     assert learner.get_tracked_purchases(intent="flip") == {}
+
+
+def test_a_sale_records_the_intent_and_the_rule_that_fired(learner):
+    """2026-10-07: `flip_outcomes.intent` and `.exit_rule`, so the P&L of
+    the turn exit can be read per rule."""
+    tracker = LearningTracker(learner)
+    tracker.record_bid_placed(
+        _player(), 1_000_000, flip=FlipIntent(target_pct=12.0, max_hold_days=5)
+    )
+    tracker.resolve_auctions(squad_ids={"p1"}, active_bid_ids=set())
+
+    tracker.record_flip_outcome(
+        SimpleNamespace(id="p1", first_name="Test", last_name="Flip", status=0),
+        1_050_000,
+        reason="Flip exit at the turn: last night -1.2%, +5.0% vs cost (EUR 50,000)",
+    )
+
+    from rehoboam.store import connect
+
+    with connect(learner.dsn) as conn:
+        row = conn.execute(
+            "select intent, exit_rule, profit from rehoboam.flip_outcomes"
+        ).fetchone()
+    assert (row["intent"], row["exit_rule"], row["profit"]) == ("flip", "turn", 50_000)
+
+
+def test_realised_flip_pnl_over_a_window(learner):
+    import time
+
+    tracker = LearningTracker(learner)
+    for pid, sell in (("a", 900_000), ("b", 1_200_000)):
+        tracker.record_bid_placed(
+            _player(pid), 1_000_000, flip=FlipIntent(target_pct=12.0, max_hold_days=5)
+        )
+        tracker.resolve_auctions(squad_ids={pid}, active_bid_ids=set())
+        tracker.record_flip_outcome(
+            SimpleNamespace(id=pid, first_name="T", last_name=pid, status=0),
+            sell,
+            reason="Flip exit at the turn",
+        )
+    # a points buy sold at a loss does not count as flip P&L
+    tracker.record_bid_placed(_player("c"), 1_000_000, tier="strong_upgrade")
+    tracker.resolve_auctions(squad_ids={"c"}, active_bid_ids=set())
+    tracker.record_flip_outcome(
+        SimpleNamespace(id="c", first_name="T", last_name="c", status=0),
+        500_000,
+        reason="Debt recovery",
+    )
+
+    assert learner.flip_realised_since(time.time() - 86_400) == 100_000
+    assert learner.flip_realised_since(time.time() + 10) == 0

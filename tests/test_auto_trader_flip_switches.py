@@ -339,6 +339,10 @@ class TestFlipSearchRunsWithoutEpCandidates:
 
         with (
             patch("rehoboam.trader.Trader.find_profit_opportunities", return_value=[opp]),
+            # The stake rule (2026-10-07) would refuse a 16.3m flip on a 6.8m
+            # float — sized in tests/test_flip_sizing.py; this test is about
+            # the search running at all.
+            patch("rehoboam.auto_trader.flip_size_reason", return_value=None),
             patch.object(trader.execution, "buy", wraps=trader.execution.buy) as mock_buy,
         ):
             trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
