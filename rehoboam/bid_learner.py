@@ -314,18 +314,22 @@ class BidLearner:
     def get_pending_bids(self) -> list[dict[str, Any]]:
         """Return all pending bids, oldest first, with their sell plans inlined."""
         with self.connection() as conn:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT player_id, player_name, our_bid, asking_price,
                        our_overbid_pct, timestamp, market_value, player_value_score,
                        tier, intent, target_pct, max_hold_days
                 FROM rehoboam.pending_bids
                 ORDER BY timestamp ASC
-            """).fetchall()
+            """
+            ).fetchall()
 
-            sell_plan_rows = conn.execute("""
+            sell_plan_rows = conn.execute(
+                """
                 SELECT pending_bid_player_id, sell_player_id
                 FROM rehoboam.pending_bid_sell_plans
-            """).fetchall()
+            """
+            ).fetchall()
 
         sell_plans: dict[str, list[str]] = {}
         for r in sell_plan_rows:
@@ -950,11 +954,13 @@ class BidLearner:
         filled = 0
         window = float(window_days) * 86400.0
         with self.connection() as conn:
-            pending = conn.execute("""
+            pending = conn.execute(
+                """
                 SELECT id, player_id, timestamp, our_bid, asking_price, player_name
                 FROM rehoboam.auction_outcomes
                 WHERE won = 0 AND winning_bid IS NULL
-                """).fetchall()
+                """
+            ).fetchall()
             for row in pending:
                 row_id = row["id"]
                 player_id = row["player_id"]
@@ -1035,7 +1041,8 @@ class BidLearner:
         noise.
         """
         with self.connection() as conn:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT player_id, player_name, our_bid, winning_bid, timestamp,
                        our_bid - winning_bid AS margin
                 FROM rehoboam.auction_outcomes
@@ -1044,7 +1051,8 @@ class BidLearner:
                   AND winning_bid > 0
                   AND our_bid > winning_bid
                 ORDER BY margin DESC
-                """).fetchall()
+                """
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def record_manager_transfers(self, rows: list[dict]) -> int:
@@ -1403,14 +1411,16 @@ class BidLearner:
         clamped to [0.5, 1.2]; defaults to 1.0 when data is insufficient.
         """
         with self.connection() as conn:
-            row = conn.execute("""
+            row = conn.execute(
+                """
                 SELECT COUNT(*) AS n,
                        AVG(mo.actual_points)::float8 AS avg_actual,
                        AVG(mo.predicted_ep)::float8 AS avg_predicted
                 FROM rehoboam.matchday_outcomes mo
                 INNER JOIN rehoboam.auction_outcomes ao ON ao.player_id = mo.player_id
                 WHERE ao.won = 1 AND mo.predicted_ep > 0
-                """).fetchone()
+                """
+            ).fetchone()
 
         if not row:
             return 1.0
