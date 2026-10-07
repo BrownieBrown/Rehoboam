@@ -3214,6 +3214,8 @@ class AutoTrader:
         # pretend to be either.
         days_left = ctx.matchday_phase.days_until_match
         if days_left is not None and days_left <= LOCKOUT_DAYS:
+            budget_before_recovery = int(ctx.current_budget)
+            offers_before_recovery = dict(ctx.my_bid_amounts or {})
             try:
                 sell_results.extend(self._run_debt_recovery(league, ctx))
             except Exception as e:
@@ -3221,6 +3223,39 @@ class AutoTrader:
                 console.print(f"[red]{error_msg}[/red]")
                 errors.append(error_msg)
                 logger.exception("debt recovery failed")
+            # The fill below chooses from the buy list the context holds,
+            # and that list was ranked for the wallet BEFORE the recovery.
+            # 2026-10-07 22:00: built at -9.5m, then 42m sold, then 28m
+            # spent among eight players ranked for a broke wallet while the
+            # best buy on the market was not in the list. Rebuild the view
+            # whenever the recovery moved anything.
+            recovery_moved = (
+                int(ctx.current_budget) != budget_before_recovery
+                or dict(ctx.my_bid_amounts or {}) != offers_before_recovery
+            )
+            if recovery_moved:
+                console.print(
+                    "[cyan]Rebuilding the market view after the debt recovery "
+                    f"(wallet EUR {budget_before_recovery:,} -> EUR {int(ctx.current_budget):,})[/cyan]"
+                )
+                logger.info(
+                    "post-recovery rebuild budget %d -> %d",
+                    budget_before_recovery,
+                    int(ctx.current_budget),
+                )
+                try:
+                    carried = (
+                        ctx.executed_trade_count,
+                        ctx.offers_placed,
+                        ctx.offers_refused,
+                    )
+                    ctx = self._build_session_context(league)
+                    ctx.executed_trade_count, ctx.offers_placed, ctx.offers_refused = carried
+                except Exception as e:
+                    error_msg = f"Post-recovery rebuild failed: {e!s}"
+                    console.print(f"[red]{error_msg}[/red]")
+                    errors.append(error_msg)
+                    logger.exception("post-recovery rebuild failed — fill uses the stale view")
 
         # Step 3: A squad that cannot field a legal eleven is an emergency in
         # EVERY phase (REH-112). This used to sit inside the `locked` branch

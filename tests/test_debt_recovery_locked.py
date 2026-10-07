@@ -288,3 +288,62 @@ class TestOpenBidsAreWithdrawnBeforeAnyoneIsSold:
         )
         assert api.cancel_bid.call_count == 0
         assert api.sell_player_instant.call_count == 1
+
+
+class TestTheFillSeesTheWalletTheRecoveryLeft:
+    """2026-10-07 22:00: the buy list was built at -9.5m, the recovery then
+    sold 42m, and the fill spent 28m choosing among eight players ranked
+    for a broke wallet (Quansah, the best buy on the market, was not among
+    them). After the recovery changes anything, the session rebuilds its
+    market view before the fill runs."""
+
+    def _run(self, tmp_path, monkeypatch, *, budget):
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.setenv("TRADING_MODE", "full")
+        monkeypatch.chdir(tmp_path)
+        squad = _squad()
+        api = _api(squad)
+        trader = AutoTrader(api=api, settings=Settings())
+        first = _context("locked", 1, squad, budget)
+        built: list = []
+        seen: list = []
+
+        def build_ctx(league):
+            # The second build sees what the recovery left: the live roster.
+            ctx = first if not built else _context("locked", 1, api.get_squad(league), 0)
+            built.append(ctx)
+            return ctx
+
+        def fill(league, ctx, *args, **kwargs):
+            seen.append(ctx)
+            return []
+
+        with (
+            patch.object(AutoTrader, "_build_session_context", side_effect=build_ctx) as build,
+            patch.object(AutoTrader, "_run_emergency_squad_fill", side_effect=fill),
+            patch.object(AutoTrader, "run_profit_sell_phase", return_value=[]),
+            patch.object(AutoTrader, "optimize_and_execute_squad", return_value=[]),
+            patch.object(AutoTrader, "run_unified_trade_phase", return_value=[]),
+            patch.object(AutoTrader, "_set_optimal_lineup", return_value=[]),
+            patch(
+                "rehoboam.services.trend_service.TrendService.get_trend",
+                return_value=SimpleNamespace(trend_7d_pct=None),
+            ),
+        ):
+            trader.run_full_session(LEAGUE)
+        return api, build, built, seen
+
+    def test_after_a_recovery_sale_the_fill_runs_on_a_rebuilt_context(self, tmp_path, monkeypatch):
+        """-8m needs the bench player and a starter; the squad drops to ten,
+        so the fill is reached — and it must see the rebuilt context."""
+        api, build, built, seen = self._run(tmp_path, monkeypatch, budget=-8_000_000)
+        assert api.sell_player_instant.call_count == 2
+        assert build.call_count == 2
+        assert seen and seen[0] is built[1]
+        assert len(seen[0].squad) == 10
+
+    def test_without_a_sale_the_context_is_built_once(self, tmp_path, monkeypatch):
+        api, build, built, seen = self._run(tmp_path, monkeypatch, budget=5_000_000)
+        assert api.sell_player_instant.call_count == 0
+        assert build.call_count == 1
