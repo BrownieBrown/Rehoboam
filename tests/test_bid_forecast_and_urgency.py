@@ -49,7 +49,20 @@ class TestTheNextUpdate:
         assert rec.overbid_pct == pytest.approx((1.1225 * 0.96 - 1) * 100, abs=0.2)
         assert "next update forecast -4.0%" in rec.reasoning
 
-    def test_a_rising_forecast_changes_nothing(self):
+    def test_a_rising_forecast_floors_the_premium_at_the_forecast(self):
+        # Kickbase declines a bid below the market value at expiry, and the
+        # listing expires after the update: a premium under the forecast
+        # rise is a bid that cannot win. The marginal tier reads the curve
+        # at its floor (about 4%), so a +6% forecast must lift it.
+        bidder = SmartBidding(ceiling_policy=POLICY, win_curve=_curve())
+        low = _bid(bidder, gain=30.0, forecast=None, trend=-12.0)
+        assert low.overbid_pct < 6.0
+        rec = _bid(bidder, gain=30.0, forecast=+6.0, trend=-12.0)
+        assert rec.overbid_pct == pytest.approx(6.0, abs=0.01)
+        assert rec.recommended_bid >= int(20_000_000 * 1.06)
+        assert "clears the +6.0% forecast at expiry" in rec.reasoning
+
+    def test_a_rising_forecast_below_the_premium_changes_nothing(self):
         bidder = SmartBidding(ceiling_policy=POLICY, win_curve=_curve())
         assert _bid(bidder, forecast=+3.0).overbid_pct == pytest.approx(_bid(bidder).overbid_pct)
         assert "forecast" not in _bid(bidder, forecast=+3.0).reasoning

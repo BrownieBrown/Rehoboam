@@ -36,12 +36,22 @@ from .kickbase_client import League
 from .kickoff import NextKickoff, fixtures_from_myeleven, next_fixture_from_matchdays
 from .matchup_analyzer import MatchupAnalyzer
 from .services.emergency_window import emergency_fill_due
+from .services.season import season_label
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
 
 logger = logging.getLogger(__name__)
 
+
 #: (store, settings) -> (loaded_at, win curve, profit curve). See Trader._load_curves.
+def _berlin_date(now: float):
+    """The Berlin calendar day of an epoch timestamp (the update's own day)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.fromtimestamp(now, tz=ZoneInfo("Europe/Berlin")).date()
+
+
 _CURVE_CACHE: dict = {}
 _CURVE_CACHE_TTL_S = 3600.0
 
@@ -208,10 +218,19 @@ class Trader:
             from .services.mv_forecast import next_update_day
             from .store.mv_forecast_store import MvForecastStore
 
-            day = next_update_day(time.time())
+            now = time.time()
+            day = next_update_day(now)
             if day is None:
-                logger.info("bid forecast: inside the update window — no forecast applied")
-                return {}
+                # The 22:00 session runs inside the window and bids on the
+                # reading it has, which is the pre-update value (verified
+                # 2026-10-04). Today's forecast is the move that reading is
+                # about to make, so it is the right one to judge against.
+                day = _berlin_date(now)
+                logger.info(
+                    "bid forecast: inside the update window — judging the pre-update "
+                    "reading against today's (%s) forecast",
+                    day,
+                )
             key = ("forecast", str(getattr(bid_learner, "dsn", "")), day.isoformat())
             cached = _CURVE_CACHE.get(key)
             if cached is not None and time.time() - cached[0] < _CURVE_CACHE_TTL_S:
@@ -713,10 +732,13 @@ class Trader:
             # REH-25: capture the actual fielded lineup + total points for
             # the most recently completed matchday, once. Skipped if the row
             # already exists or if the matchday isn't fully finished yet.
+            season = season_label(datetime.now(timezone.utc))
             if (
                 self.bid_learner is not None
                 and day_number > 0
-                and not self.bid_learner.has_matchday_lineup_result(league.id, day_number)
+                and not self.bid_learner.has_matchday_lineup_result(
+                    league.id, day_number, season=season
+                )
             ):
                 try:
                     tc = self.api.get_user_teamcenter(league, day_number=day_number)
@@ -733,6 +755,7 @@ class Trader:
                             total_points=total_points,
                             lineup_player_ids=player_ids,
                             lineup_count=lineup_count,
+                            season=season,
                         )
                 except Exception:
                     # Best-effort — never block the EP pipeline.
@@ -884,6 +907,10 @@ class Trader:
             logger.exception("replacement level unavailable — gap fills measured against 0.0")
             replacement_ep = None
 
+        # The players a sell plan may not touch: the rank rule's holds
+        # (2026-10-07). A failing read protects nobody, as before.
+        sell_protected_ids = self._sell_plan_protected_ids([p.id for p in squad])
+
         engine = DecisionEngine(
             # Fallbacks are real-points values (REH-55). The old 30.0 / 5.0 were
             # 0-100 index thresholds — leaving them here would silently disable
@@ -905,6 +932,7 @@ class Trader:
             is_emergency=is_emergency,
             top_n=8 if is_emergency else 10,
             squad_players=squad_player_map,
+            sell_protected_ids=sell_protected_ids,
         )
         trade_pairs = engine.build_trade_pairs(
             market_scores=market_scores,
@@ -1148,6 +1176,33 @@ class Trader:
     # Profit flip discovery (buy low, sell high short-hold)
     # ------------------------------------------------------------------
 
+    def _sell_plan_protected_ids(self, squad_ids: list[str]) -> frozenset[str]:
+        """The squad players a sell plan may not sell: the rank rule's holds.
+
+        Read from `player_ranks` through the league store, best-effort — a
+        failing read protects nobody, which is the pre-2026-10-07 behaviour.
+        """
+        if not squad_ids or not getattr(self.settings, "sell_rank_enabled", False):
+            return frozenset()
+        try:
+            from .services.rank_sell import rank_hold_ids
+            from .store.league_store import LeagueStore
+
+            ranks = LeagueStore().position_ranks([str(pid) for pid in squad_ids])
+            held = rank_hold_ids(
+                ranks,
+                floor=int(self.settings.sell_rank_floor),
+                min_appearances=int(self.settings.sell_rank_min_appearances),
+            )
+            if held:
+                logger.info(
+                    "sell plans: %d rank-held player(s) protected: %s", len(held), sorted(held)
+                )
+            return frozenset(held)
+        except Exception:
+            logger.warning("position ranks unavailable — sell plans protect nobody", exc_info=True)
+            return frozenset()
+
     def find_profit_opportunities(self, league: League) -> list:
         """Find short-hold profit flip candidates (buy low, sell high).
 
@@ -1203,6 +1258,7 @@ class Trader:
             max_opportunities=max_opps,
             team_value=team_value,
             max_debt_pct=self.settings.max_debt_pct_of_team_value,
+            player_forecasts=self.mv_forecasts,
         )
 
     # ------------------------------------------------------------------

@@ -41,6 +41,7 @@ class TrendAnalysis:
     trend: str = "unknown"  # "rising" / "falling" / "stable" / "unknown"
 
     # Multi-window % changes
+    trend_1d_pct: float = 0.0  # the last nightly move (2026-10-07: a turned rise)
     trend_7d_pct: float = 0.0
     trend_14d_pct: float = 0.0
     trend_30d_pct: float = 0.0
@@ -82,6 +83,7 @@ class TrendAnalysis:
             "has_data": self.has_data,
             "trend": self.trend,
             "trend_pct": self.trend_14d_pct,
+            "trend_1d_pct": self.trend_1d_pct,
             "trend_7d_pct": self.trend_7d_pct,
             "trend_14d_pct": self.trend_14d_pct,
             "trend_30d_pct": self.trend_30d_pct,
@@ -283,6 +285,14 @@ class TrendService:
             return ((new_val - old_val) / old_val) * 100
 
         n = len(values)
+        # The last nightly move. The history's newest point is usually the
+        # value the session sees (`current`), so the move is from the point
+        # before it; when the history lags a day, it is the move from the
+        # newest point to `current`. Either way: one night, not a window.
+        if values[-1] == current:
+            trend_1d = pct_change(values[-2], current)
+        else:
+            trend_1d = pct_change(values[-1], current)
         trend_7d = pct_change(values[-min(7, n)], current) if n >= 2 else 0.0
         trend_14d = pct_change(values[-min(14, n)], current) if n >= 2 else 0.0
         trend_30d = pct_change(values[-min(30, n)], current) if n >= 2 else 0.0
@@ -339,6 +349,7 @@ class TrendService:
             has_data=True,
             trend=trend,
             # Multi-window
+            trend_1d_pct=round(trend_1d, 2),
             trend_7d_pct=round(trend_7d, 2),
             trend_14d_pct=round(trend_14d, 2),
             trend_30d_pct=round(trend_30d, 2),

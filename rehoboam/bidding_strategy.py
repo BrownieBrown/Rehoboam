@@ -610,9 +610,9 @@ class SmartBidding:
         # The next update (2026-09-23): the auction settles after tonight's
         # market-value move, so the premium is judged against the value then.
         # A falling forecast lowers the bid to the same premium on tomorrow's
-        # value; a rising one changes nothing, because the safety gate checks
-        # the ceiling against today's value and a bid above it would be
-        # refused (REH-99: what the bidder proposes, the gate executes).
+        # value. A rising one is applied further down, as a floor on the
+        # premium after every reduction: the bid must clear the value at
+        # expiry or Kickbase declines it (2026-10-07).
         forecast_applied = None
         if forecast_change_pct is not None and forecast_change_pct < 0:
             before = overbid_pct
@@ -647,6 +647,22 @@ class SmartBidding:
         # trend scaling so the "fight for this player" signal isn't dampened
         # by a falling market value — contestedness doesn't care about trend.
         overbid_pct += _contested_overbid_bump(ep_tier=ep_tier, offer_count=offer_count)
+
+        # The floor (2026-10-07): Kickbase declines a bid that is below the
+        # market value at the moment the listing expires, and the listing
+        # expires after the update. A premium under the forecast rise is a
+        # bid that cannot win, whatever the curve, the trend factor or the
+        # value bid said — over the break the bot lost every riser this way.
+        forecast_floor_applied = None
+        if forecast_change_pct is not None and forecast_change_pct > overbid_pct:
+            logger.info(
+                "ep-bid expiry floor player=%s premium %.1f%% -> %.1f%% (forecast)",
+                player_id,
+                overbid_pct,
+                forecast_change_pct,
+            )
+            overbid_pct = float(forecast_change_pct)
+            forecast_floor_applied = float(forecast_change_pct)
 
         # The ceiling comes from the ONE policy the safety gate enforces.
         max_overbid = self._max_overbid_pct(ep_tier, market_value)
@@ -743,6 +759,8 @@ class SmartBidding:
             )
         if forecast_applied is not None:
             reasoning_parts.append(f"next update forecast {forecast_applied:+.1f}%")
+        if forecast_floor_applied is not None:
+            reasoning_parts.append(f"clears the {forecast_floor_applied:+.1f}% forecast at expiry")
         if break_even is not None and not exempt_from_cap:
             reasoning_parts.append(
                 f"capped at break-even +{break_even.premium_pct:.1f}% "

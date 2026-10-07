@@ -54,3 +54,33 @@ class TestComputeFlipBudget:
         before = _compute_flip_budget("moderate", 3_000_000, 0, 0)
         after_sell = _compute_flip_budget("moderate", 21_000_000, 0, 0)
         assert after_sell - before == 18_000_000
+
+
+class TestKickbaseDebtCap:
+    """Kickbase refuses an offer that would take the wallet below -33% of
+    total worth (`err 5050 ThirtyThreePercentRuleExceeded`): nine of the
+    bot's offers failed that way between 09-22 and 10-04, because its own
+    allowance is 60% of team value. The allowance has to stop where Kickbase
+    stops, net of what is already committed."""
+
+    def test_the_cap_binds_below_the_sixty_percent_allowance(self):
+        from rehoboam.auto_trader import _max_debt
+
+        # 60% of 100m is 60m; 33% of worth (100m - 20m) is 26.4m.
+        assert (
+            _max_debt(team_value=100_000_000, budget=-20_000_000, max_debt_pct=60.0, worth_pct=33.0)
+            == 26_400_000
+        )
+
+    def test_a_small_allowance_is_left_alone(self):
+        from rehoboam.auto_trader import _max_debt
+
+        assert (
+            _max_debt(team_value=100_000_000, budget=0, max_debt_pct=10.0, worth_pct=33.0)
+            == 10_000_000
+        )
+
+    def test_unknown_team_value_means_no_debt(self):
+        from rehoboam.auto_trader import _max_debt
+
+        assert _max_debt(team_value=0, budget=5_000_000, max_debt_pct=60.0, worth_pct=33.0) == 0

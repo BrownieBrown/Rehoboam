@@ -75,3 +75,26 @@ def rank_sell_reason(
 
 def _has_recovery_time(days_until_match: int | None, min_days: int) -> bool:
     return days_until_match is not None and days_until_match >= min_days
+
+
+def rank_hold_ids(ranks: dict[str, dict], *, floor: int, min_appearances: int) -> set[str]:
+    """The players the rank rule keeps as top players at their position.
+
+    Inside the floor on either measure — points per appearance or expected
+    points — with at least ``min_appearances`` appearances. A sell plan may
+    not fund a buy by selling one of these (2026-10-05: Castello Jr., 14th
+    of all defenders by points per appearance and out "uncertain" that week,
+    was the plan's first pick at -53% of cost). Unknown quality is not
+    protected: protecting every new player would make every plan impossible.
+    """
+    held: set[str] = set()
+    for player_id, row in (ranks or {}).items():
+        if int(row.get("appearances") or 0) < int(min_appearances):
+            continue
+        avg_rank = row.get("avg_points_rank_pos")
+        ep_rank = row.get("ep_rank_pos")
+        if (avg_rank is not None and int(avg_rank) <= floor) or (
+            ep_rank is not None and int(ep_rank) <= floor
+        ):
+            held.add(str(player_id))
+    return held

@@ -674,19 +674,33 @@ class BidLearner:
                 )
         return len(rows)
 
-    def has_matchday_lineup_result(self, league_id: str, day_number: int) -> bool:
+    def has_matchday_lineup_result(
+        self, league_id: str, day_number: int, season: str | None = None
+    ) -> bool:
         """True if ``matchday_lineup_results`` already has a row for this
-        (league_id, day_number). Used by the trader to skip the extra
-        /teamcenter call once a matchday is captured."""
+        (league_id, season, day_number). Used by the trader to skip the extra
+        /teamcenter call once a matchday is captured. Without a season the
+        check spans every season — the 2026-10-07 bug, kept only for callers
+        that predate the column."""
         with self.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT 1 FROM rehoboam.matchday_lineup_results
-                WHERE league_id = %s AND day_number = %s
-                LIMIT 1
-                """,
-                (league_id, int(day_number)),
-            ).fetchone()
+            if season is None:
+                row = conn.execute(
+                    """
+                    SELECT 1 FROM rehoboam.matchday_lineup_results
+                    WHERE league_id = %s AND day_number = %s
+                    LIMIT 1
+                    """,
+                    (league_id, int(day_number)),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT 1 FROM rehoboam.matchday_lineup_results
+                    WHERE league_id = %s AND day_number = %s AND season = %s
+                    LIMIT 1
+                    """,
+                    (league_id, int(day_number), season),
+                ).fetchone()
             return row is not None
 
     def record_matchday_lineup_result(
@@ -698,8 +712,13 @@ class BidLearner:
         lineup_player_ids: list[str],
         lineup_count: int,
         snapshot_at: float | None = None,
+        season: str | None = None,
     ) -> bool:
         """Persist the bot's actual fielded lineup for one matchday.
+
+        ``season`` ("2026/2027") keys the row with the league and day; when
+        omitted it is derived from ``matchday_date`` the way migration 027
+        backfilled the column.
 
         ``lineup_player_ids`` is stored as a JSON array in a TEXT column —
         analyses that need to join against player tables can json-decode.
@@ -718,9 +737,10 @@ class BidLearner:
                 """
                 INSERT INTO rehoboam.matchday_lineup_results (
                     league_id, day_number, matchday_date, total_points,
-                    lineup_player_ids, lineup_count, snapshot_at
+                    lineup_player_ids, lineup_count, snapshot_at, season
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s,
+                        COALESCE(%s, rehoboam.season_of_date(%s)))
                 ON CONFLICT DO NOTHING
                 """,
                 (
@@ -731,6 +751,8 @@ class BidLearner:
                     ids_json,
                     int(lineup_count),
                     ts,
+                    season,
+                    matchday_date,
                 ),
             )
             return cur.rowcount > 0

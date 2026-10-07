@@ -261,6 +261,24 @@ def _offer_line(
     )
 
 
+def _max_debt(*, team_value: int, budget: int, max_debt_pct: float, worth_pct: float) -> int:
+    """How far below zero a phase may take the wallet.
+
+    Marco's allowance is ``max_debt_pct`` of team value (60%). Kickbase's is
+    ``worth_pct`` (33%) of total worth — team value plus budget — and it
+    refuses the offer that would breach it (`err 5050
+    ThirtyThreePercentRuleExceeded`: nine of the bot's offers between
+    2026-09-22 and 10-04). The allowance stops where Kickbase stops.
+    """
+    tv = int(team_value or 0)
+    if tv <= 0:
+        return 0
+    own = int(tv * (float(max_debt_pct) / 100.0))
+    worth = tv + int(budget or 0)
+    kickbase = int(max(0, worth) * (float(worth_pct) / 100.0))
+    return max(0, min(own, kickbase))
+
+
 def _compute_flip_budget(
     phase: str,
     current_budget: int,
@@ -625,7 +643,12 @@ class AutoTrader:
         team_value = team_info.get("team_value", 0)
 
         # Calculate flip budget based on matchday phase
-        max_debt = int(team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        max_debt = _max_debt(
+            team_value=team_value,
+            budget=current_budget,
+            max_debt_pct=self.settings.max_debt_pct_of_team_value,
+            worth_pct=self.settings.max_single_buy_pct_of_worth,
+        )
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
         flip_budget = _compute_flip_budget(
             phase.phase,
@@ -1487,7 +1510,12 @@ class AutoTrader:
         ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
         ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
-        max_debt = int(ctx.team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        max_debt = _max_debt(
+            team_value=ctx.team_value,
+            budget=ctx.current_budget,
+            max_debt_pct=self.settings.max_debt_pct_of_team_value,
+            worth_pct=self.settings.max_single_buy_pct_of_worth,
+        )
         ctx.flip_budget = _compute_flip_budget(
             ctx.matchday_phase.phase,
             ctx.current_budget,
@@ -1868,6 +1896,88 @@ class AutoTrader:
         verdict = gate.check(player_id=pair.buy_player.id, bid=int(pair.recommended_bid))
         return None if verdict.ok else "; ".join(verdict.reasons)
 
+    def _withdraw_own_bids(self, league, ctx: EPSessionContext, shortfall: int) -> int:
+        """Withdraw the bot's own open offers until ``shortfall`` is covered.
+
+        Returns what is left for the sells. Only offers with a `pending_bids`
+        row are the bot's; one Marco placed by hand is a commitment and stays
+        (`test_manual_bids_are_not_cancelled`). Order and cut-off are
+        `services/debt_recovery.plan_bid_withdrawals`'s. A failed read of the
+        ledger withdraws nothing — toward the old behaviour, never past it.
+        """
+        from .services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        try:
+            rows = {str(r["player_id"]): r for r in self.learner.get_pending_bids()}
+        except Exception:
+            logger.warning(
+                "debt-recovery: pending-bid ledger unreadable — no withdrawals", exc_info=True
+            )
+            return shortfall
+        by_id = {str(getattr(b, "id", "")): b for b in (ctx.my_bids or [])}
+        bids = [
+            OpenBid(
+                player_id=pid,
+                amount=int(amount or 0),
+                intent=rows[pid].get("intent"),
+                tier=rows[pid].get("tier"),
+            )
+            for pid, amount in (ctx.my_bid_amounts or {}).items()
+            if str(pid) in rows and int(amount or 0) > 0
+        ]
+        plan = plan_bid_withdrawals(bids, shortfall=shortfall)
+        if not plan.withdraw:
+            return shortfall
+        console.print(
+            f"[yellow]💳 Debt recovery — withdrawing {len(plan.withdraw)} open offer(s) "
+            f"(EUR {plan.released:,}) before selling anyone[/yellow]"
+        )
+        for bid in plan.withdraw:
+            player = by_id.get(bid.player_id)
+            name = (
+                f"{getattr(player, 'first_name', '')} {getattr(player, 'last_name', bid.player_id)}".strip()
+                if player is not None
+                else bid.player_id
+            )
+            if self.dry_run:
+                console.print(
+                    f"[yellow]DRY RUN: would withdraw EUR {bid.amount:,} on {name}[/yellow]"
+                )
+            else:
+                if player is None:
+                    logger.warning(
+                        "debt-recovery: open offer %s not in my_bids — kept", bid.player_id
+                    )
+                    continue
+                try:
+                    if not self.api.cancel_bid(league, player):
+                        logger.warning("debt-recovery: withdraw %s refused by the API — kept", name)
+                        continue
+                except Exception:
+                    logger.exception("debt-recovery: withdraw %s failed — kept", name)
+                    continue
+                try:
+                    self.learner.delete_pending_bid(bid.player_id)
+                except Exception:
+                    logger.warning(
+                        "debt-recovery: pending-bid row for %s not removed", name, exc_info=True
+                    )
+                console.print(f"[green]✓ Withdrew EUR {bid.amount:,} on {name}[/green]")
+            ctx.my_bid_amounts.pop(bid.player_id, None)
+            ctx.my_bids = [
+                b for b in (ctx.my_bids or []) if str(getattr(b, "id", "")) != bid.player_id
+            ]
+            shortfall -= bid.amount
+            logger.warning(
+                "debt-recovery withdrew player=%s amount=%d intent=%s tier=%s remaining=%d",
+                bid.player_id,
+                bid.amount,
+                bid.intent,
+                bid.tier,
+                max(0, shortfall),
+            )
+        return shortfall
+
     def _run_debt_recovery(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Sell until the wallet, net of open offers, is back at zero.
 
@@ -1889,6 +1999,13 @@ class AutoTrader:
         shortfall = open_offers - int(ctx.current_budget)
         if shortfall <= 0:
             return []
+
+        # The bot's own open offers go before any player does (2026-10-07).
+        shortfall = self._withdraw_own_bids(league, ctx, shortfall)
+        if shortfall <= 0:
+            console.print("[green]✓ Debt recovery: withdrawing open offers covered it[/green]")
+            return []
+        open_offers = sum(int(v or 0) for v in (ctx.my_bid_amounts or {}).values())
 
         console.print(
             f"\n[bold red]💳 Debt recovery — wallet EUR {int(ctx.current_budget):,} "
