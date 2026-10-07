@@ -16,6 +16,7 @@ from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
 from .services.emergency_window import emergency_fill_due
 from .services.execution import LOCKOUT_DAYS
+from .services.flip_exit import flip_exit_reason
 from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
@@ -2606,11 +2607,12 @@ class AutoTrader:
             profit_pct = (profit / buy_price) * 100
 
             try:
-                trend_7d = trader.trend_service.get_trend(
-                    player.id, player.market_value, league.id
-                ).trend_7d_pct
+                trend = trader.trend_service.get_trend(player.id, player.market_value, league.id)
+                trend_7d = trend.trend_7d_pct
+                last_move = getattr(trend, "trend_1d_pct", None)
             except Exception:
                 trend_7d = None
+                last_move = None
             trend_7d_by_id[player.id] = trend_7d
 
             target = self._sell_threshold_for_trend(trend_7d)
@@ -2628,26 +2630,26 @@ class AutoTrader:
                 f"{days_held:.1f}" if days_held is not None else None,
                 max_hold,
             )
-            if profit_pct >= target:
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Flip target ({target:.0f}%) hit: +{profit_pct:.1f}% "
-                        f"(€{profit:,}{trend_info})",
-                    )
-                )
-            elif profit_pct <= self.settings.max_loss_pct and self._can_loss_sell_with_replacement(
-                trend_7d
+            # The exit (2026-10-07): at the turn — the morning after the
+            # first night the value did not rise — and held for the run
+            # while it rises, whatever the target says. The stop-loss is
+            # the floor; the target applies only when the last move is
+            # unknown. `services/flip_exit` holds the rule.
+            why = flip_exit_reason(
+                profit_pct=profit_pct,
+                last_move_pct=last_move,
+                target_pct=target,
+                max_loss_pct=float(self.settings.max_loss_pct),
+                exit_on_turn=bool(getattr(self.settings, "flip_exit_on_turn", True)),
+            )
+            if (
+                why is not None
+                and why.startswith("Flip stop-loss")
+                and (last_move is None and not self._can_loss_sell_with_replacement(trend_7d))
             ):
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Flip stop-loss ({self.settings.max_loss_pct:.0f}%): "
-                        f"{profit_pct:.1f}% (€{profit:,}{trend_info})",
-                    )
-                )
+                why = None  # the old rebound guard, kept for the unknown-move case
+            if why is not None:
+                sell_candidates.append((player, profit_pct, f"{why} (€{profit:,}{trend_info})"))
             elif overdue:
                 console.print(
                     f"[dim]Flip {player.last_name} past its {max_hold}d hold at "

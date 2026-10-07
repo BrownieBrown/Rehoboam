@@ -1203,6 +1203,32 @@ class Trader:
             logger.warning("position ranks unavailable — sell plans protect nobody", exc_info=True)
             return frozenset()
 
+    def _flip_gate_reason(self, days_until_match: int | None) -> str | None:
+        """Why no flip should be opened now (calendar or market drift), or None."""
+        from .services.flip_window import flip_gate_reason
+
+        drift = None
+        if getattr(self.settings, "flip_market_drift_gate", True):
+            try:
+                from .store.league_store import LeagueStore
+
+                drift = LeagueStore().market_drift(
+                    nights=int(getattr(self.settings, "flip_market_drift_nights", 3))
+                )
+                if drift is not None:
+                    logger.info("market drift: median %+.2f%% a night", drift)
+            except Exception:
+                logger.warning(
+                    "market drift unavailable — the flip window stays open", exc_info=True
+                )
+                drift = None
+        return flip_gate_reason(
+            days_until_match=days_until_match,
+            market_drift_pct=drift,
+            max_days_to_kickoff=int(getattr(self.settings, "flip_max_days_to_kickoff", 10)),
+            drift_min_pct=0.0,
+        )
+
     def find_profit_opportunities(self, league: League) -> list:
         """Find short-hold profit flip candidates (buy low, sell high).
 
@@ -1226,6 +1252,15 @@ class Trader:
         total_buying_power = current_budget + max_debt
 
         days_until_match = self.get_days_until_match(league)
+
+        # The window (2026-10-07): no new flip into a break or a falling
+        # market. `services/flip_window` holds the rule; an unreadable drift
+        # closes nothing.
+        gate = self._flip_gate_reason(days_until_match)
+        if gate is not None:
+            console.print(f"[dim]No new flips — {gate}[/dim]")
+            logger.info("flip window closed: %s", gate)
+            return []
 
         # Scale flip budget by matchday proximity — we need to be liquid at kickoff
         if days_until_match is None:

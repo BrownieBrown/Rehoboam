@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rehoboam.store.corpus_store import CorpusStore
 from rehoboam.store.league_store import LeagueStore
 
@@ -231,3 +233,39 @@ def test_upsert_teams_carries_the_crest_source_and_a_refetch_replaces_it(store_d
     with store.connection() as conn:
         row = conn.execute("select crest_source from rehoboam.teams where team_id = '9'").fetchone()
     assert row["crest_source"] is None
+
+
+def test_market_drift_is_the_median_nightly_move_over_the_last_nights(store_dsn):
+    """2026-10-07: the flip gate reads the market's drift from the status
+    readings — median of mv_change over the value before it, players above
+    1m, the last N Berlin days with a reading."""
+    from datetime import date
+
+    from rehoboam.store import connect
+
+    rows = []
+    for i, (pid, mv, chg) in enumerate(
+        [
+            ("a", 10_000_000, -200_000),
+            ("b", 5_000_000, 50_000),
+            ("c", 2_000_000, -40_000),
+            ("tiny", 500_000, 100_000),
+        ]
+    ):
+        for d in (date(2026, 10, 5), date(2026, 10, 6)):
+            rows.append((pid, d, 0, 1, mv, "t", T0 + i, chg))
+    with connect(store_dsn) as conn:
+        for row in rows:
+            conn.execute(
+                "insert into rehoboam.player_status_daily (player_id, day, status, lineup_probability, "
+                "market_value, team_id, fetched_at, mv_change) values (%s, %s, %s, %s, %s, %s, %s, %s)",
+                row,
+            )
+        conn.commit()
+    drift = LeagueStore(dsn=store_dsn).market_drift(nights=3, min_market_value=1_000_000)
+    # a: -200k/10.2m = -1.96%, b: +1.01%, c: -1.96%; the tiny player is excluded.
+    assert drift == pytest.approx(-1.96, abs=0.01)
+
+
+def test_market_drift_is_none_without_readings(store_dsn):
+    assert LeagueStore(dsn=store_dsn).market_drift(nights=3) is None
