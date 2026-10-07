@@ -178,3 +178,49 @@ class TestTheFlipBuyGuardIsRelative:
             _player("f2", "Forward", 1, 1),
         ]
         assert _flip_worsens_fieldability(squad, _player("x", "Forward", 1, 1)) is False
+
+
+def _run_with_last_move(trader, squad, *, flip_row, trend_7d: float = 0.0, last_move: float | None):
+    trader.settings.enable_profit_sells = True
+    trader.api.get_squad.return_value = list(squad)
+    trader.learner = Mock()
+    trader.learner.get_tracked_purchase.return_value = flip_row
+    trader.learner.get_tracked_purchases.return_value = {"flip": flip_row} if flip_row else {}
+    with patch(
+        "rehoboam.services.trend_service.TrendService.get_trend",
+        return_value=SimpleNamespace(trend_7d_pct=trend_7d, trend_1d_pct=last_move),
+    ):
+        return trader.run_profit_sell_phase(league=SimpleNamespace(id="L"), ctx=_ctx(squad))
+
+
+class TestAFlipExitsAtTheTurn:
+    """2026-10-07: hold for the run, sell the morning after the first night
+    the value does not rise. See tests/test_flip_exit.py for the rule."""
+
+    def test_a_flip_whose_rise_turned_is_sold_below_the_target(self, trader):
+        results = _run_with_last_move(
+            trader, _short_squad(1_050_000), flip_row=_flip_row(), last_move=-1.5
+        )
+        assert _sold(results) == {"flip"}
+        assert any("turn" in r.reason for r in results if r.action == "SELL")
+
+    def test_a_flip_past_the_target_but_still_rising_is_held_for_the_run(self, trader):
+        results = _run_with_last_move(
+            trader, _short_squad(1_120_000), flip_row=_flip_row(), last_move=2.0
+        )
+        assert _sold(results) == set()
+
+    def test_the_turn_sells_at_a_loss_without_a_replacement(self, trader):
+        results = _run_with_last_move(
+            trader, _short_squad(970_000), flip_row=_flip_row(), last_move=-8.0
+        )
+        assert _sold(results) == {"flip"}
+
+    def test_the_hold_period_guard_still_comes_first(self, trader):
+        row = _flip_row(days_held=0.1)
+        assert (
+            _sold(
+                _run_with_last_move(trader, _short_squad(1_050_000), flip_row=row, last_move=-1.5)
+            )
+            == set()
+        )

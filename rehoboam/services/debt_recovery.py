@@ -142,3 +142,58 @@ def plan_debt_recovery(
             recovered += cand.sell_value
             counts[cand.position] = counts.get(cand.position, 0) - 1
     return DebtPlan(sells=sells, shortfall=need, recovered=recovered, below_minimum=below_minimum)
+
+
+# ---------------------------------------------------------------------------
+# Open bids go before any player does (2026-10-07)
+# ---------------------------------------------------------------------------
+
+_TIER_WEAKNESS = {"marginal": 0, "solid_upgrade": 1, "strong_upgrade": 2, "must_have": 3}
+
+
+@dataclass(frozen=True)
+class OpenBid:
+    """One of the bot's own open offers, as the recovery sees it."""
+
+    player_id: str
+    amount: int
+    intent: str | None = None  # 'flip', 'points', or None
+    tier: str | None = None
+
+
+@dataclass(frozen=True)
+class WithdrawalPlan:
+    withdraw: list[OpenBid]
+    shortfall: int
+    released: int
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.shortfall - self.released)
+
+
+def _withdrawal_key(b: OpenBid) -> tuple:
+    """Flips first, then the weakest tier, largest amount first within a group."""
+    is_flip = 0 if (b.intent or "").lower() == "flip" else 1
+    weakness = _TIER_WEAKNESS.get((b.tier or "").lower(), -1)
+    return (is_flip, weakness, -int(b.amount))
+
+
+def plan_bid_withdrawals(bids: list[OpenBid], *, shortfall: int) -> WithdrawalPlan:
+    """Which of the bot's own open offers to withdraw before selling anyone.
+
+    An open offer counts as spent (rule I3), but it is the bot's to take
+    back: on 2026-10-07 a 19.9m flip bid with a -9.6m wallet would have had
+    the recovery sell 29.5m of starters to cover an offer it had placed
+    itself two days earlier. Withdrawn until the shortfall is covered and
+    no further; what the bids cannot cover is left for the sells.
+    """
+    need = max(0, int(shortfall))
+    withdraw: list[OpenBid] = []
+    released = 0
+    for bid in sorted(bids, key=_withdrawal_key):
+        if released >= need:
+            break
+        withdraw.append(bid)
+        released += int(bid.amount)
+    return WithdrawalPlan(withdraw=withdraw, shortfall=need, released=released)

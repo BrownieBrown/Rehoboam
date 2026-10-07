@@ -217,3 +217,59 @@ class TestPositionMinimumsGoLast:
         assert [c.player_id for c in plan.sells] == ["gk"]
         assert plan.covered is False
         assert plan.remaining == 4_000_000
+
+
+class TestWithdrawingBidsFirst:
+    """2026-10-07: nine players, -9.6m, and a 19.9m flip bid open until the
+    night before kickoff. The recovery counted the bid as spent and would
+    have sold 29.5m of starters to cover an offer the bot itself placed. An
+    open bid is withdrawn before any player is sold; flips go first, then
+    the weakest tier, largest amount first within a group."""
+
+    def test_flips_are_withdrawn_before_improvement_bids(self):
+        from rehoboam.services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        bids = [
+            OpenBid("imp", 8_000_000, intent="points", tier="strong_upgrade"),
+            OpenBid("flip", 5_000_000, intent="flip", tier=None),
+        ]
+        plan = plan_bid_withdrawals(bids, shortfall=4_000_000)
+        assert [b.player_id for b in plan.withdraw] == ["flip"]
+        assert plan.remaining == 0
+
+    def test_it_withdraws_until_the_shortfall_is_covered_and_no_further(self):
+        from rehoboam.services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        bids = [
+            OpenBid("a", 3_000_000, intent="flip", tier=None),
+            OpenBid("b", 2_000_000, intent="flip", tier=None),
+            OpenBid("c", 9_000_000, intent="points", tier="must_have"),
+        ]
+        plan = plan_bid_withdrawals(bids, shortfall=4_000_000)
+        assert [b.player_id for b in plan.withdraw] == ["a", "b"]
+        assert plan.remaining == 0
+
+    def test_the_weakest_tier_goes_before_a_must_have(self):
+        from rehoboam.services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        bids = [
+            OpenBid("must", 9_000_000, intent="points", tier="must_have"),
+            OpenBid("marg", 2_000_000, intent="points", tier="marginal"),
+            OpenBid("solid", 2_500_000, intent="points", tier="solid_upgrade"),
+        ]
+        plan = plan_bid_withdrawals(bids, shortfall=4_000_000)
+        assert [b.player_id for b in plan.withdraw] == ["marg", "solid"]
+
+    def test_what_the_bids_cannot_cover_is_left_for_the_sells(self):
+        from rehoboam.services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        plan = plan_bid_withdrawals([OpenBid("f", 3_000_000, "flip", None)], shortfall=10_000_000)
+        assert plan.remaining == 7_000_000
+
+    def test_no_shortfall_withdraws_nothing(self):
+        from rehoboam.services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        assert (
+            plan_bid_withdrawals([OpenBid("f", 3_000_000, "flip", None)], shortfall=0).withdraw
+            == []
+        )

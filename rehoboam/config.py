@@ -239,6 +239,36 @@ class Settings(BaseSettings):
             "old behaviour without a deploy."
         ),
     )
+    flip_exit_on_turn: bool = Field(
+        default=True,
+        description=(
+            "Sell a marked flip the morning after the first night its value "
+            "does not rise, and hold for the run while it does — instead of "
+            "a fixed target. Measured 2026-10-07: the turn exit captured 82% "
+            "of the peak gain on 48 runs; the three nights after a run cost "
+            "a median -13.7%. The stop-loss stays as the floor. Env: FLIP_EXIT_ON_TURN."
+        ),
+    )
+    flip_max_days_to_kickoff: int = Field(
+        default=10,
+        description=(
+            "No new flip when the next kickoff is further away than this: a "
+            "long gap is an international break, and the market drifts down "
+            "through it (October 2026: about -7% cap-weighted over twelve "
+            "nights). Env: FLIP_MAX_DAYS_TO_KICKOFF."
+        ),
+    )
+    flip_market_drift_gate: bool = Field(
+        default=True,
+        description=(
+            "No new flip while the market's median nightly move over the last "
+            "FLIP_MARKET_DRIFT_NIGHTS readings is negative. Env: FLIP_MARKET_DRIFT_GATE."
+        ),
+    )
+    flip_market_drift_nights: int = Field(
+        default=3,
+        description="How many nightly readings the market-drift gate reads. Env: FLIP_MARKET_DRIFT_NIGHTS.",
+    )
     flip_buys_require_rising_trend: bool = Field(
         default=True,
         description=(

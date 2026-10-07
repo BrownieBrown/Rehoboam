@@ -196,3 +196,95 @@ class TestItStaysOutOfTheWayOtherwise:
         assert api.sell_player_instant.call_count == 0
         # ...but the simulated sale is reported like every dry-run trade.
         assert [r.action for r in session.lineup_trades if r.success] == ["SELL"]
+
+
+class TestOpenBidsAreWithdrawnBeforeAnyoneIsSold:
+    """2026-10-07: -9.6m with a 19.9m flip bid open. Counting the bid as spent
+    is right (rule I3); selling 29.5m of starters to cover it is not, when
+    the bot can simply withdraw its own offer. Only the bot's bids: a bid
+    Marco placed by hand is a commitment (see test_manual_bids_are_not_cancelled)."""
+
+    @staticmethod
+    def _bid(pid: str, amount: int):
+        return SimpleNamespace(
+            id=pid,
+            first_name="F",
+            last_name=pid,
+            user_offer_id=f"offer-{pid}",
+            user_offer_price=amount,
+            market_value=amount,
+        )
+
+    def _run_with_bids(self, tmp_path, monkeypatch, *, budget, bids, pending_rows):
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        monkeypatch.setenv("TRADING_MODE", "full")
+        monkeypatch.chdir(tmp_path)
+        squad = _squad()
+        api = _api(squad)
+        api.cancel_bid.return_value = True
+        trader = AutoTrader(api=api, settings=Settings())
+        learner = MagicMock()
+        learner.get_pending_bids.return_value = pending_rows
+        trader.learner = learner
+        ctx = _context("locked", 1, squad, budget, {b.id: b.user_offer_price for b in bids})
+        ctx.my_bids = list(bids)
+        with (
+            patch.object(AutoTrader, "_build_session_context", return_value=ctx),
+            patch.object(AutoTrader, "_run_emergency_squad_fill", return_value=[]),
+            patch.object(AutoTrader, "run_profit_sell_phase", return_value=[]),
+            patch.object(AutoTrader, "optimize_and_execute_squad", return_value=[]),
+            patch.object(AutoTrader, "run_unified_trade_phase", return_value=[]),
+            patch.object(AutoTrader, "_set_optimal_lineup", return_value=[]),
+            patch(
+                "rehoboam.services.trend_service.TrendService.get_trend",
+                return_value=SimpleNamespace(trend_7d_pct=None),
+            ),
+        ):
+            trader.run_full_session(LEAGUE)
+        return api, ctx, learner
+
+    def test_the_bots_flip_bid_is_withdrawn_and_nobody_is_sold(self, tmp_path, monkeypatch):
+        """Wallet +1m, a 5m bot flip open: withdrawing it covers the 4m gap."""
+        bid = self._bid("tietz", 5_000_000)
+        api, ctx, learner = self._run_with_bids(
+            tmp_path,
+            monkeypatch,
+            budget=1_000_000,
+            bids=[bid],
+            pending_rows=[{"player_id": "tietz", "intent": "flip", "tier": None}],
+        )
+        assert api.cancel_bid.call_count == 1
+        assert api.cancel_bid.call_args.args[1].id == "tietz"
+        assert api.sell_player_instant.call_count == 0
+        learner.delete_pending_bid.assert_called_once_with("tietz")
+        assert ctx.my_bid_amounts == {}
+
+    def test_what_the_withdrawal_cannot_cover_is_still_sold(self, tmp_path, monkeypatch):
+        """Wallet -5m, a 5m bot flip open: the bid goes, then the bench player."""
+        api, _, _ = self._run_with_bids(
+            tmp_path,
+            monkeypatch,
+            budget=-5_000_000,
+            bids=[self._bid("tietz", 5_000_000)],
+            pending_rows=[{"player_id": "tietz", "intent": "flip", "tier": None}],
+        )
+        assert api.cancel_bid.call_count == 1
+        sold = [
+            (c.kwargs.get("player") or c.args[-1]).id
+            for c in api.sell_player_instant.call_args_list
+        ]
+        assert sold == ["bench"]
+
+    def test_a_hand_placed_bid_is_never_withdrawn(self, tmp_path, monkeypatch):
+        """The same 5m offer with no pending-bid row is Marco's: it stays, and
+        the recovery sells around it as before."""
+        api, _, _ = self._run_with_bids(
+            tmp_path,
+            monkeypatch,
+            budget=1_000_000,
+            bids=[self._bid("manual", 5_000_000)],
+            pending_rows=[],
+        )
+        assert api.cancel_bid.call_count == 0
+        assert api.sell_player_instant.call_count == 1

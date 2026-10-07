@@ -16,6 +16,7 @@ from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
 from .services.emergency_window import emergency_fill_due
 from .services.execution import LOCKOUT_DAYS
+from .services.flip_exit import flip_exit_reason
 from .services.integrity import check_integrity, i3_budget_covered
 from .services.pacing import SQUAD_CAP as pacing_squad_cap
 from .services.pacing import available_squad_slots
@@ -259,6 +260,24 @@ def _offer_line(
         position_minimum=POSITION_MINIMUMS.get(position),
         risks=tuple(risks),
     )
+
+
+def _max_debt(*, team_value: int, budget: int, max_debt_pct: float, worth_pct: float) -> int:
+    """How far below zero a phase may take the wallet.
+
+    Marco's allowance is ``max_debt_pct`` of team value (60%). Kickbase's is
+    ``worth_pct`` (33%) of total worth — team value plus budget — and it
+    refuses the offer that would breach it (`err 5050
+    ThirtyThreePercentRuleExceeded`: nine of the bot's offers between
+    2026-09-22 and 10-04). The allowance stops where Kickbase stops.
+    """
+    tv = int(team_value or 0)
+    if tv <= 0:
+        return 0
+    own = int(tv * (float(max_debt_pct) / 100.0))
+    worth = tv + int(budget or 0)
+    kickbase = int(max(0, worth) * (float(worth_pct) / 100.0))
+    return max(0, min(own, kickbase))
 
 
 def _compute_flip_budget(
@@ -625,7 +644,12 @@ class AutoTrader:
         team_value = team_info.get("team_value", 0)
 
         # Calculate flip budget based on matchday phase
-        max_debt = int(team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        max_debt = _max_debt(
+            team_value=team_value,
+            budget=current_budget,
+            max_debt_pct=self.settings.max_debt_pct_of_team_value,
+            worth_pct=self.settings.max_single_buy_pct_of_worth,
+        )
         pending_bid_total = sum(p.user_offer_price for p in my_bids)
         flip_budget = _compute_flip_budget(
             phase.phase,
@@ -1487,7 +1511,12 @@ class AutoTrader:
         ctx.current_budget = fresh_team_info.get("budget", ctx.current_budget)
         ctx.team_value = fresh_team_info.get("team_value", ctx.team_value)
         pending_bid_total = sum(p.user_offer_price for p in fresh_bids)
-        max_debt = int(ctx.team_value * (self.settings.max_debt_pct_of_team_value / 100))
+        max_debt = _max_debt(
+            team_value=ctx.team_value,
+            budget=ctx.current_budget,
+            max_debt_pct=self.settings.max_debt_pct_of_team_value,
+            worth_pct=self.settings.max_single_buy_pct_of_worth,
+        )
         ctx.flip_budget = _compute_flip_budget(
             ctx.matchday_phase.phase,
             ctx.current_budget,
@@ -1868,6 +1897,88 @@ class AutoTrader:
         verdict = gate.check(player_id=pair.buy_player.id, bid=int(pair.recommended_bid))
         return None if verdict.ok else "; ".join(verdict.reasons)
 
+    def _withdraw_own_bids(self, league, ctx: EPSessionContext, shortfall: int) -> int:
+        """Withdraw the bot's own open offers until ``shortfall`` is covered.
+
+        Returns what is left for the sells. Only offers with a `pending_bids`
+        row are the bot's; one Marco placed by hand is a commitment and stays
+        (`test_manual_bids_are_not_cancelled`). Order and cut-off are
+        `services/debt_recovery.plan_bid_withdrawals`'s. A failed read of the
+        ledger withdraws nothing — toward the old behaviour, never past it.
+        """
+        from .services.debt_recovery import OpenBid, plan_bid_withdrawals
+
+        try:
+            rows = {str(r["player_id"]): r for r in self.learner.get_pending_bids()}
+        except Exception:
+            logger.warning(
+                "debt-recovery: pending-bid ledger unreadable — no withdrawals", exc_info=True
+            )
+            return shortfall
+        by_id = {str(getattr(b, "id", "")): b for b in (ctx.my_bids or [])}
+        bids = [
+            OpenBid(
+                player_id=pid,
+                amount=int(amount or 0),
+                intent=rows[pid].get("intent"),
+                tier=rows[pid].get("tier"),
+            )
+            for pid, amount in (ctx.my_bid_amounts or {}).items()
+            if str(pid) in rows and int(amount or 0) > 0
+        ]
+        plan = plan_bid_withdrawals(bids, shortfall=shortfall)
+        if not plan.withdraw:
+            return shortfall
+        console.print(
+            f"[yellow]💳 Debt recovery — withdrawing {len(plan.withdraw)} open offer(s) "
+            f"(EUR {plan.released:,}) before selling anyone[/yellow]"
+        )
+        for bid in plan.withdraw:
+            player = by_id.get(bid.player_id)
+            name = (
+                f"{getattr(player, 'first_name', '')} {getattr(player, 'last_name', bid.player_id)}".strip()
+                if player is not None
+                else bid.player_id
+            )
+            if self.dry_run:
+                console.print(
+                    f"[yellow]DRY RUN: would withdraw EUR {bid.amount:,} on {name}[/yellow]"
+                )
+            else:
+                if player is None:
+                    logger.warning(
+                        "debt-recovery: open offer %s not in my_bids — kept", bid.player_id
+                    )
+                    continue
+                try:
+                    if not self.api.cancel_bid(league, player):
+                        logger.warning("debt-recovery: withdraw %s refused by the API — kept", name)
+                        continue
+                except Exception:
+                    logger.exception("debt-recovery: withdraw %s failed — kept", name)
+                    continue
+                try:
+                    self.learner.delete_pending_bid(bid.player_id)
+                except Exception:
+                    logger.warning(
+                        "debt-recovery: pending-bid row for %s not removed", name, exc_info=True
+                    )
+                console.print(f"[green]✓ Withdrew EUR {bid.amount:,} on {name}[/green]")
+            ctx.my_bid_amounts.pop(bid.player_id, None)
+            ctx.my_bids = [
+                b for b in (ctx.my_bids or []) if str(getattr(b, "id", "")) != bid.player_id
+            ]
+            shortfall -= bid.amount
+            logger.warning(
+                "debt-recovery withdrew player=%s amount=%d intent=%s tier=%s remaining=%d",
+                bid.player_id,
+                bid.amount,
+                bid.intent,
+                bid.tier,
+                max(0, shortfall),
+            )
+        return shortfall
+
     def _run_debt_recovery(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Sell until the wallet, net of open offers, is back at zero.
 
@@ -1889,6 +2000,13 @@ class AutoTrader:
         shortfall = open_offers - int(ctx.current_budget)
         if shortfall <= 0:
             return []
+
+        # The bot's own open offers go before any player does (2026-10-07).
+        shortfall = self._withdraw_own_bids(league, ctx, shortfall)
+        if shortfall <= 0:
+            console.print("[green]✓ Debt recovery: withdrawing open offers covered it[/green]")
+            return []
+        open_offers = sum(int(v or 0) for v in (ctx.my_bid_amounts or {}).values())
 
         console.print(
             f"\n[bold red]💳 Debt recovery — wallet EUR {int(ctx.current_budget):,} "
@@ -2489,11 +2607,12 @@ class AutoTrader:
             profit_pct = (profit / buy_price) * 100
 
             try:
-                trend_7d = trader.trend_service.get_trend(
-                    player.id, player.market_value, league.id
-                ).trend_7d_pct
+                trend = trader.trend_service.get_trend(player.id, player.market_value, league.id)
+                trend_7d = trend.trend_7d_pct
+                last_move = getattr(trend, "trend_1d_pct", None)
             except Exception:
                 trend_7d = None
+                last_move = None
             trend_7d_by_id[player.id] = trend_7d
 
             target = self._sell_threshold_for_trend(trend_7d)
@@ -2511,26 +2630,26 @@ class AutoTrader:
                 f"{days_held:.1f}" if days_held is not None else None,
                 max_hold,
             )
-            if profit_pct >= target:
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Flip target ({target:.0f}%) hit: +{profit_pct:.1f}% "
-                        f"(€{profit:,}{trend_info})",
-                    )
-                )
-            elif profit_pct <= self.settings.max_loss_pct and self._can_loss_sell_with_replacement(
-                trend_7d
+            # The exit (2026-10-07): at the turn — the morning after the
+            # first night the value did not rise — and held for the run
+            # while it rises, whatever the target says. The stop-loss is
+            # the floor; the target applies only when the last move is
+            # unknown. `services/flip_exit` holds the rule.
+            why = flip_exit_reason(
+                profit_pct=profit_pct,
+                last_move_pct=last_move,
+                target_pct=target,
+                max_loss_pct=float(self.settings.max_loss_pct),
+                exit_on_turn=bool(getattr(self.settings, "flip_exit_on_turn", True)),
+            )
+            if (
+                why is not None
+                and why.startswith("Flip stop-loss")
+                and (last_move is None and not self._can_loss_sell_with_replacement(trend_7d))
             ):
-                sell_candidates.append(
-                    (
-                        player,
-                        profit_pct,
-                        f"Flip stop-loss ({self.settings.max_loss_pct:.0f}%): "
-                        f"{profit_pct:.1f}% (€{profit:,}{trend_info})",
-                    )
-                )
+                why = None  # the old rebound guard, kept for the unknown-move case
+            if why is not None:
+                sell_candidates.append((player, profit_pct, f"{why} (€{profit:,}{trend_info})"))
             elif overdue:
                 console.print(
                     f"[dim]Flip {player.last_name} past its {max_hold}d hold at "

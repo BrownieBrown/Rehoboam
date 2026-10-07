@@ -201,6 +201,35 @@ class LeagueStore:
             ).fetchall()
         return [r["team_id"] for r in rows]
 
+    def market_drift(self, *, nights: int = 3, min_market_value: int = 1_000_000) -> float | None:
+        """The market's median nightly move, in percent, over the last readings.
+
+        Reads `player_status_daily` for the last ``nights`` Berlin days that
+        have a reading, players above ``min_market_value``: median of
+        ``mv_change`` over the value before it. None without readings. The
+        flip gate's view of the whole market (2026-10-07).
+        """
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                WITH days AS (
+                    SELECT DISTINCT day FROM rehoboam.player_status_daily
+                    WHERE mv_change IS NOT NULL
+                    ORDER BY day DESC LIMIT %s
+                )
+                SELECT percentile_cont(0.5) WITHIN GROUP (
+                    ORDER BY mv_change::numeric / NULLIF(market_value - mv_change, 0)
+                ) AS med
+                FROM rehoboam.player_status_daily
+                WHERE day IN (SELECT day FROM days)
+                  AND mv_change IS NOT NULL
+                  AND market_value > %s
+                """,
+                (int(nights), int(min_market_value)),
+            ).fetchone()
+        med = row["med"] if row else None
+        return None if med is None else float(med) * 100.0
+
     def position_ranks(self, player_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Where each of these players stands at his position (`player_ranks`).
 

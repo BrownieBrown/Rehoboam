@@ -53,6 +53,7 @@ create table if not exists matchday_lineup_results (
     lineup_player_ids text not null,
     lineup_count integer not null,
     snapshot_at real not null,
+    season text,
     primary key (league_id, day_number)
 );
 create table if not exists league_rank_history (

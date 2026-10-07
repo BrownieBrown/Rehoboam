@@ -161,3 +161,47 @@ class TestHasMatchdayLineupResult:
         assert learner.has_matchday_lineup_result("L1", 33) is False
         # Different league → still false (multi-league guard).
         assert learner.has_matchday_lineup_result("L2", 32) is False
+
+
+class TestTheRowIsKeyedBySeason:
+    """2026-10-07: nothing was recorded this season. The writer asked "is day 4
+    already there?" with no season, and last season's day 4 said yes."""
+
+    def _record(self, learner, season, day=4):
+        return learner.record_matchday_lineup_result(
+            league_id="L1",
+            day_number=day,
+            matchday_date=(
+                "2025-09-20T13:30:00Z" if season == "2025/2026" else "2026-09-20T13:30:00Z"
+            ),
+            total_points=500,
+            lineup_player_ids=["a"] * 11,
+            lineup_count=11,
+            season=season,
+        )
+
+    def test_last_seasons_row_does_not_block_this_seasons(self, learner):
+        assert self._record(learner, "2025/2026") is True
+        assert learner.has_matchday_lineup_result("L1", 4, season="2026/2027") is False
+        assert self._record(learner, "2026/2027") is True
+        assert learner.has_matchday_lineup_result("L1", 4, season="2026/2027") is True
+
+    def test_the_same_season_is_still_recorded_once(self, learner):
+        assert self._record(learner, "2026/2027") is True
+        assert self._record(learner, "2026/2027") is False
+
+    def test_the_migration_backfills_the_season_from_the_date(self, learner, store_dsn):
+        """Rows that predate the column: a date before July belongs to the
+        season that started the previous summer."""
+        with connect(store_dsn) as conn:
+            conn.execute(
+                "INSERT INTO rehoboam.matchday_lineup_results "
+                "(league_id, day_number, matchday_date, total_points, lineup_player_ids, "
+                "lineup_count, snapshot_at, season) VALUES "
+                "('L9', 34, '2026-05-16T13:30:00Z', 1041, '[]', 11, 0, "
+                "rehoboam.season_of_date('2026-05-16T13:30:00Z'))"
+            )
+            row = conn.execute(
+                "SELECT season FROM rehoboam.matchday_lineup_results WHERE league_id='L9'"
+            ).fetchone()
+        assert row["season"] == "2025/2026"

@@ -229,8 +229,15 @@ class DecisionEngine:
         best_11_ids: set[str],
         displaced_player_id: str | None,
         incoming_position: str | None = None,
+        protected_ids: frozenset[str] = frozenset(),
     ) -> SellPlan:
         """Build a sell plan that covers the budget shortfall for *bid_amount*.
+
+        *protected_ids* are never sold, whatever their EP this week: the
+        players the rank rule holds as top players at their position
+        (`services.rank_sell.rank_hold_ids`). The plan ranks by this week's
+        EP, so an injured top player would otherwise be its first pick —
+        Castello Jr., 2026-10-05, sold at -53% of cost to fund a 7m buy.
 
         Rules:
         - If ``bid_amount <= current_budget``: viable, no sells needed.
@@ -295,6 +302,8 @@ class DecisionEngine:
         starter_surplus: list[MarketPlayer] = []
 
         for player in squad:
+            if player.id in protected_ids:
+                continue
             if player.id == displaced_player_id:
                 displaced_player = player
                 continue
@@ -377,6 +386,7 @@ class DecisionEngine:
         is_emergency: bool = False,
         top_n: int = 5,
         squad_players: dict[str, MarketPlayer] | None = None,
+        sell_protected_ids: frozenset[str] = frozenset(),
     ) -> list[BuyRecommendation]:
         """Rank market players by marginal EP gain to the squad.
 
@@ -659,6 +669,7 @@ class DecisionEngine:
                     best_11_ids=best_11_ids,
                     displaced_player_id=rec.replaces_player_id,
                     incoming_position=rec.player.position,
+                    protected_ids=sell_protected_ids,
                 )
                 if sell_plan.is_viable:
                     rec.sell_plan = sell_plan

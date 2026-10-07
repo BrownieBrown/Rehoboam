@@ -1,5 +1,6 @@
 """Profit trading - Buy low, sell high to accumulate budget"""
 
+import math
 from dataclasses import dataclass
 
 from rich.console import Console
@@ -66,6 +67,22 @@ class ProfitTrader:
         self.max_overpay_pct = max_overpay_pct
         self.require_rising_trend = require_rising_trend
 
+    def _entry_price(self, player, forecast_pct: float | None) -> int:
+        """What the flip bids: the overpay cap, lifted to the forecast value.
+
+        Kickbase declines a bid that is below the player's market value when
+        the listing expires, and the listing expires after the nightly
+        update. A rising player's bid therefore has to clear tomorrow's
+        value, not today's — at exactly market value the bot won only the
+        players that fell overnight (2026-09-26 to 10-07: 17 bids, 6 won,
+        five of them falling, all five sold at a loss).
+        """
+        capped = min(player.price, self._max_flip_price(player))
+        if forecast_pct is None or forecast_pct <= 0:
+            return capped
+        at_expiry = int(math.ceil(player.market_value * (1.0 + forecast_pct / 100.0)))
+        return max(capped, at_expiry)
+
     def _max_flip_price(self, player) -> int:
         """Ceiling on what a flip may pay: market value plus the allowed premium."""
         return int(player.market_value * (1.0 + self.max_overpay_pct / 100.0))
@@ -78,6 +95,7 @@ class ProfitTrader:
         max_opportunities: int = 10,
         team_value: int = 0,
         max_debt_pct: float = 60.0,
+        player_forecasts: dict[str, float] | None = None,
     ) -> list[ProfitOpportunity]:
         """
         Find players to buy and flip for profit
@@ -89,6 +107,11 @@ class ProfitTrader:
             max_opportunities: Max opportunities to return
             team_value: Total team value (for debt capacity calculation)
             max_debt_pct: Max debt as percentage of team value
+            player_forecasts: player_id -> forecast move (percent) at the next
+                market-value update. Two uses (2026-10-07): a negative one
+                vetoes the flip like a negative last nightly move does, and a
+                positive one is the entry premium the bid must clear, because
+                Kickbase declines a bid below the market value at expiry.
 
         Returns:
             List of ProfitOpportunity sorted by best profit potential
@@ -99,6 +122,9 @@ class ProfitTrader:
         affordable = 0
         has_trend_data = 0
         not_rising_filtered = 0
+        turned_filtered = 0
+        entry_filtered = 0
+        forecasts = player_forecasts or {}
         meets_threshold = 0
         small_sample_filtered = 0
 
@@ -170,6 +196,18 @@ class ProfitTrader:
                 if trend_direction == "rising" and trend_pct > 5:
                     # Expect trend to continue (cap at 20%)
                     expected_appreciation = min(trend_pct, 20)
+                    # The rise must still be a rise tonight. Kömür and Wöber
+                    # (2026-10-02) were +60% over 14 days and had already
+                    # turned: -1.5%, then -8% and -9% the night before the
+                    # bid. The 14-day window cannot see that; the last move
+                    # and the forecast can.
+                    last_move = trend.get("trend_1d_pct")
+                    forecast = forecasts.get(player.id)
+                    if (last_move is not None and last_move < 0) or (
+                        forecast is not None and forecast < 0
+                    ):
+                        turned_filtered += 1
+                        continue
                 elif self.require_rising_trend:
                     # Every branch below is a bet that the market is wrong —
                     # mean reversion on a dip, a recovery, a stable performer,
@@ -204,8 +242,15 @@ class ProfitTrader:
                     # Not a recognized profit pattern — skip
                     continue
 
-                # Skip if no profit potential
-                if expected_appreciation < self.min_profit_pct:
+                # The entry premium: a bid below the market value at expiry
+                # is declined, and the listing expires after the update, so
+                # the bid has to clear the forecast value. That premium is
+                # paid out of the expected appreciation; if what is left is
+                # under the minimum, there is no flip here.
+                entry_pct = max(0.0, float(forecasts.get(player.id) or 0.0))
+                if expected_appreciation - entry_pct < self.min_profit_pct:
+                    if entry_pct > 0:
+                        entry_filtered += 1
                     continue
 
                 # Virtual "value gap" based on expected appreciation
@@ -287,7 +332,7 @@ class ProfitTrader:
             opportunities.append(
                 ProfitOpportunity(
                     player=player,
-                    buy_price=min(player.price, self._max_flip_price(player)),
+                    buy_price=self._entry_price(player, forecasts.get(player.id)),
                     market_value=player.market_value,
                     value_gap=value_gap,
                     value_gap_pct=value_gap_pct,
