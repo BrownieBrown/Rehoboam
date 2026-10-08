@@ -17,12 +17,15 @@ REH-20's position calibration, fitted against the old 0-100 index to correct
 what was in fact a unit mismatch. Applying it to real points would reintroduce
 a correction for a defect that no longer exists.
 
-**No serving-time overrides.** Live lineup probability and injury status are not
-consulted. ``rate.predict`` is not a calibrated within-status estimate — quality
-absorbs start-share as well as skill — and the composed model is only calibrated
-because availability and rate were fitted as a coupled pair. Overriding
-``P(status)`` breaks that coupling and exposes a ~24% starter bias. See REH-55's
-ticket notes before adding overrides.
+**Availability at serving time, in this order.** The fitted Markov row for the
+previous played status; the player's own played share when that status is stale
+(REH-98); the fitted P(status | Kickbase lineup code) blended on top
+(``lineup_prob.py``, 2026-10-08 — the ingestion had stored the code daily since
+2026-09-14 and the scorer ignored it; on matchday 4 code 1 started 100% of the
+time against the Markov row's 84%); then the live injury flag, downward only.
+``rate.predict`` is not a calibrated within-status estimate — quality absorbs
+start-share as well as skill — so any change to ``P(status)`` is checked
+against the calibration report's per-code bias, not assumed.
 """
 
 from __future__ import annotations
@@ -41,8 +44,9 @@ from rehoboam.scoring.v2.availability import (
     apply_availability_override,
     apply_stale_history_prior,
 )
-from rehoboam.scoring.v2.coefficients import load_coefficients
+from rehoboam.scoring.v2.coefficients import load_coefficients, load_lineup_prob
 from rehoboam.scoring.v2.features import PLAYED_STATUSES
+from rehoboam.scoring.v2.lineup_prob import LineupProbModel, effective_lineup_code
 from rehoboam.scoring.v2.rate import RateModel
 
 DGW_MULTIPLIER = 1.8
@@ -61,6 +65,19 @@ MIN_SEASON_MATCHDAYS = 5
 def _models() -> tuple[AvailabilityModel, RateModel, dict]:
     """Load fitted coefficients once per process."""
     return load_coefficients()
+
+
+@lru_cache(maxsize=1)
+def _lineup_model() -> LineupProbModel | None:
+    """The fitted P(status | lineup code); None until `fit-lineup-prob` has run."""
+    return load_lineup_prob()
+
+
+def _opt_int(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def prev_status_from_history(
@@ -216,6 +233,9 @@ def availability_probs(
     uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
     played_history: tuple[int, int] | None = None,
     stale_shrinkage_k: float = DEFAULT_STALE_SHRINKAGE_K,
+    lineup_probability: int | None = None,
+    lineup_model: LineupProbModel | None = None,
+    predicted_xi: bool | None = None,
 ) -> dict[int, float]:
     """Fitted transition probabilities with any serving-time override applied.
 
@@ -228,8 +248,15 @@ def availability_probs(
     path exists for the window where that evidence has aged out and every
     player would otherwise share the league marginal.
 
-    Order is deliberate: the stale prior runs first, the live injury override
-    second, so a player flagged out is out whatever last season says.
+    ``lineup_probability`` is Kickbase's code (1 starter … 5 unlikely) and
+    ``lineup_model`` the fitted P(status | code); with both, the code's observed
+    distribution is blended onto the row so far. ``predicted_xi`` is an outside
+    predicted eleven's verdict and only moves a code 2–4 (`effective_lineup_code`).
+    Either None leaves the row untouched, which is how the replay stays inert.
+
+    Order is deliberate: the stale prior first, the lineup code second, the
+    live injury override last, so a player flagged out is out whatever his
+    history or his code says.
     """
     probs = availability.predict(prev_status)
 
@@ -244,6 +271,9 @@ def availability_probs(
             ),
             shrinkage_k=stale_shrinkage_k,
         )
+
+    if lineup_model is not None:
+        probs = lineup_model.predict(effective_lineup_code(lineup_probability, predicted_xi), probs)
 
     return apply_availability_override(
         probs, live_status, uncertain_start_multiplier=uncertain_start_multiplier
@@ -283,13 +313,16 @@ def compose_ep(
     uncertain_start_multiplier: float = DEFAULT_UNCERTAIN_START_MULTIPLIER,
     played_history: tuple[int, int] | None = None,
     stale_shrinkage_k: float = DEFAULT_STALE_SHRINKAGE_K,
+    lineup_probability: int | None = None,
+    lineup_model: LineupProbModel | None = None,
+    predicted_xi: bool | None = None,
 ) -> float:
     """Probability-weighted expected points, in real Kickbase points.
 
-    ``live_status`` is Kickbase's current injury flag. It defaults to None so
-    the season replay -- which has per-match history but no historical injury
-    flags -- keeps its existing behaviour and does not silently acquire a
-    signal it cannot evaluate.
+    ``live_status`` is Kickbase's current injury flag and ``lineup_probability``
+    its lineup code. Both default to None so the season replay -- which has
+    per-match history but neither signal historically -- keeps its existing
+    behaviour and does not silently acquire a signal it cannot evaluate.
     """
     probs = availability_probs(
         prev_status,
@@ -298,6 +331,9 @@ def compose_ep(
         uncertain_start_multiplier=uncertain_start_multiplier,
         played_history=played_history,
         stale_shrinkage_k=stale_shrinkage_k,
+        lineup_probability=lineup_probability,
+        lineup_model=lineup_model,
+        predicted_xi=predicted_xi,
     )
     return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
@@ -333,6 +369,11 @@ def score_player_v2(
     # Kickbase's live injury flag: unfitted, applied at serving time.
     # Downward-only — see apply_availability_override for why that matters.
     live_status = (data.player_details or {}).get("st")
+    # Kickbase's lineup code (`prob`, 1 starter … 5 unlikely), fitted in
+    # `lineup_prob.py`; an outside predicted eleven, when the caller has one.
+    lineup_probability = _opt_int((data.player_details or {}).get("prob"))
+    predicted_xi = getattr(data, "predicted_xi", None)
+    lineup_model = _lineup_model()
 
     ep = compose_ep(
         quality_key,
@@ -344,6 +385,9 @@ def score_player_v2(
         uncertain_start_multiplier=uncertain_start_multiplier,
         played_history=played_history,
         stale_shrinkage_k=stale_shrinkage_k,
+        lineup_probability=lineup_probability,
+        lineup_model=lineup_model,
+        predicted_xi=predicted_xi,
     )
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
@@ -356,10 +400,20 @@ def score_player_v2(
         uncertain_start_multiplier=uncertain_start_multiplier,
         played_history=played_history,
         stale_shrinkage_k=stale_shrinkage_k,
+        lineup_probability=lineup_probability,
+        lineup_model=lineup_model,
+        predicted_xi=predicted_xi,
     )
+    code_note = (
+        f", lineup code {lineup_probability}"
+        if lineup_probability is not None and lineup_model is not None
+        else ""
+    )
+    if predicted_xi is not None and lineup_probability in (2, 3, 4):
+        code_note += ", outside XI: " + ("in" if predicted_xi else "out")
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "
-        f"(prev status {prev_status if prev_status is not None else 'unknown'}), "
+        f"(prev status {prev_status if prev_status is not None else 'unknown'}{code_note}), "
         f"rate={rate.predict(quality_key, 5, position):.0f} pts if started"
     ]
     if quality_key not in rate.quality:
@@ -388,7 +442,7 @@ def score_player_v2(
             games_played=0,
             consistency=0.0,
             has_fixture_data=False,
-            has_lineup_data=False,
+            has_lineup_data=lineup_probability is not None,
             warnings=[],
         ),
         # v1 decomposition — no v2 counterpart; see module docstring.
@@ -410,6 +464,8 @@ def score_player_v2(
         market_value=player.market_value,
         average_points=player.average_points or 0.0,
         position=player.position or "",
-        lineup_probability=None,
+        # The code itself, so `DecisionEngine`'s buy filter (> MAX_LINEUP_PROB_FOR_BUY)
+        # and the board see it. It was None here, which made that filter dead.
+        lineup_probability=lineup_probability,
         minutes_trend=None,
     )

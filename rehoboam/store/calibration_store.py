@@ -36,6 +36,9 @@ _PREDICTION_COLUMNS = (
     "app",
     "dry_run",
     "backfill",
+    # migration 029: the lineup code the prediction saw, the outside eleven's verdict
+    "lineup_probability",
+    "predicted_xi",
 )
 
 
@@ -130,7 +133,7 @@ class CalibrationStore:
         for r in rows:
             row = dict(r)
             row["p_status"] = Jsonb({str(k): v for k, v in row["p_status"].items()})
-            values.append([row[c] for c in _PREDICTION_COLUMNS])
+            values.append([row.get(c) for c in _PREDICTION_COLUMNS])
         with self.connection() as conn, conn.cursor() as cur:
             # nosec B608 -- identifiers come from the `_PREDICTION_COLUMNS` constant;
             # every value is a `%s` parameter.
@@ -268,8 +271,10 @@ class CalibrationStore:
             cur.executemany(
                 "INSERT INTO rehoboam.calibration_rows (season, day_number, player_id, backfill, "
                 "session_id, predicted_ep, live_ep, baseline_ep, actual_points, minutes, status, "
-                "position, team_id, owned, in_best_11, prev_status, live_status) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "position, team_id, owned, in_best_11, prev_status, live_status, "
+                "lineup_probability, predicted_xi) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                "%s, %s)",
                 [
                     (
                         season,
@@ -289,6 +294,8 @@ class CalibrationStore:
                         x["in_best_11"],
                         x["prev_status"],
                         x["live_status"],
+                        x.get("lineup_probability"),
+                        x.get("predicted_xi"),
                     )
                     for x in rows
                 ],
@@ -381,6 +388,70 @@ class CalibrationStore:
                 "WHERE season = %s AND day_number = %s AND backfill = false",
                 (season, day_number),
             )
+
+    def lineup_code_rows(
+        self,
+        *,
+        season: str,
+        before: float,
+        max_age_days: int = 3,
+        xi_source: str = "ligainsider",
+    ) -> list[dict[str, Any]]:
+        """Every played match this season with the Kickbase lineup code read before it.
+
+        For each matchday whose first kickoff is before `before`, each player
+        with a played status (1, 3, 4, 5) in `player_match_history` is joined
+        to his newest `player_status_daily` row dated before the kickoff's UTC
+        date and at most `max_age_days` earlier — the reading a session would
+        have scored him on. `predicted_xi` is the outside eleven's verdict for
+        the same matchday (True named, False his club was predicted without
+        him, None no prediction). This is the training set for
+        `fit_lineup_prob` and the readout `fit-lineup-prob` prints.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                WITH md AS (
+                    SELECT season, day_number, MIN(kickoff) AS kickoff
+                    FROM rehoboam.fixtures WHERE season = %s
+                    GROUP BY season, day_number HAVING MIN(kickoff) < %s
+                ), played AS (
+                    SELECT h.season, h.day_number, h.player_id, h.status, h.points,
+                           (to_timestamp(md.kickoff) AT TIME ZONE 'UTC')::date AS kick_date
+                    FROM rehoboam.player_match_history h
+                    JOIN md ON md.season = h.season AND md.day_number = h.day_number
+                    WHERE h.status IN (1, 3, 4, 5)
+                ), covered AS (
+                    SELECT DISTINCT season, day_number, team_id
+                    FROM rehoboam.predicted_lineups WHERE source = %s
+                )
+                SELECT p.season, p.day_number, p.player_id, p.status, p.points,
+                       s.lineup_probability, s.day AS status_day,
+                       CASE
+                         WHEN x.in_xi IS NOT NULL THEN x.in_xi
+                         WHEN c.team_id IS NOT NULL THEN FALSE
+                         ELSE NULL
+                       END AS predicted_xi
+                FROM played p
+                JOIN LATERAL (
+                    SELECT lineup_probability, day FROM rehoboam.player_status_daily s
+                    WHERE s.player_id = p.player_id
+                      AND s.day < p.kick_date AND s.day >= p.kick_date - %s
+                    ORDER BY s.day DESC LIMIT 1
+                ) s ON TRUE
+                LEFT JOIN rehoboam.player_universe u ON u.player_id = p.player_id
+                LEFT JOIN covered c
+                  ON c.season = p.season AND c.day_number = p.day_number AND c.team_id = u.team_id
+                LEFT JOIN LATERAL (
+                    SELECT bool_or(in_xi) AS in_xi FROM rehoboam.predicted_lineups x
+                    WHERE x.source = %s AND x.season = p.season
+                      AND x.day_number = p.day_number AND x.player_id = p.player_id
+                ) x ON TRUE
+                ORDER BY p.day_number, p.player_id
+                """,
+                (season, before, xi_source, int(max_age_days), xi_source),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def last_integrity_failure_at(self) -> float | None:
         """Newest integrity failure from a non-dry-run session (the gate's clean window)."""

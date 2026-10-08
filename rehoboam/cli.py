@@ -452,10 +452,20 @@ def ingest_cmd(
         momentum=settings.mv_forecast_momentum,
         cap=settings.mv_forecast_cap,
     )
+    from .enrichment.outside_sources import run_outside_sources
+
+    outside = run_outside_sources(
+        settings, season=CalibrationStore().current_season(), now=time.time()
+    )
+    console.print(f"[dim]outside sources: {outside}[/dim]")
     try:
         SessionStore().record(
             facts_for_ingest(
-                stats, app="cli", session_id=session_id, mv_forecast=asdict(mv_outcome)
+                stats,
+                app="cli",
+                session_id=session_id,
+                mv_forecast=asdict(mv_outcome),
+                outside_sources=outside,
             )
         )
     except Exception:
@@ -1648,6 +1658,176 @@ def fit_scorer(
     console.print(rates)
 
     console.print(f"[dim]Coefficients: {COEFFICIENTS_PATH}[/dim]")
+
+
+@app.command("fit-lineup-prob")
+def fit_lineup_prob_cmd(
+    shrinkage_k: float = typer.Option(
+        20.0, "--k", help="Pseudo-count pulling each code's counts toward the Markov row"
+    ),
+    max_age_days: int = typer.Option(
+        3, "--max-age-days", help="Oldest status reading before kickoff that still counts"
+    ),
+    season: str | None = typer.Option(None, "--season", help="Defaults to the store's season"),
+    write: bool = typer.Option(
+        True, "--write/--dry-run", help="Write `lineup_prob` into coefficients.json"
+    ),
+):
+    """Fit P(played status | Kickbase lineup code) from the store and show the
+    outside eleven's accuracy beside it.
+
+    Reads every played match this season with the lineup code the ingestion
+    stored the day before kickoff (`CalibrationStore.lineup_code_rows`), counts
+    status per code, and writes the counts as `lineup_prob` in
+    coefficients.json — the scorer blends them onto the Markov row
+    (`scoring/v2/lineup_prob.py`). Re-run after each matchday; the training
+    set grows one matchday a week from 2026-09-14.
+    """
+    import time
+    from collections import Counter, defaultdict
+
+    from .scoring.v2.coefficients import COEFFICIENTS_PATH, save_lineup_prob
+    from .scoring.v2.lineup_prob import LINEUP_CODES, fit_lineup_prob
+    from .store.calibration_store import CalibrationStore
+
+    _ensure_store()
+    store = CalibrationStore()
+    season = season or store.current_season()
+    if not season:
+        console.print("[red]The store has no season yet[/red]")
+        raise typer.Exit(1)
+    rows = store.lineup_code_rows(season=season, before=time.time(), max_age_days=max_age_days)
+    if not rows:
+        console.print(f"[yellow]No played matches with a stored lineup code in {season}[/yellow]")
+        raise typer.Exit(1)
+    matchdays = sorted({r["day_number"] for r in rows})
+    model = fit_lineup_prob(
+        ((r["lineup_probability"], r["status"]) for r in rows),
+        shrinkage_k=shrinkage_k,
+        meta={
+            "season": season,
+            "matchdays": matchdays,
+            "rows": len(rows),
+            "max_age_days": max_age_days,
+            "fitted_at": time.strftime("%Y-%m-%d"),
+        },
+    )
+
+    table = Table(title=f"Kickbase lineup code vs played status — {season}, MD {matchdays}")
+    table.add_column("code")
+    table.add_column("n", justify="right")
+    table.add_column("started", justify="right")
+    table.add_column("on pitch", justify="right")
+    table.add_column("not in squad", justify="right")
+    table.add_column("avg pts", justify="right")
+    by_code: dict[int, list[dict]] = defaultdict(list)
+    for r in rows:
+        if r["lineup_probability"] is not None:
+            by_code[int(r["lineup_probability"])].append(r)
+    for code in LINEUP_CODES:
+        group = by_code.get(code, [])
+        if not group:
+            table.add_row(str(code), "0", "-", "-", "-", "-")
+            continue
+        n = len(group)
+        table.add_row(
+            str(code),
+            str(n),
+            f"{sum(1 for r in group if r['status'] == 5) / n:.0%}",
+            f"{sum(1 for r in group if r['status'] in (3, 5)) / n:.0%}",
+            f"{sum(1 for r in group if r['status'] == 1) / n:.0%}",
+            f"{sum(r['points'] for r in group) / n:.1f}",
+        )
+    console.print(table)
+
+    judged = [r for r in rows if r.get("predicted_xi") is not None]
+    if judged:
+        xi = Table(title="Outside eleven (ligainsider) vs started")
+        xi.add_column("matchday")
+        xi.add_column("named", justify="right")
+        xi.add_column("named & started", justify="right")
+        xi.add_column("left out", justify="right")
+        xi.add_column("left out & started", justify="right")
+        per_md: dict[int, Counter] = defaultdict(Counter)
+        for r in judged:
+            c = per_md[int(r["day_number"])]
+            key = "in" if r["predicted_xi"] else "out"
+            c[key] += 1
+            if r["status"] == 5:
+                c[key + "_started"] += 1
+        for md, c in sorted(per_md.items()):
+            xi.add_row(
+                str(md),
+                str(c["in"]),
+                f"{c['in_started']} ({c['in_started'] / c['in']:.0%})" if c["in"] else "-",
+                str(c["out"]),
+                f"{c['out_started']} ({c['out_started'] / c['out']:.0%})" if c["out"] else "-",
+            )
+        console.print(xi)
+    else:
+        console.print("[dim]No outside eleven stored for a played matchday yet[/dim]")
+
+    if write:
+        save_lineup_prob(model)
+        console.print(
+            f"[green]lineup_prob written to {COEFFICIENTS_PATH} "
+            f"({len(rows)} rows, k={shrinkage_k})[/green]"
+        )
+    else:
+        console.print("[dim]--dry-run: coefficients.json not written[/dim]")
+
+
+@app.command("understat")
+def understat_cmd(
+    force: bool = typer.Option(False, "--force", help="Fetch even if the last snapshot is fresh"),
+):
+    """Fetch Understat's per-player xG table for the season into the store —
+    what func-rehoboam-external does once per `UNDERSTAT_STALE_AFTER_HOURS`."""
+    import time
+
+    from .enrichment.understat import run_understat_refresh
+    from .store.calibration_store import CalibrationStore
+    from .store.understat_store import UnderstatStore
+
+    _ensure_store()
+    settings = get_settings()
+    season = CalibrationStore().current_season()
+    if not season:
+        console.print("[red]The store has no season yet[/red]")
+        raise typer.Exit(1)
+    outcome = run_understat_refresh(
+        UnderstatStore(),
+        season=season,
+        now=time.time(),
+        stale_after_s=0.0 if force else settings.understat_stale_after_hours * 3600.0,
+    )
+    console.print(outcome)
+    if outcome.get("error"):
+        raise typer.Exit(1)
+
+
+@app.command("predicted-xi")
+def predicted_xi_cmd(
+    force: bool = typer.Option(False, "--force", help="Fetch whatever the days to kickoff"),
+):
+    """Fetch ligainsider's predicted elevens for the upcoming matchday into the
+    store — what func-rehoboam-external does within `PREDICTED_XI_DAYS_BEFORE`."""
+    import time
+
+    from .enrichment.ligainsider import run_predicted_xi_refresh
+    from .store.lineup_store import PredictedLineupStore
+
+    _ensure_store()
+    settings = get_settings()
+    outcome = run_predicted_xi_refresh(
+        PredictedLineupStore(),
+        now=time.time(),
+        days_before=1e9 if force else settings.predicted_xi_days_before,
+        throttle_seconds=settings.outside_source_throttle_seconds,
+    )
+    console.print(outcome)
+    if outcome.get("error"):
+        raise typer.Exit(1)
 
 
 @app.command("derive-thresholds")

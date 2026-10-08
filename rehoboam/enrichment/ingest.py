@@ -85,6 +85,7 @@ def facts_for_ingest(
     session_id: str,
     calibration: dict | None = None,
     mv_forecast: dict | None = None,
+    outside_sources: dict | None = None,
     mode: str = "ingest",
 ) -> SessionFacts:
     """The row a completed ingest run leaves for rule I7.
@@ -102,7 +103,8 @@ def facts_for_ingest(
     exceptions and reports them inside the outcome instead.
 
     `mv_forecast`, when given, is the forecast step's `MvForecastOutcome` as a
-    dict -- like calibration, it never affects `errors`.
+    dict -- like calibration, it never affects `errors`. `outside_sources` is
+    the Understat / ligainsider steps' outcomes (2026-10-08), same rule.
 
     `mode` defaults to `"ingest"`, what the twice-daily pass writes. The
     nightly pass (status for every player; nothing else refreshes, right
@@ -124,6 +126,8 @@ def facts_for_ingest(
         extra["calibration"] = calibration
     if mv_forecast is not None:
         extra["mv_forecast"] = mv_forecast
+    if outside_sources is not None:
+        extra["outside_sources"] = outside_sources
     return SessionFacts(
         session_id=session_id,
         app=app,

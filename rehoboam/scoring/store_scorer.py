@@ -22,6 +22,7 @@ from rehoboam.scoring.v2.adapter import (
 )
 from rehoboam.scoring.v2.availability import AvailabilityModel
 from rehoboam.scoring.v2.features import PLAYED_STATUSES
+from rehoboam.scoring.v2.lineup_prob import LineupProbModel
 from rehoboam.scoring.v2.rate import RateModel
 
 
@@ -32,9 +33,10 @@ class StoredPlayer:
     team_id: str | None
     market_value: int | None
     live_status: int | None  # player_status_daily.status, None when no row
-    lineup_probability: int | None  # stored, not used by the model
+    lineup_probability: int | None  # player_status_daily.lineup_probability (Kickbase code)
     status_fetched_at: float | None  # epoch of the status row, None when no row
     matches: list[dict[str, Any]]  # player_match_history rows, oldest first
+    predicted_xi: bool | None = None  # outside predicted eleven; None = no prediction
 
 
 @dataclass(frozen=True)
@@ -74,12 +76,14 @@ def score_stored(
     max_status_age_days: float,
     availability: AvailabilityModel,
     rate: RateModel,
+    lineup_model: LineupProbModel | None = None,
 ) -> StoredPrediction:
     """The store-row twin of `score_player_v2`: same inputs, same composition.
 
     Mirrors `replay/driver.py`'s `_make_score_fn` and the adapter, in this
     order: previous played status from the rows (age-limited), the played-share
-    prior only when that status is unusable, the live injury override, then
+    prior only when that status is unusable, the lineup code blended on top
+    when a `lineup_model` is given, the live injury override, then
     `compose_ep`. No DGW multiplier: the Bundesliga has none, and a rescheduled
     double would show in the calibration report's bias, which is where it
     should be noticed.
@@ -91,20 +95,21 @@ def score_stored(
         max_age_days=max_status_age_days,
     )
     played_history = played_share_from_rows(ordered) if prev_status is None else None
-    probs = availability_probs(
-        prev_status,
-        availability,
-        live_status=player.live_status,
-        played_history=played_history,
-    )
+    signals = {
+        "live_status": player.live_status,
+        "played_history": played_history,
+        "lineup_probability": player.lineup_probability,
+        "lineup_model": lineup_model,
+        "predicted_xi": player.predicted_xi,
+    }
+    probs = availability_probs(prev_status, availability, **signals)
     ep = compose_ep(
         player.player_id,
         prev_status,
         player.position,
         availability,
         rate,
-        live_status=player.live_status,
-        played_history=played_history,
+        **signals,
     )
     mass = sum(probs[s] for s in PLAYED_STATUSES)
     conditional_rate = (

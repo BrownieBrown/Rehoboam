@@ -43,6 +43,9 @@ EXPECTED_TABLES = {
     # session facts (PR D)
     "session_facts",
     "integrity_failures",
+    # lineup signals (2026-10-08)
+    "predicted_lineups",
+    "understat_player_stats",
     # calibration (PR E)
     "predictions",
     "calibration_rows",
@@ -126,6 +129,7 @@ def test_migrate_creates_every_table_in_the_rehoboam_schema(blank_dsn):
             "026_player_ranks.sql",
             "027_lineup_results_by_season.sql",
             "028_flip_outcomes_rule.sql",
+            "029_lineup_signals.sql",
         ]
         assert _tables(conn) == EXPECTED_TABLES
         public = conn.execute(
@@ -167,6 +171,7 @@ def test_migrate_is_idempotent(store_dsn):
             26,
             27,
             28,
+            29,
         }
 
 
@@ -249,7 +254,7 @@ def test_migrate_refreshes_the_bot_role_grants_on_new_tables(store_dsn, tmp_path
         conn.commit()
         # store_dsn already has every real migration applied; use a version
         # past the newest real one so this simulated file is genuinely new.
-        (tmp_path / "029_simulated.sql").write_text(
+        (tmp_path / "030_simulated.sql").write_text(
             "set role other_admin;\ncreate table rehoboam.t_new (x integer);\nreset role;\n"
         )
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
@@ -311,6 +316,7 @@ def test_an_up_to_date_database_needs_only_select_from_the_bot_role(store_dsn):
                 26,
                 27,
                 28,
+                29,
             }
             assert migrate(conn) == []
         finally:
@@ -342,7 +348,7 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
         conn.commit()
         # store_dsn already has every real migration applied; use a version
         # past the newest real one so this simulated file is genuinely new.
-        (tmp_path / "029_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
+        (tmp_path / "030_simulated.sql").write_text("create table rehoboam.t_new (x integer);\n")
         monkeypatch.setattr("rehoboam.store.migrate.MIGRATIONS", tmp_path)
         conn.execute(f"set role {ROLE}")
         conn.commit()
@@ -382,6 +388,7 @@ def test_applying_a_new_file_under_the_bot_role_fails_clearly(store_dsn, tmp_pat
             26,
             27,
             28,
+            29,
         }
 
 

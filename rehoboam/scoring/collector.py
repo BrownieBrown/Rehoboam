@@ -21,6 +21,7 @@ class DataCollector:
         performance: dict | None,
         player_details: dict | None,
         team_profiles: dict[str, dict],
+        predicted_xi: bool | None = None,
     ) -> PlayerData:
         """Assemble PlayerData from pre-fetched API data.
 
@@ -87,4 +88,5 @@ class DataCollector:
             is_dgw=is_dgw,
             missing=missing,
             upcoming_opponent_strengths=upcoming_opponent_strengths,
+            predicted_xi=predicted_xi,
         )

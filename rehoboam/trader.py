@@ -245,6 +245,39 @@ class Trader:
             return {}
 
     @staticmethod
+    def _load_predicted_xi(bid_learner, settings) -> dict[str, bool]:
+        """player_id -> named in ligainsider's eleven for the upcoming matchday.
+
+        Empty unless `PREDICTED_XI_ENABLED`; a club without a prediction has no
+        entry (None to the scorer). Cached per process for an hour, like the
+        forecasts. Best-effort: a failing read scores without it.
+        """
+        if bid_learner is None or not getattr(settings, "predicted_xi_enabled", False):
+            return {}
+        try:
+            from .store.lineup_store import PredictedLineupStore
+
+            key = ("predicted_xi",)
+            cached = _CURVE_CACHE.get(key)
+            if cached is not None and time.time() - cached[0] < _CURVE_CACHE_TTL_S:
+                return cached[1]
+            store = PredictedLineupStore(dsn=getattr(bid_learner, "dsn", None))
+            md = store.upcoming_matchday(time.time())
+            xi = (
+                store.xi_for(season=str(md["season"]), day_number=int(md["day_number"]))
+                if md
+                else {}
+            )
+            logger.info(
+                "predicted xi: %d players judged for MD%s", len(xi), md and md["day_number"]
+            )
+            _CURVE_CACHE[key] = (time.time(), xi)
+            return xi
+        except Exception:
+            logger.exception("predicted xi unavailable — scoring without it")
+            return {}
+
+    @staticmethod
     def _load_curves(bid_learner, settings):
         """(win curve, profit curve) from the store, cached per process for an hour.
 
@@ -772,6 +805,7 @@ class Trader:
 
         # --- 3. Score all players ---
         collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
+        predicted_xi = self._load_predicted_xi(self.bid_learner, self.settings)
 
         # REH-55: scoring runs through the fitted v2 models, which return real
         # Kickbase matchday points rather than the old 0-100 index. REH-20's
@@ -798,6 +832,7 @@ class Trader:
                     performance=perf,
                     player_details=details,
                     team_profiles=team_profiles,
+                    predicted_xi=predicted_xi.get(player.id),
                 )
                 market_scores.append(
                     score_player_v2(
@@ -846,6 +881,7 @@ class Trader:
                     performance=perf,
                     player_details=details,
                     team_profiles=team_profiles,
+                    predicted_xi=predicted_xi.get(player.id),
                 )
                 squad_scores.append(
                     score_player_v2(
