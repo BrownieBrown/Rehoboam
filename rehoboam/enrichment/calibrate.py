@@ -153,6 +153,8 @@ def _rows_for(
                 "in_best_11": in_best_11,
                 "prev_status": p["prev_status"] if p else None,
                 "live_status": p["live_status"] if p else None,
+                "lineup_probability": p.get("lineup_probability") if p else None,
+                "predicted_xi": p.get("predicted_xi") if p else None,
             }
         )
     return cal_rows, db_rows, names

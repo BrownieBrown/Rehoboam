@@ -56,6 +56,9 @@ class PlayerData:
     is_dgw: bool
     missing: list[str] = field(default_factory=list)
     upcoming_opponent_strengths: list[TeamStrength] = field(default_factory=list)
+    #: An outside predicted eleven's verdict (ligainsider): True named in it,
+    #: False left out while his club was predicted, None no prediction.
+    predicted_xi: bool | None = None
 
 
 @dataclass

@@ -3,7 +3,7 @@
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -771,7 +771,7 @@ class AutoTrader:
         """
         from .formation import select_best_eleven
         from .scoring.store_scorer import score_stored
-        from .scoring.v2.coefficients import load_coefficients
+        from .scoring.v2.coefficients import load_coefficients, load_lineup_prob
 
         if nk is None or nk.at is None or nk.day_number is None:
             logger.info(
@@ -786,9 +786,11 @@ class AutoTrader:
             logger.info("predictions: skipped, corpus has no season")
             return 0
         availability, rate, _meta = load_coefficients()
+        lineup_model = load_lineup_prob()
         since_iso = (now - timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
         players = store.stored_players(since_iso=since_iso, status_day=now.date())
         fresh_after = now.timestamp() - PREDICTION_STATUS_MAX_AGE_S
+        predicted_xi = self._predicted_xi(season, nk.day_number)
 
         owned = {p.id for p in ctx.squad}
         listed = set((ctx.ep_result.get("market_players") or {}).keys())
@@ -810,12 +812,14 @@ class AutoTrader:
             if p.status_fetched_at is None or p.status_fetched_at < fresh_after:
                 skipped_stale += 1
                 continue
+            xi = predicted_xi.get(p.player_id) if predicted_xi else None
             pred = score_stored(
-                p,
+                replace(p, predicted_xi=xi),
                 now=now,
                 max_status_age_days=self.settings.max_status_age_days,
                 availability=availability,
                 rate=rate,
+                lineup_model=lineup_model,
             )
             rows.append(
                 {
@@ -840,6 +844,8 @@ class AutoTrader:
                     "app": self.app_name,
                     "dry_run": bool(self.dry_run),
                     "backfill": False,
+                    "lineup_probability": p.lineup_probability,
+                    "predicted_xi": xi,
                 }
             )
         written = store.write_predictions(rows)
@@ -850,6 +856,29 @@ class AutoTrader:
             nk.day_number,
         )
         return written
+
+    def _predicted_xi(self, season: str, day_number: int) -> dict[str, bool]:
+        """ligainsider's eleven for the matchday, when `PREDICTED_XI_ENABLED`.
+
+        Best-effort like every learning read: a failure logs and scores as if
+        there were no outside prediction.
+        """
+        if not getattr(self.settings, "predicted_xi_enabled", False):
+            return {}
+        try:
+            from .store.lineup_store import PredictedLineupStore
+
+            xi = PredictedLineupStore().xi_for(season=season, day_number=day_number)
+            logger.info(
+                "predicted xi: %d players judged for MD%d (%d named)",
+                len(xi),
+                day_number,
+                sum(1 for v in xi.values() if v),
+            )
+            return xi
+        except Exception:
+            logger.exception("predicted xi unavailable — scoring without it")
+            return {}
 
     def _write_league_state(self, ctx: EPSessionContext, league) -> dict[str, int]:
         """G1: persist the market, the managers and every squad the session already fetched.

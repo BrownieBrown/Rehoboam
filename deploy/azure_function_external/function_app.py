@@ -18,7 +18,7 @@ import azure.functions as func
 
 app = func.FunctionApp()
 sys.path.insert(0, str(Path(__file__).parent))
-TEMP_DIR = "/tmp"
+TEMP_DIR = "/tmp"  # nosec B108 -- the one writable directory on Linux Consumption
 
 
 def _prepare() -> None:
@@ -122,6 +122,17 @@ def ingest(timer: func.TimerRequest):
         except Exception:
             logging.warning("mv forecast: step failed", exc_info=True)
 
+        # Understat's xG table (weekly) and ligainsider's predicted elevens
+        # (Thursday/Friday before a kickoff), 2026-10-08. Both log and skip on
+        # failure; neither touches the ingest's own counters.
+        outside_sources = None
+        try:
+            from rehoboam.enrichment.outside_sources import run_outside_sources
+
+            outside_sources = run_outside_sources(settings, season=season, now=time.time())
+        except Exception:
+            logging.warning("outside sources: step failed", exc_info=True)
+
         try:
             SessionStore().record(
                 facts_for_ingest(
@@ -130,6 +141,7 @@ def ingest(timer: func.TimerRequest):
                     session_id=session_id,
                     calibration=calibration,
                     mv_forecast=mv_forecast,
+                    outside_sources=outside_sources,
                 )
             )
         except Exception:

@@ -825,6 +825,45 @@ class Settings(BaseSettings):
             "Env: INGEST_TRANSFERS_STALE_AFTER_HOURS."
         ),
     )
+    understat_enabled: bool = Field(
+        default=True,
+        description=(
+            "Fetch Understat's per-player Bundesliga xG/xA table into "
+            "`understat_player_stats` once per `understat_stale_after_hours` (2026-10-08). "
+            "Fitting data; nothing in trading reads it yet. Env: UNDERSTAT_ENABLED."
+        ),
+    )
+    understat_stale_after_hours: float = Field(
+        default=144.0,
+        description=(
+            "Understat refresh window (six days: season totals move once a matchday). "
+            "Env: UNDERSTAT_STALE_AFTER_HOURS."
+        ),
+    )
+    predicted_xi_days_before: float = Field(
+        default=2.0,
+        description=(
+            "Fetch ligainsider's predicted elevens when the next matchday's first kickoff "
+            "is within this many days (the Thursday and Friday runs before a Friday "
+            "kickoff). 0 turns the fetch off. Env: PREDICTED_XI_DAYS_BEFORE."
+        ),
+    )
+    predicted_xi_enabled: bool = Field(
+        default=False,
+        description=(
+            "Let the outside predicted eleven move a Kickbase lineup code 2-4 "
+            "(`lineup_prob.effective_lineup_code`). Off until its accuracy has been read "
+            "off `fit-lineup-prob` for a few matchdays; the fetch itself is governed by "
+            "`predicted_xi_days_before`. Env: PREDICTED_XI_ENABLED."
+        ),
+    )
+    outside_source_throttle_seconds: float = Field(
+        default=1.5,
+        description=(
+            "Pause between requests to ligainsider / Understat. Env: "
+            "OUTSIDE_SOURCE_THROTTLE_SECONDS."
+        ),
+    )
     mv_forecast_momentum: float = Field(
         default=0.95,
         description=(

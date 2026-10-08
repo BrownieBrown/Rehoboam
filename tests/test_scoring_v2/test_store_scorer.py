@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from rehoboam.kickbase_client import MarketPlayer
 from rehoboam.scoring.models import PlayerData
 from rehoboam.scoring.store_scorer import (
@@ -169,3 +171,49 @@ def test_no_matches_scores_from_the_prior():
         rate=rate,
     )
     assert stored.prev_status is None and stored.predicted_ep > 0
+
+
+def test_the_lineup_code_scores_the_same_from_the_api_and_from_the_store(monkeypatch):
+    """Kickbase's `prob` on the details and `player_status_daily.lineup_probability`
+    are the same code; with the same fitted lineup model both paths must agree."""
+    from rehoboam.scoring.v2 import adapter
+    from rehoboam.scoring.v2.lineup_prob import LineupProbModel
+
+    model = LineupProbModel(counts={1: {1: 0, 3: 0, 4: 0, 5: 106}}, shrinkage_k=20.0)
+    monkeypatch.setattr(adapter, "_lineup_model", lambda: model)
+    availability, rate, _ = load_coefficients()
+
+    perf = {"it": [{"ti": "2026/2027", "ph": [_payload_match(*h) for h in HISTORY]}]}
+    data = PlayerData(
+        player=_market_player("1", "Midfielder"),
+        performance=perf,
+        player_details={"prob": 1, "ap": 40.0},
+        team_strength=None,
+        opponent_strength=None,
+        is_dgw=False,
+    )
+    live = score_player_v2(data, now=NOW, max_status_age_days=60.0)
+    plain = _live("1", "Midfielder", HISTORY)
+    assert live.expected_points > plain.expected_points
+    assert live.lineup_probability == 1
+    assert "lineup code 1" in live.notes[0]
+
+    stored = score_stored(
+        StoredPlayer(
+            player_id="1",
+            position="Midfielder",
+            team_id="1",
+            market_value=1_000_000,
+            live_status=None,
+            lineup_probability=1,
+            status_fetched_at=None,
+            matches=[_row(*h) for h in HISTORY],
+        ),
+        now=NOW,
+        max_status_age_days=60.0,
+        availability=availability,
+        rate=rate,
+        lineup_model=model,
+    )
+    assert round(stored.predicted_ep, 2) == live.expected_points
+    assert stored.p_status[5] == pytest.approx((106 + 20 * availability.predict(3)[5]) / 126)
