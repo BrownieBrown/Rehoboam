@@ -17,7 +17,12 @@ only place that touches the network or `datetime.now()`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+#: A Bundesliga round spans at most Friday to Monday. A round whose first
+#: kickoff is older than this is a PREVIOUS round, never one in progress --
+#: otherwise one un-rolled or postponed fixture would unlock trading for good.
+MATCHDAY_ROUND_SPAN_DAYS = 4
 
 
 def _parse_match_date(value) -> datetime | None:
@@ -65,30 +70,68 @@ def _day_groups(payload) -> list[tuple[int | None, list[dict]]]:
     return out
 
 
-def next_fixture_from_matchdays(payload: dict, now: datetime) -> NextFixture | None:
-    """Earliest not-yet-started fixture, with the matchday number of its group.
+@dataclass(frozen=True)
+class Round:
+    """One matchday group of the schedule, reduced to what the guards need."""
 
-    `st == 0` means not started; anything else (2 observed live, presumably
-    also covering in-progress states) is excluded so a fixture already
-    underway or finished never gets reported as "next". Tolerant of missing
-    keys and unparseable dates -- a schema drift here should degrade to "the
-    schedule has nothing to say", not raise.
+    day_number: int | None
+    first_kickoff: datetime
+    started: bool  # first kickoff passed, or any fixture reports st != 0
+    finished: bool  # every fixture reports st == 2
+
+
+def rounds_from_matchdays(payload, now: datetime) -> list[Round]:
+    """Every matchday group with at least one parseable date, schedule order.
+
+    A group is *started* once its earliest fixture has kicked off or any
+    fixture says so (`st != 0`); it is *finished* when every fixture says
+    `st == 2`. Tolerant of missing keys and unparseable dates -- a schema
+    drift here should degrade to "the schedule has nothing to say", not
+    raise.
+    """
+    out: list[Round] = []
+    for day, fixtures in _day_groups(payload):
+        dates = [d for d in (_parse_match_date(f.get("dt")) for f in fixtures) if d is not None]
+        if not dates:
+            continue
+        first = min(dates)
+        out.append(
+            Round(
+                day_number=day,
+                first_kickoff=first,
+                started=first <= now or any(f.get("st") != 0 for f in fixtures),
+                finished=all(f.get("st") == 2 for f in fixtures),
+            )
+        )
+    return out
+
+
+def next_fixture_from_matchdays(payload: dict, now: datetime) -> NextFixture | None:
+    """First kickoff of the earliest round that has not started, with its day.
+
+    Round-aware since 2026-10-12. Kickbase locks the fielded eleven and
+    applies the negative-budget rule at the ROUND'S first kickoff (Friday
+    evening); the Saturday and Sunday fixtures of a round already under way
+    change nothing for it, and every squad change lands on the following
+    round. So once a round has started, its remaining fixtures are not a
+    "next kickoff" for any guard -- the next kickoff that matters is the
+    first fixture of the next round. Before this, the earliest remaining
+    fixture was reported, which read "0d to kickoff" all weekend and locked
+    the bot out of Friday night, Saturday and Sunday (2026-10-10: three
+    must-have buys refused by the budget lockout, two points buys sold by
+    the debt recovery, for a kickoff that was really five days away).
     """
     best: NextFixture | None = None
-    for day, fixtures in _day_groups(payload):
-        for fixture in fixtures:
-            if fixture.get("st") != 0:
-                continue
-            parsed = _parse_match_date(fixture.get("dt"))
-            if parsed is None or parsed <= now:
-                continue
-            if best is None or parsed < best.at:
-                best = NextFixture(day_number=day, at=parsed)
+    for rnd in rounds_from_matchdays(payload, now):
+        if rnd.started:
+            continue
+        if best is None or rnd.first_kickoff < best.at:
+            best = NextFixture(day_number=rnd.day_number, at=rnd.first_kickoff)
     return best
 
 
 def next_kickoff_from_matchdays(payload: dict, now: datetime) -> datetime | None:
-    """Earliest not-yet-started fixture in the competition schedule.
+    """First kickoff of the next round that has not started (see above).
 
     `payload["it"]` is a list of matchday groups, each with its own `it` list
     of fixtures. Delegates to `next_fixture_from_matchdays` and drops the
@@ -96,6 +139,24 @@ def next_kickoff_from_matchdays(payload: dict, now: datetime) -> datetime | None
     """
     nf = next_fixture_from_matchdays(payload, now)
     return nf.at if nf else None
+
+
+def matchday_in_progress_from_matchdays(
+    payload, now: datetime, *, span_days: int = MATCHDAY_ROUND_SPAN_DAYS
+) -> bool:
+    """Is a round under way: started within `span_days` and not yet finished.
+
+    The schedule's answer to REH-110's question, replacing the `/myeleven`
+    reading that only saw OUR players' fixtures -- on 2026-10-09/10 none of
+    ours played the Friday game, so the round "had not started" until our
+    first player kicked off on Saturday afternoon. The span keeps a
+    postponed fixture from holding a round open for weeks.
+    """
+    cutoff = now - timedelta(days=span_days)
+    return any(
+        cutoff <= rnd.first_kickoff <= now and not rnd.finished
+        for rnd in rounds_from_matchdays(payload, now)
+    )
 
 
 def finished_matchdays(payload) -> list[FinishedMatchday]:

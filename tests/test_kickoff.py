@@ -209,3 +209,162 @@ class TestTraderDayNumber:
             SimpleNamespace(id="L"), now=NOW
         )
         assert nk.source == "myeleven" and nk.day_number is None
+
+
+# ---------------------------------------------------------------------------
+# Round-aware reading (2026-10-12): a started round is nobody's "next kickoff".
+# ---------------------------------------------------------------------------
+
+from rehoboam.kickoff import (  # noqa: E402
+    Round,
+    matchday_in_progress_from_matchdays,
+    rounds_from_matchdays,
+)
+
+# MD5 kicked off Friday 18:30Z with a game none of our players were in; the
+# Saturday and Sunday fixtures are still ahead. MD6 is the following Friday.
+WEEKEND = {
+    "it": [
+        {
+            "day": 5,
+            "it": [
+                {"dt": "2026-10-09T18:30:00Z", "st": 2},
+                {"dt": "2026-10-10T13:30:00Z", "st": 0},
+                {"dt": "2026-10-11T15:30:00Z", "st": 0},
+            ],
+        },
+        {
+            "day": 6,
+            "it": [
+                {"dt": "2026-10-17T13:30:00Z", "st": 0},
+                {"dt": "2026-10-16T18:30:00Z", "st": 0},
+            ],
+        },
+    ]
+}
+SATURDAY = datetime(2026, 10, 10, 8, 0, tzinfo=timezone.utc)
+FRIDAY_MORNING = datetime(2026, 10, 9, 8, 0, tzinfo=timezone.utc)
+FRIDAY_NIGHT = datetime(2026, 10, 9, 20, 0, tzinfo=timezone.utc)
+
+
+class TestNextKickoffIsTheNextRound:
+    def test_saturday_of_a_started_round_points_at_next_friday(self):
+        """The live 2026-10-10 08:00 session: it read 'Sat 13:30, 0d' and locked."""
+        assert next_fixture_from_matchdays(WEEKEND, SATURDAY) == NextFixture(
+            day_number=6, at=datetime(2026, 10, 16, 18, 30, tzinfo=timezone.utc)
+        )
+
+    def test_friday_night_after_the_first_whistle_is_already_the_next_round(self):
+        assert next_fixture_from_matchdays(WEEKEND, FRIDAY_NIGHT).day_number == 6
+
+    def test_friday_morning_still_points_at_this_round(self):
+        """Nothing played yet, every fixture `st == 0`: Friday 18:30 is the kickoff."""
+        unplayed = {
+            "it": [
+                {"day": g["day"], "it": [{**f, "st": 0} for f in g["it"]]} for g in WEEKEND["it"]
+            ]
+        }
+        assert next_fixture_from_matchdays(unplayed, FRIDAY_MORNING) == NextFixture(
+            day_number=5, at=datetime(2026, 10, 9, 18, 30, tzinfo=timezone.utc)
+        )
+
+    def test_a_round_whose_status_says_started_is_skipped_even_before_its_date(self):
+        """`st != 0` on any fixture marks the round started whatever the clock says."""
+        payload = {
+            "it": [
+                {"day": 5, "it": [{"dt": "2026-10-09T18:30:00Z", "st": 1}]},
+                {"day": 6, "it": [{"dt": "2026-10-16T18:30:00Z", "st": 0}]},
+            ]
+        }
+        early = datetime(2026, 10, 9, 18, 0, tzinfo=timezone.utc)
+        assert next_fixture_from_matchdays(payload, early).day_number == 6
+
+    def test_a_postponed_fixture_does_not_resurrect_a_finished_round(self):
+        """MD5 has one game moved to November: that is not MD5's kickoff."""
+        payload = {
+            "it": [
+                {
+                    "day": 5,
+                    "it": [
+                        {"dt": "2026-10-09T18:30:00Z", "st": 2},
+                        {"dt": "2026-11-03T19:30:00Z", "st": 0},
+                    ],
+                },
+                {"day": 6, "it": [{"dt": "2026-10-16T18:30:00Z", "st": 0}]},
+            ]
+        }
+        assert next_fixture_from_matchdays(payload, SATURDAY).day_number == 6
+
+    def test_days_until_match_on_saturday_is_the_week_ahead(self):
+        """Six days: aggressive phase, debt allowed, no lockout, no emergency fill."""
+        trader = _trader(WEEKEND, {"lp": [{"md": "2026-10-10T13:30:00Z"}], "nlp": []})
+        assert trader.get_days_until_match(SimpleNamespace(id="L"), now=SATURDAY) == 6
+
+
+class TestRoundsFromMatchdays:
+    def test_reduces_each_group_to_first_kickoff_and_flags(self):
+        assert rounds_from_matchdays(WEEKEND, SATURDAY) == [
+            Round(
+                day_number=5,
+                first_kickoff=datetime(2026, 10, 9, 18, 30, tzinfo=timezone.utc),
+                started=True,
+                finished=False,
+            ),
+            Round(
+                day_number=6,
+                first_kickoff=datetime(2026, 10, 16, 18, 30, tzinfo=timezone.utc),
+                started=False,
+                finished=False,
+            ),
+        ]
+
+    def test_groups_without_a_parseable_date_are_dropped(self):
+        assert rounds_from_matchdays({"it": [{"day": 1, "it": [{"st": 0}]}, "junk"]}, NOW) == []
+        assert rounds_from_matchdays(None, NOW) == []
+
+
+class TestMatchdayInProgressFromTheSchedule:
+    def test_saturday_of_a_started_round_is_in_progress(self):
+        """Even though none of OUR players played Friday -- the schedule knows."""
+        assert matchday_in_progress_from_matchdays(WEEKEND, SATURDAY) is True
+
+    def test_friday_morning_is_not(self):
+        assert matchday_in_progress_from_matchdays(WEEKEND, FRIDAY_MORNING) is False
+
+    def test_a_finished_round_is_not(self):
+        done = {"it": [{"day": 5, "it": [{"dt": "2026-10-09T18:30:00Z", "st": 2}]}]}
+        assert matchday_in_progress_from_matchdays(done, SATURDAY) is False
+
+    def test_a_round_older_than_the_span_is_not_held_open_by_a_postponed_game(self):
+        stale = {
+            "it": [
+                {
+                    "day": 5,
+                    "it": [
+                        {"dt": "2026-10-09T18:30:00Z", "st": 2},
+                        {"dt": "2026-11-03T19:30:00Z", "st": 0},
+                    ],
+                }
+            ]
+        }
+        thursday = datetime(2026, 10, 15, 8, 0, tzinfo=timezone.utc)
+        assert matchday_in_progress_from_matchdays(stale, thursday) is False
+
+
+class TestTraderReadsInProgressFromTheSchedule:
+    def test_schedule_wins_over_myeleven(self):
+        """2026-10-10 08:00 live: /myeleven had only future fixtures (ours play
+        Saturday), so the old reading said 'not started' and the phase locked."""
+        nk = _trader(WEEKEND, {"lp": [{"md": "2026-10-10T13:30:00Z"}], "nlp": []}).next_kickoff(
+            SimpleNamespace(id="L"), now=SATURDAY
+        )
+        assert nk.matchday_in_progress is True
+        assert nk.day_number == 6
+        assert nk.at == datetime(2026, 10, 16, 18, 30, tzinfo=timezone.utc)
+
+    def test_myeleven_is_the_fallback_when_the_schedule_is_down(self):
+        played = {"lp": [{"md": "2026-10-09T18:30:00Z"}], "nlp": []}
+        nk = _trader(RuntimeError("503"), played).next_kickoff(
+            SimpleNamespace(id="L"), now=SATURDAY
+        )
+        assert nk.source == "none" and nk.matchday_in_progress is True

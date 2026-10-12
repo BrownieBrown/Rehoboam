@@ -537,13 +537,17 @@ class AutoTrader:
         REH-110: `matchday_in_progress` overrides the day count entirely. Once
         the round's first fixture has kicked off, Kickbase has locked our
         eleven and every squad change lands on the FOLLOWING matchday, so there
-        is no lineup left to protect. `days_until_match` still reads 0 all
-        weekend — it is `min()` of the fixtures still to come — which locked the
-        bot out of the Saturday and Sunday of every round for no benefit.
+        is no lineup left to protect.
 
-        The budget-at-kickoff guard (REH-11) is deliberately untouched and keeps
-        reading `days_until_match`: that constraint is about cash, not slots,
-        and its conservative "earliest remaining fixture" meaning is correct.
+        Since 2026-10-12 `days_until_match` itself counts to the NEXT round's
+        first kickoff (`kickoff.next_fixture_from_matchdays` skips a started
+        round), so a Saturday reads 6 days, not 0, and every day-count guard —
+        this phase, the budget lockout in `ExecutionService.buy`, the debt
+        recovery, the emergency fill, the flip budget — agrees with Kickbase's
+        rule that the wallet and the squad only matter at a round's first
+        kickoff. The override below is left for the English-week case (next
+        round within a day of the one under way) and for the `/myeleven`
+        fallback when the schedule is unreachable.
         """
         # Applied ONLY where the day count would otherwise lock us out. Between
         # rounds `days_until_match` can be large while a fixture is still inside

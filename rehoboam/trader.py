@@ -33,7 +33,13 @@ from .bidding_strategy import (
 from .config import INSTANT_SELL_PCT, Settings
 from .formation import can_fill_starting_eleven
 from .kickbase_client import League
-from .kickoff import NextKickoff, fixtures_from_myeleven, next_fixture_from_matchdays
+from .kickoff import (
+    MATCHDAY_ROUND_SPAN_DAYS,
+    NextKickoff,
+    fixtures_from_myeleven,
+    matchday_in_progress_from_matchdays,
+    next_fixture_from_matchdays,
+)
 from .matchup_analyzer import MatchupAnalyzer
 from .services.emergency_window import emergency_fill_due
 from .services.season import season_label
@@ -119,30 +125,27 @@ def _determine_emergency(squad: list) -> tuple[bool, str]:
     return True, fieldability["reason"]
 
 
-#: A Bundesliga round spans at most Friday to Monday. A fixture older than this
-#: belongs to a PREVIOUS round, so it must not be read as one in progress —
-#: otherwise a single un-rolled date would unlock trading permanently.
-MATCHDAY_ROUND_SPAN_DAYS = 4
-
-
 def matchday_in_progress(
     fixtures: "list[datetime]",
     now: "datetime",
     *,
     span_days: int = MATCHDAY_ROUND_SPAN_DAYS,
 ) -> bool:
-    """Has the current matchday already kicked off? (REH-110)
+    """Has the current matchday already kicked off, read off `/myeleven`? (REH-110)
 
     True when any of our players' fixtures for this round is in the recent
     past. Kickbase locks the fielded eleven at the round's first kickoff and
     every squad change lands on the FOLLOWING matchday, so once that instant
     passes there is no lineup left to protect and trading is free.
 
-    `get_days_until_match` cannot answer this: it takes `min()` of the fixtures
-    still to come, so on the Saturday of a round that began Friday evening it
-    reports 0 days and the bot locks itself out. Measured live 2026-08-29,
-    that cost the Saturday and Sunday of every matchday — two tradeable days a
-    week.
+    Since 2026-10-12 this is the FALLBACK for when the schedule is
+    unreachable: it only sees OUR players' fixtures, so a round whose Friday
+    game involved none of them "had not started" until Saturday afternoon
+    (2026-10-09/10, two locked sessions). `kickoff.rounds_from_matchdays`
+    answers from the whole round and `next_fixture_from_matchdays` skips a
+    started round entirely, so the day count itself no longer reads 0 all
+    weekend; this flag only still matters for the English-week case (next
+    round within a day of the one under way) and the fallback.
 
     All fixtures in the past also returns True: that is the gap between rounds,
     the safest moment to trade rather than the least.
@@ -362,21 +365,23 @@ class Trader:
 
         Each source is fetched in its own try/except: a failure there means
         that source contributes nothing, it does not take the other source
-        down with it. `matchday_in_progress` is read from `/myeleven`'s
-        fixtures exactly as before this method existed -- the schedule lists
-        every fixture in the competition, not just ours, so it cannot answer
-        "has OUR round started" the way `/myeleven` can.
+        down with it. `matchday_in_progress` is read from the schedule's
+        rounds (2026-10-12) -- the round locks at ITS first kickoff, whether
+        or not one of ours plays in it -- and from `/myeleven`'s fixtures
+        only when the schedule is unreachable.
         """
         now = now or datetime.now(tz=timezone.utc)
 
         schedule_at: datetime | None = None
         schedule_fixture = None
+        schedule_payload = None
         try:
             schedule_payload = self.api.get_competition_matchdays()
             schedule_fixture = next_fixture_from_matchdays(schedule_payload, now)
             schedule_at = schedule_fixture.at if schedule_fixture else None
         except Exception:
             logger.warning("next-kickoff: schedule fetch/parse failed", exc_info=True)
+        schedule_read = isinstance(schedule_payload, dict) and bool(schedule_payload.get("it"))
 
         myeleven_fixtures: list[datetime] = []
         myeleven_fetched = False
@@ -409,10 +414,23 @@ class Trader:
         else:
             at, source, cross_check = None, "none", None
 
-        in_progress = matchday_in_progress(myeleven_fixtures, now)
+        in_progress = (
+            matchday_in_progress_from_matchdays(schedule_payload, now)
+            if schedule_read
+            else matchday_in_progress(myeleven_fixtures, now)
+        )
 
-        logger.info("next-kickoff at=%s source=%s cross_check=%s", at, source, cross_check)
-        if schedule_at is not None and myeleven_at is not None:
+        logger.info(
+            "next-kickoff at=%s source=%s cross_check=%s matchday_in_progress=%s",
+            at,
+            source,
+            cross_check,
+            in_progress,
+        )
+        # While a round is under way `/myeleven` still names our players'
+        # fixtures inside it (Saturday 13:30) and the schedule names the
+        # NEXT round (Friday) -- a disagreement by construction, not a drift.
+        if schedule_at is not None and myeleven_at is not None and not in_progress:
             disagreement_hours = abs((schedule_at - myeleven_at).total_seconds()) / 3600
             if disagreement_hours > 24:
                 logger.warning("next-kickoff sources disagree by %.0f h", disagreement_hours)
