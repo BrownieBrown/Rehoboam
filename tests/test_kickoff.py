@@ -268,16 +268,28 @@ class TestNextKickoffIsTheNextRound:
             day_number=5, at=datetime(2026, 10, 9, 18, 30, tzinfo=timezone.utc)
         )
 
-    def test_a_round_whose_status_says_started_is_skipped_even_before_its_date(self):
-        """`st != 0` on any fixture marks the round started whatever the clock says."""
+    def test_a_status_code_never_starts_a_round_before_its_kickoff(self):
+        """A stray `st` on a round still ahead must not skip the round: that
+        would push the day count a week out and silence the budget lockout."""
         payload = {
             "it": [
-                {"day": 5, "it": [{"dt": "2026-10-09T18:30:00Z", "st": 1}]},
+                {
+                    "day": 5,
+                    "it": [
+                        {"dt": "2026-10-09T18:30:00Z", "st": 0},
+                        {"dt": "2026-10-11T15:30:00Z", "st": 3},
+                    ],
+                },
                 {"day": 6, "it": [{"dt": "2026-10-16T18:30:00Z", "st": 0}]},
             ]
         }
-        early = datetime(2026, 10, 9, 18, 0, tzinfo=timezone.utc)
-        assert next_fixture_from_matchdays(payload, early).day_number == 6
+        assert next_fixture_from_matchdays(payload, FRIDAY_MORNING).day_number == 5
+
+    def test_a_date_without_an_offset_is_read_as_utc(self):
+        payload = {"it": [{"day": 6, "it": [{"dt": "2026-10-16T18:30:00", "st": 0}]}]}
+        assert next_fixture_from_matchdays(payload, SATURDAY).at == datetime(
+            2026, 10, 16, 18, 30, tzinfo=timezone.utc
+        )
 
     def test_a_postponed_fixture_does_not_resurrect_a_finished_round(self):
         """MD5 has one game moved to November: that is not MD5's kickoff."""
@@ -368,3 +380,33 @@ class TestTraderReadsInProgressFromTheSchedule:
             SimpleNamespace(id="L"), now=SATURDAY
         )
         assert nk.source == "none" and nk.matchday_in_progress is True
+
+    def test_a_schedule_without_dates_falls_through_to_myeleven(self):
+        """Non-empty `it`, no parseable `dt`: the schedule has no rounds to
+        answer from, so the flag must still come from our own fixtures."""
+        undated = {"it": [{"day": 5, "it": [{"st": 2}, {"st": 0}]}]}
+        played = {"lp": [{"md": "2026-10-09T18:30:00Z"}], "nlp": []}
+        nk = _trader(undated, played).next_kickoff(SimpleNamespace(id="L"), now=SATURDAY)
+        assert nk.matchday_in_progress is True
+
+
+class TestThePhaseOverrideOnlyOnTheFallback:
+    def test_schedule_source_never_feeds_the_override(self):
+        """Sunday before a Tuesday round: the schedule says one day to the NEXT
+        round, so the lock must hold even though a round is under way."""
+        from rehoboam.auto_trader import _in_progress_for_phase
+        from rehoboam.kickoff import NextKickoff
+
+        nk = NextKickoff(
+            at=SATURDAY, source="schedule", cross_check=None, matchday_in_progress=True
+        )
+        assert _in_progress_for_phase(nk) is False
+
+    def test_myeleven_fallback_still_unlocks(self):
+        from rehoboam.auto_trader import _in_progress_for_phase
+        from rehoboam.kickoff import NextKickoff
+
+        nk = NextKickoff(
+            at=SATURDAY, source="myeleven", cross_check=None, matchday_in_progress=True
+        )
+        assert _in_progress_for_phase(nk) is True

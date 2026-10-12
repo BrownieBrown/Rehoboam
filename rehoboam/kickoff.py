@@ -37,7 +37,10 @@ def _parse_match_date(value) -> datetime | None:
         if isinstance(value, int | float):
             return datetime.fromtimestamp(value, tz=timezone.utc)
         if isinstance(value, str):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # A date without an offset is read as UTC rather than left naive:
+            # a naive value would raise TypeError against an aware `now`.
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except (ValueError, OSError, OverflowError):
         return None
     return None
@@ -76,18 +79,22 @@ class Round:
 
     day_number: int | None
     first_kickoff: datetime
-    started: bool  # first kickoff passed, or any fixture reports st != 0
+    started: bool  # the first kickoff has passed
     finished: bool  # every fixture reports st == 2
 
 
 def rounds_from_matchdays(payload, now: datetime) -> list[Round]:
     """Every matchday group with at least one parseable date, schedule order.
 
-    A group is *started* once its earliest fixture has kicked off or any
-    fixture says so (`st != 0`); it is *finished* when every fixture says
-    `st == 2`. Tolerant of missing keys and unparseable dates -- a schema
-    drift here should degrade to "the schedule has nothing to say", not
-    raise.
+    A group is *started* once its earliest fixture has kicked off -- by the
+    clock only. A status code is NOT trusted for that: a postponed or
+    rescheduled fixture with an unexpected `st` on a round still ahead would
+    otherwise mark the whole round started, push the day count a week out,
+    and keep the budget lockout and the debt recovery from firing before the
+    real kickoff (a negative wallet at kickoff is zero points). A group is
+    *finished* when every fixture says `st == 2`. Tolerant of missing keys
+    and unparseable dates -- a schema drift here should degrade to "the
+    schedule has nothing to say", not raise.
     """
     out: list[Round] = []
     for day, fixtures in _day_groups(payload):
@@ -99,7 +106,7 @@ def rounds_from_matchdays(payload, now: datetime) -> list[Round]:
             Round(
                 day_number=day,
                 first_kickoff=first,
-                started=first <= now or any(f.get("st") != 0 for f in fixtures),
+                started=first <= now,
                 finished=all(f.get("st") == 2 for f in fixtures),
             )
         )

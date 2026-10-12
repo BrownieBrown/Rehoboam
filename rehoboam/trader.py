@@ -39,6 +39,7 @@ from .kickoff import (
     fixtures_from_myeleven,
     matchday_in_progress_from_matchdays,
     next_fixture_from_matchdays,
+    rounds_from_matchdays,
 )
 from .matchup_analyzer import MatchupAnalyzer
 from .services.emergency_window import emergency_fill_due
@@ -374,14 +375,15 @@ class Trader:
 
         schedule_at: datetime | None = None
         schedule_fixture = None
-        schedule_payload = None
+        schedule_in_progress: bool | None = None  # None: the schedule had no rounds
         try:
             schedule_payload = self.api.get_competition_matchdays()
             schedule_fixture = next_fixture_from_matchdays(schedule_payload, now)
             schedule_at = schedule_fixture.at if schedule_fixture else None
+            if rounds_from_matchdays(schedule_payload, now):
+                schedule_in_progress = matchday_in_progress_from_matchdays(schedule_payload, now)
         except Exception:
             logger.warning("next-kickoff: schedule fetch/parse failed", exc_info=True)
-        schedule_read = isinstance(schedule_payload, dict) and bool(schedule_payload.get("it"))
 
         myeleven_fixtures: list[datetime] = []
         myeleven_fetched = False
@@ -414,9 +416,12 @@ class Trader:
         else:
             at, source, cross_check = None, "none", None
 
+        # The schedule answers only when it produced at least one round; a
+        # payload with no parseable dates must fall through to `/myeleven`,
+        # not read as "no round under way".
         in_progress = (
-            matchday_in_progress_from_matchdays(schedule_payload, now)
-            if schedule_read
+            schedule_in_progress
+            if schedule_in_progress is not None
             else matchday_in_progress(myeleven_fixtures, now)
         )
 

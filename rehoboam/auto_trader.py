@@ -281,6 +281,20 @@ def _max_debt(*, team_value: int, budget: int, max_debt_pct: float, worth_pct: f
     return max(0, min(own, kickbase))
 
 
+def _in_progress_for_phase(nk) -> bool:
+    """Should the REH-110 override see a round under way?
+
+    Only when the day count came from the `/myeleven` fallback. From the
+    schedule the count already skips the started round (2026-10-12), so a
+    small count means the NEXT round is close -- a Sunday before a Tuesday
+    round -- and the override would reopen trading inside that round's lock
+    window. The flag itself stays in the facts and the log.
+    """
+    return bool(getattr(nk, "matchday_in_progress", False)) and (
+        getattr(nk, "source", "none") != "schedule"
+    )
+
+
 def _compute_flip_budget(
     phase: str,
     current_budget: int,
@@ -545,9 +559,10 @@ class AutoTrader:
         this phase, the budget lockout in `ExecutionService.buy`, the debt
         recovery, the emergency fill, the flip budget — agrees with Kickbase's
         rule that the wallet and the squad only matter at a round's first
-        kickoff. The override below is left for the English-week case (next
-        round within a day of the one under way) and for the `/myeleven`
-        fallback when the schedule is unreachable.
+        kickoff. The override below is reached only on the `/myeleven`
+        fallback (`_in_progress_for_phase`): with the schedule as the source
+        a small day count means the NEXT round is close, and the lock must
+        hold.
         """
         # Applied ONLY where the day count would otherwise lock us out. Between
         # rounds `days_until_match` can be large while a fixture is still inside
@@ -632,7 +647,7 @@ class AutoTrader:
         nk = trader.next_kickoff(league, now=now)
         self._next_kickoff = nk
         days = max((nk.at - now).days, 0) if nk.at is not None else None
-        phase = self._get_matchday_phase(days, matchday_in_progress=nk.matchday_in_progress)
+        phase = self._get_matchday_phase(days, matchday_in_progress=_in_progress_for_phase(nk))
 
         console.print(f"[cyan]📅 {phase.reason}[/cyan]")
 
