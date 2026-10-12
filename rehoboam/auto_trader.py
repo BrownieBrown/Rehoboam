@@ -281,6 +281,20 @@ def _max_debt(*, team_value: int, budget: int, max_debt_pct: float, worth_pct: f
     return max(0, min(own, kickbase))
 
 
+def _in_progress_for_phase(nk) -> bool:
+    """Should the REH-110 override see a round under way?
+
+    Only when the day count came from the `/myeleven` fallback. From the
+    schedule the count already skips the started round (2026-10-12), so a
+    small count means the NEXT round is close -- a Sunday before a Tuesday
+    round -- and the override would reopen trading inside that round's lock
+    window. The flag itself stays in the facts and the log.
+    """
+    return bool(getattr(nk, "matchday_in_progress", False)) and (
+        getattr(nk, "source", "none") != "schedule"
+    )
+
+
 def _compute_flip_budget(
     phase: str,
     current_budget: int,
@@ -537,13 +551,18 @@ class AutoTrader:
         REH-110: `matchday_in_progress` overrides the day count entirely. Once
         the round's first fixture has kicked off, Kickbase has locked our
         eleven and every squad change lands on the FOLLOWING matchday, so there
-        is no lineup left to protect. `days_until_match` still reads 0 all
-        weekend — it is `min()` of the fixtures still to come — which locked the
-        bot out of the Saturday and Sunday of every round for no benefit.
+        is no lineup left to protect.
 
-        The budget-at-kickoff guard (REH-11) is deliberately untouched and keeps
-        reading `days_until_match`: that constraint is about cash, not slots,
-        and its conservative "earliest remaining fixture" meaning is correct.
+        Since 2026-10-12 `days_until_match` itself counts to the NEXT round's
+        first kickoff (`kickoff.next_fixture_from_matchdays` skips a started
+        round), so a Saturday reads 6 days, not 0, and every day-count guard —
+        this phase, the budget lockout in `ExecutionService.buy`, the debt
+        recovery, the emergency fill, the flip budget — agrees with Kickbase's
+        rule that the wallet and the squad only matter at a round's first
+        kickoff. The override below is reached only on the `/myeleven`
+        fallback (`_in_progress_for_phase`): with the schedule as the source
+        a small day count means the NEXT round is close, and the lock must
+        hold.
         """
         # Applied ONLY where the day count would otherwise lock us out. Between
         # rounds `days_until_match` can be large while a fixture is still inside
@@ -628,7 +647,7 @@ class AutoTrader:
         nk = trader.next_kickoff(league, now=now)
         self._next_kickoff = nk
         days = max((nk.at - now).days, 0) if nk.at is not None else None
-        phase = self._get_matchday_phase(days, matchday_in_progress=nk.matchday_in_progress)
+        phase = self._get_matchday_phase(days, matchday_in_progress=_in_progress_for_phase(nk))
 
         console.print(f"[cyan]📅 {phase.reason}[/cyan]")
 

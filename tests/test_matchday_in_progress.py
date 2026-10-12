@@ -16,9 +16,11 @@ Measured live 2026-08-29 09:34Z, straight from /myeleven:
 A `md` in the past is proof the round has begun. That costs two tradeable days
 per week — the Saturday and Sunday of every matchday.
 
-The budget-at-kickoff guard (REH-11) is deliberately NOT changed: it keys off
-`get_days_until_match`, whose "earliest remaining fixture" meaning is the right
-one for cash and stays conservative.
+Since 2026-10-12 the day count itself is round-aware (`kickoff.rounds_from_matchdays`:
+a started round is skipped, so Saturday counts to the NEXT round's Friday) and the
+schedule, not `/myeleven`, says whether a round is under way. `matchday_in_progress`
+below is the `/myeleven` fallback for when the schedule is unreachable; the phase
+override it feeds is only reached in an English week or on that fallback.
 """
 
 from datetime import datetime, timedelta, timezone
