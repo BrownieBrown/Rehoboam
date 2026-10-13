@@ -19,6 +19,8 @@ from dataclasses import dataclass
 # NOTE: this is NOT the injury `st` from get_player_details, which is a live
 # serving-time signal with no historical counterpart.
 PLAYED_STATUSES: tuple[int, ...] = (1, 3, 4, 5)
+#: The states in which points are scored: came on (3) and started (5).
+SCORING_STATUSES: tuple[int, ...] = (3, 5)
 
 ROLLING_WINDOW = 3
 
