@@ -45,9 +45,10 @@ from rehoboam.scoring.v2.availability import (
     apply_stale_history_prior,
 )
 from rehoboam.scoring.v2.coefficients import load_coefficients, load_lineup_prob
-from rehoboam.scoring.v2.features import PLAYED_STATUSES
+from rehoboam.scoring.v2.features import PLAYED_STATUSES, SCORING_STATUSES
 from rehoboam.scoring.v2.lineup_prob import LineupProbModel, effective_lineup_code
 from rehoboam.scoring.v2.rate import RateModel
+from rehoboam.services.season import season_label
 
 DGW_MULTIPLIER = 1.8
 
@@ -201,6 +202,23 @@ def recent_played_share(performance: dict | None) -> tuple[int, int] | None:
     return None
 
 
+def season_points_from_performance(performance: dict | None, season: str) -> list[float]:
+    """This season's points from matches on the pitch (status 3 or 5), oldest
+    first, for `RateModel.predict(season_points=…)`. ``season`` is the
+    Kickbase title (``2026/2027``, `services.season.season_label`); the
+    store twin is `store_scorer.season_points_from_rows`."""
+    if not performance:
+        return []
+    points: list[float] = []
+    for entry in performance.get("it") or []:
+        if str(entry.get("ti") or "") != season:
+            continue
+        for match in entry.get("ph") or []:
+            if match.get("st") in SCORING_STATUSES:
+                points.append(float(match.get("p") or 0))
+    return points
+
+
 def has_top_flight_history(player_details: dict | None) -> bool:
     """Has this player ever recorded Bundesliga scoring?
 
@@ -316,6 +334,7 @@ def compose_ep(
     lineup_probability: int | None = None,
     lineup_model: LineupProbModel | None = None,
     predicted_xi: bool | None = None,
+    season_points: Sequence[float] | None = None,
 ) -> float:
     """Probability-weighted expected points, in real Kickbase points.
 
@@ -323,6 +342,8 @@ def compose_ep(
     its lineup code. Both default to None so the season replay -- which has
     per-match history but neither signal historically -- keeps its existing
     behaviour and does not silently acquire a signal it cannot evaluate.
+    ``season_points`` (this season's points on the pitch) blends the fitted
+    quality toward the season in progress; None, the replay's call, leaves it.
     """
     probs = availability_probs(
         prev_status,
@@ -335,7 +356,10 @@ def compose_ep(
         lineup_model=lineup_model,
         predicted_xi=predicted_xi,
     )
-    return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
+    return sum(
+        probs[s] * rate.predict(player_id, s, position, season_points=season_points)
+        for s in PLAYED_STATUSES
+    )
 
 
 def score_player_v2(
@@ -365,6 +389,10 @@ def score_player_v2(
     # was reverted for costing 782 points. It declines to apply a coefficient
     # fitted on inapplicable data.
     quality_key = player.id if has_top_flight_history(data.player_details) else None
+    # This season's record, blended into the fitted (or prior) quality.
+    season_points = season_points_from_performance(
+        data.performance, season_label(now or datetime.now(timezone.utc))
+    )
 
     # Kickbase's live injury flag: unfitted, applied at serving time.
     # Downward-only — see apply_availability_override for why that matters.
@@ -388,6 +416,7 @@ def score_player_v2(
         lineup_probability=lineup_probability,
         lineup_model=lineup_model,
         predicted_xi=predicted_xi,
+        season_points=season_points,
     )
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
@@ -414,7 +443,8 @@ def score_player_v2(
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "
         f"(prev status {prev_status if prev_status is not None else 'unknown'}{code_note}), "
-        f"rate={rate.predict(quality_key, 5, position):.0f} pts if started"
+        f"rate={rate.predict(quality_key, 5, position, season_points=season_points):.0f} "
+        f"pts if started" + (f" ({len(season_points)} this season)" if season_points else "")
     ]
     if quality_key not in rate.quality:
         notes.append("No fitted quality — using position prior (cold start)")

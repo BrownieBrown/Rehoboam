@@ -38,15 +38,35 @@ Anyone overriding ``P(status)`` at serving time (e.g. forcing a confirmed
 starter's ``P(5) = 1.0`` from live lineup data) MUST renormalise quality
 within-status first, or this ~24% starter bias — currently cancelled by the
 paired availability model — will leak straight into the output.
+
+THE SEASON IN PROGRESS (2026-10-13). ``quality`` is fitted on finished seasons
+(``train_max_season``) and the season being played never enters it: Diks was
+EP 112 on five starts averaging 29 because he averaged 94.8 the season
+before. ``predict(season_points=…)`` blends this season's played points into
+the fitted quality in the training's own quality space,
+
+    quality' = (n × mean(season_points) / scoring_reference + k × quality) / (n + k)
+
+with ``scoring_reference`` the pooled status-3-and-5 mean the fitted qualities
+were normalised by (recorded at fit time; 72.88 for the 2026-10 file) and
+``season_k`` the pseudo-count (measured 2026-10-13, leave-future-out on
+2026/27 MD3–5 against the frozen quality: k=10 raised Spearman by 0.04 /
+0.06 / 0.02 and left MAE within a point; k=2 was worse than frozen on MD5 —
+five games are not yet a record). Pooled, like the fit, so the caveat above
+holds unchanged. A file without a reference, or ``season_k <= 0``, never
+blends; a call without ``season_points`` (the replay) is unchanged.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from rehoboam.scoring.v2.features import PLAYED_STATUSES, FeatureRow
 
 DEFAULT_SHRINKAGE_K = 5.0
+#: Pseudo-count the fitted quality carries against this season's played games.
+DEFAULT_SEASON_K = 10.0
 
 
 @dataclass(frozen=True)
@@ -57,9 +77,24 @@ class RateModel:
     quality: dict[str, float]
     position_prior: dict[str, float]
     shrinkage_k: float
+    #: Pooled status-3/5 mean the qualities are normalised by; 0.0 = unknown
+    #: (a file written before 2026-10-13), which disables the season blend.
+    scoring_reference: float = 0.0
+    season_k: float = DEFAULT_SEASON_K
 
-    def predict(self, player_id: str | None, status: int, position: str | None) -> float:
+    def predict(
+        self,
+        player_id: str | None,
+        status: int,
+        position: str | None,
+        *,
+        season_points: Sequence[float] | None = None,
+    ) -> float:
         """Expected points for this player in this availability state.
+
+        ``season_points`` are this season's points from matches on the pitch
+        (status 3 or 5), blended into the fitted quality as the module
+        docstring describes; None or empty leaves the fitted quality alone.
 
         NOT a calibrated within-status expectation. ``quality`` is normalised
         against a reference pooled across statuses 3 and 5, while ``base_rate``
@@ -80,7 +115,15 @@ class RateModel:
         multiplier = self.quality.get(player_id)
         if multiplier is None:
             multiplier = self.position_prior.get(position or "", 1.0)
-        return base * multiplier
+        return base * self._with_season(multiplier, season_points)
+
+    def _with_season(self, fitted: float, season_points: Sequence[float] | None) -> float:
+        """The fitted quality pulled toward this season's record, or itself."""
+        if not season_points or self.scoring_reference <= 0.0 or self.season_k <= 0.0:
+            return fitted
+        n = len(season_points)
+        season_quality = _mean([float(p) for p in season_points]) / self.scoring_reference
+        return (n * season_quality + self.season_k * fitted) / (n + self.season_k)
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +131,8 @@ class RateModel:
             "quality": dict(self.quality),
             "position_prior": dict(self.position_prior),
             "shrinkage_k": self.shrinkage_k,
+            "scoring_reference": self.scoring_reference,
+            "season_k": self.season_k,
         }
 
     @classmethod
@@ -97,6 +142,8 @@ class RateModel:
             quality={str(p): float(q) for p, q in data["quality"].items()},
             position_prior={str(p): float(q) for p, q in data["position_prior"].items()},
             shrinkage_k=float(data["shrinkage_k"]),
+            scoring_reference=float(data.get("scoring_reference", 0.0)),
+            season_k=float(data.get("season_k", DEFAULT_SEASON_K)),
         )
 
 
@@ -157,4 +204,5 @@ def fit_rate(
         quality=quality,
         position_prior=position_prior,
         shrinkage_k=shrinkage_k,
+        scoring_reference=scoring_reference,
     )

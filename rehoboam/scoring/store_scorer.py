@@ -21,9 +21,10 @@ from rehoboam.scoring.v2.adapter import (
     prev_status_from_history,
 )
 from rehoboam.scoring.v2.availability import AvailabilityModel
-from rehoboam.scoring.v2.features import PLAYED_STATUSES
+from rehoboam.scoring.v2.features import PLAYED_STATUSES, SCORING_STATUSES
 from rehoboam.scoring.v2.lineup_prob import LineupProbModel
 from rehoboam.scoring.v2.rate import RateModel
+from rehoboam.services.season import season_label
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,16 @@ def played_share_from_rows(matches: list[dict[str, Any]]) -> tuple[int, int] | N
     return None
 
 
+def season_points_from_rows(matches: list[dict[str, Any]], season: str) -> list[float]:
+    """This season's points from matches on the pitch (status 3 or 5), in row
+    order — the store twin of `adapter.season_points_from_performance`."""
+    return [
+        float(m.get("points") or 0)
+        for m in matches
+        if str(m.get("season")) == season and m.get("status") in SCORING_STATUSES
+    ]
+
+
 def score_stored(
     player: StoredPlayer,
     *,
@@ -95,6 +106,7 @@ def score_stored(
         max_age_days=max_status_age_days,
     )
     played_history = played_share_from_rows(ordered) if prev_status is None else None
+    season_points = season_points_from_rows(ordered, season_label(now))
     signals = {
         "live_status": player.live_status,
         "played_history": played_history,
@@ -109,11 +121,16 @@ def score_stored(
         player.position,
         availability,
         rate,
+        season_points=season_points,
         **signals,
     )
     mass = sum(probs[s] for s in PLAYED_STATUSES)
     conditional_rate = (
-        sum(probs[s] * rate.predict(player.player_id, s, player.position) for s in PLAYED_STATUSES)
+        sum(
+            probs[s]
+            * rate.predict(player.player_id, s, player.position, season_points=season_points)
+            for s in PLAYED_STATUSES
+        )
         / mass
         if mass > 0
         else 0.0
