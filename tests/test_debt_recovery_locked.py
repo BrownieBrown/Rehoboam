@@ -288,3 +288,33 @@ class TestOpenBidsAreWithdrawnBeforeAnyoneIsSold:
         )
         assert api.cancel_bid.call_count == 0
         assert api.sell_player_instant.call_count == 1
+
+
+class TestTheRankHoldReachesTheRecovery:
+    def test_a_rank_held_bench_profit_is_sold_after_an_unheld_starter(self, tmp_path, monkeypatch):
+        """The same holds the sell plan reads (`Trader._sell_plan_protected_ids`)
+        order the recovery: with the bench player held, a starter at cost
+        covers the 5m instead."""
+        with patch(
+            "rehoboam.trader.Trader._sell_plan_protected_ids",
+            return_value=frozenset({"bench"}),
+        ):
+            api, ctx, _, _ = _run("locked", 1, -5_000_000, tmp_path, monkeypatch)
+        sold = [
+            (c.kwargs.get("player") or c.args[-1]).id
+            for c in api.sell_player_instant.call_args_list
+        ]
+        assert sold and "bench" not in sold
+        assert ctx.current_budget >= 0
+
+    def test_an_unreadable_hold_protects_nobody(self, tmp_path, monkeypatch):
+        with patch(
+            "rehoboam.trader.Trader._sell_plan_protected_ids",
+            return_value=frozenset(),
+        ):
+            api, _, _, _ = _run("locked", 1, -5_000_000, tmp_path, monkeypatch)
+        sold = [
+            (c.kwargs.get("player") or c.args[-1]).id
+            for c in api.sell_player_instant.call_args_list
+        ]
+        assert sold == ["bench"]

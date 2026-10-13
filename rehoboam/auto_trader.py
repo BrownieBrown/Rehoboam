@@ -2042,7 +2042,9 @@ class AutoTrader:
         I3's definition of covered).
 
         Who goes is `services/debt_recovery.plan_debt_recovery`'s call —
-        profits first, slumping starters last, position minimums as the last resort (the fill refills).
+        the rank rule's holds last among the sellable (the same set the sell
+        plan protects; 2026-10-13: Quansah), profits first, slumping starters
+        last, position minimums as the last resort (the fill refills).
         """
         from .formation import get_position_counts, select_best_eleven
         from .services.debt_recovery import DebtCandidate, plan_debt_recovery
@@ -2076,6 +2078,7 @@ class AutoTrader:
             activity_feed_learner=self.activity_feed_learner,
         )
 
+        held_ids = trader._sell_plan_protected_ids([p.id for p in squad])
         by_id = {p.id: p for p in squad}
         candidates: list[DebtCandidate] = []
         for p in squad:
@@ -2094,6 +2097,7 @@ class AutoTrader:
                     expected_points=score_map.get(p.id, 0.0),
                     in_best_eleven=p.id in best_ids,
                     trend_7d_pct=trend,
+                    rank_held=p.id in held_ids,
                 )
             )
 
@@ -2112,7 +2116,8 @@ class AutoTrader:
             ", ".join(
                 f"{c.name}@{c.sell_value:,}"
                 f"({'+' if (c.profit_pct or 0) >= 0 else ''}{(c.profit_pct or 0):.0f}%"
-                f"{', starter' if c.in_best_eleven else ''})"
+                f"{', starter' if c.in_best_eleven else ''}"
+                f"{', rank-held' if c.rank_held else ''})"
                 for c in plan.sells
             ),
         )
