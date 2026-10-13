@@ -14,6 +14,7 @@ from .kickoff import NextKickoff
 from .learning.tracker import FlipIntent
 from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
+from .services import budget as budget_rules
 from .services.emergency_window import emergency_fill_due
 from .services.execution import LOCKOUT_DAYS
 from .services.flip_exit import flip_exit_reason
@@ -263,22 +264,11 @@ def _offer_line(
     )
 
 
-def _max_debt(*, team_value: int, budget: int, max_debt_pct: float, worth_pct: float) -> int:
-    """How far below zero a phase may take the wallet.
-
-    Marco's allowance is ``max_debt_pct`` of team value (60%). Kickbase's is
-    ``worth_pct`` (33%) of total worth — team value plus budget — and it
-    refuses the offer that would breach it (`err 5050
-    ThirtyThreePercentRuleExceeded`: nine of the bot's offers between
-    2026-09-22 and 10-04). The allowance stops where Kickbase stops.
-    """
-    tv = int(team_value or 0)
-    if tv <= 0:
-        return 0
-    own = int(tv * (float(max_debt_pct) / 100.0))
-    worth = tv + int(budget or 0)
-    kickbase = int(max(0, worth) * (float(worth_pct) / 100.0))
-    return max(0, min(own, kickbase))
+# One definition of the debt allowance, in `services/budget` (2026-10-13):
+# the recommender in `Trader.get_ep_recommendations` reads the same rule, so
+# a buy inside the allowance no longer needs a sell plan covering the whole
+# debt. The names are kept because callers and tests already use them.
+_max_debt = budget_rules.max_debt
 
 
 def _in_progress_for_phase(nk) -> bool:
@@ -295,36 +285,7 @@ def _in_progress_for_phase(nk) -> bool:
     )
 
 
-def _compute_flip_budget(
-    phase: str,
-    current_budget: int,
-    pending_bid_total: int,
-    max_debt: int,
-    *,
-    schedule_known: bool = True,
-) -> int:
-    """Free budget for flip trading, by matchday phase.
-
-    Shared by session-context build and the trade-phase refresh so both
-    call sites agree on the formula after sells/bid-cancels mutate the
-    inputs mid-session.
-
-    Moderate (2-4 days out) used to allow no new debt, on the premise that
-    nothing would recover it in time. Since 2026-09-22 the locked window
-    sells the wallet back to zero itself (`_run_debt_recovery`), so the
-    allowance is the same in every trading phase: Marco's rule is "it can go
-    into minus until gameday, always".
-
-    ``schedule_known`` is False when neither the schedule nor `/myeleven`
-    gave a kickoff. Then the phase is a fallback, not a measurement, and the
-    recovery — gated on the day count — could never fire before a kickoff
-    the bot cannot see; so no NEW debt, exactly as the old moderate rule.
-    """
-    if phase == "locked":
-        return 0
-    if not schedule_known:
-        return current_budget - pending_bid_total
-    return current_budget + max_debt - pending_bid_total
+_compute_flip_budget = budget_rules.phase_allowance
 
 
 # One definition of the squad cap, in `services/pacing`. Two copies of one
