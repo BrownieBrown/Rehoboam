@@ -17,6 +17,15 @@ single formula:
 3. bench players held at a loss, smallest loss first, slumping prices last;
 4. starters held at a loss, the same way.
 
+A rank-held player — inside the rank rule's floor on points per appearance
+or expected points, the same set the sell plan refuses to sell
+(`rank_sell.rank_hold_ids`) — goes after every unheld one whatever his tier,
+and only when the unheld cannot cover: on 2026-10-13 the tiers alone sold
+Quansah (EP 119, 7th defender by EP, +4% over cost) with Tanaka to clear
+21.7m while Demirović, Scally and Tanaka — the three the rank rule itself
+wanted gone — summed to 23.55m. An ordering, never a block (Marco,
+2026-09-22: sell guards order, never block).
+
 A player whose position is at its formation minimum goes last of all, and
 only when nothing else covers the debt: the emergency fill, which runs right
 after the recovery, buys the slot back with the money the sale freed, and
@@ -44,6 +53,8 @@ class DebtCandidate:
     expected_points: float
     in_best_eleven: bool
     trend_7d_pct: float | None = None
+    #: Inside the rank rule's floor on either measure: sold after the unheld.
+    rank_held: bool = False
 
     @property
     def profit_pct(self) -> float | None:
@@ -84,18 +95,28 @@ class DebtPlan:
         return self.remaining == 0
 
 
+def _tier(c: DebtCandidate) -> int:
+    """0 profitable bench, 1 profitable starter, 2 loss bench, 3 loss starter."""
+    return (2 if c.at_a_loss else 0) + (1 if c.in_best_eleven else 0)
+
+
+def _held(c: DebtCandidate) -> int:
+    return 1 if c.rank_held else 0
+
+
 def _sacrifice_key(c: DebtCandidate) -> tuple:
-    """Sort key: lower sells first. See the module docstring for the tiers."""
+    """Sort key: lower sells first. The rank hold first, then the tiers of
+    the module docstring."""
     pct = c.profit_pct if c.profit_pct is not None else 0.0
-    tier = (2 if c.at_a_loss else 0) + (1 if c.in_best_eleven else 0)
+    tier = _tier(c)
     if tier == 0:
         # Profitable bench: biggest profit share first; points are irrelevant.
-        return (tier, -pct, 0.0, 0.0)
+        return (_held(c), tier, -pct, 0.0, 0.0)
     if tier == 1:
         # Profitable starters: lose the fewest points, then bank the most.
-        return (tier, c.expected_points, -pct, 0.0)
+        return (_held(c), tier, c.expected_points, -pct, 0.0)
     # Losses: a slump goes last, then the shallowest loss, then fewest points.
-    return (tier, 1.0 if c.in_a_slump else 0.0, -pct, c.expected_points)
+    return (_held(c), tier, 1.0 if c.in_a_slump else 0.0, -pct, c.expected_points)
 
 
 def plan_debt_recovery(
@@ -173,9 +194,10 @@ def _best_covering_subset(
     pool: list[DebtCandidate], owed: int, counts: dict[str, int], last_resort: bool
 ) -> list[DebtCandidate] | None:
     """The smallest sufficient sacrifice: up to three sales that cover
-    ``owed``, chosen by (worst tier among them, cash to spare, expected
-    points lost, the sacrifice order). None when no such set exists, and
-    the caller accumulates in sacrifice order instead.
+    ``owed``, chosen by (rank-held players among them, worst tier among
+    them, cash to spare, expected points lost, the sacrifice order). None
+    when no such set exists, and the caller accumulates in sacrifice order
+    instead.
 
     Why cash to spare before points: on 2026-10-07 the order alone sold a
     35m player for a 2.7m gap because he was the shallowest non-slumping
@@ -202,7 +224,8 @@ def _best_covering_subset(
                 ):
                     continue
             key = (
-                max(_sacrifice_key(c)[0] for c in combo),
+                sum(_held(c) for c in combo),
+                max(_tier(c) for c in combo),
                 total - owed,
                 sum(c.expected_points for c in combo),
                 tuple(sorted(_sacrifice_key(c) for c in combo)),
