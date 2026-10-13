@@ -397,3 +397,96 @@ class TestTheSmallestSufficientSacrifice:
         plan = plan_debt_recovery(squad, shortfall=110_000_000, position_counts=_counts(*squad))
         ids = [c.player_id for c in plan.sells]
         assert ids[-1] == "raum"
+
+
+class TestTheRankHoldOrdersTheSacrifice:
+    """2026-10-13: eleven players, -21.7m, no bench. The planner sold Quansah
+    (EP 119, 7th defender by EP, +4% over cost) with Tanaka because a profit
+    outranks a loss — while the sell plan, reading the same rank rule, would
+    have refused to sell him. A rank-held player now goes after every unheld
+    one, and only when the unheld cannot cover: an ordering, never a block
+    (Marco, 2026-09-22: sell guards order, never block)."""
+
+    @staticmethod
+    def _tonight() -> list[DebtCandidate]:
+        def held(pid, pos, mv, buy, ep, trend):
+            return DebtCandidate(
+                player_id=pid,
+                name=pid,
+                position=pos,
+                market_value=mv,
+                buy_price=buy,
+                expected_points=ep,
+                in_best_eleven=True,
+                trend_7d_pct=trend,
+                rank_held=True,
+            )
+
+        return [
+            held("flekken", "Goalkeeper", 12_019_518, 15_138_757, 85.8, 2.8),
+            held("raum", "Defender", 28_812_690, 40_717_295, 135.6, 1.3),
+            held("quansah", "Defender", 16_029_963, 15_400_000, 119.1, 7.8),
+            held("diks", "Defender", 10_864_247, 11_982_330, 111.5, 3.3),
+            held("kurucay", "Defender", 10_527_533, 11_787_533, 109.7, 10.3),
+            _c(
+                "scally", "Defender", mv=4_841_102, buy=4_150_783, ep=70.4, starter=True, trend=34.3
+            ),
+            _c(
+                "demirovic",
+                "Forward",
+                mv=11_702_706,
+                buy=20_110_500,
+                ep=54.9,
+                starter=True,
+                trend=8.0,
+            ),
+            held("romulo", "Forward", 10_832_327, 13_163_289, 87.7, 7.1),
+            held("burger", "Midfielder", 19_692_050, 24_526_411, 130.7, 1.2),
+            held("beste", "Midfielder", 13_633_256, 14_100_467, 59.3, 4.0),
+            _c(
+                "tanaka",
+                "Midfielder",
+                mv=7_006_936,
+                buy=5_650_000,
+                ep=50.4,
+                starter=True,
+                trend=35.9,
+            ),
+        ]
+
+    def test_the_unheld_cover_the_debt_before_a_held_profit(self):
+        squad = self._tonight()
+        plan = plan_debt_recovery(squad, shortfall=21_702_740, position_counts=_counts(*squad))
+        assert sorted(c.player_id for c in plan.sells) == ["demirovic", "scally", "tanaka"]
+        assert plan.covered
+
+    def test_a_held_player_goes_when_the_unheld_cannot_cover(self):
+        # Unheld sum to 23.55m; at 30m a held player must join, the cheapest
+        # sacrifice among them (a profit before a loss), and still not Raum.
+        squad = self._tonight()
+        plan = plan_debt_recovery(squad, shortfall=30_000_000, position_counts=_counts(*squad))
+        ids = [c.player_id for c in plan.sells]
+        assert plan.covered
+        assert "raum" not in ids
+        assert any(c.rank_held for c in plan.sells), "the hold orders, it does not block"
+
+    def test_a_held_profit_goes_after_an_unheld_loss(self):
+        held_profit = _c("held", mv=10_000_000, buy=8_000_000, ep=40.0, starter=True)
+        held_profit = DebtCandidate(**{**held_profit.__dict__, "rank_held": True})
+        unheld_loss = _c("loss", mv=9_000_000, buy=12_000_000, ep=45.0, starter=True)
+        squad = _eleven() + [held_profit, unheld_loss]
+        plan = plan_debt_recovery(squad, shortfall=9_000_000, position_counts=_counts(*squad))
+        # Before the hold: the profit (tier 1) went before any loss (tier 3).
+        assert [c.player_id for c in plan.sells] == ["loss"]
+
+    def test_among_covering_sets_the_one_without_a_held_player_goes(self):
+        # A held profit covers 20m alone at no spare; so does any unheld pair
+        # of the eleven (losses, slumping). Before the hold the single tier-1
+        # sale won on tier; now the pair wins on having no held player.
+        star = _c("star", mv=20_000_000, buy=18_000_000, ep=120.0, starter=True)
+        star = DebtCandidate(**{**star.__dict__, "rank_held": True})
+        squad = _eleven() + [star]
+        plan = plan_debt_recovery(squad, shortfall=20_000_000, position_counts=_counts(*squad))
+        assert plan.covered
+        assert "star" not in [c.player_id for c in plan.sells]
+        assert len(plan.sells) == 2
