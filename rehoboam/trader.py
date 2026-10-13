@@ -42,6 +42,7 @@ from .kickoff import (
     rounds_from_matchdays,
 )
 from .matchup_analyzer import MatchupAnalyzer
+from .services.budget import BuyingPower, buying_power
 from .services.emergency_window import emergency_fill_due
 from .services.season import season_label
 from .services.trend_service import TrendService
@@ -533,6 +534,33 @@ class Trader:
         )
         return PacingContext(reserve=reserve, open_offers=open_offers)
 
+    def _buying_power(
+        self, team_info: dict, my_bids: list | None, days_to_match: int | None
+    ) -> BuyingPower:
+        """The allowance this run plans with -- see `services/budget`.
+
+        Reads the same inputs as the session's gate (`_max_debt` on the raw
+        `team_value`), so the recommender and `BuyGate.spendable_budget`
+        agree on the same day -- a blank team value permits no debt on
+        either side. An unreadable open-offer total counts as zero, which
+        the gate corrects at execution.
+        """
+        wallet = int(team_info.get("budget", 0) or 0)
+        team_value = int(team_info.get("team_value", 0) or 0)
+        try:
+            pending = int(sum(int(p.user_offer_price) for p in (my_bids or [])))
+        except Exception:
+            logger.exception("buying power: open offers unreadable — counted as 0")
+            pending = 0
+        return buying_power(
+            wallet=wallet,
+            team_value=team_value,
+            pending_bid_total=pending,
+            days_until_match=days_to_match,
+            max_debt_pct=float(self.settings.max_debt_pct_of_team_value),
+            worth_pct=float(self.settings.max_single_buy_pct_of_worth),
+        )
+
     def get_ep_recommendations(
         self, league: League, *, days_until_match: int | None | object = _UNSET
     ) -> dict:
@@ -617,6 +645,28 @@ class Trader:
             logger.exception("pacing: could not read open bids — pacing disabled this run")
             my_bids = None
             pacing = None
+
+        # What this run may plan with (2026-10-13): the wallet plus the debt
+        # allowance the day count permits, net of open offers -- the same
+        # number the session's `BuyGate` reads as `spendable_budget`. Until
+        # now the recommender judged every buy against the raw wallet, so a
+        # negative wallet demanded a sell plan covering the price PLUS the
+        # whole debt, and a ten-man squad at -10m placed nothing twice.
+        # A sell plan is now only needed ABOVE the allowance.
+        power = self._buying_power(team_info, my_bids, days_to_match)
+        # The bidder's ceiling: pacing nets the open offers off it itself
+        # (`PacingContext.max_bid`), so it starts from the gross allowance;
+        # without pacing nobody else would, so it starts from the net one.
+        bid_budget = power.gross if pacing is not None else power.spendable
+        logger.info(
+            "buying power: wallet=%d max_debt=%d pending=%d gross=%d spendable=%d days=%s",
+            power.wallet,
+            power.max_debt,
+            power.pending,
+            power.gross,
+            power.spendable,
+            days_to_match,
+        )
 
         # --- 2. Collect performance + details + team profiles ---
         team_profiles: dict[str, dict] = {}
@@ -986,7 +1036,7 @@ class Trader:
             market_scores=market_scores,
             squad_scores=squad_scores,
             roster_context=roster_context,
-            budget=current_budget,
+            budget=power.spendable,
             market_players=market_player_map,
             is_emergency=is_emergency,
             top_n=8 if is_emergency else 10,
@@ -997,7 +1047,7 @@ class Trader:
             market_scores=market_scores,
             squad_scores=squad_scores,
             roster_context=roster_context,
-            budget=current_budget,
+            budget=power.spendable,
             market_players=market_player_map,
             squad_players=squad_player_map,
             top_n=10,
@@ -1023,7 +1073,7 @@ class Trader:
                     expected_points=rec.score.expected_points,
                     marginal_ep_gain=rec.marginal_ep_gain,
                     confidence=0.7,
-                    current_budget=int(current_budget),
+                    current_budget=bid_budget,
                     sell_plan=rec.sell_plan,
                     player_id=rec.player.id,
                     is_dgw=rec.score.is_dgw,
@@ -1050,7 +1100,7 @@ class Trader:
                 synthetic_sell_plan = SellPlan(
                     players_to_sell=[],
                     total_recovery=sell_recovery,
-                    net_budget_after=int(current_budget) + sell_recovery - pair.buy_player.price,
+                    net_budget_after=bid_budget + sell_recovery - pair.buy_player.price,
                     is_viable=True,
                     ep_impact=0.0,
                     reasoning="Trade pair sell recovery",
@@ -1061,7 +1111,7 @@ class Trader:
                     expected_points=pair.buy_score.expected_points,
                     marginal_ep_gain=pair.ep_gain,
                     confidence=0.7,
-                    current_budget=int(current_budget),
+                    current_budget=bid_budget,
                     sell_plan=synthetic_sell_plan,
                     player_id=pair.buy_player.id,
                     is_dgw=pair.buy_score.is_dgw,
@@ -1092,6 +1142,10 @@ class Trader:
             "squad_scores": squad_scores,
             "lineup_map": lineup_map,
             "budget": current_budget,
+            # The allowance the recs above were built with (services/budget):
+            # the wallet plus the permitted debt, and that net of open offers.
+            "buying_power": bid_budget,
+            "spendable_budget": power.spendable,
             "squad_size": squad_size,
             # Whether the buy recs above were built with the relaxed emergency
             # filters -- true only for a short squad inside the emergency
@@ -1133,7 +1187,9 @@ class Trader:
         which decides from it whether a short squad is an emergency today.
         """
         result = self.get_ep_recommendations(league, days_until_match=days_until_match)
-        current_budget = int(result.get("budget", 0))
+        # The same allowance the first pass bid with, not the raw wallet --
+        # otherwise this recompute would cap every bid at the wallet again.
+        current_budget = int(result.get("buying_power", result.get("budget", 0)))
         # REH-85: reuse the context built inside get_ep_recommendations rather
         # than rebuilding it here — a rebuild would be a second get_my_bids
         # call and could produce a different reserve within one session.
