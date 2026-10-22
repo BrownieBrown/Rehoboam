@@ -752,6 +752,7 @@ class AutoTrader:
         from .formation import select_best_eleven
         from .scoring.store_scorer import score_stored
         from .scoring.v2.coefficients import load_coefficients, load_lineup_prob
+        from .scoring.v2.lineup_prob import outside_in_xi, scorer_inputs
 
         if nk is None or nk.at is None or nk.day_number is None:
             logger.info(
@@ -792,9 +793,14 @@ class AutoTrader:
             if p.status_fetched_at is None or p.status_fetched_at < fresh_after:
                 skipped_stale += 1
                 continue
-            xi = predicted_xi.get(p.player_id) if predicted_xi else None
+            code = predicted_xi.get(p.player_id) if predicted_xi else None
+            xi_input, outside_input = scorer_inputs(
+                code,
+                xi_enabled=bool(getattr(self.settings, "predicted_xi_enabled", False)),
+                fallback_enabled=bool(getattr(self.settings, "outside_lineup_fallback", False)),
+            )
             pred = score_stored(
-                replace(p, predicted_xi=xi),
+                replace(p, predicted_xi=xi_input, outside_code=outside_input),
                 now=now,
                 max_status_age_days=self.settings.max_status_age_days,
                 availability=availability,
@@ -825,7 +831,10 @@ class AutoTrader:
                     "dry_run": bool(self.dry_run),
                     "backfill": False,
                     "lineup_probability": p.lineup_probability,
-                    "predicted_xi": xi,
+                    # Recorded whether or not the scorer used it: the
+                    # predictions' `predicted_at` against `kickoff` is how
+                    # `fit-lineup-prob` reads its accuracy by days to kickoff.
+                    "predicted_xi": outside_in_xi(code),
                 }
             )
         written = store.write_predictions(rows)
@@ -837,25 +846,30 @@ class AutoTrader:
         )
         return written
 
-    def _predicted_xi(self, season: str, day_number: int) -> dict[str, bool]:
-        """ligainsider's eleven for the matchday, when `PREDICTED_XI_ENABLED`.
+    def _predicted_xi(self, season: str, day_number: int) -> dict[str, int]:
+        """ligainsider's verdict (`lineup_prob.OUTSIDE_*`) per player for the matchday.
 
+        Loaded when `PREDICTED_XI_ENABLED` or `OUTSIDE_LINEUP_FALLBACK` is on.
         Best-effort like every learning read: a failure logs and scores as if
         there were no outside prediction.
         """
-        if not getattr(self.settings, "predicted_xi_enabled", False):
+        if not (
+            getattr(self.settings, "predicted_xi_enabled", False)
+            or getattr(self.settings, "outside_lineup_fallback", False)
+        ):
             return {}
         try:
+            from .scoring.v2.lineup_prob import outside_in_xi
             from .store.lineup_store import PredictedLineupStore
 
-            xi = PredictedLineupStore().xi_for(season=season, day_number=day_number)
+            codes = PredictedLineupStore().codes_for(season=season, day_number=day_number)
             logger.info(
                 "predicted xi: %d players judged for MD%d (%d named)",
-                len(xi),
+                len(codes),
                 day_number,
-                sum(1 for v in xi.values() if v),
+                sum(1 for c in codes.values() if outside_in_xi(c)),
             )
-            return xi
+            return codes
         except Exception:
             logger.exception("predicted xi unavailable — scoring without it")
             return {}

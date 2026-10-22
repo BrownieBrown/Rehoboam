@@ -17,6 +17,7 @@ from rehoboam.config import (
 )
 from rehoboam.formation import _POSITION_MAX_STARTERS, select_best_eleven
 from rehoboam.kickbase_client import MarketPlayer
+from rehoboam.scoring.v2.lineup_prob import OUTSIDE_LEFT_OUT, OUTSIDE_MISSING
 from rehoboam.services.safety_gate import club_counts
 
 from .models import (
@@ -30,6 +31,19 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: ligainsider verdicts the buy filters treat like a Kickbase code above
+#: `MAX_LINEUP_PROB_FOR_BUY`: left out of a predicted eleven started 8–10% on
+#: matchdays 5–6 (code 4: 16%). An alternative is not one of them — he is
+#: listed because a starter is in doubt, the same footing as a code 3.
+UNLIKELY_OUTSIDE_CODES = frozenset({OUTSIDE_LEFT_OUT, OUTSIDE_MISSING})
+
+
+def unlikely_starter(ps: PlayerScore) -> bool:
+    """Kickbase's code when it sent one, ligainsider's verdict when it did not."""
+    if ps.lineup_probability is not None:
+        return ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
+    return ps.outside_lineup in UNLIKELY_OUTSIDE_CODES
 
 
 @dataclass(frozen=True)
@@ -464,17 +478,15 @@ class DecisionEngine:
                 )
                 continue
 
-            # Skip players unlikely to start (prob 4-5)
-            if (
-                ps.lineup_probability is not None
-                and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
-            ):
+            # Skip players unlikely to start (Kickbase code 4-5, or ligainsider
+            # left him out of the eleven when Kickbase sent no code)
+            if unlikely_starter(ps):
                 skip_lineup_prob += 1
                 logger.debug(
-                    "buy-skip %s: lineup_probability=%s > %s (unlikely starter)",
+                    "buy-skip %s: lineup_probability=%s outside=%s (unlikely starter)",
                     player.last_name,
                     ps.lineup_probability,
-                    MAX_LINEUP_PROB_FOR_BUY,
+                    ps.outside_lineup,
                 )
                 continue
 
@@ -811,10 +823,7 @@ class DecisionEngine:
                 continue
 
             # Skip players unlikely to start or with collapsing minutes
-            if (
-                ps.lineup_probability is not None
-                and ps.lineup_probability > MAX_LINEUP_PROB_FOR_BUY
-            ):
+            if unlikely_starter(ps):
                 continue
             if ps.minutes_trend == "decreasing" and ps.minutes_bonus <= -15.0:
                 continue

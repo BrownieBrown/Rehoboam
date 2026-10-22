@@ -9,9 +9,11 @@ players out for the match, "Letzte Aktualisierung" when the page last changed.
 
 This is a scraper, so it is held to the scraper's rules: a parse that does not
 find eleven starters writes nothing for that club, every failure is logged and
-the run continues, and the scorer reads the result only where Kickbase's own
-code is undecided (`lineup_prob.effective_lineup_code`), behind
-`PREDICTED_XI_ENABLED`, once its accuracy has been read off `fit-lineup-prob`.
+the run continues. The scorer reads it in two places: where Kickbase sent no
+lineup code — since 2026-10-21, every player, because the code is a Kickbase
+Premium field — as its own fitted verdict (`lineup_prob.predict_outside`,
+`OUTSIDE_LINEUP_FALLBACK`), and where Kickbase's code is undecided
+(`lineup_prob.effective_lineup_code`, behind `PREDICTED_XI_ENABLED`).
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from typing import Any
 import requests
 
 from rehoboam.enrichment.names import by_team, match_player
-from rehoboam.store.lineup_store import LIGAINSIDER
+from rehoboam.store.lineup_store import COVER_SLOT_BASE, LIGAINSIDER
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,8 @@ LIGAINSIDER_TEAM_PATHS: dict[str, str] = {
     "77": "/sv-07-elversberg/1331/",
 }
 
-#: Slots: starters 1–11 in pitch order, alternatives from 101, missing players None.
-ALTERNATIVE_SLOT_BASE = 100
+# Slots: starters 1–11 in pitch order, an alternative COVER_SLOT_BASE + the slot
+# of the starter he is listed beside, missing players None.
 
 _HEADING = re.compile(r"<h1>\s*VORAUSSICHTLICHE AUFSTELLUNG\s*</h1>", re.I)
 _LEGEND = re.compile(r"Spieler stand in der Startelf", re.I)
@@ -89,6 +91,8 @@ class ParsedLineup:
     missing: tuple[Named, ...]
     opponent: str | None
     updated_at: str | None
+    #: Per alternative, the 1-based pitch slot of the starter he is listed beside.
+    alternative_for: tuple[int, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -107,6 +111,7 @@ def parse_team_page(page: str) -> ParsedLineup:
 
     starters: list[Named] = []
     alternatives: list[Named] = []
+    alternative_for: list[int] = []
     parts = _COLUMN_SPLIT.split(pitch)
     openings = _COLUMN_SPLIT.findall(pitch)
     for opening, body in zip(openings, parts[1:], strict=False):
@@ -118,6 +123,7 @@ def parse_team_page(page: str) -> ParsedLineup:
             continue
         starters.append(names[0])
         alternatives.extend(names[1:])
+        alternative_for.extend([len(starters)] * (len(names) - 1))
 
     opponent_match = _OPPONENT.search(tail[:5000])
     opponent = _clean(opponent_match.group(1)) if opponent_match else None
@@ -137,7 +143,14 @@ def parse_team_page(page: str) -> ParsedLineup:
             seen.add(slug)
             missing.append(Named(_clean(name), slug))
 
-    return ParsedLineup(tuple(starters), tuple(alternatives), tuple(missing), opponent, updated_at)
+    return ParsedLineup(
+        tuple(starters),
+        tuple(alternatives),
+        tuple(missing),
+        opponent,
+        updated_at,
+        tuple(alternative_for),
+    )
 
 
 def slug_name(slug: str) -> str:
@@ -198,8 +211,8 @@ def lineup_rows(
 
     for i, named in enumerate(parsed.starters, start=1):
         add(named, True, i)
-    for i, named in enumerate(parsed.alternatives, start=ALTERNATIVE_SLOT_BASE + 1):
-        add(named, False, i)
+    for named, starter_slot in zip(parsed.alternatives, parsed.alternative_for, strict=True):
+        add(named, False, COVER_SLOT_BASE + starter_slot)
     for named in parsed.missing:
         add(named, False, None)
     return rows, unmatched
@@ -216,7 +229,13 @@ def run_predicted_xi_refresh(
     sleep=time.sleep,
 ) -> dict[str, Any]:
     """Fetch every club's predicted eleven for the upcoming matchday when its
-    first kickoff is within `days_before` days. Never raises."""
+    first kickoff is within `days_before` days. Never raises.
+
+    A club whose own match in that matchday has kicked off is skipped: its
+    page has moved on to the next match, and writing it would file the next
+    match's prediction under this matchday — over the pre-match one the
+    calibration join reads.
+    """
     outcome: dict[str, Any] = {
         "matchday": None,
         "teams": 0,
@@ -224,6 +243,7 @@ def run_predicted_xi_refresh(
         "unmatched": 0,
         "incomplete": [],
         "failed": [],
+        "started": [],
         "skipped": None,
         "error": None,
     }
@@ -238,9 +258,13 @@ def run_predicted_xi_refresh(
             outcome["skipped"] = f"kickoff in {hours_to_kickoff / 24:.1f} d (> {days_before} d)"
             return outcome
         universe = store.universe() if hasattr(store, "universe") else _universe(store)
+        kickoffs = store.team_kickoffs(season=str(md["season"]), day_number=int(md["day_number"]))
         rows: list[dict[str, Any]] = []
         paths = team_paths if team_paths is not None else LIGAINSIDER_TEAM_PATHS
         for team_id, path in paths.items():
+            if kickoffs.get(team_id, float("inf")) <= now:
+                outcome["started"].append(team_id)
+                continue
             try:
                 parsed = parse_team_page(fetch_team_page(path, session=session))
             except Exception as e:  # noqa: BLE001 -- one club's failure costs one club
@@ -271,13 +295,15 @@ def run_predicted_xi_refresh(
             rows.extend(team_rows)
         outcome["written"] = store.write(rows)
         logger.info(
-            "ligainsider: MD%s %d clubs, %d rows, %d unmatched, failed=%s incomplete=%s",
+            "ligainsider: MD%s %d clubs, %d rows, %d unmatched, failed=%s incomplete=%s "
+            "started=%s",
             outcome["matchday"],
             outcome["teams"],
             outcome["written"],
             outcome["unmatched"],
             outcome["failed"],
             outcome["incomplete"],
+            outcome["started"],
         )
     except Exception as e:  # noqa: BLE001 -- an outside source never fails the run
         logger.exception("predicted xi refresh failed")

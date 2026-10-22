@@ -13,6 +13,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from rehoboam.scoring.store_scorer import StoredPlayer
+from rehoboam.store.lineup_store import NEWEST_FETCH
 
 _PREDICTION_COLUMNS = (
     "session_id",
@@ -40,6 +41,53 @@ _PREDICTION_COLUMNS = (
     "lineup_probability",
     "predicted_xi",
 )
+
+
+# `lineup_code_rows`' query: assembled once from constants (no value is ever
+# formatted in; every one is a bound parameter), so that the outside eleven is
+# read through the same newest-fetch rule as `PredictedLineupStore`.
+_LINEUP_CODE_ROWS_HEAD = """
+                WITH md AS (
+                    SELECT season, day_number, MIN(kickoff) AS kickoff
+                    FROM rehoboam.fixtures WHERE season = %s
+                    GROUP BY season, day_number HAVING MIN(kickoff) < %s
+                ), played AS (
+                    SELECT h.season, h.day_number, h.player_id, h.status, h.points,
+                           (to_timestamp(md.kickoff) AT TIME ZONE 'UTC')::date AS kick_date
+                    FROM rehoboam.player_match_history h
+                    JOIN md ON md.season = h.season AND md.day_number = h.day_number
+                    WHERE h.status IN (1, 3, 4, 5)
+                ), covered AS (
+                    SELECT DISTINCT season, day_number, team_id
+                    FROM rehoboam.predicted_lineups x WHERE source = %s
+                )
+                SELECT p.season, p.day_number, p.player_id, p.status, p.points,
+                       s.lineup_probability, s.day AS status_day,
+                       CASE
+                         WHEN x.in_xi IS NOT NULL THEN x.in_xi
+                         WHEN c.team_id IS NOT NULL THEN FALSE
+                         ELSE NULL
+                       END AS predicted_xi
+                FROM played p
+                JOIN LATERAL (
+                    SELECT lineup_probability, day FROM rehoboam.player_status_daily s
+                    WHERE s.player_id = p.player_id
+                      AND s.day < p.kick_date AND s.day >= p.kick_date - %s
+                    ORDER BY s.day DESC LIMIT 1
+                ) s ON TRUE
+                LEFT JOIN rehoboam.player_universe u ON u.player_id = p.player_id
+                LEFT JOIN covered c
+                  ON c.season = p.season AND c.day_number = p.day_number AND c.team_id = u.team_id
+                LEFT JOIN LATERAL (
+                    SELECT bool_or(in_xi) AS in_xi FROM rehoboam.predicted_lineups x
+                    WHERE x.source = %s AND x.season = p.season
+                      AND x.day_number = p.day_number AND x.player_id = p.player_id
+                      AND """
+_LINEUP_CODE_ROWS_TAIL = """
+                ) x ON TRUE
+                ORDER BY p.day_number, p.player_id
+                """
+_LINEUP_CODE_ROWS_SQL = _LINEUP_CODE_ROWS_HEAD + NEWEST_FETCH + _LINEUP_CODE_ROWS_TAIL
 
 
 class CalibrationStore:
@@ -410,46 +458,43 @@ class CalibrationStore:
         """
         with self.connection() as conn:
             rows = conn.execute(
-                """
-                WITH md AS (
-                    SELECT season, day_number, MIN(kickoff) AS kickoff
-                    FROM rehoboam.fixtures WHERE season = %s
-                    GROUP BY season, day_number HAVING MIN(kickoff) < %s
-                ), played AS (
-                    SELECT h.season, h.day_number, h.player_id, h.status, h.points,
-                           (to_timestamp(md.kickoff) AT TIME ZONE 'UTC')::date AS kick_date
-                    FROM rehoboam.player_match_history h
-                    JOIN md ON md.season = h.season AND md.day_number = h.day_number
-                    WHERE h.status IN (1, 3, 4, 5)
-                ), covered AS (
-                    SELECT DISTINCT season, day_number, team_id
-                    FROM rehoboam.predicted_lineups WHERE source = %s
-                )
-                SELECT p.season, p.day_number, p.player_id, p.status, p.points,
-                       s.lineup_probability, s.day AS status_day,
-                       CASE
-                         WHEN x.in_xi IS NOT NULL THEN x.in_xi
-                         WHEN c.team_id IS NOT NULL THEN FALSE
-                         ELSE NULL
-                       END AS predicted_xi
-                FROM played p
-                JOIN LATERAL (
-                    SELECT lineup_probability, day FROM rehoboam.player_status_daily s
-                    WHERE s.player_id = p.player_id
-                      AND s.day < p.kick_date AND s.day >= p.kick_date - %s
-                    ORDER BY s.day DESC LIMIT 1
-                ) s ON TRUE
-                LEFT JOIN rehoboam.player_universe u ON u.player_id = p.player_id
-                LEFT JOIN covered c
-                  ON c.season = p.season AND c.day_number = p.day_number AND c.team_id = u.team_id
-                LEFT JOIN LATERAL (
-                    SELECT bool_or(in_xi) AS in_xi FROM rehoboam.predicted_lineups x
-                    WHERE x.source = %s AND x.season = p.season
-                      AND x.day_number = p.day_number AND x.player_id = p.player_id
-                ) x ON TRUE
-                ORDER BY p.day_number, p.player_id
-                """,
+                _LINEUP_CODE_ROWS_SQL,
                 (season, before, xi_source, int(max_age_days), xi_source),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def outside_xi_by_lead(self, *, season: str, before: float) -> list[dict[str, Any]]:
+        """The outside eleven's verdict against the start, by whole days to kickoff.
+
+        Read off `predictions`: every live session records `predicted_xi`
+        beside `predicted_at` and the matchday's `kickoff`, so a verdict read
+        on the Monday and one read on the Friday are kept apart. One row per
+        player, matchday and lead day (the newest session's), played statuses
+        only: `{lead_days, predicted_xi, n, started}`.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                WITH judged AS (
+                    SELECT DISTINCT ON (p.season, p.day_number, p.player_id, lead_days)
+                           p.season, p.day_number, p.player_id, p.predicted_xi,
+                           FLOOR((p.kickoff - p.predicted_at) / 86400.0)::int AS lead_days
+                    FROM rehoboam.predictions p
+                    WHERE p.season = %s AND p.kickoff < %s AND p.predicted_xi IS NOT NULL
+                      AND NOT p.dry_run AND NOT p.backfill AND p.predicted_at <= p.kickoff
+                    ORDER BY p.season, p.day_number, p.player_id, lead_days, p.predicted_at DESC
+                )
+                SELECT j.lead_days, j.predicted_xi, COUNT(*) AS n,
+                       COUNT(*) FILTER (WHERE h.status = 5) AS started
+                FROM judged j
+                JOIN rehoboam.player_match_history h
+                  ON h.season = j.season AND h.day_number = j.day_number
+                 AND h.player_id = j.player_id
+                WHERE h.status IN (1, 3, 4, 5)
+                GROUP BY j.lead_days, j.predicted_xi
+                ORDER BY j.lead_days, j.predicted_xi
+                """,
+                (season, before),
             ).fetchall()
         return [dict(r) for r in rows]
 

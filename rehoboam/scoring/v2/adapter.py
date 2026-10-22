@@ -46,7 +46,11 @@ from rehoboam.scoring.v2.availability import (
 )
 from rehoboam.scoring.v2.coefficients import load_coefficients, load_lineup_prob
 from rehoboam.scoring.v2.features import PLAYED_STATUSES
-from rehoboam.scoring.v2.lineup_prob import LineupProbModel, effective_lineup_code
+from rehoboam.scoring.v2.lineup_prob import (
+    OUTSIDE_LABELS,
+    LineupProbModel,
+    effective_lineup_code,
+)
 from rehoboam.scoring.v2.rate import RateModel
 
 DGW_MULTIPLIER = 1.8
@@ -236,6 +240,7 @@ def availability_probs(
     lineup_probability: int | None = None,
     lineup_model: LineupProbModel | None = None,
     predicted_xi: bool | None = None,
+    outside_code: int | None = None,
 ) -> dict[int, float]:
     """Fitted transition probabilities with any serving-time override applied.
 
@@ -252,7 +257,10 @@ def availability_probs(
     ``lineup_model`` the fitted P(status | code); with both, the code's observed
     distribution is blended onto the row so far. ``predicted_xi`` is an outside
     predicted eleven's verdict and only moves a code 2–4 (`effective_lineup_code`).
-    Either None leaves the row untouched, which is how the replay stays inert.
+    ``outside_code`` is ligainsider's fuller verdict (``lineup_prob.OUTSIDE_*``)
+    and stands in only where Kickbase sent no code — the normal case since the
+    code went behind Kickbase Premium on 2026-10-21. Every one None leaves the
+    row untouched, which is how the replay stays inert.
 
     Order is deliberate: the stale prior first, the lineup code second, the
     live injury override last, so a player flagged out is out whatever his
@@ -273,7 +281,12 @@ def availability_probs(
         )
 
     if lineup_model is not None:
-        probs = lineup_model.predict(effective_lineup_code(lineup_probability, predicted_xi), probs)
+        if lineup_probability is not None:
+            probs = lineup_model.predict(
+                effective_lineup_code(lineup_probability, predicted_xi), probs
+            )
+        else:
+            probs = lineup_model.predict_outside(outside_code, probs)
 
     return apply_availability_override(
         probs, live_status, uncertain_start_multiplier=uncertain_start_multiplier
@@ -316,6 +329,7 @@ def compose_ep(
     lineup_probability: int | None = None,
     lineup_model: LineupProbModel | None = None,
     predicted_xi: bool | None = None,
+    outside_code: int | None = None,
 ) -> float:
     """Probability-weighted expected points, in real Kickbase points.
 
@@ -334,6 +348,7 @@ def compose_ep(
         lineup_probability=lineup_probability,
         lineup_model=lineup_model,
         predicted_xi=predicted_xi,
+        outside_code=outside_code,
     )
     return sum(probs[s] * rate.predict(player_id, s, position) for s in PLAYED_STATUSES)
 
@@ -373,6 +388,7 @@ def score_player_v2(
     # `lineup_prob.py`; an outside predicted eleven, when the caller has one.
     lineup_probability = _opt_int((data.player_details or {}).get("prob"))
     predicted_xi = getattr(data, "predicted_xi", None)
+    outside_code = getattr(data, "outside_code", None)
     lineup_model = _lineup_model()
 
     ep = compose_ep(
@@ -388,6 +404,7 @@ def score_player_v2(
         lineup_probability=lineup_probability,
         lineup_model=lineup_model,
         predicted_xi=predicted_xi,
+        outside_code=outside_code,
     )
 
     dgw_multiplier = DGW_MULTIPLIER if data.is_dgw else 1.0
@@ -403,6 +420,7 @@ def score_player_v2(
         lineup_probability=lineup_probability,
         lineup_model=lineup_model,
         predicted_xi=predicted_xi,
+        outside_code=outside_code,
     )
     code_note = (
         f", lineup code {lineup_probability}"
@@ -411,6 +429,13 @@ def score_player_v2(
     )
     if predicted_xi is not None and lineup_probability in (2, 3, 4):
         code_note += ", outside XI: " + ("in" if predicted_xi else "out")
+    if (
+        lineup_probability is None
+        and outside_code is not None
+        and lineup_model is not None
+        and lineup_model.outside is not None
+    ):
+        code_note += f", ligainsider: {OUTSIDE_LABELS.get(outside_code, outside_code)}"
     notes = [
         f"v2: availability P(start)={probs[5]:.0%} "
         f"(prev status {prev_status if prev_status is not None else 'unknown'}{code_note}), "
@@ -467,5 +492,6 @@ def score_player_v2(
         # The code itself, so `DecisionEngine`'s buy filter (> MAX_LINEUP_PROB_FOR_BUY)
         # and the board see it. It was None here, which made that filter dead.
         lineup_probability=lineup_probability,
+        outside_lineup=outside_code,
         minutes_trend=None,
     )

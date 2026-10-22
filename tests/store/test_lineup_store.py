@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from rehoboam.scoring.v2.lineup_prob import OUTSIDE_ALTERNATIVE, OUTSIDE_CONTESTED
 from rehoboam.store.calibration_store import CalibrationStore
 from rehoboam.store.corpus_store import CorpusStore
 from rehoboam.store.league_store import LeagueStore
-from rehoboam.store.lineup_store import PredictedLineupStore
+from rehoboam.store.lineup_store import COVER_SLOT_BASE, PredictedLineupStore
 
 SEASON = "2026/2027"
 KICKOFF_MD5 = 1_760_000_000.0  # any epoch; only its UTC date matters to the join
@@ -183,3 +184,79 @@ def test_lineup_code_rows_join_the_day_before_reading_and_the_outside_verdict(st
         CalibrationStore(dsn=store_dsn).lineup_code_rows(season=SEASON, before=KICKOFF_MD5 - 1)
         == []
     )
+
+
+def test_codes_for_reads_the_linked_alternative_and_the_missing(store_dsn):
+    _seed(store_dsn)
+    store = PredictedLineupStore(dsn=store_dsn)
+    store.write(
+        _rows(("A", "a"))
+        + [
+            dict(_rows(("B", "b"))[0], in_xi=False, slot=COVER_SLOT_BASE + 1),
+            dict(_rows(("Gone", None))[0], in_xi=False, slot=None),
+        ]
+    )
+    assert store.codes_for(season=SEASON, day_number=5) == {
+        "a": OUTSIDE_CONTESTED,  # b is listed beside him
+        "b": OUTSIDE_ALTERNATIVE,
+    }
+    assert store.xi_for(season=SEASON, day_number=5) == {"a": True, "b": False}
+
+
+def test_team_kickoffs_are_each_clubs_own_first_whistle(store_dsn):
+    _seed(store_dsn)
+    kickoffs = PredictedLineupStore(dsn=store_dsn).team_kickoffs(season=SEASON, day_number=5)
+    assert kickoffs == {"2": KICKOFF_MD5, "9": KICKOFF_MD5}
+
+
+def _prediction(session, pid, predicted_at, xi, *, dry_run=False):
+    return {
+        "session_id": session,
+        "player_id": pid,
+        "season": SEASON,
+        "day_number": 5,
+        "kickoff": KICKOFF_MD5,
+        "predicted_at": predicted_at,
+        "predicted_ep": 40.0,
+        "p_status": {1: 0.1, 3: 0.2, 4: 0.1, 5: 0.6},
+        "rate": 60.0,
+        "prev_status": 5,
+        "live_status": 0,
+        "position": "Forward",
+        "team_id": "2",
+        "owned": False,
+        "listed": False,
+        "in_best_11": False,
+        "live_ep": None,
+        "data_grade": "A",
+        "app": "function",
+        "dry_run": dry_run,
+        "backfill": False,
+        "predicted_xi": xi,
+    }
+
+
+def test_outside_xi_by_lead_keeps_monday_and_friday_verdicts_apart(store_dsn):
+    corpus, _ = _seed(store_dsn)
+    for pid, st in (("a", 5), ("b", 4)):
+        corpus.record_match_history(pid, "2", _perf([_match(5, "2026-10-09T18:30:00Z", st, 0)]))
+    store = CalibrationStore(dsn=store_dsn)
+    four_days, half_day = KICKOFF_MD5 - 4 * 86400 + 60, KICKOFF_MD5 - 43200
+    store.write_predictions(
+        [
+            _prediction("mon", "a", four_days, False),  # Monday: left out, then started
+            _prediction("mon", "b", four_days, True),
+            _prediction("fri1", "a", half_day - 3600, False),
+            _prediction("fri2", "a", half_day, True),  # the newest same-day session wins
+            _prediction("fri2", "b", half_day, False),
+            _prediction("dry", "b", half_day, True, dry_run=True),  # a status run: ignored
+        ]
+    )
+    rows = store.outside_xi_by_lead(season=SEASON, before=KICKOFF_MD5 + 1)
+    got = {(r["lead_days"], r["predicted_xi"]): (r["n"], r["started"]) for r in rows}
+    assert got == {
+        (0, False): (1, 0),
+        (0, True): (1, 1),
+        (3, False): (1, 1),
+        (3, True): (1, 0),
+    }
