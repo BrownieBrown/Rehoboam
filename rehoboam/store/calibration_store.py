@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from rehoboam.scoring.store_scorer import StoredPlayer
@@ -43,10 +44,11 @@ _PREDICTION_COLUMNS = (
 )
 
 
-# `lineup_code_rows`' query: assembled once from constants (no value is ever
-# formatted in; every one is a bound parameter), so that the outside eleven is
-# read through the same newest-fetch rule as `PredictedLineupStore`.
-_LINEUP_CODE_ROWS_HEAD = """
+# `lineup_code_rows`' query, composed with psycopg's `sql` so the outside
+# eleven is read through the same newest-fetch rule as `PredictedLineupStore`;
+# every value is a bound parameter.
+_LINEUP_CODE_ROWS_SQL = sql.SQL(
+    """
                 WITH md AS (
                     SELECT season, day_number, MIN(kickoff) AS kickoff
                     FROM rehoboam.fixtures WHERE season = %s
@@ -82,12 +84,11 @@ _LINEUP_CODE_ROWS_HEAD = """
                     SELECT bool_or(in_xi) AS in_xi FROM rehoboam.predicted_lineups x
                     WHERE x.source = %s AND x.season = p.season
                       AND x.day_number = p.day_number AND x.player_id = p.player_id
-                      AND """
-_LINEUP_CODE_ROWS_TAIL = """
+                      AND {newest}
                 ) x ON TRUE
                 ORDER BY p.day_number, p.player_id
                 """
-_LINEUP_CODE_ROWS_SQL = _LINEUP_CODE_ROWS_HEAD + NEWEST_FETCH + _LINEUP_CODE_ROWS_TAIL
+).format(newest=NEWEST_FETCH)
 
 
 class CalibrationStore:

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from psycopg import sql
+
 from rehoboam.scoring.v2.lineup_prob import outside_codes, outside_in_xi
 
 LIGAINSIDER = "ligainsider"
@@ -23,12 +25,18 @@ COVER_SLOT_BASE = 200
 #: Only a club's newest fetch for the matchday counts. `write` upserts by name
 #: and deletes nothing, so a player the page dropped since an earlier fetch
 #: keeps that fetch's row (2–3 phantom "named" starters a matchday on MD5–6).
-#: Every reader of the table filters through this, on an alias `x`.
-NEWEST_FETCH = (
+#: Every reader of the table filters through this, on an alias `x`; it is a
+#: `psycopg.sql.SQL` so it can only be composed in as SQL text, never a value.
+NEWEST_FETCH = sql.SQL(
     "x.fetched_at = (SELECT MAX(y.fetched_at) FROM rehoboam.predicted_lineups y "
     "WHERE y.source = x.source AND y.season = x.season "
     "AND y.day_number = x.day_number AND y.team_id = x.team_id)"
 )
+
+_CODES_FOR_SQL = sql.SQL(
+    "SELECT player_id, player_name, team_id, in_xi, slot FROM rehoboam.predicted_lineups x "
+    "WHERE source = %s AND season = %s AND day_number = %s AND {newest}"
+).format(newest=NEWEST_FETCH)
 
 _COLUMNS = (
     "source",
@@ -106,10 +114,7 @@ class PredictedLineupStore:
         """
         with self.connection() as conn:
             rows = conn.execute(
-                # NEWEST_FETCH is a constant; every value is a bound parameter.
-                "SELECT player_id, player_name, team_id, in_xi, slot "  # nosec B608
-                "FROM rehoboam.predicted_lineups x "
-                "WHERE source = %s AND season = %s AND day_number = %s AND " + NEWEST_FETCH,
+                _CODES_FOR_SQL,
                 (source, season, day_number),
             ).fetchall()
             teams = sorted({r["team_id"] for r in rows})
