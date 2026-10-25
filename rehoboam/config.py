@@ -690,6 +690,32 @@ class Settings(BaseSettings):
             "winners paid a median of +9%)."
         ),
     )
+    direction_check_enabled: bool = Field(
+        default=True,
+        description=(
+            "Read the last nightly market-value move before a points buy "
+            "(services/entry_direction): under DIRECTION_VETO_BELOW_MV a player "
+            "who did not rise is not bid on unless the squad needs him before "
+            "kickoff; up to DIRECTION_COST_BELOW_MV his expected resale "
+            "shortfall is charged against the value bid."
+        ),
+    )
+    direction_veto_below_mv: int = Field(
+        default=5_000_000,
+        description="Market value below which a buy after a non-rising night is refused.",
+    )
+    direction_cost_below_mv: int = Field(
+        default=15_000_000,
+        description="Market value below which a non-riser's resale shortfall is charged.",
+    )
+    direction_falling_drift_gap_pct: float = Field(
+        default=9.0,
+        description=(
+            "Value-while-held gap between a 5-15m riser and faller (+10% vs "
+            "+0.5-1%, both seasons, measured 2026-10-25), charged as a percent "
+            "of market value."
+        ),
+    )
     overbid_pct_must_have: float = Field(
         default=35.0,
         description=(
@@ -938,6 +964,18 @@ class Settings(BaseSettings):
                 Tier.MUST_HAVE: self.overbid_pct_must_have,
             },
             price_bands=parse_price_bands(self.overbid_price_bands),
+        )
+
+    def entry_direction_rule(self):
+        """The last-night direction rule for points buys, or None when off."""
+        if not self.direction_check_enabled:
+            return None
+        from rehoboam.services.entry_direction import EntryDirectionRule
+
+        return EntryDirectionRule(
+            veto_below_mv=self.direction_veto_below_mv,
+            cost_below_mv=self.direction_cost_below_mv,
+            falling_drift_gap_pct=self.direction_falling_drift_gap_pct,
         )
 
 
