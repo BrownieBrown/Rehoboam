@@ -130,3 +130,17 @@ def buying_power(
         gross=gross,
         spendable=gross - pending_i,
     )
+
+
+def forced_sell_due(days_until_match: int | None) -> bool:
+    """Whether step 5's forced bench sale may repay a negative wallet.
+
+    Only when the schedule is unknown. With a known day count the debt is
+    allowed until the locked window and `_run_debt_recovery` repays it there
+    (it runs whenever the day count is within `LOCKOUT_DAYS`, before step 5
+    is ever reached), so an earlier forced sale only realises losses: on
+    Saturday 2026-10-17, six days out, it sold Maloney and Hack, the latter
+    the morning he arrived. An unknown schedule hides the locked window, and
+    a negative wallet at an unseen kickoff is zero points for the matchday.
+    """
+    return days_until_match is None

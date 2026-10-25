@@ -44,6 +44,9 @@ _RULE_PREFIXES = (
     ("Flip target", "target"),
     ("Deferred sell plan", "sell_plan"),
     ("Debt recovery", "debt_recovery"),
+    # How `run_profit_sell_phase` words a rank sale; the two bare verdicts
+    # below are what `rank_sell_reason` returns on its own.
+    ("Rank sell", "rank"),
     ("Outside the top", "rank"),
     ("Out for weeks", "rank"),
 )
