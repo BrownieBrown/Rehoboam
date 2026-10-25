@@ -3755,6 +3755,12 @@ class AutoTrader:
         optimizer.display_optimization(optimization, player_values=player_values)
 
         if optimization.players_to_sell and not optimization.is_gameday_ready:
+            if not budget_rules.forced_sell_due(optimization.days_until_gameday):
+                console.print(
+                    f"[dim]Budget negative, {optimization.days_until_gameday}d to kickoff — "
+                    f"debt is repaid in the locked window, no forced sell now[/dim]"
+                )
+                return results
             console.print(
                 f"\n[yellow]⚠️  Budget negative, selling "
                 f"{len(optimization.players_to_sell)} player(s)...[/yellow]"

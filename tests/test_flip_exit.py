@@ -85,3 +85,19 @@ class TestTheRuleTag:
         assert exit_rule_tag("Outside the top 30 at position on both measures") == "rank"
         assert exit_rule_tag("Squad optimization — forced sell to recover budget") == "other"
         assert exit_rule_tag(None) is None
+
+    def test_rank_sell_as_the_profit_sell_phase_words_it(self):
+        """`run_profit_sell_phase` prefixes the rank verdict with "Rank sell: "
+        and appends the cost basis; until 2026-10-25 that string fell through
+        to "other", so every rank sale was missing from the per-rule read."""
+        from rehoboam.services.flip_exit import exit_rule_tag
+
+        assert (
+            exit_rule_tag(
+                "Rank sell: Outside the top 30 at position on both measures "
+                "(points per appearance 108, expected points 76, 2 apps) "
+                "(bought €3,821,148, now €3,614,411, -5.4%)"
+            )
+            == "rank"
+        )
+        assert exit_rule_tag("Rank sell: Out for weeks (status 1)") == "rank"
