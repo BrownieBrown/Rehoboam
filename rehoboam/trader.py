@@ -44,6 +44,7 @@ from .kickoff import (
 from .matchup_analyzer import MatchupAnalyzer
 from .services.budget import BuyingPower, buying_power
 from .services.emergency_window import emergency_fill_due
+from .services.entry_direction import EntryDirectionRule
 from .services.season import season_label
 from .services.trend_service import TrendService
 from .value_history import ValueHistoryCache
@@ -76,6 +77,24 @@ def _grade_of(score) -> str | None:
     """The score's data-quality grade, or None when it carries none."""
     quality = getattr(score, "data_quality", None)
     return getattr(quality, "grade", None) if quality is not None else None
+
+
+def _direction_rule(settings) -> EntryDirectionRule | None:
+    """The configured direction rule; anything that is not one (a test double) is off."""
+    factory = getattr(settings, "entry_direction_rule", None)
+    rule = factory() if callable(factory) else None
+    return rule if isinstance(rule, EntryDirectionRule) else None
+
+
+def _last_move(trend, *, emergency: bool) -> float | None:
+    """The last nightly move the direction rule reads, or None when it must not.
+
+    None without history (`TrendAnalysis()` reports 0.0, which would read as
+    "did not rise") and in an emergency, where fielding eleven outranks resale.
+    """
+    if emergency or not getattr(trend, "has_data", False):
+        return None
+    return getattr(trend, "trend_1d_pct", None)
 
 
 def _pair_alternatives(pairs: list) -> dict[str, float]:
@@ -203,6 +222,7 @@ class Trader:
             # it here is the fix for the bug where the bidder used its own 20%/30%
             # caps and Telegram offered buys the gate would then refuse.
             ceiling_policy=settings.bid_ceiling_policy(),
+            direction_rule=_direction_rule(settings),
         )
 
     # ------------------------------------------------------------------
@@ -1237,6 +1257,7 @@ class Trader:
                     urgent=bool(result.get("urgent", False)),
                     alternative_gain=result.get("alternative_gains", {}).get(rec.player.id),
                     data_grade=_grade_of(rec.score),
+                    last_move_pct=_last_move(trend, emergency=bool(result.get("emergency"))),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1280,6 +1301,7 @@ class Trader:
                     urgent=bool(result.get("urgent", False)),
                     alternative_gain=result.get("alternative_gains", {}).get(pair.buy_player.id),
                     data_grade=_grade_of(pair.buy_score),
+                    last_move_pct=_last_move(trend, emergency=bool(result.get("emergency"))),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:

@@ -204,12 +204,14 @@ class SmartBidding:
         profit_curve=None,  # services.profit_curve.ProfitCurve: where paying more stops paying back
         urgency_bump: float = DEFAULT_URGENCY_BUMP,  # quantile added when urgent
         eur_per_point: float | None = None,  # what the league pays per expected point
+        direction_rule=None,  # services.entry_direction.EntryDirectionRule; None = off
     ):
         self.ceiling_policy = ceiling_policy
         self.win_curve = win_curve
         self.profit_curve = profit_curve
         self.urgency_bump = float(urgency_bump)
         self.eur_per_point = float(eur_per_point) if eur_per_point else None
+        self.direction_rule = direction_rule
         self.curve_quantiles = dict(curve_quantiles or DEFAULT_CURVE_QUANTILES)
         self.default_overbid_pct = default_overbid_pct
         self.max_overbid_pct = max_overbid_pct
@@ -339,6 +341,7 @@ class SmartBidding:
         urgent: bool = False,
         alternative_gain: float | None = None,
         data_grade: str | None = None,
+        last_move_pct: float | None = None,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -384,6 +387,11 @@ class SmartBidding:
                 the break-even cap; one scored on the position prior (grade C,
                 or unknown) is capped like a strong upgrade, because its
                 "gain" is a guess and the league likely knows what we don't.
+            last_move_pct: The player's last nightly market-value move, in
+                percent (`TrendAnalysis.trend_1d_pct`); None when unknown. Read
+                by `direction_rule`: under 5m a player who did not rise is not
+                bid on unless `urgent`; at 5-15m his expected resale shortfall
+                is charged against the value bid.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -423,6 +431,27 @@ class SmartBidding:
         else:
             ep_tier = "marginal"
             tier_bonus = 0.0
+
+        # Direction (2026-10-25): under 5m only a riser resells at a profit and
+        # points after are the same either way, so a buy after a night he did
+        # not rise is refused — unless the squad needs the body before kickoff.
+        direction_veto = (
+            self.direction_rule.veto_reason(int(market_value), last_move_pct)
+            if self.direction_rule is not None and not urgent
+            else None
+        )
+        if direction_veto is not None:
+            logger.info("ep-bid SKIP player=%s tier=%s | %s", player_id, ep_tier, direction_veto)
+            return BidRecommendation(
+                base_price=asking_price,
+                recommended_bid=0,
+                overbid_amount=0,
+                overbid_pct=0.0,
+                reasoning=direction_veto,
+                budget_ceiling=current_budget,
+                sell_plan=sell_plan,
+                marginal_ep_gain=marginal_ep_gain,
+            )
 
         # Competitor-aware skip: don't feed contested auctions for players that
         # wouldn't meaningfully change our matchday output. We'd just inflate
@@ -504,6 +533,11 @@ class SmartBidding:
         # point or a unique gain, the curve is read at the tier's quantile.
         curve_point = None
         value_point = None
+        falling_cost = (
+            self.direction_rule.falling_cost_eur(int(market_value), last_move_pct)
+            if self.direction_rule is not None
+            else 0.0
+        )
         if self.win_curve is not None:
             try:
                 if self.eur_per_point is not None:
@@ -515,6 +549,7 @@ class SmartBidding:
                         market_value=int(market_value),
                         unique_gain_pts=unique_gain,
                         eur_per_point=self.eur_per_point,
+                        resale_drift_eur=-falling_cost,
                     )
                 if value_point is None:
                     quantile = self.curve_quantiles.get(ep_tier, 0.0)
@@ -751,6 +786,11 @@ class SmartBidding:
                 f"{', empty slot +100' if urgent else ''}) worth EUR "
                 f"{int(value_point.value_eur):,}, wins {value_point.win_share:.0%} of listings"
             )
+            if falling_cost > 0:
+                reasoning_parts.append(
+                    f"fell last night ({last_move_pct:+.1f}%): EUR {int(falling_cost):,} "
+                    f"expected resale shortfall charged"
+                )
         elif curve_point is not None:
             reasoning_parts.append(
                 f"curve p{int(round(curve_point.quantile * 100))} of {curve_point.sample} "
@@ -783,7 +823,7 @@ class SmartBidding:
         logger.info(
             "ep-bid player=%s tier=%s ep_gain=%+.1f conf=%.2f "
             "ask=%d mv=%d bid=%d overbid=%.1f%% "
-            "trend=%s offers=%d dgw=%s demand_adj=%+.1f league_comp=%+.1f "
+            "trend=%s last_move=%s offers=%d dgw=%s demand_adj=%+.1f league_comp=%+.1f "
             "ceiling=%d sell_plan=%s | %s",
             player_id,
             ep_tier,
@@ -794,6 +834,7 @@ class SmartBidding:
             recommended_bid,
             actual_overbid_pct,
             trend_change_pct,
+            last_move_pct,
             offer_count,
             is_dgw,
             demand_adjustment,

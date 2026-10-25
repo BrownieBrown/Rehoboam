@@ -46,11 +46,17 @@ def optimal_premium(
     unique_gain_pts: float,
     eur_per_point: float | None,
     step_pct: float = 0.5,
+    resale_drift_eur: float = 0.0,
 ) -> ValuePoint | None:
     """The premium on the band's curve with the highest expected value.
 
     Scans premiums from 0 to the top of the band's curve in `step_pct` steps;
     F(p) is read off the curve at each. Ties go to the lower premium.
+
+    ``resale_drift_eur`` is added to what winning is worth: negative for a
+    player expected to resell below the value he was bought at
+    (`services/entry_direction`). When it outweighs the points, every premium
+    has a negative expected value and the scan settles on 0.
     """
     if win_curve is None or eur_per_point is None or eur_per_point <= 0:
         return None
@@ -59,7 +65,7 @@ def optimal_premium(
     top = win_curve.premium_at(int(market_value), 1.0)
     if top is None:
         return None
-    value = float(eur_per_point) * float(unique_gain_pts)
+    value = float(eur_per_point) * float(unique_gain_pts) + float(resale_drift_eur)
     best: ValuePoint | None = None
     p = 0.0
     while p <= top.premium_pct + 1e-9:
