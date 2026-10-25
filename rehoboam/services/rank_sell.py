@@ -52,25 +52,87 @@ def rank_sell_reason(
     min_appearances: int,
     min_days_for_starter: int,
 ) -> str | None:
-    """The reason to sell, or None to hold."""
-    if inp.status == OUT_FOR_WEEKS:
-        return "Out for weeks (status 1)"
+    """The reason to sell, or None to hold.
 
-    if inp.avg_points_rank_pos is None or (inp.appearances or 0) < min_appearances:
-        return None  # unknown quality is not bad quality
-    if inp.ep_rank_pos is None:
-        return None  # no prediction: the model cannot vouch either way
-    if inp.avg_points_rank_pos <= floor or inp.ep_rank_pos <= floor:
-        return None  # a top player on either measure
+    The quality verdict is `rank_floor_verdict`, shared with the buy side; the
+    two guards after it only decide WHEN a held player goes.
+    """
+    verdict = rank_floor_verdict(
+        status=inp.status,
+        avg_points_rank_pos=inp.avg_points_rank_pos,
+        ep_rank_pos=inp.ep_rank_pos,
+        appearances=inp.appearances,
+        floor=floor,
+        min_appearances=min_appearances,
+    )
+    if verdict is None or inp.status == OUT_FOR_WEEKS:
+        return verdict
     if inp.trend_7d_pct is not None and inp.trend_7d_pct >= 1.0:
         return None  # rebounding: the same guard the loss-sells use
     if inp.in_best_eleven and not _has_recovery_time(inp.days_until_match, min_days_for_starter):
         return None
+    return verdict
+
+
+def rank_floor_verdict(
+    *,
+    status: int | None,
+    avg_points_rank_pos: int | None,
+    ep_rank_pos: int | None,
+    appearances: int | None,
+    floor: int,
+    min_appearances: int,
+) -> str | None:
+    """Why this player is not worth holding at his position, or None.
+
+    One predicate for both sides (2026-10-25): the sell loop sells on it and
+    the buy side refuses on it (`buy_rank_refusals`), so the bot can no longer
+    buy a player the next session sells — Amoako, Seiwald, Džeko and Diks were
+    bought as upgrades over a weak starter and rank-sold one to eleven days
+    later, each round trip paying only the premium.
+    """
+    if status == OUT_FOR_WEEKS:
+        return "Out for weeks (status 1)"
+    if avg_points_rank_pos is None or (appearances or 0) < min_appearances:
+        return None  # unknown quality is not bad quality
+    if ep_rank_pos is None:
+        return None  # no prediction: the model cannot vouch either way
+    if avg_points_rank_pos <= floor or ep_rank_pos <= floor:
+        return None  # a top player on either measure
     return (
         f"Outside the top {floor} at position on both measures "
-        f"(points per appearance {inp.avg_points_rank_pos}, expected points "
-        f"{inp.ep_rank_pos}, {inp.appearances} apps)"
+        f"(points per appearance {avg_points_rank_pos}, expected points "
+        f"{ep_rank_pos}, {appearances} apps)"
     )
+
+
+def buy_rank_refusals(
+    players: dict[str, object],
+    ranks: dict[str, dict],
+    *,
+    floor: int,
+    min_appearances: int,
+) -> dict[str, str]:
+    """player_id -> why the rank rule would sell him, for each candidate it would.
+
+    ``players`` maps id to the market player (its ``status`` is read);
+    ``ranks`` is `LeagueStore.position_ranks`. A player without a rank row is
+    unknown quality and passes, unless Kickbase already has him out for weeks.
+    """
+    refused: dict[str, str] = {}
+    for player_id, player in players.items():
+        row = ranks.get(str(player_id)) or {}
+        verdict = rank_floor_verdict(
+            status=getattr(player, "status", None),
+            avg_points_rank_pos=row.get("avg_points_rank_pos"),
+            ep_rank_pos=row.get("ep_rank_pos"),
+            appearances=row.get("appearances"),
+            floor=floor,
+            min_appearances=min_appearances,
+        )
+        if verdict is not None:
+            refused[str(player_id)] = verdict
+    return refused
 
 
 def _has_recovery_time(days_until_match: int | None, min_days: int) -> bool:

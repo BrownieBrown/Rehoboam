@@ -397,6 +397,14 @@ class Settings(BaseSettings):
         default=True,
         description="Sell a held player outside the top N at his position by points per appearance",
     )
+    buy_rank_guard_enabled: bool = Field(
+        default=True,
+        description=(
+            "Refuse a points buy the rank-sell rule would sell (same floor, "
+            "same minimum appearances); off with SELL_RANK_ENABLED too. Exempt "
+            "when the squad needs a player before kickoff."
+        ),
+    )
     sell_rank_floor: int = Field(
         default=30,
         description="The N: a held player ranked below this at his position is sold",

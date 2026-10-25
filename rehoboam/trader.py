@@ -1050,10 +1050,21 @@ class Trader:
             replacement_ep=replacement_ep,
         )
 
+        # The buy side refuses who the rank rule would sell (2026-10-25), so a
+        # buy is never undone by the next session's rank sale. Only the
+        # candidates are filtered; `market_scores` stays whole for the result.
+        rank_refused = self._rank_refusals(market_player_map, exempt=urgent or is_emergency)
+        if rank_refused:
+            console.print(
+                f"[dim]Buy rank guard: {len(rank_refused)} candidate(s) the rank rule "
+                f"would sell — not bought[/dim]"
+            )
+        buy_scores = [s for s in market_scores if str(s.player_id) not in rank_refused]
+
         # Always compute both buy recs and trade pairs so the unified trade
         # phase can rank them against each other regardless of squad size.
         buy_recs = engine.recommend_buys(
-            market_scores=market_scores,
+            market_scores=buy_scores,
             squad_scores=squad_scores,
             roster_context=roster_context,
             budget=power.spendable,
@@ -1064,7 +1075,7 @@ class Trader:
             sell_protected_ids=sell_protected_ids,
         )
         trade_pairs = engine.build_trade_pairs(
-            market_scores=market_scores,
+            market_scores=buy_scores,
             squad_scores=squad_scores,
             roster_context=roster_context,
             budget=power.spendable,
@@ -1312,6 +1323,42 @@ class Trader:
     # ------------------------------------------------------------------
     # Profit flip discovery (buy low, sell high short-hold)
     # ------------------------------------------------------------------
+
+    def _rank_refusals(self, players: dict, *, exempt: bool) -> dict[str, str]:
+        """Market players the rank-sell rule would sell, refused as buys.
+
+        The same floor and minimum appearances as the sell loop, so the two
+        sides cannot disagree about who is worth holding. Exempt when the squad
+        needs a body before kickoff (urgent or emergency); a failing store read
+        refuses nobody.
+        """
+        settings = self.settings
+        if (
+            exempt
+            or not players
+            or not getattr(settings, "buy_rank_guard_enabled", False)
+            or not getattr(settings, "sell_rank_enabled", False)
+        ):
+            return {}
+        try:
+            from .services.rank_sell import buy_rank_refusals
+            from .store.league_store import LeagueStore
+
+            ranks = LeagueStore().position_ranks([str(pid) for pid in players])
+            refused = buy_rank_refusals(
+                players,
+                ranks,
+                floor=int(settings.sell_rank_floor),
+                min_appearances=int(settings.sell_rank_min_appearances),
+            )
+        except Exception:
+            logger.warning(
+                "position ranks unavailable — the buy rank guard refuses nobody", exc_info=True
+            )
+            return {}
+        for player_id, why in refused.items():
+            logger.info("buy rank guard: refused player=%s | %s", player_id, why)
+        return refused
 
     def _sell_plan_protected_ids(self, squad_ids: list[str]) -> frozenset[str]:
         """The squad players a sell plan may not sell: the rank rule's holds.
