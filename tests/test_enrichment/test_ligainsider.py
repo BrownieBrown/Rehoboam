@@ -6,7 +6,6 @@ from pathlib import Path
 
 from rehoboam.enrichment import ligainsider
 from rehoboam.enrichment.ligainsider import (
-    ALTERNATIVE_SLOT_BASE,
     Named,
     ParsedLineup,
     lineup_rows,
@@ -14,6 +13,7 @@ from rehoboam.enrichment.ligainsider import (
     run_predicted_xi_refresh,
     slug_name,
 )
+from rehoboam.store.lineup_store import COVER_SLOT_BASE
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ligainsider_fcb_2026_10_05.html"
 PAGE = FIXTURE.read_text(encoding="utf-8")
@@ -47,6 +47,8 @@ def test_parses_eleven_starters_in_pitch_order_and_the_alternatives_beside_them(
         "Luis Díaz",
     ]
     assert [n.name for n in parsed.alternatives] == ["Stanišić", "Brown", "Karl"]
+    # each beside the starter he would replace: Laimer, Davies, Saibari
+    assert parsed.alternative_for == (2, 5, 7)
     assert parsed.starters[0].slug == "manuel-neuer_114"
 
 
@@ -73,7 +75,8 @@ def test_rows_mark_the_eleven_the_alternatives_and_the_missing():
     assert by_name["Neuer"]["player_id"] == "100"
     assert by_name["Luis Díaz"]["player_id"] == "103" and by_name["Luis Díaz"]["slot"] == 11
     assert by_name["Stanišić"]["in_xi"] is False
-    assert by_name["Stanišić"]["slot"] == ALTERNATIVE_SLOT_BASE + 1
+    assert by_name["Stanišić"]["slot"] == COVER_SLOT_BASE + 2  # beside Laimer, slot 2
+    assert by_name["Karl"]["slot"] == COVER_SLOT_BASE + 7
     assert by_name["Jamal Musiala"]["in_xi"] is False and by_name["Jamal Musiala"]["slot"] is None
     assert by_name["Jamal Musiala"]["player_id"] == "104"
     assert all(r["source"] == "ligainsider" and r["day_number"] == 5 for r in rows)
@@ -84,9 +87,13 @@ def test_rows_mark_the_eleven_the_alternatives_and_the_missing():
 
 
 class _Store:
-    def __init__(self, md):
+    def __init__(self, md, kickoffs=None):
         self.md = md
+        self.kickoffs = kickoffs or {}
         self.written = []
+
+    def team_kickoffs(self, *, season, day_number):
+        return self.kickoffs
 
     def upcoming_matchday(self, now):
         return self.md
@@ -162,3 +169,23 @@ def test_the_slug_resolves_a_display_name_the_universe_cannot():
         "18", lineup, season="2026/2027", day_number=5, fetched_at=1.0, universe=universe
     )
     assert rows[0]["player_id"] == "77" and unmatched == []
+
+
+def test_refresh_skips_a_club_whose_own_match_has_kicked_off(monkeypatch):
+    """Saturday's run must not file Friday's club's next preview under this matchday."""
+    store = _Store(MD, kickoffs={"2": 9 * DAY, "3": 11 * DAY})
+    calls = []
+    monkeypatch.setattr(
+        ligainsider, "fetch_team_page", lambda path, **kw: calls.append(path) or PAGE
+    )
+    out = run_predicted_xi_refresh(
+        store,
+        now=10 * DAY,
+        days_before=7.0,
+        throttle_seconds=0.0,
+        team_paths={"2": "/fc-bayern-muenchen/1/", "3": "/borussia-dortmund/14/"},
+        sleep=lambda s: None,
+    )
+    assert out["started"] == ["2"]
+    assert calls == ["/borussia-dortmund/14/"]
+    assert {r["team_id"] for r in store.written} == {"3"}

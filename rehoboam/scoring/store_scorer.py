@@ -37,6 +37,7 @@ class StoredPlayer:
     status_fetched_at: float | None  # epoch of the status row, None when no row
     matches: list[dict[str, Any]]  # player_match_history rows, oldest first
     predicted_xi: bool | None = None  # outside predicted eleven; None = no prediction
+    outside_code: int | None = None  # ligainsider's verdict, `lineup_prob.OUTSIDE_*`
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ def score_stored(
         "lineup_probability": player.lineup_probability,
         "lineup_model": lineup_model,
         "predicted_xi": player.predicted_xi,
+        "outside_code": player.outside_code,
     }
     probs = availability_probs(prev_status, availability, **signals)
     ep = compose_ep(

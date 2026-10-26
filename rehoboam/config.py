@@ -875,11 +875,23 @@ class Settings(BaseSettings):
         ),
     )
     predicted_xi_days_before: float = Field(
-        default=2.0,
+        default=7.0,
         description=(
             "Fetch ligainsider's predicted elevens when the next matchday's first kickoff "
-            "is within this many days (the Thursday and Friday runs before a Friday "
-            "kickoff). 0 turns the fetch off. Env: PREDICTED_XI_DAYS_BEFORE."
+            "is within this many days — every ingestion run between two rounds, so the "
+            "Monday–Wednesday trading sessions have a verdict too (Kickbase's own code "
+            "went behind Premium on 2026-10-21). A club that has already kicked off is "
+            "never refetched. 0 turns the fetch off. Env: PREDICTED_XI_DAYS_BEFORE."
+        ),
+    )
+    outside_lineup_fallback: bool = Field(
+        default=True,
+        description=(
+            "Score a player Kickbase sent no lineup code for on ligainsider's verdict "
+            "(named sure / in doubt / alternative / left out / missing), fitted by "
+            "`fit-lineup-prob` (`lineup_prob.predict_outside`); also feeds the buy "
+            "filter's 'unlikely starter' skip. No fitted outside model scores as "
+            "before. Env: OUTSIDE_LINEUP_FALLBACK."
         ),
     )
     predicted_xi_enabled: bool = Field(

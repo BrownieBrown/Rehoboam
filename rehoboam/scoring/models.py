@@ -41,6 +41,7 @@ class PlayerScore:
     position: str = ""
     club: str = ""  # REH-117: the pipeline knows it; the proposal message needs it
     lineup_probability: int | None = None  # 1=starter, 2-3=rotation, 4-5=unlikely
+    outside_lineup: int | None = None  # ligainsider's verdict, `lineup_prob.OUTSIDE_*`
     minutes_trend: str | None = None  # "increasing" | "decreasing" | "stable"
 
 
@@ -59,6 +60,8 @@ class PlayerData:
     #: An outside predicted eleven's verdict (ligainsider): True named in it,
     #: False left out while his club was predicted, None no prediction.
     predicted_xi: bool | None = None
+    #: ligainsider's fuller verdict (`lineup_prob.OUTSIDE_*`), None no prediction.
+    outside_code: int | None = None
 
 
 @dataclass

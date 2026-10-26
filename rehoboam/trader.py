@@ -270,14 +270,18 @@ class Trader:
             return {}
 
     @staticmethod
-    def _load_predicted_xi(bid_learner, settings) -> dict[str, bool]:
-        """player_id -> named in ligainsider's eleven for the upcoming matchday.
+    def _load_predicted_xi(bid_learner, settings) -> dict[str, int]:
+        """player_id -> ligainsider's verdict (`lineup_prob.OUTSIDE_*`) for the upcoming matchday.
 
-        Empty unless `PREDICTED_XI_ENABLED`; a club without a prediction has no
-        entry (None to the scorer). Cached per process for an hour, like the
-        forecasts. Best-effort: a failing read scores without it.
+        Empty unless `PREDICTED_XI_ENABLED` or `OUTSIDE_LINEUP_FALLBACK`; a club
+        without a prediction has no entry (None to the scorer). Cached per
+        process for an hour, like the forecasts. Best-effort: a failing read
+        scores without it.
         """
-        if bid_learner is None or not getattr(settings, "predicted_xi_enabled", False):
+        if bid_learner is None or not (
+            getattr(settings, "predicted_xi_enabled", False)
+            or getattr(settings, "outside_lineup_fallback", False)
+        ):
             return {}
         try:
             from .store.lineup_store import PredictedLineupStore
@@ -288,16 +292,16 @@ class Trader:
                 return cached[1]
             store = PredictedLineupStore(dsn=getattr(bid_learner, "dsn", None))
             md = store.upcoming_matchday(time.time())
-            xi = (
-                store.xi_for(season=str(md["season"]), day_number=int(md["day_number"]))
+            codes = (
+                store.codes_for(season=str(md["season"]), day_number=int(md["day_number"]))
                 if md
                 else {}
             )
             logger.info(
-                "predicted xi: %d players judged for MD%s", len(xi), md and md["day_number"]
+                "predicted xi: %d players judged for MD%s", len(codes), md and md["day_number"]
             )
-            _CURVE_CACHE[key] = (time.time(), xi)
-            return xi
+            _CURVE_CACHE[key] = (time.time(), codes)
+            return codes
         except Exception:
             logger.exception("predicted xi unavailable — scoring without it")
             return {}
@@ -594,6 +598,7 @@ class Trader:
         from .scoring.collector import DataCollector
         from .scoring.decision import DecisionEngine, alternative_gains
         from .scoring.v2.adapter import score_player_v2
+        from .scoring.v2.lineup_prob import scorer_inputs
 
         # --- 1. Fetch squad and market ---
         squad = self.api.get_squad(league)
@@ -900,6 +905,14 @@ class Trader:
         collector = DataCollector(matchup_analyzer=self.matchup_analyzer)
         predicted_xi = self._load_predicted_xi(self.bid_learner, self.settings)
 
+        def _outside_inputs(code: int | None) -> dict:
+            xi, outside = scorer_inputs(
+                code,
+                xi_enabled=bool(getattr(self.settings, "predicted_xi_enabled", False)),
+                fallback_enabled=bool(getattr(self.settings, "outside_lineup_fallback", False)),
+            )
+            return {"predicted_xi": xi, "outside_code": outside}
+
         # REH-55: scoring runs through the fitted v2 models, which return real
         # Kickbase matchday points rather than the old 0-100 index. REH-20's
         # per-position calibration multiplier is deliberately NOT applied — it
@@ -925,7 +938,7 @@ class Trader:
                     performance=perf,
                     player_details=details,
                     team_profiles=team_profiles,
-                    predicted_xi=predicted_xi.get(player.id),
+                    **_outside_inputs(predicted_xi.get(player.id)),
                 )
                 market_scores.append(
                     score_player_v2(
@@ -974,7 +987,7 @@ class Trader:
                     performance=perf,
                     player_details=details,
                     team_profiles=team_profiles,
-                    predicted_xi=predicted_xi.get(player.id),
+                    **_outside_inputs(predicted_xi.get(player.id)),
                 )
                 squad_scores.append(
                     score_player_v2(

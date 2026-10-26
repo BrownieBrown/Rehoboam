@@ -1673,22 +1673,30 @@ def fit_lineup_prob_cmd(
         True, "--write/--dry-run", help="Write `lineup_prob` into coefficients.json"
     ),
 ):
-    """Fit P(played status | Kickbase lineup code) from the store and show the
-    outside eleven's accuracy beside it.
+    """Fit P(played status | Kickbase lineup code) and P(played status |
+    ligainsider's verdict) from the store, and show the outside eleven's accuracy.
 
     Reads every played match this season with the lineup code the ingestion
     stored the day before kickoff (`CalibrationStore.lineup_code_rows`), counts
     status per code, and writes the counts as `lineup_prob` in
     coefficients.json — the scorer blends them onto the Markov row
     (`scoring/v2/lineup_prob.py`). Re-run after each matchday; the training
-    set grows one matchday a week from 2026-09-14.
+    set grows one matchday a week from 2026-09-14. The ligainsider counts
+    (`lineup_prob.OUTSIDE_*`) are the stand-in the scorer reads where Kickbase
+    sent no code — every player since the code went behind Premium (2026-10-21).
     """
     import time
     from collections import Counter, defaultdict
 
     from .scoring.v2.coefficients import COEFFICIENTS_PATH, save_lineup_prob
-    from .scoring.v2.lineup_prob import LINEUP_CODES, fit_lineup_prob
+    from .scoring.v2.lineup_prob import (
+        LINEUP_CODES,
+        OUTSIDE_CODES,
+        OUTSIDE_LABELS,
+        fit_lineup_prob,
+    )
     from .store.calibration_store import CalibrationStore
+    from .store.lineup_store import PredictedLineupStore
 
     _ensure_store()
     store = CalibrationStore()
@@ -1701,8 +1709,13 @@ def fit_lineup_prob_cmd(
         console.print(f"[yellow]No played matches with a stored lineup code in {season}[/yellow]")
         raise typer.Exit(1)
     matchdays = sorted({r["day_number"] for r in rows})
+    lineups = PredictedLineupStore()
+    codes_by_md = {md: lineups.codes_for(season=season, day_number=md) for md in matchdays}
+    for r in rows:
+        r["outside_code"] = codes_by_md[r["day_number"]].get(r["player_id"])
     model = fit_lineup_prob(
         ((r["lineup_probability"], r["status"]) for r in rows),
+        outside_observations=((r["outside_code"], r["status"]) for r in rows),
         shrinkage_k=shrinkage_k,
         meta={
             "season": season,
@@ -1739,6 +1752,47 @@ def fit_lineup_prob_cmd(
             f"{sum(r['points'] for r in group) / n:.1f}",
         )
     console.print(table)
+
+    if model.outside is not None:
+        outside = Table(title=f"ligainsider verdict vs played status — {season}")
+        outside.add_column("verdict")
+        outside.add_column("n", justify="right")
+        outside.add_column("started", justify="right")
+        outside.add_column("on pitch", justify="right")
+        outside.add_column("not in squad", justify="right")
+        for code in OUTSIDE_CODES:
+            row = model.outside.counts.get(code)
+            n = sum(row.values()) if row else 0
+            if not n:
+                outside.add_row(OUTSIDE_LABELS[code], "0", "-", "-", "-")
+                continue
+            outside.add_row(
+                OUTSIDE_LABELS[code],
+                str(n),
+                f"{row.get(5, 0) / n:.0%}",
+                f"{(row.get(3, 0) + row.get(5, 0)) / n:.0%}",
+                f"{row.get(1, 0) / n:.0%}",
+            )
+        console.print(outside)
+
+    lead_rows = store.outside_xi_by_lead(season=season, before=time.time())
+    if lead_rows:
+        lead = Table(title="Outside eleven vs started, by days before kickoff (from predictions)")
+        lead.add_column("days before")
+        lead.add_column("named", justify="right")
+        lead.add_column("named & started", justify="right")
+        lead.add_column("left out", justify="right")
+        lead.add_column("left out & started", justify="right")
+        per_lead: dict[int, dict[bool, tuple[int, int]]] = defaultdict(dict)
+        for r in lead_rows:
+            per_lead[int(r["lead_days"])][bool(r["predicted_xi"])] = (r["n"], r["started"])
+        for days, by_verdict in sorted(per_lead.items()):
+            cells = []
+            for verdict in (True, False):
+                n, started = by_verdict.get(verdict, (0, 0))
+                cells += [str(n), f"{started} ({started / n:.0%})" if n else "-"]
+            lead.add_row(str(days), *cells)
+        console.print(lead)
 
     judged = [r for r in rows if r.get("predicted_xi") is not None]
     if judged:
