@@ -11,6 +11,19 @@ import type { Tone } from "@/lib/format";
  * noise, not a bargain -- and this is the one place that decides how big a
  * difference has to be before the site calls it one.
  */
+/**
+ * How far fair price must sit from market value before the site says so.
+ * Set at the fit's own typical miss (34% between 5 and 15 m): anything
+ * closer is indistinguishable from the line being wrong about him.
+ *
+ * What the label does NOT mean: a week's backtest (2026-09-15 to 09-21, 195
+ * likely starters from 5 m up) found no link between this gap and where his
+ * market value went next -- "cheap by 35%+" rose 47% of the time, "expensive
+ * by 35%+" 49%. So "cheap" reads "many expected points for the money", never
+ * "his price will rise". `Next MV` is the column for that.
+ */
+export const NOISE_BAND_PCT = 35;
+
 export type FairVerdict = {
   /** Fair price against market value, in percent: +25 means the market asks
    * 25% LESS than his expected points usually cost -- he is cheap. */
@@ -29,7 +42,7 @@ export function fairVerdict(
   if (marketValue === null || marketValue === undefined || marketValue <= 0) return null;
   const gapPct = ((fairPrice - marketValue) / marketValue) * 100;
 
-  // TODO(owner): decide where "noise" ends and "cheap"/"expensive" begins.
-  // Until then everything reads as fair, so nothing on the site over-claims.
+  if (gapPct >= NOISE_BAND_PCT) return { gapPct, label: "cheap", tone: "positive" };
+  if (gapPct <= -NOISE_BAND_PCT) return { gapPct, label: "expensive", tone: "negative" };
   return { gapPct, label: "fair", tone: "neutral" };
 }
