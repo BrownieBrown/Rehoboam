@@ -15,6 +15,8 @@ from .learning.tracker import FlipIntent
 from .notify.telegram import send_message
 from .services import AutoTradeResult, ExecutionService
 from .services import budget as budget_rules
+from .services.books import CoreBookCheck
+from .services.books import Holding as CoreHolding
 from .services.emergency_window import emergency_fill_due
 from .services.execution import LOCKOUT_DAYS
 from .services.flip_exit import flip_exit_reason
@@ -92,8 +94,15 @@ def _build_buy_gate(
     marginal_ep_gain: float | None,
     released_player_id: str | None = None,
     session_refusal: str | None = None,
+    released_proceeds: int = 0,
+    core_book: bool = True,
 ) -> BuyGate:
     """The safety gate for one autonomous candidate (REH-100).
+
+    ``core_book`` attaches the core-book rule (`services/books`): a debt the
+    non-core holdings could not repay is refused. False on the emergency fill
+    only. ``released_proceeds`` is a trade pair's sale, counted as cash for
+    that rule (the player himself is left out of the holdings).
 
     Every autonomous buy is built here rather than at each call site, so a new
     buy path cannot quietly acquire a weaker gate than the existing ones.
@@ -147,6 +156,55 @@ def _build_buy_gate(
         total_worth=_total_worth(ctx),
         max_single_buy_pct=settings.max_single_buy_pct_of_worth,
         session_refusal=session_refusal,
+        core_book=(
+            _core_book_check(
+                settings=settings,
+                ctx=ctx,
+                player=player,
+                holdings=holdings,
+                released_proceeds=released_proceeds,
+            )
+            if core_book
+            else None
+        ),
+    )
+
+
+def _holding(player, ep_by_id: dict[str, float]) -> CoreHolding:
+    avg = getattr(player, "average_points", None)
+    return CoreHolding(
+        player_id=str(player.id),
+        market_value=int(getattr(player, "market_value", 0) or 0),
+        expected_points=float(ep_by_id.get(str(player.id), 0.0)),
+        avg_points=float(avg) if avg else None,
+    )
+
+
+def _core_book_check(
+    *, settings, ctx, player, holdings: list, released_proceeds: int
+) -> CoreBookCheck | None:
+    """The core-book rule's inputs for one candidate, or None when it is off.
+
+    ``holdings`` is squad plus open offers, already without a trade pair's
+    released player. Expected points come from this session's scores; a
+    holding without one counts as 0.0 (never core by points), which errs
+    toward treating him as tradable — his market value is still real cash.
+    """
+    if not bool(getattr(settings, "core_book_enabled", False)):
+        return None
+    ep_result = getattr(ctx, "ep_result", None) or {}
+    ep_by_id = {
+        str(s.player_id): float(s.expected_points) for s in ep_result.get("squad_scores") or []
+    }
+    for pid, s in (ep_result.get("market_scores") or {}).items():
+        ep_by_id.setdefault(str(pid), float(s.expected_points))
+    open_offers = sum(int(v or 0) for v in (getattr(ctx, "my_bid_amounts", None) or {}).values())
+    return CoreBookCheck(
+        holdings=tuple(_holding(h, ep_by_id) for h in holdings),
+        candidate=_holding(player, ep_by_id),
+        wallet=int(getattr(ctx, "current_budget", 0) or 0) + int(released_proceeds),
+        open_offers=open_offers,
+        core_size=int(getattr(settings, "core_book_size", 6)),
     )
 
 
@@ -1776,6 +1834,7 @@ class AutoTrader:
                         free_slots=1,
                         marginal_ep_gain=obj.ep_gain,
                         released_player_id=obj.sell_player.id,
+                        released_proceeds=int(sell_result.price),
                         session_refusal=getattr(ctx, "session_refusal", None),
                     ),
                 )
@@ -1922,6 +1981,7 @@ class AutoTrader:
             free_slots=1,
             marginal_ep_gain=pair.ep_gain,
             released_player_id=pair.sell_player.id,
+            released_proceeds=proceeds,
             session_refusal=getattr(ctx, "session_refusal", None),
         )
         verdict = gate.check(player_id=pair.buy_player.id, bid=int(pair.recommended_bid))
@@ -2031,6 +2091,18 @@ class AutoTrader:
         open_count += sum(1 for r in rows if (r.get("intent") or "") == "flip")
         return held_value, open_count
 
+    def _core_of(self, squad: list, score_map: dict[str, float]) -> frozenset[str]:
+        """The squad's core book (`services/books`); empty when the rule is off."""
+        from .services.books import core_ids
+
+        if not bool(getattr(self.settings, "core_book_enabled", False)):
+            return frozenset()
+        ep_by_id = {str(k): float(v) for k, v in score_map.items()}
+        return core_ids(
+            [_holding(p, ep_by_id) for p in squad],
+            size=int(getattr(self.settings, "core_book_size", 6)),
+        )
+
     def _run_debt_recovery(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Sell until the wallet, net of open offers, is back at zero.
 
@@ -2079,6 +2151,7 @@ class AutoTrader:
         )
 
         held_ids = trader._sell_plan_protected_ids([p.id for p in squad])
+        core = self._core_of(squad, score_map)
         by_id = {p.id: p for p in squad}
         candidates: list[DebtCandidate] = []
         for p in squad:
@@ -2098,6 +2171,7 @@ class AutoTrader:
                     in_best_eleven=p.id in best_ids,
                     trend_7d_pct=trend,
                     rank_held=p.id in held_ids,
+                    core=str(p.id) in core,
                 )
             )
 
@@ -2117,7 +2191,8 @@ class AutoTrader:
                 f"{c.name}@{c.sell_value:,}"
                 f"({'+' if (c.profit_pct or 0) >= 0 else ''}{(c.profit_pct or 0):.0f}%"
                 f"{', starter' if c.in_best_eleven else ''}"
-                f"{', rank-held' if c.rank_held else ''})"
+                f"{', rank-held' if c.rank_held else ''}"
+                f"{', core' if c.core else ''})"
                 for c in plan.sells
             ),
         )
@@ -2384,6 +2459,9 @@ class AutoTrader:
                     # this session takes one of both.
                     free_slots=min(slots_short, SQUAD_CAP - len(fresh_squad)) - bought,
                     marginal_ep_gain=rec.marginal_ep_gain,
+                    # Nor the core-book rule: the fill buys in the locked
+                    # window, where no debt is allowed anyway.
+                    core_book=False,
                     # No `session_refusal`: this is the emergency fill, and an
                     # empty lineup slot is -100 points — worse than the deficit
                     # PR D's I3 guards against, so this path is exempt from it.
