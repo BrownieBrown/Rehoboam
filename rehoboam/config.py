@@ -323,6 +323,33 @@ class Settings(BaseSettings):
             "Env: FLIP_MAX_DECEL_RATIO."
         ),
     )
+    flip_entry_momentum_enabled: bool = Field(
+        default=True,
+        description=(
+            "Judge flip entries on the three-night move (services/flip_entry) instead of "
+            "the 14-day trend and the 20-point average floor, which pass a run only once "
+            "it is over (2026-11-01: they dropped 70 of 115 good listings)."
+        ),
+    )
+    flip_min_3d_move_pct: float = Field(
+        default=5.0,
+        description="Momentum entry: the three-night move a flip needs, in percent.",
+    )
+    flip_expected_gain_pct: float = Field(
+        default=15.0,
+        description=(
+            "Momentum entry: the appreciation a flip is priced on (October 2026 median "
+            "of the signal, +16.9%). The turn exit decides the sale, not this."
+        ),
+    )
+    flip_starter_band_from: int = Field(
+        default=5_000_000,
+        description="Momentum entry: from this market value a flip needs lineup code 1-2.",
+    )
+    flip_max_market_value: int = Field(
+        default=15_000_000,
+        description="Momentum entry: no flip at or above this market value.",
+    )
     flip_buys_require_rising_trend: bool = Field(
         default=True,
         description=(

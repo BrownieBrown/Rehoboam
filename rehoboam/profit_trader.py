@@ -1,9 +1,15 @@
 """Profit trading - Buy low, sell high to accumulate budget"""
 
+import logging
 import math
+from collections import Counter
 from dataclasses import dataclass
 
 from rich.console import Console
+
+from .services.flip_entry import flip_entry
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -39,6 +45,17 @@ class FlipTrade:
     status: str = "holding"  # holding, sold, target
 
 
+@dataclass(frozen=True)
+class FlipEntryRules:
+    """The momentum entry (`services/flip_entry`), as configured."""
+
+    min_3d_move_pct: float = 5.0
+    expected_gain_pct: float = 15.0
+    min_average_points: float = 20.0
+    starter_band_from: int = 5_000_000
+    max_market_value: int = 15_000_000
+
+
 class ProfitTrader:
     """Find and execute profit trading opportunities"""
 
@@ -51,6 +68,7 @@ class ProfitTrader:
         require_rising_trend: bool = True,
         min_last_move_pct: float = 0.0,
         max_decel_ratio: float = 0.0,
+        entry_rules: FlipEntryRules | None = None,
     ):
         """
         Args:
@@ -74,6 +92,10 @@ class ProfitTrader:
         # end, not one to join. Both default to 0 = off.
         self.min_last_move_pct = float(min_last_move_pct)
         self.max_decel_ratio = float(max_decel_ratio)
+        # The momentum entry (2026-11-01): when set, a Kickbase listing is
+        # judged by `services/flip_entry` instead of the 14-day trend and the
+        # average-points floor, which only pass a run once it is over.
+        self.entry_rules = entry_rules
 
     def _entry_price(self, player, forecast_pct: float | None) -> int:
         """What the flip bids: the overpay cap, lifted to the forecast value.
@@ -135,6 +157,7 @@ class ProfitTrader:
         forecasts = player_forecasts or {}
         meets_threshold = 0
         small_sample_filtered = 0
+        drops: Counter[str] = Counter()
 
         # Use debt capacity for affordability (can go negative to flip)
         max_debt = int(team_value * (max_debt_pct / 100)) if team_value > 0 else 0
@@ -145,12 +168,14 @@ class ProfitTrader:
 
             # Skip injured/unavailable players
             if player.status != 0:
+                drops["status"] += 1
                 continue
 
             healthy += 1
 
             # Must be affordable (including debt capacity)
             if player.price > max_affordable:
+                drops["unaffordable"] += 1
                 continue
 
             affordable += 1
@@ -158,6 +183,7 @@ class ProfitTrader:
             # Get trend data (required for KICKBASE players)
             trend = player_trends.get(player.id, {})
             if not trend.get("has_data", False):
+                drops["no_trend"] += 1
                 continue  # Skip players without trend data
 
             has_trend_data += 1
@@ -172,96 +198,119 @@ class ProfitTrader:
             is_kickbase = player.price == player.market_value
 
             if is_kickbase:
-                # KICKBASE players: Look for momentum opportunities ONLY
-                # ONLY bid on rising trend players with decent points
-
-                # Filter 1: Must have minimum avg points (avoid 0-point players)
-                MIN_AVG_POINTS = 20.0  # Don't flip players with <20 pts/week (relaxed from 30)
-                if player.average_points < MIN_AVG_POINTS:
-                    continue  # Skip low-performing players
-
-                # Filter 2: CRITICAL - Detect and skip small sample size anomalies
-                # Players like Emre Can (1 game, 100+ points) have:
-                # - Very high average points (>80)
-                # - Very strong rising trend (>40%) - market reacting to one game
-                # - This is a small sample size trap!
-                # HEURISTIC: If avg_points > 80 AND trend > 40%, likely 1-2 game anomaly
-                if player.average_points > 80 and trend_pct > 40:
-                    small_sample_filtered += 1
-                    console.print(
-                        f"[yellow]⚠️  Filtered {player.first_name} {player.last_name} from profit trades: "
-                        f"Likely small sample size ({player.average_points:.1f} pts/game, +{trend_pct:.1f}% trend)[/yellow]"
+                if self.entry_rules is not None:
+                    rules = self.entry_rules
+                    verdict = flip_entry(
+                        market_value=int(player.market_value),
+                        average_points=player.average_points,
+                        lineup_code=getattr(player, "lineup_probability", None),
+                        last_move_pct=trend.get("trend_1d_pct"),
+                        prev_move_pct=trend.get("trend_1d_prev_pct"),
+                        move_3d_pct=trend.get("trend_3d_pct"),
+                        forecast_pct=forecasts.get(player.id),
+                        min_3d_move_pct=rules.min_3d_move_pct,
+                        min_last_move_pct=self.min_last_move_pct,
+                        max_decel_ratio=self.max_decel_ratio,
+                        expected_gain_pct=rules.expected_gain_pct,
+                        min_average_points=rules.min_average_points,
+                        starter_band_from=rules.starter_band_from,
+                        max_market_value=rules.max_market_value,
                     )
-                    continue  # Skip small sample size anomalies
-
-                # Filter 3: Accept rising trends OR stable performers with good
-                # points OR dip-in-uptrend (mean reversion).
-                expected_appreciation = 0
-                is_dip_in_uptrend = trend.get("is_dip_in_uptrend", False)
-                is_secular_decline = trend.get("is_secular_decline", False)
-                is_recovery = trend.get("is_recovery", False)
-
-                if trend_direction == "rising" and trend_pct > 5:
-                    # Expect trend to continue (cap at 20%)
-                    expected_appreciation = min(trend_pct, 20)
-                    # The rise must still be a rise tonight. Kömür and Wöber
-                    # (2026-10-02) were +60% over 14 days and had already
-                    # turned: -1.5%, then -8% and -9% the night before the
-                    # bid. The 14-day window cannot see that; the last move
-                    # and the forecast can.
-                    last_move = trend.get("trend_1d_pct")
-                    forecast = forecasts.get(player.id)
-                    if (last_move is not None and last_move < 0) or (
-                        forecast is not None and forecast < 0
-                    ):
-                        turned_filtered += 1
+                    if not verdict.ok:
+                        drops[verdict.reason] += 1
                         continue
-                    if last_move is not None and last_move < self.min_last_move_pct:
-                        turned_filtered += 1
-                        continue
-                    prev_move = trend.get("trend_1d_prev_pct")
-                    if (
-                        last_move is not None
-                        and prev_move is not None
-                        and prev_move > 0
-                        and self.max_decel_ratio > 0
-                        and last_move < self.max_decel_ratio * prev_move
-                    ):
-                        turned_filtered += 1  # the rise halved overnight: slowing to a stop
-                        continue
-                elif self.require_rising_trend:
-                    # Every branch below is a bet that the market is wrong —
-                    # mean reversion on a dip, a recovery, a stable performer,
-                    # or a fallen high-scorer. Across 151 real flips those bets
-                    # lost EUR 55.3M at a 28% win rate. A rising trend is the
-                    # one case where the market is already moving our way.
-                    not_rising_filtered += 1
-                    continue
-                elif is_recovery and player.average_points >= 30:
-                    # Recovery signal: short-term reversal after dip → catch the bounce
-                    expected_appreciation = 12
-                elif is_dip_in_uptrend and player.average_points >= 30:
-                    # Genuine dip in a longer uptrend — best mean-reversion play.
-                    # Trend service already filtered for: recent down + medium up.
-                    expected_appreciation = 10
-                elif trend_direction == "stable" and player.average_points >= 40:
-                    # Stable good performers - conservative 8% appreciation
-                    expected_appreciation = 8
-                elif trend_direction == "falling" and peak_value > 0:
-                    # Hard mean reversion for high-quality players that crashed.
-                    # Stricter threshold than dip-in-uptrend because a falling
-                    # trend without uptrend context is riskier.
-                    if is_secular_decline:
-                        continue  # genuine decline, not a dip — avoid
-                    current_vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
-                    if current_vs_peak_pct < -25 and player.average_points >= 40:
-                        # >25% below peak + high performer + not in secular decline
-                        expected_appreciation = min(abs(current_vs_peak_pct) * 0.3, 15)
-                    else:
-                        continue  # Not deep enough or not high enough quality
+                    expected_appreciation = verdict.expected_pct
                 else:
-                    # Not a recognized profit pattern — skip
-                    continue
+                    # KICKBASE players: Look for momentum opportunities ONLY
+                    # ONLY bid on rising trend players with decent points
+
+                    # Filter 1: Must have minimum avg points (avoid 0-point players)
+                    MIN_AVG_POINTS = 20.0  # Don't flip players with <20 pts/week (relaxed from 30)
+                    if player.average_points < MIN_AVG_POINTS:
+                        continue  # Skip low-performing players
+
+                    # Filter 2: CRITICAL - Detect and skip small sample size anomalies
+                    # Players like Emre Can (1 game, 100+ points) have:
+                    # - Very high average points (>80)
+                    # - Very strong rising trend (>40%) - market reacting to one game
+                    # - This is a small sample size trap!
+                    # HEURISTIC: If avg_points > 80 AND trend > 40%, likely 1-2 game anomaly
+                    if player.average_points > 80 and trend_pct > 40:
+                        small_sample_filtered += 1
+                        console.print(
+                            f"[yellow]⚠️  Filtered {player.first_name} {player.last_name} from profit trades: "
+                            f"Likely small sample size ({player.average_points:.1f} pts/game, +{trend_pct:.1f}% trend)[/yellow]"
+                        )
+                        continue  # Skip small sample size anomalies
+
+                    # Filter 3: Accept rising trends OR stable performers with good
+                    # points OR dip-in-uptrend (mean reversion).
+                    expected_appreciation = 0
+                    is_dip_in_uptrend = trend.get("is_dip_in_uptrend", False)
+                    is_secular_decline = trend.get("is_secular_decline", False)
+                    is_recovery = trend.get("is_recovery", False)
+
+                    if trend_direction == "rising" and trend_pct > 5:
+                        # Expect trend to continue (cap at 20%)
+                        expected_appreciation = min(trend_pct, 20)
+                        # The rise must still be a rise tonight. Kömür and Wöber
+                        # (2026-10-02) were +60% over 14 days and had already
+                        # turned: -1.5%, then -8% and -9% the night before the
+                        # bid. The 14-day window cannot see that; the last move
+                        # and the forecast can.
+                        last_move = trend.get("trend_1d_pct")
+                        forecast = forecasts.get(player.id)
+                        if (last_move is not None and last_move < 0) or (
+                            forecast is not None and forecast < 0
+                        ):
+                            turned_filtered += 1
+                            continue
+                        if last_move is not None and last_move < self.min_last_move_pct:
+                            turned_filtered += 1
+                            continue
+                        prev_move = trend.get("trend_1d_prev_pct")
+                        if (
+                            last_move is not None
+                            and prev_move is not None
+                            and prev_move > 0
+                            and self.max_decel_ratio > 0
+                            and last_move < self.max_decel_ratio * prev_move
+                        ):
+                            turned_filtered += 1  # the rise halved overnight: slowing to a stop
+                            continue
+                    elif self.require_rising_trend:
+                        # Every branch below is a bet that the market is wrong —
+                        # mean reversion on a dip, a recovery, a stable performer,
+                        # or a fallen high-scorer. Across 151 real flips those bets
+                        # lost EUR 55.3M at a 28% win rate. A rising trend is the
+                        # one case where the market is already moving our way.
+                        not_rising_filtered += 1
+                        continue
+                    elif is_recovery and player.average_points >= 30:
+                        # Recovery signal: short-term reversal after dip → catch the bounce
+                        expected_appreciation = 12
+                    elif is_dip_in_uptrend and player.average_points >= 30:
+                        # Genuine dip in a longer uptrend — best mean-reversion play.
+                        # Trend service already filtered for: recent down + medium up.
+                        expected_appreciation = 10
+                    elif trend_direction == "stable" and player.average_points >= 40:
+                        # Stable good performers - conservative 8% appreciation
+                        expected_appreciation = 8
+                    elif trend_direction == "falling" and peak_value > 0:
+                        # Hard mean reversion for high-quality players that crashed.
+                        # Stricter threshold than dip-in-uptrend because a falling
+                        # trend without uptrend context is riskier.
+                        if is_secular_decline:
+                            continue  # genuine decline, not a dip — avoid
+                        current_vs_peak_pct = ((current_value - peak_value) / peak_value) * 100
+                        if current_vs_peak_pct < -25 and player.average_points >= 40:
+                            # >25% below peak + high performer + not in secular decline
+                            expected_appreciation = min(abs(current_vs_peak_pct) * 0.3, 15)
+                        else:
+                            continue  # Not deep enough or not high enough quality
+                    else:
+                        # Not a recognized profit pattern — skip
+                        continue
 
                 # The entry premium: a bid below the market value at expiry
                 # is declined, and the listing expires after the update, so
@@ -272,6 +321,7 @@ class ProfitTrader:
                 if expected_appreciation - entry_pct < self.min_profit_pct:
                     if entry_pct > 0:
                         entry_filtered += 1
+                    drops["entry_premium"] += 1
                     continue
 
                 # Virtual "value gap" based on expected appreciation
@@ -307,6 +357,7 @@ class ProfitTrader:
 
             # Skip if too risky
             if risk_score > self.max_risk_score:
+                drops["risk"] += 1
                 continue
 
             # Estimate holding period
@@ -363,6 +414,17 @@ class ProfitTrader:
                     reason=reason,
                 )
             )
+
+        # One line per search: what was looked at and what dropped it, so a
+        # silent filter shows up in the logs (2026-11-01: an offline replay
+        # was needed to see that two filters dropped 70 of 115 good listings).
+        logger.info(
+            "flip-search entry=%s checked=%d passed=%d drops=%s",
+            "momentum" if self.entry_rules is not None else "trend14",
+            checked,
+            len(opportunities),
+            dict(sorted(drops.items())),
+        )
 
         # Sort by profit potential (value gap % + expected appreciation)
         opportunities.sort(key=lambda o: o.value_gap_pct + o.expected_appreciation, reverse=True)
