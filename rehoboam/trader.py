@@ -177,6 +177,24 @@ def matchday_in_progress(
     return any(cutoff <= f < now for f in fixtures)
 
 
+def flip_entry_rules(settings):
+    """The momentum flip entry as configured, or None for the legacy rule.
+
+    A test-double `Settings` without the switch gets the legacy rule, like
+    every other optional flip guard read with `getattr`.
+    """
+    from .profit_trader import FlipEntryRules
+
+    if not bool(getattr(settings, "flip_entry_momentum_enabled", False)):
+        return None
+    return FlipEntryRules(
+        min_3d_move_pct=float(settings.flip_min_3d_move_pct),
+        expected_gain_pct=float(settings.flip_expected_gain_pct),
+        starter_band_from=int(settings.flip_starter_band_from),
+        max_market_value=int(settings.flip_max_market_value),
+    )
+
+
 class Trader:
     """EP-first orchestrator for the auto trading pipeline."""
 
@@ -1487,6 +1505,7 @@ class Trader:
             require_rising_trend=self.settings.flip_buys_require_rising_trend,
             min_last_move_pct=float(getattr(self.settings, "flip_min_last_move_pct", 0.0)),
             max_decel_ratio=float(getattr(self.settings, "flip_max_decel_ratio", 0.0)),
+            entry_rules=flip_entry_rules(self.settings),
         )
 
         max_opps = 5 if flip_budget < current_budget else 10

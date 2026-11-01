@@ -43,6 +43,9 @@ class TrendAnalysis:
     # Multi-window % changes
     trend_1d_pct: float = 0.0  # the last nightly move (2026-10-07: a turned rise)
     trend_1d_prev_pct: float = 0.0  # the move the night before (a slowing rise)
+    #: Three nights' move (2026-11-01): the flip entry signal. The 14-day
+    #: window only sees a run once it is over.
+    trend_3d_pct: float = 0.0
     trend_7d_pct: float = 0.0
     trend_14d_pct: float = 0.0
     trend_30d_pct: float = 0.0
@@ -86,6 +89,7 @@ class TrendAnalysis:
             "trend_pct": self.trend_14d_pct,
             "trend_1d_pct": self.trend_1d_pct,
             "trend_1d_prev_pct": self.trend_1d_prev_pct,
+            "trend_3d_pct": self.trend_3d_pct,
             "trend_7d_pct": self.trend_7d_pct,
             "trend_14d_pct": self.trend_14d_pct,
             "trend_30d_pct": self.trend_30d_pct,
@@ -297,6 +301,13 @@ class TrendService:
         else:
             trend_1d = pct_change(values[-1], current)
             trend_1d_prev = pct_change(values[-2], values[-1])
+        # Three nights back from `current`, aligned like the one-night move.
+        nightly_base = values[:-1] if values[-1] == current else values
+        trend_3d = (
+            pct_change(nightly_base[-3], current)
+            if len(nightly_base) >= 3
+            else pct_change(nightly_base[0], current)
+        )
         trend_7d = pct_change(values[-min(7, n)], current) if n >= 2 else 0.0
         trend_14d = pct_change(values[-min(14, n)], current) if n >= 2 else 0.0
         trend_30d = pct_change(values[-min(30, n)], current) if n >= 2 else 0.0
@@ -355,6 +366,7 @@ class TrendService:
             # Multi-window
             trend_1d_pct=round(trend_1d, 2),
             trend_1d_prev_pct=round(trend_1d_prev, 2),
+            trend_3d_pct=round(trend_3d, 2),
             trend_7d_pct=round(trend_7d, 2),
             trend_14d_pct=round(trend_14d, 2),
             trend_30d_pct=round(trend_30d, 2),

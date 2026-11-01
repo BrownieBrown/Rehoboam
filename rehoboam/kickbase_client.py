@@ -47,6 +47,14 @@ class League:
         )
 
 
+def _opt_code(value: Any) -> int | None:
+    """Kickbase's lineup code as an int, or None when absent or malformed."""
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class MarketPlayer:
     """Player on the market"""
@@ -70,6 +78,8 @@ class MarketPlayer:
     # cancel_offer passing it as {offer_id} — see has_user_offer (REH-95).
     listed_at: str | None = None  # When player was listed (ISO datetime)
     offers: list = None  # List of all offers
+    #: Kickbase's lineup code (`prob`, Premium only): 1 starter ... 5 unlikely.
+    lineup_probability: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MarketPlayer":
@@ -95,6 +105,7 @@ class MarketPlayer:
             user_offer_id=data.get("uoid"),
             listed_at=data.get("dt"),
             offers=data.get("ofs", []),
+            lineup_probability=_opt_code(data.get("prob")),
         )
 
     def is_kickbase_seller(self) -> bool:
