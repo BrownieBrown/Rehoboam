@@ -155,6 +155,22 @@ class Settings(BaseSettings):
         default=60.0,
         description="Maximum debt allowed as % of team value (can go negative up to this)",
     )
+    core_book_enabled: bool = Field(
+        default=True,
+        description=(
+            "Debt may only be taken where the non-core holdings could repay it, and the "
+            "locked-window recovery sells the core last (services/books.py; Raum, 2026-10-28)."
+        ),
+    )
+    core_book_size: int = Field(
+        default=6,
+        ge=0,
+        le=15,
+        description=(
+            "How many players form the core the debt is never repaid with. 6 is the "
+            "leaders' median count of 28-day+ holds (2026-11-01: 4-7)."
+        ),
+    )
 
     # Squad Management Safeguards
     min_squad_size: int = Field(

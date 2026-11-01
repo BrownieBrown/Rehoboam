@@ -23,8 +23,10 @@ or expected points, the same set the sell plan refuses to sell
 and only when the unheld cannot cover: on 2026-10-13 the tiers alone sold
 Quansah (EP 119, 7th defender by EP, +4% over cost) with Tanaka to clear
 21.7m while Demirović, Scally and Tanaka — the three the rank rule itself
-wanted gone — summed to 23.55m. An ordering, never a block (Marco,
-2026-09-22: sell guards order, never block).
+wanted gone — summed to 23.55m. A core-book player (`services/books`) is
+held the same way: on 2026-10-28 the recovery sold Raum to repay the debt
+Coufal had been bought on. An ordering, never a block (Marco, 2026-09-22:
+sell guards order, never block).
 
 A player whose position is at its formation minimum goes last of all, and
 only when nothing else covers the debt: the emergency fill, which runs right
@@ -55,6 +57,9 @@ class DebtCandidate:
     trend_7d_pct: float | None = None
     #: Inside the rank rule's floor on either measure: sold after the unheld.
     rank_held: bool = False
+    #: In the core book (`services/books`): sold after the unheld, like a
+    #: rank hold. The debt was taken on the promise that the rest repays it.
+    core: bool = False
 
     @property
     def profit_pct(self) -> float | None:
@@ -101,7 +106,7 @@ def _tier(c: DebtCandidate) -> int:
 
 
 def _held(c: DebtCandidate) -> int:
-    return 1 if c.rank_held else 0
+    return 1 if (c.rank_held or c.core) else 0
 
 
 def _sacrifice_key(c: DebtCandidate) -> tuple:

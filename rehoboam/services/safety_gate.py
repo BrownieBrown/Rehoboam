@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from rehoboam.config import MAX_PLAYERS_PER_CLUB
 from rehoboam.services.bid_ceiling import FALLBACK_TIER, BidCeilingPolicy, Tier
+from rehoboam.services.books import CoreBookCheck
 
 
 def club_counts(holdings: Iterable[object]) -> dict[str, int]:
@@ -58,6 +59,7 @@ def check_buy(
     total_worth: int | None = None,
     max_single_buy_pct: float | None = None,
     session_refusal: str | None = None,
+    core_book_reason: str | None = None,
 ) -> GateResult:
     """Is this buy allowed to execute?
 
@@ -138,6 +140,11 @@ def check_buy(
                 f"EUR {total_worth:,}) — grow team value, selling will not raise it"
             )
 
+    # A debt only the core could repay (`services/books`). Computed by the
+    # caller because it needs the squad; reported like any other reason.
+    if core_book_reason:
+        reasons.append(core_book_reason)
+
     if session_refusal:
         reasons.append(session_refusal)
 
@@ -186,10 +193,15 @@ class BuyGate:
     #: given this — an empty lineup slot is -100 points, worse than the
     #: deficit I3 guards against.
     session_refusal: str | None = None
+    #: The core-book rule (`services/books`): None on the emergency fill —
+    #: an empty slot is -100 points, and that path buys in the locked window
+    #: where no debt is allowed anyway.
+    core_book: CoreBookCheck | None = None
 
     def check(self, *, player_id: str, bid: int) -> GateResult:
         """Run the gate for this player at this price."""
         return check_buy(
+            core_book_reason=self.core_book.reason(bid) if self.core_book else None,
             player_id=player_id,
             bid=bid,
             market_value=self.market_value,
