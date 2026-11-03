@@ -13,14 +13,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from rehoboam.services.flip_sizing import flip_size_reason
+from tests import test_pacing_flips as _pacing_flips
 from tests.test_pacing_flips import (
     _configure,
     _ctx,
     _flip_opp,
     _successful_buy,
-    trader,
-    settings,
-)  # noqa: F401
+)
+
+# Shared pytest fixtures, bound by name so pytest finds them here.
+settings = _pacing_flips.settings
+trader = _pacing_flips.trader
 
 KW = {"max_fraction": 0.34, "max_open": 3}
 
@@ -55,10 +58,81 @@ class TestTheStake:
         assert why == "3 flips already open (max 3)"
 
 
+class TestTheFirstFlip:
+    """2026-11-03: with nothing open the float is the bare wallet (14.2m), so
+    34% allowed 4.8m while the momentum entry passed only 6-9.5m starters —
+    eight candidates in four sessions, all refused, all rising. The first
+    open flip may take a larger slice; every later one is back at 34%."""
+
+    FIRST = {**KW, "first_flip_fraction": 0.60}
+
+    def test_the_first_flip_may_take_the_larger_slice(self):
+        assert (
+            flip_size_reason(
+                8_032_000, cash=14_205_522, held_flip_value=0, open_flips=0, **self.FIRST
+            )
+            is None
+        )
+
+    def test_the_first_flip_is_still_capped(self):
+        why = flip_size_reason(
+            9_517_918, cash=14_205_522, held_flip_value=0, open_flips=0, **self.FIRST
+        )
+        assert why == (
+            "EUR 9,517,918 is more than 60% of the EUR 14,205,522 float (max EUR 8,523,313)"
+        )
+
+    def test_a_second_flip_is_back_at_the_ordinary_fraction(self):
+        why = flip_size_reason(
+            3_000_000, cash=5_700_000, held_flip_value=8_000_000, open_flips=1, **self.FIRST
+        )
+        assert why is None
+        why = flip_size_reason(
+            5_000_000, cash=5_700_000, held_flip_value=8_000_000, open_flips=1, **self.FIRST
+        )
+        assert why == (
+            "EUR 5,000,000 is more than 34% of the EUR 13,700,000 float (max EUR 4,658,000)"
+        )
+
+    def test_a_smaller_first_fraction_never_tightens_the_rule(self):
+        assert (
+            flip_size_reason(
+                3_000_000,
+                cash=10_000_000,
+                held_flip_value=0,
+                open_flips=0,
+                max_fraction=0.34,
+                max_open=3,
+                first_flip_fraction=0.10,
+            )
+            is None
+        )
+
+    def test_without_a_first_fraction_the_rule_is_unchanged(self):
+        why = flip_size_reason(8_000_000, cash=14_205_522, held_flip_value=0, open_flips=0, **KW)
+        assert why is not None and "34%" in why
+
+    def test_a_negative_wallet_is_still_no_float(self):
+        why = flip_size_reason(1_000_000, cash=-1, held_flip_value=0, open_flips=0, **self.FIRST)
+        assert why is not None and why.startswith("no float")
+
+
 class TestTheLoopSizesEveryFlip:
+    def test_the_loop_reads_the_first_flip_setting(self, trader):
+        _configure(trader)
+        trader.settings.flip_max_fraction_of_float = 0.25  # float 20m -> 5m
+        trader.settings.flip_first_fraction_of_float = 0.50  # first flip -> 10m
+        ctx = _ctx(pacing_ctx=None)
+        opp = _flip_opp(buy_price=8_000_000)
+        trader.execution.buy = MagicMock(return_value=_successful_buy(opp.buy_price))
+        with patch("rehoboam.trader.Trader.find_profit_opportunities", return_value=[opp]):
+            trader.run_unified_trade_phase(league=SimpleNamespace(id="L"), ctx=ctx)
+        trader.execution.buy.assert_called_once()
+
     def test_an_oversized_flip_is_skipped_in_the_trade_phase(self, trader):
         _configure(trader)
         trader.settings.flip_max_fraction_of_float = 0.25  # float 20m -> 5m
+        trader.settings.flip_first_fraction_of_float = 0.25  # first flip too
         ctx = _ctx(pacing_ctx=None)
         opp = _flip_opp(buy_price=8_000_000)
         trader.execution.buy = MagicMock()

@@ -294,6 +294,16 @@ class Settings(BaseSettings):
             "Env: FLIP_MAX_FRACTION_OF_FLOAT."
         ),
     )
+    flip_first_fraction_of_float: float = Field(
+        default=0.60,
+        description=(
+            "With no flip open, the first one may take this share of the float "
+            "instead of FLIP_MAX_FRACTION_OF_FLOAT (only ever widens it). With "
+            "nothing open the float is the bare wallet, and 34% of it sat below "
+            "every 5m+ starter the momentum entry passes (2026-11-01..03: eight "
+            "rising candidates, all refused). Env: FLIP_FIRST_FRACTION_OF_FLOAT."
+        ),
+    )
     flip_max_open: int = Field(
         default=3,
         description="At most this many flips open at once (held plus pending bids). Env: FLIP_MAX_OPEN.",
