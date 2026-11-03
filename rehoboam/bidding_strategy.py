@@ -130,6 +130,11 @@ DEFAULT_CURVE_QUANTILES = {
     "marginal": 0.0,
 }
 
+#: A core buy (2026-11-03, `services/books.core_buy`) bids at least this point
+#: of the band's winning premiums: it is held for points, so the cost to fear
+#: is losing the auction, not the resale. p75 wins about three in four.
+DEFAULT_CORE_BID_QUANTILE = 0.75
+
 from .services.value_bid import EMPTY_SLOT_PENALTY_POINTS, optimal_premium  # noqa: E402
 
 #: When the squad cannot field eleven and kickoff is close, every tier reads
@@ -205,7 +210,9 @@ class SmartBidding:
         urgency_bump: float = DEFAULT_URGENCY_BUMP,  # quantile added when urgent
         eur_per_point: float | None = None,  # what the league pays per expected point
         direction_rule=None,  # services.entry_direction.EntryDirectionRule; None = off
+        core_bid_quantile: float = DEFAULT_CORE_BID_QUANTILE,  # win curve point a core buy bids
     ):
+        self.core_bid_quantile = float(core_bid_quantile)
         self.ceiling_policy = ceiling_policy
         self.win_curve = win_curve
         self.profit_curve = profit_curve
@@ -228,7 +235,7 @@ class SmartBidding:
         self.tier_solid_upgrade = tier_solid_upgrade
         self.full_commit_gain = full_commit_gain
 
-    def _max_overbid_pct(self, ep_tier: str, market_value: int) -> float:
+    def _max_overbid_pct(self, ep_tier: str, market_value: int, *, core: bool = False) -> float:
         """The overbid ceiling for this tier, as a percentage of market value.
 
         REH-116. This used to be `elite_max_overbid_pct` (30.0) for must_have
@@ -251,8 +258,10 @@ class SmartBidding:
         worse failure than a slightly wrong one.
         """
         if self.ceiling_policy is None or market_value <= 0:
-            return self.elite_max_overbid_pct if ep_tier == "must_have" else self.max_overbid_pct
-        ceiling = self.ceiling_policy.max_bid(int(market_value), ep_tier)
+            if core or ep_tier == "must_have":
+                return self.elite_max_overbid_pct
+            return self.max_overbid_pct
+        ceiling = self.ceiling_policy.max_bid(int(market_value), ep_tier, core=core)
         return max(0.0, (ceiling - market_value) / market_value * 100.0)
 
     def _stack_overbid(
@@ -342,6 +351,7 @@ class SmartBidding:
         alternative_gain: float | None = None,
         data_grade: str | None = None,
         last_move_pct: float | None = None,
+        core_buy: bool = False,
     ) -> BidRecommendation:
         """
         Calculate optimal bid driven by expected points (EP) gain rather than market value.
@@ -392,6 +402,13 @@ class SmartBidding:
                 by `direction_rule`: under 5m a player who did not rise is not
                 bid on unless `urgent`; at 5-15m his expected resale shortfall
                 is charged against the value bid.
+            core_buy: The player would enter the core book (`services/books.
+                core_buy`: top six by points per appearance, 5+ matches). He is
+                held for points, so he is bid to win: at least the band's
+                winners' `core_bid_quantile` (p75), no break-even cap, the
+                must-have ceiling without the price band, and never skipped
+                as a contested marginal buy. Trend, forecast and floor still
+                apply.
 
         Returns:
             BidRecommendation — recommended_bid=0 if no improvement warranted
@@ -456,8 +473,10 @@ class SmartBidding:
         # Competitor-aware skip: don't feed contested auctions for players that
         # wouldn't meaningfully change our matchday output. We'd just inflate
         # the price for a rival without improving our chances of winning the league.
+        # A core buy fights like a must-have: never skipped, bumped hardest.
+        fight_tier = "must_have" if core_buy else ep_tier
         contested_skip_reason = _contested_skip_reason(
-            ep_tier=ep_tier,
+            ep_tier=fight_tier,
             offer_count=offer_count,
             has_aggressive_competitors=has_aggressive_competitors,
         )
@@ -612,7 +631,32 @@ class SmartBidding:
         # (no fitted history) was priced at 16m of worth and bid to the
         # ceiling; only his falling trend saved it. The exemption is for a
         # must-have the model has seen, not one it is guessing at.
-        exempt_from_cap = ep_tier == "must_have" and data_grade == "A"
+        # A core buy (2026-11-03) is bid to win: at least the band's winners'
+        # p75, whatever the tier or the value bid said, and exempt from the
+        # break-even cap below — resale is the trading book's cost, and a core
+        # player is held. Kabak (114.9 a match, 3rd in our squad) was bid +1%
+        # as "marginal" and went for +16.7%.
+        core_point = None
+        if core_buy and self.win_curve is not None:
+            try:
+                core_point = self.win_curve.premium_at(int(market_value), self.core_bid_quantile)
+            except Exception:
+                logger.exception("win curve failed for core buy player=%s", player_id)
+                core_point = None
+            if core_point is not None and core_point.premium_pct > overbid_pct:
+                logger.info(
+                    "ep-bid core player=%s tier=%s premium %.1f%% -> %.1f%% "
+                    "(winners' p%d of %d, band=%d)",
+                    player_id,
+                    ep_tier,
+                    overbid_pct,
+                    core_point.premium_pct,
+                    int(round(core_point.quantile * 100)),
+                    core_point.sample,
+                    core_point.band_lower,
+                )
+                overbid_pct = core_point.premium_pct
+        exempt_from_cap = core_buy or (ep_tier == "must_have" and data_grade == "A")
         break_even = None
         expected_resale = None
         if self.profit_curve is not None:
@@ -681,7 +725,7 @@ class SmartBidding:
         # winning, bid harder to pull ahead of rival offers. Applied AFTER
         # trend scaling so the "fight for this player" signal isn't dampened
         # by a falling market value — contestedness doesn't care about trend.
-        overbid_pct += _contested_overbid_bump(ep_tier=ep_tier, offer_count=offer_count)
+        overbid_pct += _contested_overbid_bump(ep_tier=fight_tier, offer_count=offer_count)
 
         # The floor (2026-10-07): Kickbase declines a bid that is below the
         # market value at the moment the listing expires, and the listing
@@ -700,7 +744,7 @@ class SmartBidding:
             forecast_floor_applied = float(forecast_change_pct)
 
         # The ceiling comes from the ONE policy the safety gate enforces.
-        max_overbid = self._max_overbid_pct(ep_tier, market_value)
+        max_overbid = self._max_overbid_pct(ep_tier, market_value, core=core_buy)
         overbid_pct = min(overbid_pct, max_overbid)
         # Calculate raw bid from overbid percentage
         overbid_amount = int(asking_price * (overbid_pct / 100))
@@ -739,7 +783,7 @@ class SmartBidding:
         # a proposal shown in Telegram a proposal that can actually execute.
         if self.ceiling_policy is not None and market_value > 0:
             recommended_bid = min(
-                recommended_bid, self.ceiling_policy.max_bid(market_value, ep_tier)
+                recommended_bid, self.ceiling_policy.max_bid(market_value, ep_tier, core=core_buy)
             )
 
         # REH-85: leave enough behind to keep buying. Applied here, after the
@@ -796,6 +840,16 @@ class SmartBidding:
                 f"curve p{int(round(curve_point.quantile * 100))} of {curve_point.sample} "
                 f"{'league' if curve_point.pooled else 'band'} buys"
                 + (" (urgent)" if urgent else "")
+            )
+        if core_buy:
+            reasoning_parts.append(
+                "core buy: bid to win"
+                + (
+                    f" (winners' p{int(round(core_point.quantile * 100))} "
+                    f"+{core_point.premium_pct:.1f}%)"
+                    if core_point is not None
+                    else ""
+                )
             )
         if forecast_applied is not None:
             reasoning_parts.append(f"next update forecast {forecast_applied:+.1f}%")

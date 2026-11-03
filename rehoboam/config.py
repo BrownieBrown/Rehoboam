@@ -171,6 +171,31 @@ class Settings(BaseSettings):
             "leaders' median count of 28-day+ holds (2026-11-01: 4-7)."
         ),
     )
+    core_bid_enabled: bool = Field(
+        default=True,
+        description=(
+            "A buy that would enter the core book is bid to win (2026-11-03): at least "
+            "CORE_BID_QUANTILE of the band's winning premiums, no break-even cap, the "
+            "must-have ceiling without the price band. Env: CORE_BID_ENABLED."
+        ),
+    )
+    core_bid_quantile: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=0.95,
+        description=(
+            "The win-curve point a core buy bids at least. p75 wins about three in four "
+            "listings in its band (+17.5% at 15m+ on 2026-11-03). Env: CORE_BID_QUANTILE."
+        ),
+    )
+    core_bid_min_appearances: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Matches a candidate's points per appearance must rest on before it can "
+            "make him a core buy. Env: CORE_BID_MIN_APPEARANCES."
+        ),
+    )
 
     # Squad Management Safeguards
     min_squad_size: int = Field(
