@@ -1893,6 +1893,9 @@ class AutoTrader:
                     open_flips=open_flips,
                     max_fraction=float(getattr(self.settings, "flip_max_fraction_of_float", 0.34)),
                     max_open=int(getattr(self.settings, "flip_max_open", 3)),
+                    first_flip_fraction=getattr(
+                        self.settings, "flip_first_fraction_of_float", None
+                    ),
                 )
                 if too_big is not None:
                     console.print(
