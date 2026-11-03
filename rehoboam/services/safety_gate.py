@@ -60,6 +60,7 @@ def check_buy(
     max_single_buy_pct: float | None = None,
     session_refusal: str | None = None,
     core_book_reason: str | None = None,
+    core_buy: bool = False,
 ) -> GateResult:
     """Is this buy allowed to execute?
 
@@ -94,13 +95,14 @@ def check_buy(
         # last check before real money never trusts a caller's arithmetic. It
         # is the same `max_allowed_bid` the bidder sized against, which is what
         # stops a proposal being offered and then refused (REH-99).
-        cap = ceiling_policy.max_bid(market_value, tier)
+        cap = ceiling_policy.max_bid(market_value, tier, core=core_buy)
         if bid > cap:
             over = (bid / market_value - 1.0) * 100.0
             allowed = (cap / market_value - 1.0) * 100.0
             reasons.append(
-                f"overbid {over:.1f}% exceeds the {allowed:.1f}% ceiling for tier "
-                f"{Tier(tier).value if tier else FALLBACK_TIER.value} "
+                f"overbid {over:.1f}% exceeds the {allowed:.1f}% ceiling for "
+                + ("a core buy " if core_buy else "tier ")
+                + f"{Tier(tier).value if tier else FALLBACK_TIER.value} "
                 f"(bid EUR {bid:,} vs max EUR {cap:,} on market value EUR {market_value:,})"
             )
 
@@ -197,6 +199,9 @@ class BuyGate:
     #: an empty slot is -100 points, and that path buys in the locked window
     #: where no debt is allowed anyway.
     core_book: CoreBookCheck | None = None
+    #: The buy enters the core book (`services/books.core_buy`): the ceiling is
+    #: the must-have percentage without the price band, as the bidder sized it.
+    core_buy: bool = False
 
     def check(self, *, player_id: str, bid: int) -> GateResult:
         """Run the gate for this player at this price."""
@@ -215,4 +220,5 @@ class BuyGate:
             total_worth=self.total_worth,
             max_single_buy_pct=self.max_single_buy_pct,
             session_refusal=self.session_refusal,
+            core_buy=self.core_buy,
         )

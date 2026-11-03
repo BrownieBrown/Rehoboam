@@ -241,6 +241,7 @@ class Trader:
             # caps and Telegram offered buys the gate would then refuse.
             ceiling_policy=settings.bid_ceiling_policy(),
             direction_rule=_direction_rule(settings),
+            core_bid_quantile=float(getattr(settings, "core_bid_quantile", 0.75) or 0.75),
         )
 
     # ------------------------------------------------------------------
@@ -1114,6 +1115,13 @@ class Trader:
         # gain over that, not the whole gain.
         alternatives = alternative_gains(buy_recs)
         alternatives.update(_pair_alternatives(trade_pairs))
+        # Which buys would enter the core book (2026-11-03): bid to win.
+        core_buy_ids = self._core_buy_ids(
+            squad,
+            squad_scores,
+            [(rec.player, None) for rec in buy_recs]
+            + [(pair.buy_player, str(pair.sell_player.id)) for pair in trade_pairs],
+        )
         for rec in buy_recs:
             try:
                 bid_rec = self.bidding.calculate_ep_bid(
@@ -1131,6 +1139,7 @@ class Trader:
                     urgent=urgent,
                     alternative_gain=alternatives.get(rec.player.id),
                     data_grade=_grade_of(rec.score),
+                    core_buy=str(rec.player.id) in core_buy_ids,
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1169,6 +1178,7 @@ class Trader:
                     urgent=urgent,
                     alternative_gain=alternatives.get(pair.buy_player.id),
                     data_grade=_grade_of(pair.buy_score),
+                    core_buy=str(pair.buy_player.id) in core_buy_ids,
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1206,6 +1216,9 @@ class Trader:
             "competitor_player_ids": competitor_player_ids,
             "urgent": urgent,
             "alternative_gains": alternatives,
+            # The buys that would enter the core book: bid to win, and the
+            # gate (`_build_buy_gate`) reads the same set for the ceiling.
+            "core_buy_ids": core_buy_ids,
             # REH-85: surfaced so get_ep_recommendations_with_trends can reuse
             # this session's context instead of rebuilding it — a rebuild
             # would mean a second get_my_bids call and could yield a
@@ -1287,6 +1300,7 @@ class Trader:
                     alternative_gain=result.get("alternative_gains", {}).get(rec.player.id),
                     data_grade=_grade_of(rec.score),
                     last_move_pct=_last_move(trend, emergency=bool(result.get("emergency"))),
+                    core_buy=str(rec.player.id) in (result.get("core_buy_ids") or ()),
                 )
                 rec.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1331,6 +1345,7 @@ class Trader:
                     alternative_gain=result.get("alternative_gains", {}).get(pair.buy_player.id),
                     data_grade=_grade_of(pair.buy_score),
                     last_move_pct=_last_move(trend, emergency=bool(result.get("emergency"))),
+                    core_buy=str(pair.buy_player.id) in (result.get("core_buy_ids") or ()),
                 )
                 pair.recommended_bid = bid_rec.recommended_bid
             except Exception:
@@ -1341,6 +1356,55 @@ class Trader:
     # ------------------------------------------------------------------
     # Profit flip discovery (buy low, sell high short-hold)
     # ------------------------------------------------------------------
+
+    def _core_buy_ids(
+        self, squad: list, squad_scores: list, candidates: list[tuple]
+    ) -> frozenset[str]:
+        """The candidates that would enter the core book (`services/books.core_buy`).
+
+        ``candidates`` are ``(player, released_player_id)``: a trade pair's
+        sale leaves the squad before the buy is judged. Appearances come from
+        one `player_ranks` read; a failing read, or the rule off, marks nobody
+        — every buy is then bid as before, never more aggressively.
+        """
+        settings = self.settings
+        if not candidates or not bool(getattr(settings, "core_bid_enabled", False)):
+            return frozenset()
+        try:
+            from .services.books import Holding, core_buy
+            from .store.league_store import LeagueStore
+
+            ep_by_id = {str(s.player_id): float(s.expected_points) for s in squad_scores or []}
+
+            def holding(p) -> Holding:
+                avg = getattr(p, "average_points", None)
+                return Holding(
+                    player_id=str(p.id),
+                    market_value=int(getattr(p, "market_value", 0) or 0),
+                    expected_points=ep_by_id.get(str(p.id), 0.0),
+                    avg_points=float(avg) if avg else None,
+                )
+
+            ids = [str(p.id) for p, _ in candidates]
+            ranks = LeagueStore().position_ranks(ids)
+            held = [holding(p) for p in squad]
+            marked = set()
+            for player, released in candidates:
+                pid = str(player.id)
+                if core_buy(
+                    holding(player),
+                    [h for h in held if h.player_id != released],
+                    size=int(getattr(settings, "core_book_size", 6)),
+                    appearances=(ranks.get(pid) or {}).get("appearances"),
+                    min_appearances=int(getattr(settings, "core_bid_min_appearances", 5)),
+                ):
+                    marked.add(pid)
+        except Exception:
+            logger.warning("core buys unavailable — every buy bid as trading", exc_info=True)
+            return frozenset()
+        if marked:
+            logger.info("core buys: %s", sorted(marked))
+        return frozenset(marked)
 
     def _rank_refusals(self, players: dict, *, exempt: bool) -> dict[str, str]:
         """Market players the rank-sell rule would sell, refused as buys.

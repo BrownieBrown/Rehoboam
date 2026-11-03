@@ -116,8 +116,15 @@ def max_allowed_bid(
     floor_eur: int,
     tier_pcts: Mapping[Tier, float],
     price_bands: Sequence[tuple[int, float]] = (),
+    core: bool = False,
 ) -> int:
     """The highest bid permitted for this player, in euros.
+
+    **A core buy (2026-11-03) takes the must-have percentage and no band.**
+    The band is resale arithmetic — at 15m+ paying more bought no points and
+    resold worse — and a player entering the core book is held for points,
+    not resold; what a core buy loses is the auction. `core` is decided by
+    `services/books.core_buy` and carried to the bidder and the gate alike.
 
     Returns 0 for a non-positive market value: `check_buy` reports that as its
     own failure, and this must not hand back a spendable ceiling computed from
@@ -134,14 +141,16 @@ def max_allowed_bid(
         return 0
 
     resolved = FALLBACK_TIER
-    if tier is not None:
+    if core:
+        resolved = Tier.MUST_HAVE
+    elif tier is not None:
         try:
             resolved = Tier(tier)
         except ValueError:
             resolved = FALLBACK_TIER
 
     pct = tier_pcts.get(resolved, tier_pcts[FALLBACK_TIER])
-    band = price_band_pct(market_value, price_bands)
+    band = None if core else price_band_pct(market_value, price_bands)
     if band is not None:
         pct = min(pct, band)
     return market_value + max(floor_eur, int(market_value * pct / 100.0))
@@ -160,7 +169,7 @@ class BidCeilingPolicy:
     tier_pcts: Mapping[Tier, float]
     price_bands: PriceBands = ()
 
-    def max_bid(self, market_value: int, tier: Tier | str | None) -> int:
+    def max_bid(self, market_value: int, tier: Tier | str | None, *, core: bool = False) -> int:
         """The highest bid permitted for this player, in euros."""
         return max_allowed_bid(
             market_value=market_value,
@@ -168,4 +177,5 @@ class BidCeilingPolicy:
             floor_eur=self.floor_eur,
             tier_pcts=self.tier_pcts,
             price_bands=self.price_bands,
+            core=core,
         )

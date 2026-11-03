@@ -79,6 +79,32 @@ def liquid_value(holdings: Iterable[Holding], core: frozenset[str]) -> int:
     return sum(h.sell_value for h in holdings if h.player_id not in core)
 
 
+def core_buy(
+    candidate: Holding,
+    holdings: Sequence[Holding],
+    *,
+    size: int,
+    appearances: int | None,
+    min_appearances: int,
+) -> bool:
+    """Would this buy enter the core book? (2026-11-03)
+
+    A core buy is held for points, so the bid is sized to win it, not to
+    resell it (`SmartBidding.calculate_ep_bid(core_buy=…)`). It must rank in
+    the top ``size`` of the squad after the buy by points per appearance,
+    on an average of at least ``min_appearances`` matches — a player with
+    no average, or too few matches to trust one, is a trading-book buy.
+    Unlike `core_ids`, expected points never stand in for the average here:
+    the EP model's view is what the trading book already bids on.
+    """
+    if size <= 0 or candidate.avg_points is None:
+        return False
+    if appearances is None or int(appearances) < int(min_appearances):
+        return False
+    after = [h for h in holdings if h.player_id != candidate.player_id] + [candidate]
+    return candidate.player_id in core_ids(after, size=size)
+
+
 def debt_cover_reason(
     *,
     holdings: Sequence[Holding],

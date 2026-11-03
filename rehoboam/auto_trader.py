@@ -133,6 +133,13 @@ def _build_buy_gate(
             solid=settings.bid_tier_solid_upgrade,
         )
 
+    # A core buy (2026-11-03) is held to the must-have ceiling without the
+    # price band — the same `core_buy_ids` the trader handed the bidder, so
+    # the two cannot disagree. A flip (no gain measured) is never one.
+    core_buy = marginal_ep_gain is not None and str(getattr(player, "id", "")) in (
+        (getattr(ctx, "ep_result", None) or {}).get("core_buy_ids") or ()
+    )
+
     holdings = [
         held
         for held in list(getattr(ctx, "squad", []) or []) + list(getattr(ctx, "my_bids", []) or [])
@@ -156,6 +163,7 @@ def _build_buy_gate(
         total_worth=_total_worth(ctx),
         max_single_buy_pct=settings.max_single_buy_pct_of_worth,
         session_refusal=session_refusal,
+        core_buy=core_buy,
         core_book=(
             _core_book_check(
                 settings=settings,
