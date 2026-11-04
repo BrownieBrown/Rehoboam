@@ -25,10 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: Kickbase's penalty for an empty lineup slot. When the squad cannot field
-#: eleven and kickoff is close, winning is worth this many points more.
-EMPTY_SLOT_PENALTY_POINTS = 100.0
-
 
 @dataclass(frozen=True)
 class ValuePoint:
