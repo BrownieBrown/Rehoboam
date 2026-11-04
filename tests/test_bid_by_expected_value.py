@@ -65,13 +65,18 @@ class TestTheValueBid:
         assert "value bid" not in rec.reasoning
         assert "curve p" in rec.reasoning
 
-    def test_an_empty_slot_near_kickoff_adds_its_penalty(self):
+    def test_an_empty_slot_near_kickoff_is_not_counted_twice(self):
+        # 2026-11-04: the gain of a buy into an empty slot is already measured
+        # against an unknown regular starter (`best_eleven_gain`), and the
+        # emergency fill fills the slot on the last day — losing the auction
+        # never leaves it at -100. Adding the penalty on top priced Rohr's
+        # +35.3 as 135.3 points and bid +33.5%.
         calm = _bid(_bidder(), gain=5.0, alternative=0.0)
         urgent = _bid(_bidder(), gain=5.0, alternative=0.0, urgent=True)
         assert "worth EUR 1,275,000" in calm.reasoning
-        assert "empty slot +100" in urgent.reasoning
-        assert "worth EUR 26,775,000" in urgent.reasoning
-        assert urgent.overbid_pct >= calm.overbid_pct
+        assert "worth EUR 1,275,000" in urgent.reasoning
+        assert "empty slot +100" not in urgent.reasoning
+        assert urgent.overbid_pct == pytest.approx(calm.overbid_pct)
 
     def test_the_tier_no_longer_sets_the_premium(self):
         # Same unique gain, different tiers (via the strong/must-have bands): same premium.
