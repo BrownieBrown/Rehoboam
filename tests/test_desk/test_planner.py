@@ -130,3 +130,33 @@ def test_an_insolvent_book_sells_the_cheapest_players_first_and_keeps_the_eleven
 
     assert {p.player_id for p in result.sells} == {"b0", "b1"}
     assert solvency.cash_after(book, result.sells, ()) >= 0
+
+
+# --- M2-14: a committed position is not sold to fund a swap ------------------
+
+
+def test_a_committed_position_is_not_swapped_for_a_better_listing():
+    from dataclasses import replace
+
+    runner = _p("runner", ep=1.0, value=4_000_000, drift=0.10)
+    hot = Offer(_p("hot", ep=1.0, value=4_000_000, drift=0.30), premium=0.05)
+
+    free = planner.plan(Book(held=(*_eleven(), runner), cash=200_000), [hot], MU)
+    held = planner.plan(
+        Book(held=(*_eleven(), replace(runner, committed=True)), cash=200_000), [hot], MU
+    )
+
+    assert [p.player_id for p in free.sells] == ["runner"]  # the churn M2-13 measured
+    assert held.sells == ()
+    assert held.bids == ()
+
+
+def test_the_solvency_repair_still_sells_a_committed_position():
+    from dataclasses import replace
+
+    held = replace(_p("runner", ep=1.0, value=4_000_000, drift=0.10), committed=True)
+    book = Book(held=(*_eleven(), held), cash=-1_000_000)
+
+    result = planner.plan(book, [], MU)
+
+    assert [p.player_id for p in result.sells] == ["runner"]

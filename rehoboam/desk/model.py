@@ -18,6 +18,10 @@ class Player:
     ep_next: float  # expected points at the next kickoff
     drift: float  # expected fractional value change over the horizon, from when we'd hold him
     drift_low: float = 0.0  # its p10: the haircut when he is a named sale before kickoff
+    # Bought inside the drift horizon and still expected to rise: the plan paid a
+    # premium for the whole horizon, so it may not sell him to fund a swap. Only
+    # the solvency repair may (M2-14). Derived each session, never stored.
+    committed: bool = False
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,9 @@ class Offer:
     # Does the auction settle before the next kickoff? A player who arrives after
     # the lock cannot play that matchday: his drift counts, his points don't.
     arrives_before_kickoff: bool = True
+    # Does it settle early enough to be sold in a session before the kickoff?
+    # Only then can it cover the debt it creates (solvency, M2-13).
+    sellable_before_kickoff: bool = False
 
     @property
     def bid(self) -> int:
@@ -50,6 +57,9 @@ class Book:
     # True: no debt may be carried past this session (the last before a kickoff,
     # or planned debt switched off). False: debt the bench covers is allowed.
     last_before_kickoff: bool = True
+    # What the open bids that settle before the last session raise if sold, at
+    # their p10. A bid's cover rides along until it settles (M2-13).
+    open_bid_cover: int = 0
 
 
 @dataclass(frozen=True)

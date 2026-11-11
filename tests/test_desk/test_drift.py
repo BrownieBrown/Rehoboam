@@ -136,3 +136,112 @@ def test_training_samples_stay_inside_the_window():
     )
 
     assert len(samples) == 3
+
+
+# ---------------------------------------------------------------------------
+# Refinements (M2-11): an optional level above the full cell
+# ---------------------------------------------------------------------------
+
+
+def test_features_carry_the_14_night_move_and_the_last_match_points():
+    path = {D - timedelta(days=14): 80, D - timedelta(days=3): 100, D - timedelta(days=1): 110}
+    path[D] = 120
+
+    features = drift.features_at(path, D, market_falling=False, last_points=132)
+
+    assert features is not None
+    assert features.move_14n == pytest.approx(0.50)
+    assert features.last_points == 132
+
+
+def test_the_14_night_move_is_unknown_without_14_nights_of_history():
+    path = {D - timedelta(days=3): 100, D - timedelta(days=1): 110, D: 121}
+
+    features = drift.features_at(path, D, market_falling=False)
+
+    assert features is not None
+    assert features.move_14n is None
+    assert features.last_points is None
+
+
+@pytest.mark.parametrize(
+    ("known_on", "expected"),
+    [
+        (D - timedelta(days=1), 140),  # yesterday's match is known
+        (D, None),  # a result on the same value day is not priced yet
+        (D - timedelta(days=11), None),  # outside the window: no recent match
+    ],
+)
+def test_the_last_match_is_the_newest_known_before_the_day(known_on, expected):
+    matches = ((D - timedelta(days=20), 30), (known_on, 140))  # the first is outside the window
+
+    assert drift.last_points_at(matches, D) == expected
+
+
+def test_last_points_reads_the_match_before_a_later_one():
+    matches = ((D - timedelta(days=4), 90), (D + timedelta(days=2), 160))
+
+    assert drift.last_points_at(matches, D) == 90
+
+
+@pytest.mark.parametrize(
+    ("points", "bucket"),
+    [(None, 0), (0, 1), (49, 1), (50, 2), (99, 2), (100, 3), (149, 3), (150, 4)],
+)
+def test_last_points_buckets(points, bucket):
+    keys = drift.cell_keys(
+        DriftFeatures(0.0, 0.0, 3_000_000, False, move_14n=0.0, last_points=points),
+        (drift.LAST_POINTS,),
+    )
+
+    assert keys[0][-1] == bucket
+
+
+def test_a_refined_key_sits_above_the_unrefined_hierarchy():
+    f = DriftFeatures(0.0, 0.0, 3_000_000, False, move_14n=-0.25, last_points=None)
+
+    refined = drift.cell_keys(f, drift.REFINEMENTS)
+
+    assert refined[1:] == drift.cell_keys(f)
+    assert refined[0] == (*drift.cell_keys(f)[0], 0, 0)
+
+
+def test_no_refined_level_when_the_14_night_move_is_unknown():
+    f = _f()
+
+    assert drift.cell_keys(f, drift.REFINEMENTS) == drift.cell_keys(f)
+
+
+def test_a_refined_cell_shrinks_toward_its_unrefined_cell():
+    # Same unrefined cell; the rebounders (fell 25% over 14 nights) rose 30%.
+    flat = [(DriftFeatures(0.0, 0.0, 3_000_000, False, move_14n=0.0), 0.0)] * 60
+    rebound = [(DriftFeatures(0.0, 0.0, 3_000_000, False, move_14n=-0.25), 0.30)] * 6
+    table = drift.fit(flat + rebound, lag=0, horizon=7, refine=(drift.MOVE_14N,))
+    plain = drift.fit(flat + rebound, lag=0, horizon=7)
+
+    rebounder = DriftFeatures(0.0, 0.0, 3_000_000, False, move_14n=-0.25)
+    unrefined = plain.predict(rebounder).mean
+    k = drift.SHRINK_K
+
+    assert table.predict(rebounder).mean == pytest.approx((6 * 0.30 + k * unrefined) / (6 + k))
+    assert table.predict(rebounder).n == 6
+    assert plain.predict(rebounder).n == 66
+
+
+def test_fit_refuses_an_unknown_refinement():
+    with pytest.raises(ValueError, match="unknown refinement"):
+        drift.fit([(_f(), 0.0)], lag=0, horizon=7, refine=("lineup_code",))
+
+
+def test_training_samples_carry_the_last_match_points():
+    path = {D + timedelta(days=i): 1_000_000 for i in range(-14, 9)}
+    moves = {D + timedelta(days=i): 0.0 for i in range(-16, 9)}
+    matches = {"p": ((D - timedelta(days=2), 155),)}
+
+    samples = list(
+        drift.training_samples(
+            {"p": path}, moves, lag=0, horizon=7, first_day=D, last_day=D, matches=matches
+        )
+    )
+
+    assert [(f.last_points, f.move_14n) for f, _ in samples] == [(155, 0.0)]

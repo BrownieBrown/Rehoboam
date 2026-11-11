@@ -39,6 +39,7 @@ FORECAST_MOMENTUM = 0.95  # services/mv_forecast's rule: 0.95 × the last move, 
 FORECAST_CAP = 0.30
 ROUND_SPAN = timedelta(days=4)  # a round's matches are over 4 days after its first whistle
 SESSION_GAP = timedelta(hours=12)
+COMMIT_SPAN = timedelta(days=7)  # the drift horizon a bid's premium paid for (M2-14)
 UNKNOWN_DRIFT_LOW = -0.20  # a named sale with no drift estimate is valued 20% down
 
 
@@ -61,6 +62,8 @@ class World:
     reset_at: datetime
     # Walk-forward price blends: (usable from, fit). Empty: raw EP (spec §4.1).
     blends: tuple[tuple[datetime, PriceBlend], ...] = ()
+    # Per player, (value day the result is known, points): the LAST_POINTS refinement.
+    matches: Mapping[str, drift.Matches] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,9 @@ class Policy:
     limits: planner.Limits = planner.Limits()
     price_blend: bool = False
     planned_debt: bool = False  # debt the bench covers, repaid by the last session before kickoff
+    # M2-14: a player we won inside the drift horizon, still expected to rise, is
+    # not sold to fund a swap: the bid paid a premium for the whole horizon.
+    commit_hold: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,8 +169,12 @@ def _drift_estimate(
 ) -> tuple[float, float]:
     """(mean, p10); (0, UNKNOWN_DRIFT_LOW) without three nights of history."""
     path = world.paths.get(player_id)
+    played = world.matches.get(player_id, ())
+    points = drift.last_points_at(played, day) if played else None
     features = (
-        drift.features_at(path, day, drift.market_falling(world.moves, day)) if path else None
+        drift.features_at(path, day, drift.market_falling(world.moves, day), points)
+        if path
+        else None
     )
     if features is None:
         return 0.0, UNKNOWN_DRIFT_LOW
@@ -306,7 +316,7 @@ def _player(
 
 def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
     day = value_day(at)
-    held = _held_players(world, state, at, day)
+    held = _held_players(world, state, at, day, commit=policy.commit_hold)
     offers = _offers(world, state, at, day)
     kickoff_at = next_kickoff(world, at)
     book = Book(
@@ -317,6 +327,7 @@ def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimS
         last_before_kickoff=(
             not policy.planned_debt or kickoff_at is None or kickoff_at <= at + SESSION_GAP
         ),
+        open_bid_cover=_open_bid_cover(world, state, day, kickoff_at),
     )
     mu = points_per_euro(
         max(1, matchdays_left(world, at)), world.eur_per_point, scale=policy.mu_scale
@@ -326,14 +337,39 @@ def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimS
     return _apply(state, at, result.sells, result.bids, listing_of)
 
 
-def _held_players(world: World, state: SimState, at: datetime, day: date) -> list[Player]:
+def _sellable(listing: Listing, kickoff_at: datetime | None) -> bool:
+    """Settles at least one session gap before the kickoff, so a session can sell it."""
+    return kickoff_at is not None and listing.expires_at <= kickoff_at - SESSION_GAP
+
+
+def _open_bid_cover(world: World, state: SimState, day: date, kickoff_at: datetime | None) -> int:
+    """The p10 resale of the open bids that settle in time (M2-13)."""
+    cover = 0
+    for pending in state.pending:
+        if not _sellable(pending.listing, kickoff_at):
+            continue
+        pid = pending.listing.player_id
+        value = value_at(world, pid, day) or 0
+        _, low = _drift_estimate(world, world.buy_table, pid, day)
+        cover += round(value * (1 + min(0.0, low)))
+    return cover
+
+
+def _held_players(
+    world: World, state: SimState, at: datetime, day: date, *, commit: bool = False
+) -> list[Player]:
+    won_at = {e.player_id: e.at for e in state.events if e.kind == "won"} if commit else {}
     out = []
     for pid in sorted(state.held):
         value = value_at(world, pid, day)
         mean_drift, low = _drift_estimate(world, world.hold_table, pid, day)
         player = _player(world, pid, at, value or 0, mean_drift, low)
-        if player is not None and value:
-            out.append(player)
+        if player is None or not value:
+            continue
+        bought = won_at.get(pid)
+        if bought is not None and at - bought < COMMIT_SPAN and mean_drift >= 0:
+            player = replace(player, committed=True)
+        out.append(player)
     return out
 
 
@@ -358,7 +394,14 @@ def _offers(world: World, state: SimState, at: datetime, day: date) -> dict[Offe
         if premium is None or player is None:
             continue
         arrives = kickoff_at is None or listing.expires_at < kickoff_at
-        out[Offer(player, premium, arrives_before_kickoff=arrives)] = listing
+        out[
+            Offer(
+                player,
+                premium,
+                arrives_before_kickoff=arrives,
+                sellable_before_kickoff=_sellable(listing, kickoff_at),
+            )
+        ] = listing
     return out
 
 

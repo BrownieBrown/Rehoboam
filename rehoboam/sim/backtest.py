@@ -96,9 +96,19 @@ class League:
     wallet: tuple[history.WalletReading, ...]
 
 
-def load(conn, *, fit_cutoff: date, until: datetime = W1_END) -> tuple[World, League]:
+def load(
+    conn,
+    *,
+    fit_cutoff: date,
+    until: datetime = W1_END,
+    hold_refine: Sequence[str] = (),
+    buy_refine: Sequence[str] = (),
+) -> tuple[World, League]:
+    """The world and the league. ``hold_refine`` / ``buy_refine`` name the drift
+    refinements each table is fitted with (`drift.REFINEMENTS`, M2-11)."""
     paths = history.load_value_paths(conn)
     moves = drift.market_moves(paths)
+    matches = history.load_match_points(conn)
     transfers = history.load_transfers(conn, since=datetime(2026, 7, 1, tzinfo=timezone.utc))
     self_ids = history.load_self_ids(conn)
     listings = history.load_kickbase_listings(conn, expired_before=until)
@@ -107,8 +117,8 @@ def load(conn, *, fit_cutoff: date, until: datetime = W1_END) -> tuple[World, Le
     world = World(
         paths=paths,
         moves=moves,
-        hold_table=_fit(paths, moves, fit_cutoff, lag=0),
-        buy_table=_fit(paths, moves, fit_cutoff, lag=1),
+        hold_table=_fit(paths, moves, matches, fit_cutoff, lag=0, refine=hold_refine),
+        buy_table=_fit(paths, moves, matches, fit_cutoff, lag=1, refine=buy_refine),
         listings=listings,
         rivals={
             (lst.player_id, lst.listed_at): auction.rival_for(lst, buys, paths, self_ids)
@@ -121,6 +131,7 @@ def load(conn, *, fit_cutoff: date, until: datetime = W1_END) -> tuple[World, Le
         rival_buys=engine.rival_buys(transfers, paths, self_ids),
         eur_per_point=eur_per_point(conn) or FALLBACK_EUR_PER_POINT,
         reset_at=RESET_AT,
+        matches=matches,
     )
     league = League(
         snapshots=history.load_squad_snapshots(conn),
@@ -133,7 +144,9 @@ def load(conn, *, fit_cutoff: date, until: datetime = W1_END) -> tuple[World, Le
     return world, league
 
 
-def _fit(paths, moves, cutoff: date, *, lag: int) -> drift.DriftTable:
+def _fit(
+    paths, moves, matches, cutoff: date, *, lag: int, refine: Sequence[str] = ()
+) -> drift.DriftTable:
     first = min(day for path in paths.values() for day in path)
     samples = drift.training_samples(
         paths,
@@ -142,8 +155,9 @@ def _fit(paths, moves, cutoff: date, *, lag: int) -> drift.DriftTable:
         horizon=HORIZON_DAYS,
         first_day=first,
         last_day=cutoff - timedelta(days=lag + HORIZON_DAYS),
+        matches=matches,
     )
-    return drift.fit(samples, lag=lag, horizon=HORIZON_DAYS)
+    return drift.fit(samples, lag=lag, horizon=HORIZON_DAYS, refine=refine)
 
 
 def holdings_at(league: League, manager_id: str, at: datetime) -> frozenset[str]:
@@ -208,8 +222,17 @@ def _with_blends(world: World, policy: Policy) -> World:
     return world
 
 
-def _name(policy: Policy) -> str:
-    return f"v3 (mu x{policy.mu_scale:g}{', blend' if policy.price_blend else ''})"
+def _name(policy: Policy, world: World) -> str:
+    parts = [f"mu x{policy.mu_scale:g}"]
+    if policy.price_blend:
+        parts.append("blend")
+    for label, table in (("hold", world.hold_table), ("buy", world.buy_table)):
+        if table.refine:
+            parts.append(f"{label} " + "+".join(_SHORT[name] for name in table.refine))
+    return f"v3 ({', '.join(parts)})"
+
+
+_SHORT = {drift.MOVE_14N: "m14", drift.LAST_POINTS: "pts"}
 
 
 def run(world: World, league: League, policy: Policy, window: Window = W1) -> BacktestReport:
@@ -229,7 +252,7 @@ def run(world: World, league: League, policy: Policy, window: Window = W1) -> Ba
         events[e.kind] = events.get(e.kind, 0) + 1
     return BacktestReport(
         window=window,
-        policy=_policy_line(world, _name(policy), first, final, window),
+        policy=_policy_line(world, _name(policy, world), first, final, window),
         do_nothing=_policy_line(world, "hold the starting squad", first, held_only, window),
         actual=manager_line(world, league, _us(league), rounds, window),
         rivals=tuple(

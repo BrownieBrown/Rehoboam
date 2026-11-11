@@ -99,7 +99,7 @@ def _best_move(
 ) -> tuple[float, tuple[Player, ...], tuple[Offer, ...]] | None:
     sold = {p.player_id for p in sells}
     bid_on = {o.player.player_id for o in bids}
-    sellable = [p for p in book.held if p.player_id not in sold]
+    sellable = [p for p in book.held if p.player_id not in sold and not p.committed]
     biddable = [o for o in offers if o.player.player_id not in bid_on]
 
     candidates: list[tuple[tuple[Player, ...], tuple[Offer, ...]]] = []

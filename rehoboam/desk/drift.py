@@ -15,14 +15,21 @@ hierarchy is full cell → (last move, band, market) → (band, market) → all,
 rare combination predicts close to what its band does. The low quantile (p10)
 comes from the most specific level with enough samples; it is used as the
 haircut on a named sale in the solvency check.
+
+**Refinements (M2-11).** A table may be fitted with an extra level above the
+full cell, keyed by the 14-night move and/or the points of the last match. A
+refined cell shrinks toward the full cell, so a table without evidence for a
+refinement predicts what the unrefined table predicts. They exist because the
+hold model missed rebounds: players sold after a 14-night fall, or while out of
+the team, rose a mean +30–43% in the week after (spec §12, M2-11).
 """
 
 from __future__ import annotations
 
 import math
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import mean, median
@@ -34,6 +41,16 @@ LAST_MOVE_EDGES: tuple[float, ...] = (-0.02, -0.005, 0.005, 0.02)
 MOVE_3N_EDGES: tuple[float, ...] = (-0.05, -0.015, 0.015, 0.05)
 BAND_EDGES: tuple[int, ...] = (5_000_000, 15_000_000)
 
+# Refinement edges. The 14-night edges are the quintiles of the 2025/26 training
+# set, rounded; two quintiles coincide at 0 (players at the floor never move), so
+# there are four buckets. The points edges follow Eval §7.3 (150+ rose +4.8%).
+MOVE_14N_EDGES: tuple[float, ...] = (-0.18, 0.0, 0.10)
+LAST_POINTS_EDGES: tuple[int, ...] = (50, 100, 150)
+LAST_POINTS_WINDOW_DAYS = 10  # an older match counts as "no recent match"
+MOVE_14N = "move_14n"
+LAST_POINTS = "last_points"
+REFINEMENTS: tuple[str, ...] = (MOVE_14N, LAST_POINTS)  # canonical order of the key
+
 SHRINK_K = 30
 LOW_QUANTILE = 0.10
 MIN_QUANTILE_N = 30
@@ -41,6 +58,7 @@ MARKET_NIGHTS = 3
 MARKET_MIN_VALUE = 1_000_000  # the universe median ignores the cheapest tail
 
 Key = tuple[int, ...]
+Matches = Sequence[tuple[date, int]]  # (value day the result is known, points), sorted
 
 
 @dataclass(frozen=True)
@@ -49,6 +67,8 @@ class DriftFeatures:
     move_3n: float  # change over the last three nights
     market_value: int
     market_falling: bool
+    move_14n: float | None = None  # None without 14 nights of history
+    last_points: int | None = None  # the last match known that day; None = none in the window
 
 
 @dataclass(frozen=True)
@@ -70,9 +90,10 @@ class DriftTable:
     lag: int
     horizon: int
     cells: Mapping[Key, CellStats]
+    refine: tuple[str, ...] = ()
 
     def predict(self, features: DriftFeatures) -> DriftEstimate:
-        keys = cell_keys(features)  # most specific first
+        keys = cell_keys(features, self.refine)  # most specific first
         estimate = self.cells[()].mean
         for key in reversed(keys[:-1]):  # general → specific
             stats = self.cells.get(key)
@@ -97,23 +118,64 @@ def band(market_value: int) -> int:
     return bisect_right(BAND_EDGES, market_value)
 
 
-def cell_keys(f: DriftFeatures) -> tuple[Key, ...]:
+def cell_keys(f: DriftFeatures, refine: Sequence[str] = ()) -> tuple[Key, ...]:
+    """The cell hierarchy, most specific first.
+
+    With ``refine``, a refined cell sits above the full cell. It is left out when
+    a refined feature is unknown (a path shorter than 14 nights), so such a
+    player is predicted by the unrefined hierarchy.
+    """
     lm = bisect_right(LAST_MOVE_EDGES, f.last_move)
     m3 = bisect_right(MOVE_3N_EDGES, f.move_3n)
     b = band(f.market_value)
     mk = int(f.market_falling)
-    return ((lm, m3, b, mk), (lm, b, mk), (b, mk), ())
+    keys: tuple[Key, ...] = ((lm, m3, b, mk), (lm, b, mk), (b, mk), ())
+    extra = _refined(f, refine)
+    return keys if extra is None else ((*keys[0], *extra), *keys)
 
 
-def fit(samples: Iterable[tuple[DriftFeatures, float]], *, lag: int, horizon: int) -> DriftTable:
+def _refined(f: DriftFeatures, refine: Sequence[str]) -> Key | None:
+    if not refine:
+        return None
+    extra: list[int] = []
+    for name in refine:
+        if name == MOVE_14N:
+            if f.move_14n is None:
+                return None
+            extra.append(bisect_right(MOVE_14N_EDGES, f.move_14n))
+        elif name == LAST_POINTS:
+            points = f.last_points  # None: no match in the window, bucket 0
+            extra.append(0 if points is None else 1 + bisect_right(LAST_POINTS_EDGES, points))
+        else:
+            raise ValueError(f"unknown refinement {name!r}")
+    return tuple(extra)
+
+
+def canonical_refine(refine: Iterable[str]) -> tuple[str, ...]:
+    """The refinements in key order; raises on an unknown name."""
+    names = set(refine)
+    unknown = names - set(REFINEMENTS)
+    if unknown:
+        raise ValueError(f"unknown refinement {sorted(unknown)[0]!r}")
+    return tuple(name for name in REFINEMENTS if name in names)
+
+
+def fit(
+    samples: Iterable[tuple[DriftFeatures, float]],
+    *,
+    lag: int,
+    horizon: int,
+    refine: Iterable[str] = (),
+) -> DriftTable:
+    refine = canonical_refine(refine)
     grouped: dict[Key, list[float]] = defaultdict(list)
     for features, target in samples:
-        for key in cell_keys(features):
+        for key in cell_keys(features, refine):
             grouped[key].append(target)
     if () not in grouped:
         raise ValueError("cannot fit a drift table on no samples")
     cells = {key: _stats(values) for key, values in grouped.items()}
-    return DriftTable(lag=lag, horizon=horizon, cells=cells)
+    return DriftTable(lag=lag, horizon=horizon, cells=cells, refine=refine)
 
 
 def _stats(values: list[float]) -> CellStats:
@@ -136,8 +198,13 @@ def _quantile(values: list[float], q: float) -> float:
 Path = Mapping[date, int]
 
 
-def features_at(path: Path, day: date, market_falling: bool | None) -> DriftFeatures | None:
-    """The features known at ``day`` (its value has been published), or None."""
+def features_at(
+    path: Path, day: date, market_falling: bool | None, last_points: int | None = None
+) -> DriftFeatures | None:
+    """The features known at ``day`` (its value has been published), or None.
+
+    ``last_points`` comes from `last_points_at`; the path itself gives the rest.
+    """
     if market_falling is None:
         return None
     today = path.get(day)
@@ -145,12 +212,29 @@ def features_at(path: Path, day: date, market_falling: bool | None) -> DriftFeat
     three_back = path.get(day - timedelta(days=3))
     if not today or not yesterday or not three_back:
         return None
+    fourteen_back = path.get(day - timedelta(days=14))
     return DriftFeatures(
         last_move=today / yesterday - 1,
         move_3n=today / three_back - 1,
         market_value=today,
         market_falling=market_falling,
+        move_14n=today / fourteen_back - 1 if fourteen_back else None,
+        last_points=last_points,
     )
+
+
+def last_points_at(matches: Matches, day: date) -> int | None:
+    """Points of the newest match whose result was known before ``day``.
+
+    A match is known on the value day of its final whistle, and it is priced
+    by the next nightly update, so a result on ``day`` itself does not count.
+    None when there is none within `LAST_POINTS_WINDOW_DAYS`.
+    """
+    i = bisect_left(matches, (day,))  # first match known on or after `day`
+    if i == 0:
+        return None
+    known, points = matches[i - 1]
+    return points if (day - known).days <= LAST_POINTS_WINDOW_DAYS else None
 
 
 def target_at(path: Path, day: date, *, lag: int, horizon: int) -> float | None:
@@ -188,17 +272,21 @@ def training_samples(
     horizon: int,
     first_day: date,
     last_day: date,
+    matches: Mapping[str, Matches] | None = None,
 ) -> Iterable[tuple[DriftFeatures, float]]:
     """Every (features, target) pair whose features are known in [first_day, last_day].
 
     Pass ``last_day`` as the fit's cutoff minus ``lag + horizon``, so no target
-    reaches past the cutoff.
+    reaches past the cutoff. Pass ``matches`` to fit a `LAST_POINTS` refinement:
+    without it every sample reads as "no recent match".
     """
-    for path in paths.values():
+    for player_id, path in paths.items():
+        played = matches.get(player_id, ()) if matches is not None else ()
         for day in path:
             if not first_day <= day <= last_day:
                 continue
-            features = features_at(path, day, market_falling(moves, day))
+            points = last_points_at(played, day) if played else None
+            features = features_at(path, day, market_falling(moves, day), points)
             target = target_at(path, day, lag=lag, horizon=horizon)
             if features is not None and target is not None:
                 yield features, target

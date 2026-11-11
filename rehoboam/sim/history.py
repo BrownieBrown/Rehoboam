@@ -231,6 +231,29 @@ def load_points(conn, *, season: str) -> dict[tuple[str, int], float]:
     return {(r["player_id"], int(r["day_number"])): float(r["points"] or 0) for r in rows}
 
 
+MATCH_LENGTH = timedelta(hours=2)  # kickoff to final whistle, with stoppage time
+MATCH_SEASONS = ("2025/2026", "2026/2027")  # the seasons the value paths cover
+
+
+def load_match_points(conn) -> dict[str, tuple[tuple[date, int], ...]]:
+    """Per player, (value day the result is known, points), oldest first.
+
+    The value day of the final whistle (kickoff + `MATCH_LENGTH`) under the
+    22:00 Berlin rule. A future fixture's placeholder row is harmless: a reader
+    only looks at matches known before its own day.
+    """
+    rows = conn.execute(
+        "select player_id, match_date, points from rehoboam.player_match_history "
+        "where season = any(%(seasons)s) and match_date is not null",
+        {"seasons": list(MATCH_SEASONS)},
+    ).fetchall()
+    out: dict[str, list[tuple[date, int]]] = defaultdict(list)
+    for r in rows:
+        kickoff = datetime.fromisoformat(r["match_date"].replace("Z", "+00:00"))
+        out[r["player_id"]].append((value_day(kickoff + MATCH_LENGTH), int(r["points"] or 0)))
+    return {pid: tuple(sorted(matches)) for pid, matches in out.items()}
+
+
 def load_rounds(conn, *, season: str) -> tuple[Round, ...]:
     rows = conn.execute(
         "select day_number, min(kickoff) as kickoff from rehoboam.fixtures "

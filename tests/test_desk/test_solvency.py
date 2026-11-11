@@ -65,3 +65,48 @@ def test_the_last_session_repays_the_debt_by_selling_the_bench_first():
 
     assert {p.player_id for p in result.sells} <= {"b1", "b2"}
     assert solvency.cash_after(_book(-6_000_000, last=True), result.sells, ()) >= 0
+
+
+# --- M2-13: the trading book covers its own debt -----------------------------
+
+
+def _flip(sellable=True, value=3_000_000, low=-0.10, premium=0.05):
+    player = _p("flip", ep=0.0, value=value, drift=0.30, low=low)
+    return Offer(player, premium=premium, sellable_before_kickoff=sellable)
+
+
+def _eleven_book(cash, open_bid_cover=0):
+    return Book(
+        held=tuple(_eleven()), cash=cash, open_bid_cover=open_bid_cover, last_before_kickoff=False
+    )
+
+
+def test_a_bid_sold_before_kickoff_covers_its_own_debt_at_its_p10():
+    # Bid 3.15m on a 3m flip with a -10% p10: it raises 2.7m, so 450k of cash is needed.
+    assert solvency.solvent(_eleven_book(450_000), (), (_flip(),))
+    assert not solvency.solvent(_eleven_book(449_999), (), (_flip(),))
+
+
+def test_a_bid_that_settles_too_late_to_sell_covers_nothing():
+    assert not solvency.solvent(_eleven_book(450_000), (), (_flip(sellable=False),))
+
+
+def test_an_open_bid_keeps_covering_its_debt_in_the_next_session():
+    # Last session's bid is now pending: its cost is committed, its cover rides on the book.
+    book = Book(
+        held=tuple(_eleven()),
+        cash=450_000,
+        committed=3_150_000,
+        open_bids=1,
+        open_bid_cover=2_700_000,
+        last_before_kickoff=False,
+    )
+
+    assert solvency.solvent(book, (), ())
+    assert planner.plan(book, [], MU).sells == ()
+
+
+def test_the_bid_cover_never_survives_the_last_session():
+    book = Book(held=tuple(_eleven()), cash=450_000, last_before_kickoff=True)
+
+    assert not solvency.solvent(book, (), (_flip(),))

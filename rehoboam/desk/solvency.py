@@ -45,8 +45,22 @@ def bench_cover(held: Sequence[Player]) -> int:
     )
 
 
+def bid_cover(bids: Iterable[Offer]) -> int:
+    """What the new bids raise if sold before kickoff, at their p10 (M2-13).
+
+    The trading book repays its own debt, as the league's leaders do: a flip
+    bought on Monday is the sale that clears the wallet before Friday. Only a
+    bid that settles before the last session can be sold in time.
+    """
+    return sum(
+        round(o.player.market_value * (1 + min(0.0, o.player.drift_low)))
+        for o in bids
+        if o.sellable_before_kickoff
+    )
+
+
 def solvent(book: Book, sells: Iterable[Player], bids: Iterable[Offer]) -> bool:
-    sells = tuple(sells)
+    sells, bids = tuple(sells), tuple(bids)
     cash = cash_after(book, sells, bids)
     if cash >= 0:
         return True
@@ -55,4 +69,5 @@ def solvent(book: Book, sells: Iterable[Player], bids: Iterable[Offer]) -> bool:
     sold = {p.player_id for p in sells}
     held = [p for p in book.held if p.player_id not in sold]
     cap = DEBT_CAP_OF_SQUAD_VALUE * sum(p.market_value for p in held)
-    return -cash <= min(cap, bench_cover(held))
+    cover = bench_cover(held) + book.open_bid_cover + bid_cover(bids)
+    return -cash <= min(cap, cover)
