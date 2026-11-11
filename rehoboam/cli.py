@@ -1361,6 +1361,106 @@ def transfer_study(
     console.print("[dim]Read-only. Premiums from 2025-07-29; points and resales from 2021.[/dim]")
 
 
+@app.command("desk-drift-report")
+def desk_drift_report(
+    fit_cutoff: str = typer.Option(
+        "2026-07-01", "--fit-cutoff", help="Fit on value paths before this day"
+    ),
+    season: str = typer.Option(
+        "2026/2027", "--season", help="Season whose league premiums set the hurdle"
+    ),
+):
+    """M1 of the v3 spec: is 7-day drift predictable out of sample? Read-only.
+
+    Fits the drift table (`desk/drift.py`) on every value path before the
+    cutoff, predicts every Kickbase listing after it, and judges the
+    pre-registered hurdle: the top decile's median 7-day drift after settling
+    must beat the league's median premium for its band.
+    """
+    from datetime import date, datetime, timezone
+
+    from .sim.drift_report import format_report, run
+    from .store import connect
+
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        report = run(
+            conn,
+            fit_cutoff=date.fromisoformat(fit_cutoff),
+            season=season,
+            now=datetime.now(timezone.utc),
+        )
+    for line in format_report(report):
+        console.print(line, highlight=False)
+
+
+@app.command("desk-validate-sim")
+def desk_validate_sim():
+    """M0 of the v3 spec: does the simulator reproduce history? Read-only.
+
+    Replays every manager's transfers from his first stored squad against every
+    later squad snapshot, prices each snapshot from the value paths under the
+    22:00 Berlin rule, and explains our budget readings by our transfers.
+    """
+    from datetime import datetime, timezone
+
+    from .sim import history
+    from .sim.validate import format_validation, validate
+    from .store import connect
+
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        snapshots = history.load_squad_snapshots(conn)
+        since = min((s.at for s in snapshots), default=datetime.now(timezone.utc))
+        result = validate(
+            snapshots,
+            history.load_transfers(conn, since=since),
+            history.load_value_paths(conn),
+            history.load_wallet(conn),
+            history.load_self_ids(conn),
+        )
+        names = {
+            r["manager_id"]: r["name"]
+            for r in conn.execute("select manager_id, name from rehoboam.managers")
+        }
+    for line in format_validation(result, names):
+        console.print(line, highlight=False)
+
+
+@app.command("desk-backtest")
+def desk_backtest(
+    mu_scale: list[float] = typer.Option(
+        [1.0], "--mu-scale", help="Sweep of MU_SCALE; repeat the flag"
+    ),
+    fit_cutoff: str = typer.Option(
+        "2026-07-01", "--fit-cutoff", help="Fit drift tables before this day"
+    ),
+):
+    """M2 of the v3 spec: the planner over window W1 against the league. Read-only.
+
+    Replays the `desk` planner twice a day from our real go-live squad. Auctions
+    settle against the league's real buyers and kickoffs score real points. It
+    reports net worth and points per matchday beside holding still, our real
+    record and every rival, and the bar B1-B3.
+    """
+    from datetime import date
+
+    from .sim import backtest
+    from .sim.engine import Policy
+    from .store import connect
+
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff))
+    for scale in mu_scale:
+        for line in backtest.format_report(backtest.run(world, league, Policy(mu_scale=scale))):
+            console.print(line, highlight=False)
+        console.print()
+
+
 def _parse_day(text: str) -> float:
     from datetime import datetime
 
