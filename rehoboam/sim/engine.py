@@ -374,11 +374,29 @@ def _open_bid_cover(world: World, state: SimState, day: date, kickoff_at: dateti
     return cover
 
 
+@dataclass(frozen=True)
+class Decision:
+    """What one two-book session does: the replay applies it, the live session executes it."""
+
+    sells: tuple[Player, ...]
+    bids: tuple[Offer, ...]
+    books: Mapping[str, str]  # player id -> "core" | "flip", for every bid
+    listings: Mapping[str, Listing]  # player id -> the listing each bid is for
+    repaying: bool  # the last session before a kickoff: no bids, the wallet back to zero
+
+
 def _flipbook_session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
+    d = decide(world, state, at, policy)
+    return _apply(state, at, d.sells, d.bids, d.listings, d.books)
+
+
+def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decision:
     """One session of the two books (ADR-0008, M2-17). The core is what we did not
     win as a flip: its best eleven stays, the rest is sold, and with
     `Policy.core_upgrades` it bids first for one points upgrade. The flip book
-    exits at the turn, buys into what is left, and repays before the kickoff."""
+    exits at the turn, buys into what is left, and repays before the kickoff.
+
+    Pure over (world, state): the replay and the live session call the same code."""
     day = value_day(at)
     held = _held_players(world, state, at, day)
     book_of: dict[str, str] = {}
@@ -430,8 +448,17 @@ def _flipbook_session(world: World, state: SimState, at: datetime, policy: Polic
         )
         books |= {o.player.player_id: "flip" for o in flips_bought}
         new_bids += flips_bought
-    listing_of = {o.player.player_id: listing for o, listing in offers.items()}
-    return _apply(state, at, sells, new_bids, listing_of, books)
+    chosen = {o.player.player_id for o in new_bids}
+    listing_of = {
+        o.player.player_id: lst for o, lst in offers.items() if o.player.player_id in chosen
+    }
+    return Decision(
+        sells=tuple(sells),
+        bids=tuple(new_bids),
+        books=books,
+        listings=listing_of,
+        repaying=kickoff_at is None or kickoff_at <= at + SESSION_GAP,
+    )
 
 
 def _last_move(world: World, player_id: str, day: date) -> float | None:
