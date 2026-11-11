@@ -1486,6 +1486,41 @@ def desk_holdout(
     console.print(backtest.format_ensemble(report), highlight=False)
 
 
+@app.command("desk-scorecard")
+def desk_scorecard(
+    policies: list[str] = typer.Option(
+        ["no empty slot"], "--policy", "-p", help="named configurations (backtest.NAMED_POLICIES)"
+    ),
+    baseline: str = typer.Option("", "--baseline", "-b", help="the configuration to beat"),
+    fit_cutoff: str = typer.Option("2026-07-01", "--fit-cutoff"),
+):
+    """ADR-0012: money, missing players and points, against the league's top three.
+
+    Each configuration over the 15 daily windows of W1, beside the three managers
+    with the most profit over the same windows. With --baseline, says whether the
+    change is kept: no axis worse beyond noise, at least one better. Read-only.
+    """
+    from datetime import date
+
+    from .sim import backtest
+    from .store import connect
+
+    unknown = [p for p in [*policies, baseline] if p and p not in backtest.NAMED_POLICIES]
+    if unknown:
+        raise typer.BadParameter(f"unknown: {unknown}; known: {list(backtest.NAMED_POLICIES)}")
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff))
+    base = (
+        backtest.scorecard(world, league, backtest.NAMED_POLICIES[baseline]) if baseline else None
+    )
+    for name in policies:
+        card = backtest.scorecard(world, league, backtest.NAMED_POLICIES[name])
+        console.print(f"[bold]{name}[/bold]", highlight=False)
+        console.print(backtest.format_scorecard(card, base), highlight=False)
+
+
 @app.command("desk-backtest")
 def desk_backtest(
     mu_scale: list[float] = typer.Option(

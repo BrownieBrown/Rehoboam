@@ -137,3 +137,26 @@ def test_a_slot_a_flip_already_fills_is_no_hole():
     )
 
     assert pick is None
+
+
+def test_a_cheap_fill_takes_the_most_points_per_euro_not_the_star():
+    ten = [p for p in _eleven() if p.player_id != "f1"]
+    star = _offer("star", 120.0, value=15_000_000)  # 7.6 pts per million
+    honest = _offer("honest", 60.0, value=3_000_000)  # 19 pts per million
+
+    rich = core.upgrade(
+        ten, [star, honest], MU, cash=0, allowance=30_000_000, capital_neutral=True, fill_holes=True
+    )
+    cheap = core.upgrade(
+        ten,
+        [star, honest],
+        MU,
+        cash=0,
+        allowance=30_000_000,
+        capital_neutral=True,
+        fill_holes=True,
+        cheap_fill=True,
+    )
+
+    assert rich == star
+    assert cheap == honest

@@ -23,6 +23,7 @@ from rehoboam.desk.model import Offer, Player
 # Expected points a matchday an upgrade must add. A premium buys one move; a
 # smaller gain is within the scorer's error and invites the churn of M2-13.
 CORE_MIN_GAIN = 10.0
+HOLE_RANK = 1e9  # a cheap fill outranks every upgrade
 
 
 def upgrade(
@@ -37,6 +38,7 @@ def upgrade(
     surplus: int = 0,
     fill_holes: bool = False,
     others: Sequence[Player] = (),
+    cheap_fill: bool = False,
 ) -> Offer | None:
     """The bid that raises U the most through the eleven, or None.
 
@@ -52,6 +54,9 @@ def upgrade(
     exemption on; ``others`` are the rest of the squad (the flips), so only a hole
     in the eleven the whole squad can field counts. Without them a hole the flips
     cover still counts, and the core converts flip slots into core starters.
+    ``cheap_fill`` fills a hole with the most expected points per euro of bid,
+    not the most utility: a star bought to fill a slot ties up capital the flip
+    book trades with (M2-25).
     ``surplus`` is positive cash the core may add on top: the week's flip profit,
     back in the wallet after the repayment before a kickoff. Never debt (M2-22).
     """
@@ -82,6 +87,10 @@ def upgrade(
         value = (
             ep - base_ep + mu * (o.player.market_value * o.player.drift - o.premium_eur - displaced)
         )
-        if value > 0 and (best is None or value > best[0]):
+        if value <= 0:
+            continue
+        if cheap_fill and fills_a_hole:  # fills outrank upgrades, cheapest per point first
+            value = HOLE_RANK + (ep - base_ep) / max(1, o.bid)
+        if best is None or value > best[0]:
             best = (value, o)
     return best[1] if best else None

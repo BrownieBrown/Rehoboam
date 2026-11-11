@@ -89,6 +89,7 @@ class Policy:
     # M2-23: the core may fill an empty slot outside capital neutrality: "" never, "core" a
     # hole in the core's own eleven (converts flip slots), "squad" a hole the whole squad has.
     core_fills_holes: str = ""
+    cheap_fill: bool = False  # M2-25: fill a hole with the most points per euro
 
 
 @dataclass(frozen=True)
@@ -447,6 +448,7 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
                 capital_neutral=policy.core_capital_neutral,
                 surplus=max(0, cash) if policy.core_spends_surplus else 0,
                 fill_holes=bool(policy.core_fills_holes),
+                cheap_fill=policy.cheap_fill,
                 others=(
                     [p for p in flips if p.player_id not in sold]
                     if policy.core_fills_holes == "squad"

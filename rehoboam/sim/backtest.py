@@ -439,3 +439,206 @@ def format_report(r: BacktestReport) -> list[str]:
         f"  B2 points >= rivals' median: {'PASS' if r.b2 else 'FAIL'}",
         f"  B3 no violations: {'PASS' if r.b3 else 'FAIL ' + '; '.join(r.violations)}",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The leader scorecard (ADR-0012): every change, against the league's top three
+# ---------------------------------------------------------------------------
+
+LEADER_COUNT = 3
+MONEY_NOISE = 3_000_000  # a mean change smaller than this, in euros, is not a change
+POINTS_NOISE = 10.0  # likewise, in points a matchday
+
+
+def trading_profit(
+    buys: Sequence[tuple[datetime, str, int]],
+    sells: Sequence[tuple[datetime, str, int]],
+    end_value,
+) -> int:
+    """Each buy's first later sale price (or its value at the end) minus its price."""
+    total = 0
+    for at, pid, price in buys:
+        sale = min((s for s in sells if s[1] == pid and s[0] > at), default=None)
+        exit_price = sale[2] if sale else (end_value(pid) or 0)
+        total += exit_price - price
+    return total
+
+
+@dataclass(frozen=True)
+class Card:
+    name: str
+    total: float  # mean transfer-only net worth change over the windows
+    trading: float  # mean trading profit
+    points: float  # mean points a matchday
+    short: int = 0  # kickoffs with an empty slot (v3 only)
+    kickoffs: int = 0
+
+
+@dataclass(frozen=True)
+class Scorecard:
+    v3: Card
+    leaders: tuple[Card, ...]  # the top three by total profit, best first
+
+    @property
+    def money_level(self) -> str:
+        totals = sorted(c.total for c in self.leaders)
+        trades = sorted(c.trading for c in self.leaders)
+        if self.v3.total > totals[-1] and self.v3.trading > trades[-1]:
+            return "beats"
+        if self.v3.total >= totals[0] and self.v3.trading >= median(trades):
+            return "same level"
+        return "below"
+
+    def keeps(self, baseline: Scorecard) -> tuple[bool, list[str]]:
+        """Kept only if no axis gets worse (beyond noise) and at least one gets better."""
+        v, b = self.v3, baseline.v3
+        worse, better = [], []
+        if v.short > b.short:
+            worse.append(f"empty slots {b.short} -> {v.short}")
+        elif v.short < b.short:
+            better.append(f"empty slots {b.short} -> {v.short}")
+        for label, now, before, noise in (
+            ("total profit", v.total, b.total, MONEY_NOISE),
+            ("trading profit", v.trading, b.trading, MONEY_NOISE),
+            ("points", v.points, b.points, POINTS_NOISE),
+        ):
+            if now < before - noise:
+                worse.append(f"{label} {before:,.0f} -> {now:,.0f}")
+            elif now > before + noise:
+                better.append(f"{label} {before:,.0f} -> {now:,.0f}")
+        return (not worse and bool(better)), [*(f"worse: {w}" for w in worse), *better]
+
+
+def scorecard(
+    world: World,
+    league: League,
+    policy: Policy,
+    starts: Sequence[datetime] = ENSEMBLE_STARTS,
+    end: datetime = W1_END,
+) -> Scorecard:
+    """v3 and the league's top three, over the same windows (one path a start)."""
+    world = _with_blends(world, policy)
+    end_value = _end_value(world, end)
+    totals: list[float] = []
+    tradings: list[float] = []
+    points: list[float] = []
+    short = kickoffs = 0
+    managers: dict[str, dict[str, list[float]]] = {}
+    for start in starts:
+        window = Window(start, end)
+        rounds = window_rounds(world, window)
+        days = _days(rounds)
+        first = start_state(league, start)
+        final = engine.run(world, first, start, end, policy)
+        played = [m for m in final.matchdays if m.day_number in days]
+        totals.append(engine.net_worth(world, final, end) - engine.net_worth(world, first, start))
+        tradings.append(
+            trading_profit(
+                [(e.at, e.player_id, e.amount) for e in final.events if e.kind == "won"],
+                [(e.at, e.player_id, e.amount) for e in final.events if e.kind == "sell"],
+                end_value,
+            )
+        )
+        points.append(sum(m.points for m in played) / len(played) if played else 0.0)
+        short += sum(m.fielded < engine.ELEVEN for m in played)
+        kickoffs += len(played)
+        for mid in {s.manager_id for s in league.snapshots} - league.self_ids:
+            line = manager_line(world, league, mid, rounds, window)
+            mine = [t for t in league.transfers if t.manager_id == mid and start < t.at <= end]
+            row = managers.setdefault(mid, {"total": [], "trading": [], "points": []})
+            row["total"].append(line.net_worth_change)
+            row["points"].append(line.points_per_matchday)
+            row["trading"].append(
+                trading_profit(
+                    [(t.at, t.player_id, t.price) for t in mine if t.kind == BUY],
+                    [(t.at, t.player_id, t.price) for t in mine if t.kind == SELL],
+                    end_value,
+                )
+            )
+    cards = [
+        Card(league.names.get(mid, mid), _mean(r["total"]), _mean(r["trading"]), _mean(r["points"]))
+        for mid, r in managers.items()
+    ]
+    leaders = tuple(sorted(cards, key=lambda c: c.total, reverse=True)[:LEADER_COUNT])
+    mine = Card(
+        _name(policy, world),
+        _mean(totals),
+        _mean(tradings),
+        _mean(points),
+        short,
+        kickoffs,
+    )
+    return Scorecard(v3=mine, leaders=leaders)
+
+
+def format_scorecard(card: Scorecard, baseline: Scorecard | None = None) -> str:
+    rows = [f"  {'':<28}{'total':>10}{'trading':>10}{'pts/MD':>8}{'empty slots':>13}"]
+    for c in (card.v3, *card.leaders):
+        slots = f"{c.short}/{c.kickoffs}" if c is card.v3 else ""
+        rows.append(
+            f"  {c.name[:28]:<28}{c.total / 1e6:>+9.1f}m{c.trading / 1e6:>+9.1f}m{c.points:>8.0f}{slots:>13}"
+        )
+    rows.append(f"  money against the leaders: {card.money_level}")
+    if baseline is not None:
+        kept, why = card.keeps(baseline)
+        rows.append(
+            f"  against {baseline.v3.name}: {'KEEP' if kept else 'REJECT'} ({'; '.join(why) or 'no change'})"
+        )
+    return "\n".join(rows)
+
+
+def _end_value(world: World, end: datetime):
+    day = value_day(end)
+    return lambda pid: engine.value_at(world, pid, day)
+
+
+def _mean(xs: Sequence[float]) -> float:
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+# The configurations worth comparing, on the current code (tags pin the frozen code).
+NAMED_POLICIES: dict[str, Policy] = {
+    "planner": Policy(mu_scale=1.0, price_blend=True),
+    "flip book": Policy(price_blend=True, flipbook=True, planned_debt=True),
+    "two books": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+    ),
+    "no empty slot": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="squad",
+    ),
+    "core fills its eleven": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="core",
+    ),
+    "cheap fill, squad": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="squad",
+        cheap_fill=True,
+    ),
+    "cheap fill, core": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="core",
+        cheap_fill=True,
+    ),
+}
