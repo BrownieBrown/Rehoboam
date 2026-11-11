@@ -24,10 +24,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 
-from rehoboam.desk import bids, drift, planner
+from rehoboam.desk import bids, drift, flipbook, planner, solvency
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
 from rehoboam.desk.exchange import points_per_euro
-from rehoboam.desk.model import Book, Offer, Player
+from rehoboam.desk.model import MAX_SQUAD, Book, Offer, Player
 from rehoboam.desk.points import PriceBlend, fit_blend
 from rehoboam.sim import auction
 from rehoboam.sim.history import Listing, Prediction, Round, Transfer, ValuePaths, value_day
@@ -75,6 +75,11 @@ class Policy:
     # M2-14: a player we won inside the drift horizon, still expected to rise, is
     # not sold to fund a swap: the bid paid a premium for the whole horizon.
     commit_hold: bool = False
+    # M2-15: bid argmax F(p)·(drift − p) on the band's rival premiums, not the median.
+    value_bid: bool = False
+    # M2-17: the flip book instead of the planner (desk/flipbook.py): keep the
+    # eleven, sell the bench, buy risers into the free slots, sell at the turn.
+    flipbook: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,13 +188,17 @@ def _drift_estimate(
     return estimate.mean, low
 
 
-def _ceiling(world: World, market_value: int, at: datetime) -> float | None:
+def _rival_premiums(world: World, market_value: int, at: datetime) -> list[float]:
     band = drift.band(market_value)
-    return bids.ceiling(
+    return [
         p
         for t, v, p in world.rival_buys
         if at - CEILING_LOOKBACK <= t < at and drift.band(v) == band
-    )
+    ]
+
+
+def _ceiling(world: World, market_value: int, at: datetime) -> float | None:
+    return bids.ceiling(_rival_premiums(world, market_value, at))
 
 
 def _forecast_at_expiry(
@@ -315,9 +324,11 @@ def _player(
 
 
 def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
+    if policy.flipbook:
+        return _flipbook_session(world, state, at, policy)
     day = value_day(at)
     held = _held_players(world, state, at, day, commit=policy.commit_hold)
-    offers = _offers(world, state, at, day)
+    offers = _offers(world, state, at, day, value_bid=policy.value_bid)
     kickoff_at = next_kickoff(world, at)
     book = Book(
         held=tuple(held),
@@ -355,6 +366,43 @@ def _open_bid_cover(world: World, state: SimState, day: date, kickoff_at: dateti
     return cover
 
 
+def _flipbook_session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
+    """One session of the flip book (M2-17). The eleven is the best of what we
+    did not buy at auction; everything else that is not a flip is sold."""
+    day = value_day(at)
+    held = _held_players(world, state, at, day)
+    won = {e.player_id for e in state.events if e.kind == "won"}
+    flips = [p for p in held if p.player_id in won]
+    rest = [p for p in held if p.player_id not in won]
+    eleven = {p.player_id for p in best_eleven(rest)[1]}
+    core = [p for p in rest if p.player_id in eleven]
+    moves = {p.player_id: _last_move(world, p.player_id, day) for p in flips}
+    sells = [*(p for p in rest if p.player_id not in eleven), *flipbook.exits(flips, moves)]
+    cash = state.cash + sum(p.market_value for p in sells) - sum(x.bid for x in state.pending)
+    kickoff_at = next_kickoff(world, at)
+    offers: dict[Offer, Listing] = {}
+    new_bids: tuple[Offer, ...] = ()
+    if kickoff_at is None or kickoff_at <= at + SESSION_GAP:
+        sold = {p.player_id for p in sells}
+        keep = [p for p in flips if p.player_id not in sold]
+        sells += flipbook.repay(keep, core, cash=cash, last_moves=moves)
+    else:
+        offers = _offers(world, state, at, day, value_bid=policy.value_bid)
+        sold = {p.player_id for p in sells}
+        squad_value = sum(p.market_value for p in held if p.player_id not in sold)
+        allowance = solvency.DEBT_CAP_OF_SQUAD_VALUE * squad_value if policy.planned_debt else 0
+        slots = MAX_SQUAD - (len(held) - len(sells)) - len(state.pending)
+        new_bids = flipbook.entries(list(offers), cash, slots, allowance)
+    listing_of = {o.player.player_id: listing for o, listing in offers.items()}
+    return _apply(state, at, sells, new_bids, listing_of)
+
+
+def _last_move(world: World, player_id: str, day: date) -> float | None:
+    path = world.paths.get(player_id, {})
+    today, yesterday = path.get(day), path.get(day - timedelta(days=1))
+    return today / yesterday - 1 if today and yesterday else None
+
+
 def _held_players(
     world: World, state: SimState, at: datetime, day: date, *, commit: bool = False
 ) -> list[Player]:
@@ -378,7 +426,9 @@ def next_kickoff(world: World, at: datetime) -> datetime | None:
     return min(later) if later else None
 
 
-def _offers(world: World, state: SimState, at: datetime, day: date) -> dict[Offer, Listing]:
+def _offers(
+    world: World, state: SimState, at: datetime, day: date, *, value_bid: bool = False
+) -> dict[Offer, Listing]:
     pending = {p.listing.player_id for p in state.pending}
     kickoff_at = next_kickoff(world, at)
     out: dict[Offer, Listing] = {}
@@ -389,8 +439,13 @@ def _offers(world: World, state: SimState, at: datetime, day: date) -> dict[Offe
         base = _forecast_at_expiry(world, pid, day, listing.expires_at)
         if not base:
             continue
-        premium = _ceiling(world, base, at)
-        player = _player(world, pid, at, base, _drift(world, world.buy_table, pid, day))
+        expected = _drift(world, world.buy_table, pid, day)
+        premium = (
+            bids.value_premium(_rival_premiums(world, base, at), expected)
+            if value_bid
+            else _ceiling(world, base, at)
+        )
+        player = _player(world, pid, at, base, expected)
         if premium is None or player is None:
             continue
         arrives = kickoff_at is None or listing.expires_at < kickoff_at

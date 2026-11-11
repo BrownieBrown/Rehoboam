@@ -223,9 +223,13 @@ def _with_blends(world: World, policy: Policy) -> World:
 
 
 def _name(policy: Policy, world: World) -> str:
-    parts = [f"mu x{policy.mu_scale:g}"]
-    if policy.price_blend:
+    parts = ["flip book" if policy.flipbook else f"mu x{policy.mu_scale:g}"]
+    if policy.price_blend and not policy.flipbook:
         parts.append("blend")
+    if policy.planned_debt:
+        parts.append("debt")
+    if policy.value_bid:
+        parts.append("value bid")
     for label, table in (("hold", world.hold_table), ("buy", world.buy_table)):
         if table.refine:
             parts.append(f"{label} " + "+".join(_SHORT[name] for name in table.refine))

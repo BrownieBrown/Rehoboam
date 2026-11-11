@@ -99,7 +99,7 @@ def _best_move(
 ) -> tuple[float, tuple[Player, ...], tuple[Offer, ...]] | None:
     sold = {p.player_id for p in sells}
     bid_on = {o.player.player_id for o in bids}
-    sellable = [p for p in book.held if p.player_id not in sold and not p.committed]
+    sellable = [p for p in book.held if p.player_id not in sold]
     biddable = [o for o in offers if o.player.player_id not in bid_on]
 
     candidates: list[tuple[tuple[Player, ...], tuple[Offer, ...]]] = []
@@ -111,13 +111,33 @@ def _best_move(
             candidates += [((*sells, p), (*bids, o)) for p in sellable for o in biddable]
 
     best: tuple[float, tuple[Player, ...], tuple[Offer, ...]] | None = None
+    eleven_now = _kickoff_ep(book, sells, bids)
     for new_sells, new_bids in candidates:
         if not _feasible(book, new_sells, new_bids, limits):
+            continue
+        if _sells_committed(new_sells, sells) and not (
+            _kickoff_ep(book, new_sells, new_bids) > eleven_now + IMPROVEMENT_EPSILON
+        ):
             continue
         score = _score(book, new_sells, new_bids, mu)
         if best is None or score > best[0]:
             best = (score, new_sells, new_bids)
     return best
+
+
+def _sells_committed(new_sells: Sequence[Player], sells: Sequence[Player]) -> bool:
+    """Does the move add the sale of a committed player (M2-14)?"""
+    return any(p.committed for p in new_sells[len(sells) :])
+
+
+def _kickoff_ep(book: Book, sells: Sequence[Player], bids: Sequence[Offer]) -> float:
+    """EP of the best eleven the plan fields, its arriving bids counted as won.
+
+    A committed player is sold only by a move that raises this: points may
+    break a commitment, a better drift may not (M2-15).
+    """
+    arriving = [o.player for o in bids if o.arrives_before_kickoff]
+    return best_eleven([*_held_after(book, sells), *arriving])[0]
 
 
 def _feasible(book: Book, sells: Sequence[Player], bids: Sequence[Offer], limits: Limits) -> bool:

@@ -160,3 +160,17 @@ def test_the_solvency_repair_still_sells_a_committed_position():
     result = planner.plan(book, [], MU)
 
     assert [p.player_id for p in result.sells] == ["runner"]
+
+
+def test_a_committed_bench_player_is_sold_when_it_raises_the_eleven():
+    from dataclasses import replace
+
+    runner = replace(_p("runner", ep=1.0, value=4_000_000, drift=0.10), committed=True)
+    striker = Offer(_p("striker", "Forward", ep=140.0, value=4_000_000, drift=0.0), premium=0.05)
+    rising_eleven = [replace(p, drift=0.20) for p in _eleven()]  # every starter costs more to sell
+    book = Book(held=(*rising_eleven, runner), cash=200_000)
+
+    result = planner.plan(book, [striker], MU)
+
+    assert [p.player_id for p in result.sells] == ["runner"]
+    assert [o.player.player_id for o in result.bids] == ["striker"]
