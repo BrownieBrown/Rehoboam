@@ -188,6 +188,16 @@ class Settings(BaseSettings):
             "listings in its band (+17.5% at 15m+ on 2026-11-03). Env: CORE_BID_QUANTILE."
         ),
     )
+    core_bid_max_quantile: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=0.99,
+        description=(
+            "A core buy bids at most this point of the band's winning premiums — the "
+            "one cap above its value bid, since it skips the band and break-even caps "
+            "(Rohr, 2026-11-03: +33.5%). Env: CORE_BID_MAX_QUANTILE."
+        ),
+    )
     core_bid_min_appearances: int = Field(
         default=5,
         ge=1,

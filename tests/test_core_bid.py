@@ -270,3 +270,43 @@ class TestTheTraderDecidesOnce:
         assert trader._core_buy_ids(self._squad(), [], [(self._player("kabak", 114.9), None)]) == (
             frozenset()
         )
+
+
+class TestTheCoreCap:
+    """2026-11-04: Rohr (15.8m) was bid +33.5% — the value bid's urgency term
+    with no band cap above it. A core buy now bids between the winners' p75
+    and p90 of its band, whatever any single term says."""
+
+    def _bidder(self, max_q: float = 0.90):
+        return SmartBidding(
+            ceiling_policy=POLICY,
+            win_curve=_win_curve(),
+            profit_curve=_profit_curve(),
+            core_bid_quantile=0.75,
+            core_bid_max_quantile=max_q,
+            eur_per_point=1_000_000.0,  # every point worth 1m: the value bid wants the top
+        )
+
+    def _bid(self, bidder, *, core: bool):
+        return bidder.calculate_ep_bid(
+            asking_price=20_000_000,
+            market_value=20_000_000,
+            expected_points=110.0,
+            marginal_ep_gain=60.0,
+            confidence=0.9,
+            current_budget=500_000_000,
+            player_id="rohr",
+            trend_change_pct=0.0,
+            offer_count=0,
+            data_grade="A",
+            core_buy=core,
+        )
+
+    def test_a_core_buy_is_capped_at_the_winners_p90(self):
+        rec = self._bid(self._bidder(), core=True)
+        assert rec.overbid_pct == pytest.approx(13.9, abs=0.2)  # p90 of 4..15
+        assert "capped at the winners' p90" in rec.reasoning
+
+    def test_a_cap_below_the_floor_never_lowers_it_under_p75(self):
+        rec = self._bid(self._bidder(max_q=0.5), core=True)
+        assert rec.overbid_pct == pytest.approx(12.25, abs=0.2)

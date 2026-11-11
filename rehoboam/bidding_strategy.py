@@ -135,7 +135,11 @@ DEFAULT_CURVE_QUANTILES = {
 #: is losing the auction, not the resale. p75 wins about three in four.
 DEFAULT_CORE_BID_QUANTILE = 0.75
 
-from .services.value_bid import EMPTY_SLOT_PENALTY_POINTS, optimal_premium  # noqa: E402
+#: ...and at most this point (2026-11-04): Rohr was bid +33.5% when no band
+#: cap stood above the value bid. p90 is still a bid that wins nine in ten.
+DEFAULT_CORE_BID_MAX_QUANTILE = 0.90
+
+from .services.value_bid import optimal_premium  # noqa: E402
 
 #: When the squad cannot field eleven and kickoff is close, every tier reads
 #: the win curve this much higher up: an empty slot is -100 points, and the
@@ -211,8 +215,10 @@ class SmartBidding:
         eur_per_point: float | None = None,  # what the league pays per expected point
         direction_rule=None,  # services.entry_direction.EntryDirectionRule; None = off
         core_bid_quantile: float = DEFAULT_CORE_BID_QUANTILE,  # win curve point a core buy bids
+        core_bid_max_quantile: float = DEFAULT_CORE_BID_MAX_QUANTILE,  # ...and never above
     ):
         self.core_bid_quantile = float(core_bid_quantile)
+        self.core_bid_max_quantile = max(float(core_bid_max_quantile), self.core_bid_quantile)
         self.ceiling_policy = ceiling_policy
         self.win_curve = win_curve
         self.profit_curve = profit_curve
@@ -385,9 +391,11 @@ class SmartBidding:
                 auction settles after that update, so a falling forecast
                 lowers the premium to what it will be worth then. Applied
                 downward only — the gate checks against today's value.
-            urgent: The squad cannot field eleven and kickoff is close. Winning
-                is worth the -100 of an empty slot more (value bid), or each
-                tier reads the win curve at a higher quantile (fallback).
+            urgent: The squad cannot field eleven and kickoff is close. Each
+                tier reads the win curve at a higher quantile (fallback only).
+                The value bid adds nothing for it since 2026-11-04: the gain is
+                already measured against an unknown starter, and the emergency
+                fill fills the slot on the last day.
             alternative_gain: The best marginal gain among the other viable
                 candidates at this position — what the bot gets if it loses
                 this listing. Winning is worth the gain over it, not the whole
@@ -560,9 +568,12 @@ class SmartBidding:
         if self.win_curve is not None:
             try:
                 if self.eur_per_point is not None:
+                    # No empty-slot penalty on top (2026-11-04): a buy into an
+                    # empty slot is already measured against an unknown regular
+                    # starter (`best_eleven_gain`), and the emergency fill fills
+                    # the slot on the last day, so losing never leaves it at
+                    # -100. Counting both priced Rohr's +35.3 as 135.3 points.
                     unique_gain = float(marginal_ep_gain) - float(alternative_gain or 0.0)
-                    if urgent:
-                        unique_gain += EMPTY_SLOT_PENALTY_POINTS
                     value_point = optimal_premium(
                         self.win_curve,
                         market_value=int(market_value),
@@ -656,6 +667,26 @@ class SmartBidding:
                     core_point.band_lower,
                 )
                 overbid_pct = core_point.premium_pct
+        # ...and never above the winners' p90 (2026-11-04): the core buy skips
+        # the band and break-even caps, so this is the one thing standing above
+        # the value bid. Rohr went out at +33.5% before it existed.
+        core_cap_point = None
+        if core_buy and self.win_curve is not None:
+            try:
+                cap_point = self.win_curve.premium_at(int(market_value), self.core_bid_max_quantile)
+            except Exception:
+                logger.exception("win curve failed for core cap player=%s", player_id)
+                cap_point = None
+            if cap_point is not None and overbid_pct > cap_point.premium_pct:
+                logger.info(
+                    "ep-bid core cap player=%s premium %.1f%% -> %.1f%% (winners' p%d)",
+                    player_id,
+                    overbid_pct,
+                    cap_point.premium_pct,
+                    int(round(cap_point.quantile * 100)),
+                )
+                overbid_pct = cap_point.premium_pct
+                core_cap_point = cap_point
         exempt_from_cap = core_buy or (ep_tier == "must_have" and data_grade == "A")
         break_even = None
         expected_resale = None
@@ -826,8 +857,7 @@ class SmartBidding:
         if value_point is not None:
             reasoning_parts.append(
                 f"value bid: unique gain {value_point.unique_gain_pts:+.1f} pts "
-                f"(next best {float(alternative_gain or 0.0):+.1f}"
-                f"{', empty slot +100' if urgent else ''}) worth EUR "
+                f"(next best {float(alternative_gain or 0.0):+.1f}) worth EUR "
                 f"{int(value_point.value_eur):,}, wins {value_point.win_share:.0%} of listings"
             )
             if falling_cost > 0:
@@ -848,6 +878,12 @@ class SmartBidding:
                     f" (winners' p{int(round(core_point.quantile * 100))} "
                     f"+{core_point.premium_pct:.1f}%)"
                     if core_point is not None
+                    else ""
+                )
+                + (
+                    f", capped at the winners' p{int(round(core_cap_point.quantile * 100))} "
+                    f"+{core_cap_point.premium_pct:.1f}%"
+                    if core_cap_point is not None
                     else ""
                 )
             )

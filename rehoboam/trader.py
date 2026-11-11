@@ -242,6 +242,7 @@ class Trader:
             ceiling_policy=settings.bid_ceiling_policy(),
             direction_rule=_direction_rule(settings),
             core_bid_quantile=float(getattr(settings, "core_bid_quantile", 0.75) or 0.75),
+            core_bid_max_quantile=float(getattr(settings, "core_bid_max_quantile", 0.90) or 0.90),
         )
 
     # ------------------------------------------------------------------
