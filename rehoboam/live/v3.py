@@ -1,0 +1,167 @@
+"""The live adapter for v3 (ADR-0008 to ADR-0013).
+
+The live session runs `engine.decide`: the same code the replay is judged on. This
+module only translates. A `Snapshot` of the real league (squad, wallet, Kickbase's
+open listings with their exact expiry, our open bids, each player's book) becomes
+the simulator's `World` and `SimState`; the store supplies the history.
+
+Read-only here. Executing a `Decision` (instant sales, bids through the safety
+gate) is a separate step behind `TRADING_MODE=v3`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
+
+from rehoboam.sim import backtest, engine
+from rehoboam.sim.engine import Decision, Event, Pending, SimState, World
+from rehoboam.sim.history import BERLIN, Listing, in_update_window, value_day
+
+FROZEN = "v3-frozen-6"
+POLICY = backtest.NAMED_POLICIES["eleven + surplus"]
+FIT_CUTOFF = date(2026, 7, 1)  # the drift tables are fitted on 2025/26, as in every replay
+FLIP = "flip"
+CORE = "core"
+
+
+@dataclass(frozen=True)
+class OpenListing:
+    """One of Kickbase's own listings, open now."""
+
+    player_id: str
+    listed_at: datetime
+    expires_at: datetime
+    market_value: int
+    our_bid: int | None = None
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    now: datetime
+    cash: int
+    squad: Mapping[str, int]  # player id -> market value now
+    listings: tuple[OpenListing, ...]
+    books: Mapping[str, str]  # player id -> "flip" | "core", for what we hold or bid on
+    names: Mapping[str, str] = field(default_factory=dict)
+
+
+def decision_time(now: datetime) -> datetime:
+    """Inside Kickbase's nightly update (22:00-22:30 Berlin) a reading may be either
+    side of it; the session then decides as of 21:59 Berlin, on yesterday's values."""
+    if not in_update_window(now):
+        return now
+    berlin = now.astimezone(BERLIN)
+    return berlin.replace(hour=21, minute=59, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def listings_from_payload(items: Iterable[Mapping], now: datetime) -> tuple[OpenListing, ...]:
+    """Kickbase's own listings from the raw market payload (`it`): no seller (`u`),
+    an expiry in seconds (`exs`). A manager's listing is never a candidate."""
+    out = []
+    for item in items:
+        if item.get("u") or not item.get("exs") or not item.get("i"):
+            continue
+        listed = item.get("dt")
+        out.append(
+            OpenListing(
+                player_id=str(item["i"]),
+                listed_at=_parse(listed) if listed else now,
+                expires_at=now + timedelta(seconds=int(item["exs"])),
+                market_value=int(item.get("mv") or 0),
+                our_bid=int(item["uop"]) if item.get("uop") else None,
+            )
+        )
+    return tuple(out)
+
+
+def to_world_and_state(world: World, snap: Snapshot, at: datetime) -> tuple[World, SimState]:
+    """The replay's world and state for a live session at ``at``.
+
+    Today's values come from the API where the store has none yet; the open
+    listings join the history; money counts to the season's end (ADR-0013). A
+    held player is a flip only if his book says so; a bid with no known book
+    (placed by hand) is core.
+    """
+    day = value_day(at)
+    open_listings = tuple(
+        Listing(lst.player_id, lst.listed_at, lst.expires_at, at, lst.market_value)
+        for lst in snap.listings
+    )
+    current = {**snap.squad, **{lst.player_id: lst.market_value for lst in snap.listings}}
+    paths = dict(world.paths)
+    for pid, value in current.items():
+        path = paths.get(pid, {})
+        if value and day not in path:
+            paths[pid] = {**path, day: value}
+    world = replace(
+        world,
+        paths=paths,
+        listings=(*world.listings, *open_listings),
+        reset_at=backtest.SEASON_END,
+    )
+    by_id = {lst.player_id: lst for lst in open_listings}
+    pending = tuple(
+        Pending(by_id[lst.player_id], lst.our_bid, snap.books.get(lst.player_id, CORE))
+        for lst in snap.listings
+        if lst.our_bid
+    )
+    events = tuple(
+        Event(at, "won", pid, 0, FLIP) for pid in sorted(snap.squad) if snap.books.get(pid) == FLIP
+    )
+    return world, SimState(
+        cash=snap.cash, held=frozenset(snap.squad), pending=pending, events=events
+    )
+
+
+def plan(conn, snap: Snapshot) -> tuple[Decision, World, datetime]:
+    """Load the history (read-only), then decide as the frozen configuration would."""
+    at = decision_time(snap.now)
+    world, _ = backtest.load(conn, fit_cutoff=FIT_CUTOFF, until=snap.now)
+    world = replace(world, blends=engine.fit_blends(world))
+    world, state = to_world_and_state(world, snap, at)
+    return engine.decide(world, state, at, POLICY), world, at
+
+
+def books_from_store(conn, player_ids: Sequence[str]) -> dict[str, str]:
+    """Each player's book from our own history: a bid or a purchase marked `flip`."""
+    if not player_ids:
+        return {}
+    rows = conn.execute(
+        "select player_id, intent from rehoboam.tracked_purchases where player_id = any(%(ids)s) "
+        "union all "
+        "select player_id, intent from rehoboam.pending_bids where player_id = any(%(ids)s)",
+        {"ids": list(player_ids)},
+    ).fetchall()
+    return {r["player_id"]: FLIP if r["intent"] == FLIP else CORE for r in rows}
+
+
+def describe(decision: Decision, snap: Snapshot, world: World) -> list[str]:
+    """What the session would do, in words."""
+    lines = []
+    for p in decision.sells:
+        if decision.repaying:
+            why = "repay the wallet before the kickoff"
+        elif snap.books.get(p.player_id) == FLIP:
+            why = "flip: a night without a rise (the turn)"
+        else:
+            why = "core: not in the eleven"
+        lines.append(f"SELL {_name(snap, p.player_id):<28} {p.market_value:>12,}  {why}")
+    for o in decision.bids:
+        lst = decision.listings[o.player.player_id]
+        book = decision.books.get(o.player.player_id, "?")
+        lines.append(
+            f"BID  {_name(snap, o.player.player_id):<28} {o.bid:>12,}  +{o.premium:.1%} {book:<4} "
+            f"EP {o.player.ep_next:5.1f} drift {o.player.drift:+.1%}  "
+            f"expires {lst.expires_at:%a %H:%M} UTC"
+        )
+    return lines or ["nothing to do"]
+
+
+def _name(snap: Snapshot, player_id: str) -> str:
+    return snap.names.get(player_id, player_id)
+
+
+def _parse(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)

@@ -1547,6 +1547,86 @@ def desk_scorecard(
         console.print(backtest.format_scorecard(card, base), highlight=False)
 
 
+@app.command("v3-status")
+def v3_status(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """Read-only: what v3 (the frozen configuration) would do with the real squad now.
+
+    GET calls to Kickbase and a read-only store transaction only. Never places,
+    cancels or sells, never writes a row, and never runs the legacy session (so it
+    cannot touch a Top-5 forced sale). The dry run of every new sell path.
+    """
+    from datetime import datetime, timezone
+
+    from .desk.eleven import ELEVEN, best_eleven
+    from .live import v3
+    from .sim import engine
+    from .sim.history import value_day
+    from .store import connect
+
+    api, _settings, league = _login_and_get_league(league_index)
+    now = datetime.now(timezone.utc)
+    squad = api.get_squad(league)
+    cash = int(api.get_team_info(league).get("budget", 0))
+    market = api.get_market(league)
+    items = (getattr(api, "last_market_payload", None) or {}).get("it", [])
+    listings = v3.listings_from_payload(items, now)
+    names = {p.id: f"{p.first_name} {p.last_name}".strip() for p in [*squad, *market]}
+    # No _ensure_store(): it applies pending migrations (DDL); this command never writes.
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        ids = [p.id for p in squad] + [lst.player_id for lst in listings if lst.our_bid]
+        books = v3.books_from_store(conn, ids)
+        snap = v3.Snapshot(
+            now=now,
+            cash=cash,
+            squad={p.id: p.market_value for p in squad},
+            listings=listings,
+            books=books,
+            names=names,
+        )
+        decision, world, at = v3.plan(conn, snap)
+    unseen = [names.get(p.id, p.id) for p in squad if p.id not in world.positions]
+    held = [
+        pl
+        for pid in snap.squad
+        if (pl := engine._player(world, pid, at, snap.squad[pid], 0.0)) is not None
+    ]
+    kickoff = engine.next_kickoff(world, at)
+    ep, eleven = best_eleven(held)
+    console.print(
+        (
+            f"[bold]v3 ({v3.FROZEN}) at {at:%Y-%m-%d %H:%M} UTC[/bold] (value day {value_day(at)}), "
+            f"next kickoff {kickoff:%a %Y-%m-%d %H:%M} UTC"
+            if kickoff
+            else "no kickoff ahead"
+        ),
+        highlight=False,
+    )
+    console.print(
+        f"wallet {cash:,}  squad {len(squad)}  eleven {len(eleven)}/{ELEVEN} (EP {ep:.0f})  "
+        f"open Kickbase listings {len(listings)}  our bids {sum(1 for x in listings if x.our_bid)}  "
+        f"flips held {sum(1 for b in books.values() if b == v3.FLIP)}",
+        highlight=False,
+    )
+    if unseen:
+        console.print(
+            f"[yellow]No stored prediction, invisible to v3: {', '.join(unseen)}[/yellow]",
+            highlight=False,
+        )
+    if decision.repaying:
+        console.print("[yellow]Last session before the kickoff: repay only, no bids[/yellow]")
+    for line in v3.describe(decision, snap, world):
+        console.print(f"  {line}", highlight=False)
+    after = cash + sum(p.market_value for p in decision.sells) - sum(o.bid for o in decision.bids)
+    committed = sum(x.our_bid or 0 for x in listings)
+    console.print(
+        f"wallet after, all bids won: {after - committed:,}. Nothing was placed or sold.",
+        highlight=False,
+    )
+
+
 @app.command("desk-backtest")
 def desk_backtest(
     mu_scale: list[float] = typer.Option(
