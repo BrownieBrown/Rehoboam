@@ -46,3 +46,18 @@ def test_an_empty_slot_costs_one_hundred():
 
     assert len(eleven) == 10
     assert score == pytest.approx(10 * 50.0 + EMPTY_SLOT_POINTS)
+
+
+def test_ties_in_expected_points_break_by_player_id_whatever_the_input_order():
+    from rehoboam.desk.eleven import best_eleven
+    from rehoboam.desk.model import Player
+
+    squad = [Player("g", "Goalkeeper", 1, 50.0, 0.0)]
+    squad += [Player(f"d{i}", "Defender", 1, 50.0, 0.0) for i in range(4)]
+    squad += [Player(f"m{i}", "Midfielder", 1, 50.0, 0.0) for i in range(4)]
+    squad += [Player(f"f{i}", "Forward", 1, 50.0, 0.0) for i in "zyxa"]  # four tied forwards
+
+    forward = sorted(best_eleven(squad)[1], key=lambda p: p.player_id)
+    backward = sorted(best_eleven(list(reversed(squad)))[1], key=lambda p: p.player_id)
+
+    assert forward == backward

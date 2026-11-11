@@ -58,3 +58,14 @@ def test_a_bid_that_cannot_be_sold_before_kickoff_is_not_bought_on_debt():
     assert [o.player.player_id for o in flipbook.entries([late], 5_000_000, 5, 9_000_000)] == [
         "late"
     ]
+
+
+def test_when_slots_bind_the_euros_per_slot_rank_the_entries():
+    cheap = _offer("cheap", 0.60, value=1_000_000)  # +0.55m expected after its premium
+    big = _offer("big", 0.20, value=10_000_000)  # +1.5m
+
+    by_pct = flipbook.entries([cheap, big], cash=0, slots=1, allowance=20_000_000)
+    by_eur = flipbook.entries([cheap, big], cash=0, slots=1, allowance=20_000_000, by_euros=True)
+
+    assert [o.player.player_id for o in by_pct] == ["cheap"]
+    assert [o.player.player_id for o in by_eur] == ["big"]

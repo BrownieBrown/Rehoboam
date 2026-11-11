@@ -80,6 +80,7 @@ class Policy:
     # M2-17: the flip book instead of the planner (desk/flipbook.py): keep the
     # eleven, sell the bench, buy risers into the free slots, sell at the turn.
     flipbook: bool = False
+    flip_by_euros: bool = False  # M2-18: rank flips by expected euros, not percent
 
 
 @dataclass(frozen=True)
@@ -284,7 +285,8 @@ def settle(world: World, state: SimState, pending: Pending) -> SimState:
 def kickoff(world: World, state: SimState, rnd: Round) -> SimState:
     day = value_day(rnd.kickoff)
     squad = [
-        _player(world, pid, rnd.kickoff, value_at(world, pid, day) or 0, 0.0) for pid in state.held
+        _player(world, pid, rnd.kickoff, value_at(world, pid, day) or 0, 0.0)
+        for pid in sorted(state.held)
     ]
     expected, eleven = best_eleven(p for p in squad if p is not None)
     points = sum(world.points.get((p.player_id, rnd.day_number), 0.0) for p in eleven)
@@ -392,7 +394,9 @@ def _flipbook_session(world: World, state: SimState, at: datetime, policy: Polic
         squad_value = sum(p.market_value for p in held if p.player_id not in sold)
         allowance = solvency.DEBT_CAP_OF_SQUAD_VALUE * squad_value if policy.planned_debt else 0
         slots = MAX_SQUAD - (len(held) - len(sells)) - len(state.pending)
-        new_bids = flipbook.entries(list(offers), cash, slots, allowance)
+        new_bids = flipbook.entries(
+            list(offers), cash, slots, allowance, by_euros=policy.flip_by_euros
+        )
     listing_of = {o.player.player_id: listing for o, listing in offers.items()}
     return _apply(state, at, sells, new_bids, listing_of)
 

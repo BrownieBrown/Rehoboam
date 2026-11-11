@@ -24,7 +24,7 @@ def best_eleven(players: Iterable[Player]) -> tuple[float, tuple[Player, ...]]:
         if p.position in by_position:
             by_position[p.position].append(p)
     for group in by_position.values():
-        group.sort(key=lambda p: p.ep_next, reverse=True)
+        group.sort(key=lambda p: (-p.ep_next, p.player_id))  # ties: by id, never by input order
 
     best: tuple[float, tuple[Player, ...]] | None = None
     for defenders, midfielders, forwards in sorted(LEGAL_FORMATIONS):

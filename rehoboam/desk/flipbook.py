@@ -57,15 +57,24 @@ def repay(
     return tuple(sales)
 
 
-def entries(offers: Sequence[Offer], cash: int, slots: int, allowance: float) -> tuple[Offer, ...]:
+def entries(
+    offers: Sequence[Offer], cash: int, slots: int, allowance: float, *, by_euros: bool = False
+) -> tuple[Offer, ...]:
     """Bids by expected drift, highest first.
 
     ``cash`` is the wallet net of open bids and this session's sales; the bids
     may take it down to ``-allowance``, except a bid that cannot be sold before
-    the kickoff, which needs the cash.
+    the kickoff, which needs the cash. ``by_euros`` ranks by the expected gain
+    after the premium in euros, ``(drift − premium) × value``: the return per
+    slot, for when slots bind rather than money (M2-18).
     """
+
+    def rank(o: Offer) -> float:
+        edge = o.player.drift - o.premium
+        return edge * o.player.market_value if by_euros else o.player.drift
+
     bids: list[Offer] = []
-    for o in sorted(offers, key=lambda o: o.player.drift, reverse=True):
+    for o in sorted(offers, key=rank, reverse=True):
         if len(bids) >= slots:
             break
         if o.player.drift < o.premium:
