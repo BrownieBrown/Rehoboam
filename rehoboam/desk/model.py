@@ -17,6 +17,7 @@ class Player:
     market_value: int  # held: the value in force now; listed: the forecast value at expiry
     ep_next: float  # expected points at the next kickoff
     drift: float  # expected fractional value change over the horizon, from when we'd hold him
+    drift_low: float = 0.0  # its p10: the haircut when he is a named sale before kickoff
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,9 @@ class Book:
     cash: int
     committed: int = 0  # the sum of our open bids
     open_bids: int = 0  # how many
+    # True: no debt may be carried past this session (the last before a kickoff,
+    # or planned debt switched off). False: debt the bench covers is allowed.
+    last_before_kickoff: bool = True
 
 
 @dataclass(frozen=True)

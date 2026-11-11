@@ -67,7 +67,7 @@ def _repair(book: Book, mu: float) -> tuple[Player, ...]:
     objective as every other decision, with no second sacrifice order.
     """
     sells: tuple[Player, ...] = ()
-    while solvency.cash_after(book, sells, ()) < 0:
+    while not solvency.solvent(book, sells, ()):
         remaining = _held_after(book, sells)
         if not remaining:
             break

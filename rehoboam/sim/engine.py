@@ -38,6 +38,8 @@ VALUE_FALLBACK_DAYS = 7
 FORECAST_MOMENTUM = 0.95  # services/mv_forecast's rule: 0.95 × the last move, capped at ±30%
 FORECAST_CAP = 0.30
 ROUND_SPAN = timedelta(days=4)  # a round's matches are over 4 days after its first whistle
+SESSION_GAP = timedelta(hours=12)
+UNKNOWN_DRIFT_LOW = -0.20  # a named sale with no drift estimate is valued 20% down
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class Policy:
     mu_scale: float = 1.0
     limits: planner.Limits = planner.Limits()
     price_blend: bool = False
+    planned_debt: bool = False  # debt the bench covers, repaid by the last session before kickoff
 
 
 @dataclass(frozen=True)
@@ -152,11 +155,22 @@ def fit_blends(world: World) -> tuple[tuple[datetime, PriceBlend], ...]:
 
 
 def _drift(world: World, table: drift.DriftTable, player_id: str, day: date) -> float:
+    return _drift_estimate(world, table, player_id, day)[0]
+
+
+def _drift_estimate(
+    world: World, table: drift.DriftTable, player_id: str, day: date
+) -> tuple[float, float]:
+    """(mean, p10); (0, UNKNOWN_DRIFT_LOW) without three nights of history."""
     path = world.paths.get(player_id)
-    if path is None:
-        return 0.0
-    features = drift.features_at(path, day, drift.market_falling(world.moves, day))
-    return table.predict(features).mean if features else 0.0
+    features = (
+        drift.features_at(path, day, drift.market_falling(world.moves, day)) if path else None
+    )
+    if features is None:
+        return 0.0, UNKNOWN_DRIFT_LOW
+    estimate = table.predict(features)
+    low = estimate.low if estimate.low == estimate.low else UNKNOWN_DRIFT_LOW  # NaN guard
+    return estimate.mean, low
 
 
 def _ceiling(world: World, market_value: int, at: datetime) -> float | None:
@@ -273,7 +287,12 @@ def kickoff(world: World, state: SimState, rnd: Round) -> SimState:
 
 
 def _player(
-    world: World, player_id: str, at: datetime, value: int, drift_mean: float
+    world: World,
+    player_id: str,
+    at: datetime,
+    value: int,
+    drift_mean: float,
+    drift_low: float = 0.0,
 ) -> Player | None:
     position = world.positions.get(player_id)
     if position is None:
@@ -282,18 +301,22 @@ def _player(
     blend = blend_at(world, at)
     if blend is not None:
         ep = blend.apply(ep, value)
-    return Player(player_id, position, value, ep, drift_mean)
+    return Player(player_id, position, value, ep, drift_mean, drift_low)
 
 
 def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
     day = value_day(at)
     held = _held_players(world, state, at, day)
     offers = _offers(world, state, at, day)
+    kickoff_at = next_kickoff(world, at)
     book = Book(
         held=tuple(held),
         cash=state.cash,
         committed=sum(p.bid for p in state.pending),
         open_bids=len(state.pending),
+        last_before_kickoff=(
+            not policy.planned_debt or kickoff_at is None or kickoff_at <= at + SESSION_GAP
+        ),
     )
     mu = points_per_euro(
         max(1, matchdays_left(world, at)), world.eur_per_point, scale=policy.mu_scale
@@ -307,7 +330,8 @@ def _held_players(world: World, state: SimState, at: datetime, day: date) -> lis
     out = []
     for pid in sorted(state.held):
         value = value_at(world, pid, day)
-        player = _player(world, pid, at, value or 0, _drift(world, world.hold_table, pid, day))
+        mean_drift, low = _drift_estimate(world, world.hold_table, pid, day)
+        player = _player(world, pid, at, value or 0, mean_drift, low)
         if player is not None and value:
             out.append(player)
     return out
