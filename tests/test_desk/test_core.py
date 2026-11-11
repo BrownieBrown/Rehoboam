@@ -160,3 +160,64 @@ def test_a_cheap_fill_takes_the_most_points_per_euro_not_the_star():
 
     assert rich == star
     assert cheap == honest
+
+
+def _listing(pid, position, ep, value=3_000_000):
+    return Offer(Player(pid, position, value, ep, 0.0), premium=0.05, sellable_before_kickoff=True)
+
+
+def test_day_zero_fills_every_slot_in_one_session_and_one_upgrade_at_most():
+    market = [_listing("g1", "Goalkeeper", 50.0)]
+    market += [_listing(f"d{i}", "Defender", 50.0) for i in range(4)]
+    market += [_listing(f"m{i}", "Midfielder", 50.0) for i in range(4)]
+    market += [_listing(f"f{i}", "Forward", 50.0) for i in range(3)]
+
+    bids = core.bids(
+        [],
+        market,
+        MU,
+        cash=200_000_000,
+        allowance=0,
+        capital_neutral=True,
+        fill_holes=True,
+        cheap_fill=True,
+    )
+
+    assert len(bids) == 11  # a full legal eleven, not one player a session
+    assert len({o.player.player_id for o in bids}) == 11
+
+
+def test_open_core_bids_count_as_filled_so_a_slot_is_not_bought_twice():
+    keeper = Player("g0", "Goalkeeper", 3_000_000, 50.0, 0.0)
+    market = [_listing("g1", "Goalkeeper", 55.0), _listing("d0", "Defender", 50.0)]
+
+    bids = core.bids(
+        [],
+        market,
+        MU,
+        cash=50_000_000,
+        allowance=0,
+        capital_neutral=True,
+        fill_holes=True,
+        cheap_fill=True,
+        pending=[keeper],
+    )
+
+    assert [o.player.player_id for o in bids] == ["d0"]
+
+
+def test_the_fills_stop_at_the_wallet():
+    market = [_listing(f"d{i}", "Defender", 50.0) for i in range(4)]
+
+    bids = core.bids(
+        [],
+        market,
+        MU,
+        cash=6_500_000,
+        allowance=0,
+        capital_neutral=True,
+        fill_holes=True,
+        cheap_fill=True,
+    )
+
+    assert len(bids) == 2  # 3.15m each

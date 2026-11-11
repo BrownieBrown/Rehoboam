@@ -1493,6 +1493,11 @@ def desk_scorecard(
     ),
     baseline: str = typer.Option("", "--baseline", "-b", help="the configuration to beat"),
     fit_cutoff: str = typer.Option("2026-07-01", "--fit-cutoff"),
+    day0: int = typer.Option(
+        0,
+        "--day0",
+        help="start every path like the reset: no squad, this much cash (e.g. 200000000)",
+    ),
 ):
     """ADR-0012: money, missing players and points, against the league's top three.
 
@@ -1512,11 +1517,14 @@ def desk_scorecard(
     with connect() as conn:
         conn.execute("set transaction read only")
         world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff))
+    budget = day0 or None
     base = (
-        backtest.scorecard(world, league, backtest.NAMED_POLICIES[baseline]) if baseline else None
+        backtest.scorecard(world, league, backtest.NAMED_POLICIES[baseline], day0_budget=budget)
+        if baseline
+        else None
     )
     for name in policies:
-        card = backtest.scorecard(world, league, backtest.NAMED_POLICIES[name])
+        card = backtest.scorecard(world, league, backtest.NAMED_POLICIES[name], day0_budget=budget)
         console.print(f"[bold]{name}[/bold]", highlight=False)
         console.print(backtest.format_scorecard(card, base), highlight=False)
 

@@ -16,8 +16,9 @@ sells before its replacement has arrived (C1).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
-from rehoboam.desk.eleven import best_eleven
+from rehoboam.desk.eleven import ELEVEN, best_eleven
 from rehoboam.desk.model import Offer, Player
 
 # Expected points a matchday an upgrade must add. A premium buys one move; a
@@ -39,6 +40,7 @@ def upgrade(
     fill_holes: bool = False,
     others: Sequence[Player] = (),
     cheap_fill: bool = False,
+    fills_only: bool = False,
 ) -> Offer | None:
     """The bid that raises U the most through the eleven, or None.
 
@@ -77,6 +79,8 @@ def upgrade(
         fills_a_hole = (  # an empty slot is -100 every matchday it stays
             fill_holes and len(best_eleven([*squad, *others, o.player])[1]) > fielded
         )
+        if fills_only and not fills_a_hole:
+            continue
         if (
             capital_neutral
             and not fills_a_hole
@@ -94,3 +98,49 @@ def upgrade(
         if best is None or value > best[0]:
             best = (value, o)
     return best[1] if best else None
+
+
+def bids(
+    squad: Sequence[Player],
+    offers: Sequence[Offer],
+    mu: float,
+    *,
+    cash: int,
+    allowance: float,
+    others: Sequence[Player] = (),
+    pending: Sequence[Player] = (),
+    **rules: Any,
+) -> tuple[Offer, ...]:
+    """The core's bids this session (ADR-0011, M2-26).
+
+    Every slot the squad cannot field is filled now, not one a session: from an
+    empty squad (the reset's day 0) the eleven has to stand before the first
+    kickoff. Open core bids (``pending``) count as filled, so a slot is not
+    bought twice; ``others`` (the flips) count for fielding. Only in a session
+    with no hole to fill, one upgrade, as before.
+    """
+    chosen: list[Offer] = []
+    pool = list(offers)
+    while True:
+        team = [*squad, *pending, *(o.player for o in chosen)]
+        if len(best_eleven([*team, *others])[1]) >= ELEVEN:
+            break
+        fill = upgrade(
+            team,
+            pool,
+            mu,
+            cash=cash,
+            allowance=allowance,
+            others=others,
+            fills_only=True,
+            **{**rules, "fill_holes": True},
+        )
+        if fill is None:
+            break
+        chosen.append(fill)
+        pool.remove(fill)
+        cash -= fill.bid
+    if chosen or not offers:
+        return tuple(chosen)
+    one = upgrade(squad, pool, mu, cash=cash, allowance=allowance, others=others, **rules)
+    return (one,) if one is not None else ()

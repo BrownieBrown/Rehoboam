@@ -509,15 +509,36 @@ class Scorecard:
         return (not worse and bool(better)), [*(f"worse: {w}" for w in worse), *better]
 
 
+# Day 0 (Marco, 2026-11-11: "the bot should behave like its day 0 so we can win after the
+# reset"): the reset clears squads and budgets; a cash-only league restarts every manager
+# with no squad and 150, 200 or 250m (Eval §7.4). After the reset money keeps its value
+# to the season's end, so the horizon moves there.
+DAY0_BUDGET = 200_000_000
+SEASON_END = datetime(2027, 6, 1, tzinfo=timezone.utc)
+
+
+def day0_state(budget: int = DAY0_BUDGET) -> SimState:
+    """The reset's first session: no players, only cash."""
+    return SimState(cash=budget, held=frozenset())
+
+
 def scorecard(
     world: World,
     league: League,
     policy: Policy,
     starts: Sequence[datetime] = ENSEMBLE_STARTS,
     end: datetime = W1_END,
+    *,
+    day0_budget: int | None = None,
 ) -> Scorecard:
-    """v3 and the league's top three, over the same windows (one path a start)."""
+    """v3 and the league's top three, over the same windows (one path a start).
+
+    With ``day0_budget``, every path starts like the reset's day 0: no squad, that
+    much cash, and the season's end as the horizon (`day0_state`).
+    """
     world = _with_blends(world, policy)
+    if day0_budget is not None:
+        world = replace(world, reset_at=SEASON_END)
     end_value = _end_value(world, end)
     totals: list[float] = []
     tradings: list[float] = []
@@ -528,7 +549,7 @@ def scorecard(
         window = Window(start, end)
         rounds = window_rounds(world, window)
         days = _days(rounds)
-        first = start_state(league, start)
+        first = start_state(league, start) if day0_budget is None else day0_state(day0_budget)
         final = engine.run(world, first, start, end, policy)
         played = [m for m in final.matchdays if m.day_number in days]
         totals.append(engine.net_worth(world, final, end) - engine.net_worth(world, first, start))
@@ -622,6 +643,24 @@ NAMED_POLICIES: dict[str, Policy] = {
         core_upgrades=True,
         core_capital_neutral=True,
         core_fills_holes="core",
+    ),
+    "eleven + surplus": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="core",
+        core_spends_surplus=True,
+    ),
+    "no empty slot + surplus": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="squad",
+        core_spends_surplus=True,
     ),
     "cheap fill, squad": Policy(
         price_blend=True,

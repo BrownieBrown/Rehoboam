@@ -23,6 +23,7 @@ from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 
 from rehoboam.desk import bids, core, drift, flipbook, planner, solvency
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
@@ -438,25 +439,40 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
             mu = points_per_euro(
                 max(1, matchdays_left(world, at)), world.eur_per_point, scale=policy.mu_scale
             )
-            up = core.upgrade(
-                core_players,
-                candidates,
-                mu,
-                cash=cash,
-                allowance=allowance,
-                holds_value=policy.core_holds_value,
-                capital_neutral=policy.core_capital_neutral,
-                surplus=max(0, cash) if policy.core_spends_surplus else 0,
-                fill_holes=bool(policy.core_fills_holes),
-                cheap_fill=policy.cheap_fill,
-                others=(
-                    [p for p in flips if p.player_id not in sold]
-                    if policy.core_fills_holes == "squad"
-                    else ()
-                ),
-            )
-            if up is not None:
-                new_bids, cash, slots = (up,), cash - up.bid, slots - 1
+            rules: dict[str, Any] = {
+                "holds_value": policy.core_holds_value,
+                "capital_neutral": policy.core_capital_neutral,
+                "surplus": max(0, cash) if policy.core_spends_surplus else 0,
+                "fill_holes": bool(policy.core_fills_holes),
+                "cheap_fill": policy.cheap_fill,
+            }
+            squad_wide = policy.core_fills_holes == "squad"
+            others = [p for p in flips if p.player_id not in sold] if squad_wide else []
+            if policy.core_fills_holes:
+                pending_core, pending_flips = _pending_players(world, state, at, day)
+                picks = core.bids(
+                    core_players,
+                    candidates,
+                    mu,
+                    cash=cash,
+                    allowance=allowance,
+                    others=[*others, *pending_flips] if squad_wide else others,
+                    pending=pending_core,
+                    **rules,
+                )[:slots]
+            else:
+                up = core.upgrade(
+                    core_players,
+                    candidates,
+                    mu,
+                    cash=cash,
+                    allowance=allowance,
+                    others=others,
+                    **rules,
+                )
+                picks = (up,) if up is not None else ()
+            for up in picks:
+                new_bids, cash, slots = (*new_bids, up), cash - up.bid, slots - 1
                 books[up.player.player_id] = "core"
                 candidates = [o for o in candidates if o is not up]
         cover = None
@@ -483,6 +499,20 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
         listings=listing_of,
         repaying=kickoff_at is None or kickoff_at <= at + SESSION_GAP,
     )
+
+
+def _pending_players(
+    world: World, state: SimState, at: datetime, day: date
+) -> tuple[list[Player], list[Player]]:
+    """Our open bids' players, counted as won: (core bids, flip bids)."""
+    core_side: list[Player] = []
+    flip_side: list[Player] = []
+    for pending in state.pending:
+        pid = pending.listing.player_id
+        player = _player(world, pid, at, value_at(world, pid, day) or pending.bid, 0.0)
+        if player is not None:
+            (core_side if pending.book == "core" else flip_side).append(player)
+    return core_side, flip_side
 
 
 def _last_move(world: World, player_id: str, day: date) -> float | None:
