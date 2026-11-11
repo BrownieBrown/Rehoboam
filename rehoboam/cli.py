@@ -1443,6 +1443,12 @@ def desk_holdout(
     capital_neutral: bool = typer.Option(
         False, "--capital-neutral/--core-first-claim", help="ADR-0010's capital-neutral core"
     ),
+    spend_surplus: bool = typer.Option(
+        False, "--spend-surplus", help="ADR-0013: the core spends spare cash on upgrades"
+    ),
+    season_horizon: bool = typer.Option(
+        False, "--season-horizon", help="ADR-0013: money counts to the season's end"
+    ),
     fill_holes: str = typer.Option(
         "", "--fill-holes", help='ADR-0011: "squad" fills every empty slot; "core" also stand-ins'
     ),
@@ -1454,6 +1460,7 @@ def desk_holdout(
     from our real squad every two days, from the freeze to the first round after
     it. Only rounds that have finished count. Read-only.
     """
+    from dataclasses import replace
     from datetime import date, datetime, timezone
 
     from .sim import backtest
@@ -1476,7 +1483,10 @@ def desk_holdout(
         core_upgrades=core_upgrades,
         core_capital_neutral=capital_neutral,
         core_fills_holes=fill_holes,
+        core_spends_surplus=spend_surplus,
     )
+    if season_horizon:
+        world = replace(world, reset_at=backtest.SEASON_END)
     report = backtest.holdout(world, league, policy, frozen_at=frozen, now=now)
     if report is None:
         console.print(
@@ -1498,6 +1508,9 @@ def desk_scorecard(
         "--day0",
         help="start every path like the reset: no squad, this much cash (e.g. 200000000)",
     ),
+    season_horizon: bool = typer.Option(
+        False, "--season-horizon", help="money counts to the season's end, as after the reset"
+    ),
 ):
     """ADR-0012: money, missing players and points, against the league's top three.
 
@@ -1518,13 +1531,18 @@ def desk_scorecard(
         conn.execute("set transaction read only")
         world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff))
     budget = day0 or None
+    horizon = backtest.SEASON_END if season_horizon else None
     base = (
-        backtest.scorecard(world, league, backtest.NAMED_POLICIES[baseline], day0_budget=budget)
+        backtest.scorecard(
+            world, league, backtest.NAMED_POLICIES[baseline], day0_budget=budget, horizon=horizon
+        )
         if baseline
         else None
     )
     for name in policies:
-        card = backtest.scorecard(world, league, backtest.NAMED_POLICIES[name], day0_budget=budget)
+        card = backtest.scorecard(
+            world, league, backtest.NAMED_POLICIES[name], day0_budget=budget, horizon=horizon
+        )
         console.print(f"[bold]{name}[/bold]", highlight=False)
         console.print(backtest.format_scorecard(card, base), highlight=False)
 

@@ -530,15 +530,17 @@ def scorecard(
     end: datetime = W1_END,
     *,
     day0_budget: int | None = None,
+    horizon: datetime | None = None,
 ) -> Scorecard:
     """v3 and the league's top three, over the same windows (one path a start).
 
     With ``day0_budget``, every path starts like the reset's day 0: no squad, that
-    much cash, and the season's end as the horizon (`day0_state`).
+    much cash, and the season's end as the horizon (`day0_state`). ``horizon``
+    moves the date money stops counting (μ) without emptying the squad.
     """
     world = _with_blends(world, policy)
-    if day0_budget is not None:
-        world = replace(world, reset_at=SEASON_END)
+    if horizon is not None or day0_budget is not None:
+        world = replace(world, reset_at=horizon or SEASON_END)
     end_value = _end_value(world, end)
     totals: list[float] = []
     tradings: list[float] = []
