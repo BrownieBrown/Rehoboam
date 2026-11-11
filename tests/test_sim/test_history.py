@@ -29,3 +29,13 @@ def test_value_day_follows_the_22_00_berlin_update(utc, expected):
 def test_value_day_refuses_a_naive_datetime():
     with pytest.raises(ValueError):
         value_day(datetime(2026, 11, 11, 9, 0))
+
+
+def test_the_chance_of_appearing_is_a_start_or_a_sub_appearance():
+    from rehoboam.sim.history import appearance_probability
+
+    assert appearance_probability({"1": 0.002, "3": 0.198, "4": 0.08, "5": 0.72}) == pytest.approx(
+        0.80
+    )
+    assert appearance_probability(None) is None
+    assert appearance_probability({}) is None

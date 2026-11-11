@@ -132,6 +132,7 @@ def load(
         eur_per_point=eur_per_point(conn) or FALLBACK_EUR_PER_POINT,
         reset_at=RESET_AT,
         matches=matches,
+        appearances=history.load_appearances(conn, season=SEASON),
     )
     league = League(
         snapshots=history.load_squad_snapshots(conn),
@@ -217,8 +218,9 @@ def _policy_line(
 
 
 def _with_blends(world: World, policy: Policy) -> World:
-    if policy.price_blend and not world.blends:
-        return replace(world, blends=engine.fit_blends(world))
+    if policy.price_blend and (not world.blends or world.blends_form != policy.form_blend):
+        blends = engine.fit_blends(world, form=policy.form_blend)
+        return replace(world, blends=blends, blends_form=policy.form_blend)
     return world
 
 
@@ -654,6 +656,16 @@ NAMED_POLICIES: dict[str, Policy] = {
         core_capital_neutral=True,
         core_fills_holes="core",
         core_spends_surplus=True,
+    ),
+    "eleven + surplus + form": Policy(
+        price_blend=True,
+        flipbook=True,
+        planned_debt=True,
+        core_upgrades=True,
+        core_capital_neutral=True,
+        core_fills_holes="core",
+        core_spends_surplus=True,
+        form_blend=True,
     ),
     "no empty slot + surplus": Policy(
         price_blend=True,

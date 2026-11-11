@@ -119,7 +119,11 @@ def plan(conn, snap: Snapshot) -> tuple[Decision, World, datetime]:
     """Load the history (read-only), then decide as the frozen configuration would."""
     at = decision_time(snap.now)
     world, _ = backtest.load(conn, fit_cutoff=FIT_CUTOFF, until=snap.now)
-    world = replace(world, blends=engine.fit_blends(world))
+    world = replace(
+        world,
+        blends=engine.fit_blends(world, form=POLICY.form_blend),
+        blends_form=POLICY.form_blend,
+    )
     world, state = to_world_and_state(world, snap, at)
     return engine.decide(world, state, at, POLICY), world, at
 

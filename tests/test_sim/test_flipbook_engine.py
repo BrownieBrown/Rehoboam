@@ -121,3 +121,35 @@ def test_the_core_buys_a_points_upgrade_sells_who_it_displaces_and_keeps_him_thr
     assert displaced and displaced[0] in CORE  # whichever 60-pointer the best formation drops
     assert not any(e.kind == "sell" and e.player_id == "star" for e in events)
     assert final.violations == ()
+
+
+def test_form_is_the_season_average_of_appearances_finished_before_the_day():
+    from dataclasses import replace
+
+    apps = {
+        "f0": tuple((D0 - timedelta(days=d), pts) for d, pts in ((30, 100), (20, 120), (10, 140)))
+    }
+    world = replace(_world(), appearances={"f0": tuple(sorted(apps["f0"]))})
+
+    assert engine.form_at(world, "f0", D0) == 120.0
+    assert engine.form_at(world, "f0", D0 - timedelta(days=10)) is None  # two before: too few
+    assert engine.form_at(world, "g", D0) is None
+
+
+def test_the_blend_reads_real_form_times_the_chance_of_appearing():
+    from dataclasses import replace
+
+    from rehoboam.desk.points import PriceBlend
+
+    apps = tuple((D0 - timedelta(days=d), 120) for d in (30, 20, 10))  # 120 a game
+    before = START - timedelta(days=1)
+    world = replace(
+        _world(),
+        appearances={"f0": apps},
+        predictions={"f0": (Prediction(before, 60.0, 1, p_appear=0.5),)},
+        blends=((before, PriceBlend(0.0, 1.0, 0.0, rows=100, form_weight=1.0)),),
+    )
+
+    player = engine._player(world, "f0", START, 5_000_000, 0.0)
+
+    assert player.ep_next == 60.0  # real form x P(appear) = 120 x 0.5 = 60: the model was right

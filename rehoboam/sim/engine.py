@@ -19,7 +19,7 @@ A negative wallet at kickoff scores zero and is recorded as a violation.
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -29,7 +29,7 @@ from rehoboam.desk import bids, core, drift, flipbook, planner, solvency
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
 from rehoboam.desk.exchange import points_per_euro
 from rehoboam.desk.model import MAX_SQUAD, Book, Offer, Player
-from rehoboam.desk.points import PriceBlend, fit_blend
+from rehoboam.desk.points import FORM_MIN_APPS, PriceBlend, fit_blend, fit_form_blend
 from rehoboam.sim import auction
 from rehoboam.sim.history import Listing, Prediction, Round, Transfer, ValuePaths, value_day
 
@@ -65,6 +65,9 @@ class World:
     blends: tuple[tuple[datetime, PriceBlend], ...] = ()
     # Per player, (value day the result is known, points): the LAST_POINTS refinement.
     matches: Mapping[str, drift.Matches] = field(default_factory=dict)
+    # Per player, this season's appearances (minutes > 0): (value day known, points).
+    appearances: Mapping[str, drift.Matches] = field(default_factory=dict)
+    blends_form: bool = False  # the blends carry the form term (desk/points.py)
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,8 @@ class Policy:
     # hole in the core's own eleven (converts flip slots), "squad" a hole the whole squad has.
     core_fills_holes: str = ""
     cheap_fill: bool = False  # M2-25: fill a hole with the most points per euro
+    # 2026-11-11: the price blend also reads real form (points per appearance) against EP
+    form_blend: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,9 +165,31 @@ def blend_at(world: World, at: datetime) -> PriceBlend | None:
     return usable[-1] if usable else None
 
 
-def fit_blends(world: World) -> tuple[tuple[datetime, PriceBlend], ...]:
-    """One fit per finished round, on every round up to it, usable once it has finished."""
-    rows: list[tuple[float, int, float]] = []
+def form_at(world: World, player_id: str, day: date) -> float | None:
+    """This season's points per appearance from the matches known before ``day``;
+    None below `FORM_MIN_APPS` appearances."""
+    apps = world.appearances.get(player_id, ())
+    known = bisect_left(apps, (day,))
+    if known < FORM_MIN_APPS:
+        return None
+    return sum(points for _, points in apps[:known]) / known
+
+
+def _expected_form(world: World, player_id: str, day: date, pred: Prediction) -> float | None:
+    """Real form at the scorer's own chance of playing: points per appearance x P(appears).
+    The scorer's per-player quality is fitted on past seasons; its availability is not."""
+    form = form_at(world, player_id, day)
+    if form is None or pred.p_appear is None:
+        return None
+    return form * pred.p_appear
+
+
+def fit_blends(world: World, *, form: bool = False) -> tuple[tuple[datetime, PriceBlend], ...]:
+    """One fit per finished round, on every round up to it, usable once it has finished.
+
+    With ``form``, each row carries the player's form as known at that round's
+    kickoff, and the blend learns how far it corrects the scorer."""
+    rows: list[tuple[float, int, float | None, float]] = []
     out: list[tuple[datetime, PriceBlend]] = []
     for rnd in world.rounds:
         day = value_day(rnd.kickoff)
@@ -171,8 +198,15 @@ def fit_blends(world: World) -> tuple[tuple[datetime, PriceBlend], ...]:
             points = world.points.get((pid, rnd.day_number))
             value = value_at(world, pid, day)
             if pred and pred.day_number == rnd.day_number and points is not None and value:
-                rows.append((pred.ep, value, points))
-        fit = fit_blend(rows)
+                rows.append(
+                    (
+                        pred.ep,
+                        value,
+                        _expected_form(world, pid, day, pred) if form else None,
+                        points,
+                    )
+                )
+        fit = fit_form_blend(rows) if form else fit_blend([(e, v, p) for e, v, _, p in rows])
         if fit is not None:
             out.append((rnd.kickoff + ROUND_SPAN, fit))
     return tuple(out)
@@ -333,7 +367,9 @@ def _player(
     ep = ep_at(world, player_id, at)
     blend = blend_at(world, at)
     if blend is not None:
-        ep = blend.apply(ep, value)
+        pred = prediction_at(world, player_id, at) if blend.form_weight else None
+        form = _expected_form(world, player_id, value_day(at), pred) if pred else None
+        ep = blend.apply(ep, value, form)
     return Player(player_id, position, value, ep, drift_mean, drift_low)
 
 
