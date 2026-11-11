@@ -492,10 +492,11 @@ problem.
 **Frozen configurations (ADR-0007).** Each one is scored only on rounds after its freeze, from
 a worktree of its tag.
 
-| Tag           | Frozen at                 | `desk-holdout` flags                                         | Chosen by                                               | Its own W1 ensemble (development, vs our real record)                |
-| ------------- | ------------------------- | ------------------------------------------------------------ | ------------------------------------------------------- | -------------------------------------------------------------------- |
-| `v3-frozen-1` | 2026-11-11T16:19:29+00:00 | `--frozen-at 2026-11-11T16:19:29+00:00 --mu-scale 1 --blend` | the pre-registered rule (M2-5)                          | money +€22.3m, points −27.1 per MD: fails the ADR-0007 bar on points |
-| `v3-frozen-2` | 2026-11-11T16:28:59+00:00 | `--frozen-at 2026-11-11T16:28:59+00:00 --mu-scale 1 --blend` | frozen-1 plus the kickoff-timing correctness fix (M2-7) | money +€26.9m, points +23.8 per MD: passes the ADR-0007 bar          |
+| Tag           | Frozen at                 | `desk-holdout` flags                                              | Chosen by                                                    | Its own W1 ensemble (development, vs our real record)                          |
+| ------------- | ------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `v3-frozen-1` | 2026-11-11T16:19:29+00:00 | `--frozen-at 2026-11-11T16:19:29+00:00 --mu-scale 1 --blend`      | the pre-registered rule (M2-5)                               | money +€22.3m, points −27.1 per MD: fails the ADR-0007 bar on points           |
+| `v3-frozen-2` | 2026-11-11T16:28:59+00:00 | `--frozen-at 2026-11-11T16:28:59+00:00 --mu-scale 1 --blend`      | frozen-1 plus the kickoff-timing correctness fix (M2-7)      | money +€26.9m, points +23.8 per MD: passes the ADR-0007 bar                    |
+| `v3-frozen-3` | 2026-11-11T18:42:55+00:00 | `--frozen-at 2026-11-11T18:42:55+00:00 --blend --flipbook --debt` | the freeze rule (M2-17): 8/8 paired money wins over frozen-2 | money +€60.0m, points +20.2 per MD: passes the ADR-0007 bar; W1 profit +€47.4m |
 
 **What M2 found.** At μ×1 the planner is a money machine. It went into kickoffs with €47–91m of
 idle cash, and cash scores nothing. The cause is a derivation error in §4.3: μ(N) = (N−1)/P values
