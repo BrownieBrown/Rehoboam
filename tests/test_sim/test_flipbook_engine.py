@@ -27,10 +27,17 @@ def _riser(day: date) -> int:
     return round(_riser(peak) * 0.96 ** (day - peak).days)
 
 
-def _world() -> World:
+def _star(day: date) -> int:
+    """Flat at 4m, then falling from 10-06: a turn that must not sell a core player."""
+    return 4_000_000 if day <= D0 + timedelta(days=4) else 3_800_000
+
+
+def _world(with_star: bool = False) -> World:
     paths = {pid: {d: 5_000_000 for d in DAYS} for pid in CORE}
     paths["bench"] = {d: 2_000_000 for d in DAYS}
     paths["riser"] = {d: _riser(d) for d in DAYS}
+    if with_star:
+        paths["star"] = {d: _star(d) for d in DAYS}
     moves = drift.market_moves(paths)
 
     def table(lag):
@@ -47,17 +54,24 @@ def _world() -> World:
         last_seen=seen,
         market_value=_riser(D0 + timedelta(days=1)),
     )
-    eps = {pid: 60.0 for pid in CORE} | {"bench": 5.0, "riser": 20.0}
+    star = Listing(
+        "star",
+        listed_at=datetime(2026, 10, 2, 8, 30, tzinfo=UTC),
+        expires_at=datetime(2026, 10, 3, 13, 0, tzinfo=UTC),
+        last_seen=seen,
+        market_value=4_000_000,
+    )
+    eps = {pid: 60.0 for pid in CORE} | {"bench": 5.0, "riser": 20.0, "star": 140.0}
     before = START - timedelta(days=1)
     return World(
         paths=paths,
         moves=moves,
         hold_table=table(0),
         buy_table=table(1),
-        listings=(listing,),
+        listings=(listing, star) if with_star else (listing,),
         rivals={},
         predictions={pid: (Prediction(before, ep, 1),) for pid, ep in eps.items()},
-        positions=CORE | {"bench": "Midfielder", "riser": "Forward"},
+        positions=CORE | {"bench": "Midfielder", "riser": "Forward", "star": "Forward"},
         points={},
         rounds=(Round(1, KICKOFF),),
         rival_buys=tuple((START - timedelta(days=10), 3_000_000, 0.05) for _ in range(25)),
@@ -92,3 +106,18 @@ def test_the_wallet_is_never_negative_at_the_kickoff():
 
     assert final.violations == ()
     assert [m.cash_at_kickoff >= 0 for m in final.matchdays] == [True]
+
+
+def test_the_core_buys_a_points_upgrade_sells_who_it_displaces_and_keeps_him_through_a_turn():
+    state = SimState(cash=-1_000_000, held=frozenset({*CORE, "bench"}))
+    policy = Policy(flipbook=True, planned_debt=True, core_upgrades=True)
+    final = engine.run(_world(with_star=True), state, START, END, policy)
+    events = final.events
+
+    won = next(e for e in events if e.kind == "won" and e.player_id == "star")
+    displaced = [e.player_id for e in events if e.kind == "sell" and e.at > won.at][:1]
+
+    assert won.book == "core"
+    assert displaced and displaced[0] in CORE  # whichever 60-pointer the best formation drops
+    assert not any(e.kind == "sell" and e.player_id == "star" for e in events)
+    assert final.violations == ()

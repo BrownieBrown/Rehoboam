@@ -35,7 +35,7 @@ RESET_AT = datetime(2026, 12, 20, tzinfo=timezone.utc)  # after MD14, the last r
 SEASON = "2026/2027"
 HORIZON_DAYS = 7
 FALLBACK_EUR_PER_POINT = 255_008.0  # measured 2026-09-23, used only if the fit is too loose
-PATH_SPACING = timedelta(days=2)
+PATH_SPACING = timedelta(days=1)  # ADR-0009: daily starts (two days before it)
 
 
 @dataclass(frozen=True)
@@ -230,6 +230,8 @@ def _name(policy: Policy, world: World) -> str:
         parts.append("debt")
     if policy.value_bid:
         parts.append("value bid")
+    if policy.core_upgrades:
+        parts.append("core")
     for label, table in (("hold", world.hold_table), ("buy", world.buy_table)):
         if table.refine:
             parts.append(f"{label} " + "+".join(_SHORT[name] for name in table.refine))
@@ -278,7 +280,7 @@ def _days(rounds: Sequence[Round]) -> frozenset[int]:
 # The ensemble: one configuration judged on many paths, not one draw
 # ---------------------------------------------------------------------------
 
-ENSEMBLE_STARTS = tuple(W1_START + PATH_SPACING * i for i in range(8))  # 09-22 → 10-06
+ENSEMBLE_STARTS = tuple(W1_START + PATH_SPACING * i for i in range(15))  # 09-22 → 10-06
 
 
 @dataclass(frozen=True)

@@ -1439,6 +1439,10 @@ def desk_holdout(
     fit_cutoff: str = typer.Option("2026-07-01", "--fit-cutoff"),
     flip_book: bool = typer.Option(False, "--flipbook/--planner", help="M2-17's flip book"),
     debt: bool = typer.Option(False, "--debt/--no-debt", help="planned debt between rounds"),
+    core_upgrades: bool = typer.Option(False, "--core/--no-core", help="ADR-0008's core book"),
+    capital_neutral: bool = typer.Option(
+        False, "--capital-neutral/--core-first-claim", help="ADR-0010's capital-neutral core"
+    ),
 ):
     """The rolling freeze (ADR-0007): a frozen configuration on rounds after its freeze.
 
@@ -1461,7 +1465,14 @@ def desk_holdout(
     with connect() as conn:
         conn.execute("set transaction read only")
         world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff), until=now)
-    policy = Policy(mu_scale=mu_scale, price_blend=blend, flipbook=flip_book, planned_debt=debt)
+    policy = Policy(
+        mu_scale=mu_scale,
+        price_blend=blend,
+        flipbook=flip_book,
+        planned_debt=debt,
+        core_upgrades=core_upgrades,
+        core_capital_neutral=capital_neutral,
+    )
     report = backtest.holdout(world, league, policy, frozen_at=frozen, now=now)
     if report is None:
         console.print(

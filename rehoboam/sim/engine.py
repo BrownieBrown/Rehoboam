@@ -24,7 +24,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 
-from rehoboam.desk import bids, drift, flipbook, planner, solvency
+from rehoboam.desk import bids, core, drift, flipbook, planner, solvency
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
 from rehoboam.desk.exchange import points_per_euro
 from rehoboam.desk.model import MAX_SQUAD, Book, Offer, Player
@@ -81,12 +81,16 @@ class Policy:
     # eleven, sell the bench, buy risers into the free slots, sell at the turn.
     flipbook: bool = False
     flip_by_euros: bool = False  # M2-18: rank flips by expected euros, not percent
+    core_upgrades: bool = False  # ADR-0008: the core bids first for one points upgrade
+    core_holds_value: bool = False  # M2-20: only upgrades whose drift covers the premium
+    core_capital_neutral: bool = False  # M2-21: an upgrade costs at most what it displaces
 
 
 @dataclass(frozen=True)
 class Pending:
     listing: Listing
     bid: int
+    book: str = ""  # "flip" | "core" (ADR-0008); "" for the planner
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ class Event:
     kind: str  # sell | bid | won | lost | declined
     player_id: str
     amount: int
+    book: str = ""  # the bid's book, carried to its outcome (ADR-0008)
 
 
 @dataclass(frozen=True)
@@ -270,7 +275,7 @@ def settle(world: World, state: SimState, pending: Pending) -> SimState:
     else:
         won = auction.wins(pending.bid / actual - 1, rival) is True
         kind = "won" if won else "lost"
-    event = Event(listing.expires_at, kind, listing.player_id, pending.bid)
+    event = Event(listing.expires_at, kind, listing.player_id, pending.bid, pending.book)
     if not won:
         return replace(state, pending=remaining, events=(*state.events, event))
     return replace(
@@ -369,36 +374,62 @@ def _open_bid_cover(world: World, state: SimState, day: date, kickoff_at: dateti
 
 
 def _flipbook_session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
-    """One session of the flip book (M2-17). The eleven is the best of what we
-    did not buy at auction; everything else that is not a flip is sold."""
+    """One session of the two books (ADR-0008, M2-17). The core is what we did not
+    win as a flip: its best eleven stays, the rest is sold, and with
+    `Policy.core_upgrades` it bids first for one points upgrade. The flip book
+    exits at the turn, buys into what is left, and repays before the kickoff."""
     day = value_day(at)
     held = _held_players(world, state, at, day)
-    won = {e.player_id for e in state.events if e.kind == "won"}
-    flips = [p for p in held if p.player_id in won]
-    rest = [p for p in held if p.player_id not in won]
+    book_of: dict[str, str] = {}
+    for e in state.events:  # the latest win decides: a fact from our own history
+        if e.kind == "won":
+            book_of[e.player_id] = e.book
+    flips = [p for p in held if book_of.get(p.player_id, "core") != "core"]
+    rest = [p for p in held if book_of.get(p.player_id, "core") == "core"]
     eleven = {p.player_id for p in best_eleven(rest)[1]}
-    core = [p for p in rest if p.player_id in eleven]
+    core_players = [p for p in rest if p.player_id in eleven]
     moves = {p.player_id: _last_move(world, p.player_id, day) for p in flips}
     sells = [*(p for p in rest if p.player_id not in eleven), *flipbook.exits(flips, moves)]
     cash = state.cash + sum(p.market_value for p in sells) - sum(x.bid for x in state.pending)
     kickoff_at = next_kickoff(world, at)
     offers: dict[Offer, Listing] = {}
     new_bids: tuple[Offer, ...] = ()
+    books: dict[str, str] = {}
     if kickoff_at is None or kickoff_at <= at + SESSION_GAP:
         sold = {p.player_id for p in sells}
         keep = [p for p in flips if p.player_id not in sold]
-        sells += flipbook.repay(keep, core, cash=cash, last_moves=moves)
+        sells += flipbook.repay(keep, core_players, cash=cash, last_moves=moves)
     else:
         offers = _offers(world, state, at, day, value_bid=policy.value_bid)
         sold = {p.player_id for p in sells}
         squad_value = sum(p.market_value for p in held if p.player_id not in sold)
         allowance = solvency.DEBT_CAP_OF_SQUAD_VALUE * squad_value if policy.planned_debt else 0
         slots = MAX_SQUAD - (len(held) - len(sells)) - len(state.pending)
-        new_bids = flipbook.entries(
-            list(offers), cash, slots, allowance, by_euros=policy.flip_by_euros
+        candidates = list(offers)
+        if policy.core_upgrades and slots > 0:
+            mu = points_per_euro(
+                max(1, matchdays_left(world, at)), world.eur_per_point, scale=policy.mu_scale
+            )
+            up = core.upgrade(
+                core_players,
+                candidates,
+                mu,
+                cash=cash,
+                allowance=allowance,
+                holds_value=policy.core_holds_value,
+                capital_neutral=policy.core_capital_neutral,
+            )
+            if up is not None:
+                new_bids, cash, slots = (up,), cash - up.bid, slots - 1
+                books[up.player.player_id] = "core"
+                candidates = [o for o in candidates if o is not up]
+        flips_bought = flipbook.entries(
+            candidates, cash, slots, allowance, by_euros=policy.flip_by_euros
         )
+        books |= {o.player.player_id: "flip" for o in flips_bought}
+        new_bids += flips_bought
     listing_of = {o.player.player_id: listing for o, listing in offers.items()}
-    return _apply(state, at, sells, new_bids, listing_of)
+    return _apply(state, at, sells, new_bids, listing_of, books)
 
 
 def _last_move(world: World, player_id: str, day: date) -> float | None:
@@ -470,17 +501,25 @@ def _apply(
     sells: Sequence[Player],
     new_bids: Sequence[Offer],
     listing_of: Mapping[str, Listing],
+    books: Mapping[str, str] | None = None,
 ) -> SimState:
+    book = books or {}
     events = list(state.events)
     events += [Event(at, "sell", p.player_id, p.market_value) for p in sells]
-    events += [Event(at, "bid", o.player.player_id, o.bid) for o in new_bids]
+    events += [
+        Event(at, "bid", o.player.player_id, o.bid, book.get(o.player.player_id, ""))
+        for o in new_bids
+    ]
     return replace(
         state,
         cash=state.cash + sum(p.market_value for p in sells),
         held=state.held - {p.player_id for p in sells},
         pending=(
             *state.pending,
-            *(Pending(listing_of[o.player.player_id], o.bid) for o in new_bids),
+            *(
+                Pending(listing_of[o.player.player_id], o.bid, book.get(o.player.player_id, ""))
+                for o in new_bids
+            ),
         ),
         events=tuple(events),
     )
