@@ -1443,6 +1443,9 @@ def desk_holdout(
     capital_neutral: bool = typer.Option(
         False, "--capital-neutral/--core-first-claim", help="ADR-0010's capital-neutral core"
     ),
+    fill_holes: str = typer.Option(
+        "", "--fill-holes", help='ADR-0011: "squad" fills every empty slot; "core" also stand-ins'
+    ),
 ):
     """The rolling freeze (ADR-0007): a frozen configuration on rounds after its freeze.
 
@@ -1472,6 +1475,7 @@ def desk_holdout(
         planned_debt=debt,
         core_upgrades=core_upgrades,
         core_capital_neutral=capital_neutral,
+        core_fills_holes=fill_holes,
     )
     report = backtest.holdout(world, league, policy, frozen_at=frozen, now=now)
     if report is None:
