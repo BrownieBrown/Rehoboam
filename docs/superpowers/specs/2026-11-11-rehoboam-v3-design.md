@@ -435,6 +435,39 @@ ensemble of paths started on different days and sessions, reported as a mean wit
 The bar then applies to the mean. That is the next change. Named-sale debt waits until a
 configuration is chosen on the ensemble.
 
+**The ensemble, and the rule that picks the frozen configuration.** These were written before the
+first ensemble run.
+
+- **Paths.** Eight per configuration, each starting from our real squad and wallet at 20:00 UTC
+  on 09-22, 09-24, … 10-06. All end 11-11 and all play MD5–MD9.
+- **Scoring.** Each path is measured against the rivals' median over its own window.
+- **The bar.** B1 and B2 apply to the mean excess.
+- **The candidates.** The price blend with derived μ at ×0.5, ×1, ×2 and ×4 (`backtest.choose`).
+- **The rule.** Among clean candidates (no violations) whose mean points excess is ≥ 0, freeze
+  the one with the highest mean money excess. If none reaches the points bar, freeze the one with
+  the highest mean points excess. Points come first because they win matchups; money buys them.
+- **What the frozen configuration faces.** It goes to the MD10–MD14 holdout whatever its W1
+  result. The holdout costs nothing and decides live.
+
+| M2-5 | 2026-11-11 | + ensemble (`backtest.ensemble`) | 8 paths × blend μ ×0.5/1/2/4; vs the rivals' median over each path's window | mean money −€18.3m/−€14.4m/−€8.4m/+€1.8m; **mean points −194/−172/−182/−208 per MD**; 0 violations. The rule picks **blend μ×1**. M2-4's 962.8 was its luckiest path (+98; the others −98 to −268) |
+| M2-6 | 2026-11-11 | same | the same 8 paths against **our real record from each start** | blend μ×1: **money +€22.3m** (every path, +14.6 to +36.1m), **points −27 per MD** (−124 to +243), ahead on both in 2 of 8 paths. ×4: +€38.5m, −64 |
+
+**A flaw in the bar (B1/B2), found by M2-5 and pending Marco's decision.** B2 compares a level
+reached from unequal starts. We start W1 with the league's lowest team value (~130m against
+~200m for the rivals), and points follow team value (ρ 0.90, *Eval §7.3*). No policy closes a
+70m gap in five matchdays: every path started later, from a weaker real squad, scores lower
+across all settings. That was knowable from the evaluation before the bar was written. The
+proposed amendment:
+
+- **Windows before the reset (unequal starts):** v3 must beat **our real record from the same
+  start** on both money and points, as an ensemble mean.
+- **From the reset (everyone starts from zero):** the level bar against the rivals' median
+  applies as written.
+
+Under the amended bar the frozen candidate still **fails**: +€22.3m money, −27 points a
+matchday. So the amendment does not move the goalposts to a pass. The points side is the open
+problem.
+
 **What M2 found.** At μ×1 the planner is a money machine. It went into kickoffs with €47–91m of
 idle cash, and cash scores nothing. The cause is a derivation error in §4.3: μ(N) = (N−1)/P values
 a euro as if it will buy quality for every remaining matchday, while each session credits a

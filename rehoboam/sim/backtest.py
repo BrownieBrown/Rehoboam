@@ -141,45 +141,58 @@ def _us(league: League) -> str:
     return sorted(league.self_ids)[0]
 
 
-def start_state(league: League) -> SimState:
-    cash = max((r for r in league.wallet if r.at <= W1_START), key=lambda r: r.at).budget
-    return SimState(cash=cash, held=holdings_at(league, _us(league), W1_START))
+def start_state(league: League, start: datetime = W1_START) -> SimState:
+    cash = max((r for r in league.wallet if r.at <= start), key=lambda r: r.at).budget
+    return SimState(cash=cash, held=holdings_at(league, _us(league), start))
 
 
-def window_rounds(world: World) -> tuple[Round, ...]:
-    return tuple(r for r in world.rounds if W1_START < r.kickoff <= W1_END)
+def window_rounds(world: World, start: datetime = W1_START) -> tuple[Round, ...]:
+    return tuple(r for r in world.rounds if start < r.kickoff <= W1_END)
 
 
 def _squad_value(world: World, held: frozenset[str], at: datetime) -> int:
     return sum(engine.value_at(world, p, value_day(at)) or 0 for p in held)
 
 
-def manager_line(world: World, league: League, manager_id: str, rounds: Sequence[Round]) -> Line:
-    start = holdings_at(league, manager_id, W1_START)
-    end = holdings_at(league, manager_id, W1_END)
+def manager_line(
+    world: World,
+    league: League,
+    manager_id: str,
+    rounds: Sequence[Round],
+    start: datetime = W1_START,
+) -> Line:
+    held_start = holdings_at(league, manager_id, start)
+    held_end = holdings_at(league, manager_id, W1_END)
     cash = sum(
         (t.price if t.kind == SELL else -t.price if t.kind == BUY else 0)
         for t in league.transfers
-        if t.manager_id == manager_id and W1_START < t.at <= W1_END
+        if t.manager_id == manager_id and start < t.at <= W1_END
     )
-    change = _squad_value(world, end, W1_END) - _squad_value(world, start, W1_START) + cash
+    change = _squad_value(world, held_end, W1_END) - _squad_value(world, held_start, start) + cash
     points = [league.matchday_points.get((manager_id, r.day_number), 0.0) for r in rounds]
     return Line(league.names.get(manager_id, manager_id), change, sum(points) / len(points))
 
 
-def _policy_line(world: World, name: str, start: SimState, final: SimState) -> Line:
-    change = engine.net_worth(world, final, W1_END) - engine.net_worth(world, start, W1_START)
+def _policy_line(
+    world: World, name: str, first: SimState, final: SimState, start: datetime = W1_START
+) -> Line:
+    change = engine.net_worth(world, final, W1_END) - engine.net_worth(world, first, start)
     points = [m.points for m in final.matchdays]
     return Line(name, change, sum(points) / len(points) if points else 0.0)
 
 
-def run(world: World, league: League, policy: Policy) -> BacktestReport:
+def _with_blends(world: World, policy: Policy) -> World:
     if policy.price_blend and not world.blends:
-        world = replace(world, blends=engine.fit_blends(world))
-    rounds = window_rounds(world)
-    start = start_state(league)
-    final = engine.run(world, start, W1_START, W1_END, policy)
-    held_only = SimState(cash=start.cash, held=start.held)
+        return replace(world, blends=engine.fit_blends(world))
+    return world
+
+
+def run(world: World, league: League, policy: Policy, start: datetime = W1_START) -> BacktestReport:
+    world = _with_blends(world, policy)
+    rounds = window_rounds(world, start)
+    first = start_state(league, start)
+    final = engine.run(world, first, start, W1_END, policy)
+    held_only = SimState(cash=first.cash, held=first.held)
     for rnd in rounds:
         held_only = engine.kickoff(world, held_only, rnd)
     managers = sorted({s.manager_id for s in league.snapshots})
@@ -190,17 +203,99 @@ def run(world: World, league: League, policy: Policy) -> BacktestReport:
         policy=_policy_line(
             world,
             f"v3 (mu x{policy.mu_scale:g}{', blend' if policy.price_blend else ''})",
-            start,
+            first,
             final,
+            start,
         ),
-        do_nothing=_policy_line(world, "hold the go-live squad", start, held_only),
-        actual=manager_line(world, league, _us(league), rounds),
+        do_nothing=_policy_line(world, "hold the starting squad", first, held_only, start),
+        actual=manager_line(world, league, _us(league), rounds, start),
         rivals=tuple(
-            manager_line(world, league, m, rounds) for m in managers if m not in league.self_ids
+            manager_line(world, league, m, rounds, start)
+            for m in managers
+            if m not in league.self_ids
         ),
         matchdays=tuple(r.day_number for r in rounds),
         events=events,
         violations=final.violations,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The ensemble: one configuration judged on many paths, not one draw
+# ---------------------------------------------------------------------------
+
+ENSEMBLE_STARTS = tuple(W1_START + timedelta(days=2 * i) for i in range(8))  # 09-22 → 10-06
+
+
+@dataclass(frozen=True)
+class EnsembleReport:
+    name: str
+    money_excess: tuple[int, ...]  # per path: policy minus the rivals' median, same window
+    points_excess: tuple[float, ...]
+    violations: int
+    # Against our real record from the same start: independent of the starting squad.
+    money_vs_real: tuple[int, ...] = ()
+    points_vs_real: tuple[float, ...] = ()
+
+    @property
+    def mean_money(self) -> float:
+        return sum(self.money_excess) / len(self.money_excess)
+
+    @property
+    def mean_points(self) -> float:
+        return sum(self.points_excess) / len(self.points_excess)
+
+    @property
+    def b1(self) -> bool:
+        return self.mean_money >= 0
+
+    @property
+    def b2(self) -> bool:
+        return self.mean_points >= 0
+
+
+def ensemble(
+    world: World, league: League, policy: Policy, starts: Sequence[datetime] = ENSEMBLE_STARTS
+) -> EnsembleReport:
+    world = _with_blends(world, policy)
+    reports = [run(world, league, policy, start) for start in starts]
+    return EnsembleReport(
+        name=reports[0].policy.name,
+        money_excess=tuple(
+            r.policy.net_worth_change - r.rival_median.net_worth_change for r in reports
+        ),
+        points_excess=tuple(
+            r.policy.points_per_matchday - r.rival_median.points_per_matchday for r in reports
+        ),
+        violations=sum(len(r.violations) for r in reports),
+        money_vs_real=tuple(r.policy.net_worth_change - r.actual.net_worth_change for r in reports),
+        points_vs_real=tuple(
+            r.policy.points_per_matchday - r.actual.points_per_matchday for r in reports
+        ),
+    )
+
+
+def choose(reports: Sequence[EnsembleReport]) -> EnsembleReport:
+    """The rule written before the first ensemble run (spec §12): points first.
+
+    Among configurations whose mean points excess is ≥ 0, the highest mean money
+    excess. If none reaches the points bar, the highest mean points excess.
+    """
+    clean = [r for r in reports if r.violations == 0]
+    on_points = [r for r in clean if r.b2]
+    if on_points:
+        return max(on_points, key=lambda r: r.mean_money)
+    return max(clean, key=lambda r: r.mean_points)
+
+
+def format_ensemble(r: EnsembleReport) -> str:
+    return (
+        f"  {r.name[:24]:<24} money vs median {r.mean_money:>+13,.0f} "
+        f"[{min(r.money_excess):+,} .. {max(r.money_excess):+,}]  "
+        f"pts/MD vs median {r.mean_points:>+7.1f} "
+        f"[{min(r.points_excess):+.0f} .. {max(r.points_excess):+.0f}]  "
+        f"B1 {'PASS' if r.b1 else 'FAIL'} B2 {'PASS' if r.b2 else 'FAIL'} "
+        f"violations {r.violations}"
     )
 
 
