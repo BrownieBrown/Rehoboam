@@ -84,6 +84,7 @@ class Policy:
     core_upgrades: bool = False  # ADR-0008: the core bids first for one points upgrade
     core_holds_value: bool = False  # M2-20: only upgrades whose drift covers the premium
     core_capital_neutral: bool = False  # M2-21: an upgrade costs at most what it displaces
+    core_spends_surplus: bool = False  # M2-22: ...plus the wallet's positive cash, never debt
 
 
 @dataclass(frozen=True)
@@ -418,6 +419,7 @@ def _flipbook_session(world: World, state: SimState, at: datetime, policy: Polic
                 allowance=allowance,
                 holds_value=policy.core_holds_value,
                 capital_neutral=policy.core_capital_neutral,
+                surplus=max(0, cash) if policy.core_spends_surplus else 0,
             )
             if up is not None:
                 new_bids, cash, slots = (up,), cash - up.bid, slots - 1

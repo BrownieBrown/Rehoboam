@@ -34,6 +34,7 @@ def upgrade(
     allowance: float,
     holds_value: bool = False,
     capital_neutral: bool = False,
+    surplus: int = 0,
 ) -> Offer | None:
     """The bid that raises U the most through the eleven, or None.
 
@@ -44,6 +45,8 @@ def upgrade(
     ``capital_neutral`` buys only an upgrade whose bid is at most what the
     starters it displaces sell for: the flip book's capital is not drawn on, and
     the core improves by buying points cheaper than it sells them (M2-21).
+    ``surplus`` is positive cash the core may add on top: the week's flip profit,
+    back in the wallet after the repayment before a kickoff. Never debt (M2-22).
     """
     base_ep, base = best_eleven(squad)
     starters = {p.player_id for p in base}
@@ -58,7 +61,7 @@ def upgrade(
             continue
         kept = {p.player_id for p in eleven}
         leaving = [p for p in squad if p.player_id in starters - kept]
-        if capital_neutral and o.bid > sum(p.market_value for p in leaving):
+        if capital_neutral and o.bid > sum(p.market_value for p in leaving) + max(0, surplus):
             continue
         displaced = sum(p.market_value * p.drift for p in leaving)
         value = (

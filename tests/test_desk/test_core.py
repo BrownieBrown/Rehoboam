@@ -87,3 +87,23 @@ def test_a_capital_neutral_core_pays_at_most_what_the_displaced_starter_sells_fo
 
     assert pick == cheap
     assert core.upgrade(_eleven(), [dear, cheap], MU, cash=0, allowance=20_000_000) == dear
+
+
+def test_the_core_may_spend_surplus_cash_on_top_of_what_it_displaces():
+    dear = _offer("dear", 120.0, value=9_000_000)  # bid 9.45m against a 5m starter
+
+    neutral = core.upgrade(
+        _eleven(), [dear], MU, cash=4_000_000, allowance=20_000_000, capital_neutral=True
+    )
+    surplus = core.upgrade(
+        _eleven(),
+        [dear],
+        MU,
+        cash=4_500_000,
+        allowance=20_000_000,
+        capital_neutral=True,
+        surplus=4_500_000,
+    )
+
+    assert neutral is None
+    assert surplus == dear  # 5m displaced + 4.5m of surplus cover 9.45m
