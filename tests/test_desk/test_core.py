@@ -107,3 +107,33 @@ def test_the_core_may_spend_surplus_cash_on_top_of_what_it_displaces():
 
     assert neutral is None
     assert surplus == dear  # 5m displaced + 4.5m of surplus cover 9.45m
+
+
+def test_a_capital_neutral_core_still_fills_an_empty_slot():
+    ten = [p for p in _eleven() if p.player_id != "f1"]  # a forward short: -100 at kickoff
+    forward = _offer("fill", 40.0, value=3_000_000)
+
+    pick = core.upgrade(
+        ten, [forward], MU, cash=0, allowance=10_000_000, capital_neutral=True, fill_holes=True
+    )
+
+    assert pick == forward
+
+
+def test_a_slot_a_flip_already_fills_is_no_hole():
+    ten = [p for p in _eleven() if p.player_id != "f1"]
+    flip = _p("flip", "Forward", ep=30.0, value=2_000_000)
+    forward = _offer("fill", 40.0, value=3_000_000)
+
+    pick = core.upgrade(
+        ten,
+        [forward],
+        MU,
+        cash=0,
+        allowance=10_000_000,
+        capital_neutral=True,
+        fill_holes=True,
+        others=[flip],
+    )
+
+    assert pick is None

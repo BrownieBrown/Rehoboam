@@ -35,6 +35,8 @@ def upgrade(
     holds_value: bool = False,
     capital_neutral: bool = False,
     surplus: int = 0,
+    fill_holes: bool = False,
+    others: Sequence[Player] = (),
 ) -> Offer | None:
     """The bid that raises U the most through the eleven, or None.
 
@@ -44,12 +46,18 @@ def upgrade(
     points that do not cost money, the leaders' quality buys (M2-16, M2-20).
     ``capital_neutral`` buys only an upgrade whose bid is at most what the
     starters it displaces sell for: the flip book's capital is not drawn on, and
-    the core improves by buying points cheaper than it sells them (M2-21).
+    the core improves by buying points cheaper than it sells them (M2-21). Filling
+    an empty slot is exempt: there is nobody to displace, and the slot costs
+    -100 points every matchday it stays empty (M2-23). ``fill_holes`` turns the
+    exemption on; ``others`` are the rest of the squad (the flips), so only a hole
+    in the eleven the whole squad can field counts. Without them a hole the flips
+    cover still counts, and the core converts flip slots into core starters.
     ``surplus`` is positive cash the core may add on top: the week's flip profit,
     back in the wallet after the repayment before a kickoff. Never debt (M2-22).
     """
     base_ep, base = best_eleven(squad)
     starters = {p.player_id for p in base}
+    fielded = len(best_eleven([*squad, *others])[1])
     best: tuple[float, Offer] | None = None
     for o in offers:
         if not o.arrives_before_kickoff or (holds_value and o.player.drift < o.premium):
@@ -61,7 +69,14 @@ def upgrade(
             continue
         kept = {p.player_id for p in eleven}
         leaving = [p for p in squad if p.player_id in starters - kept]
-        if capital_neutral and o.bid > sum(p.market_value for p in leaving) + max(0, surplus):
+        fills_a_hole = (  # an empty slot is -100 every matchday it stays
+            fill_holes and len(best_eleven([*squad, *others, o.player])[1]) > fielded
+        )
+        if (
+            capital_neutral
+            and not fills_a_hole
+            and o.bid > sum(p.market_value for p in leaving) + max(0, surplus)
+        ):
             continue
         displaced = sum(p.market_value * p.drift for p in leaving)
         value = (

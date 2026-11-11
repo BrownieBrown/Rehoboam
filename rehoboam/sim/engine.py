@@ -85,6 +85,10 @@ class Policy:
     core_holds_value: bool = False  # M2-20: only upgrades whose drift covers the premium
     core_capital_neutral: bool = False  # M2-21: an upgrade costs at most what it displaces
     core_spends_surplus: bool = False  # M2-22: ...plus the wallet's positive cash, never debt
+    flip_debt_covered: bool = False  # M2-23: flip debt <= what the flips raise at their p10
+    # M2-23: the core may fill an empty slot outside capital neutrality: "" never, "core" a
+    # hole in the core's own eleven (converts flip slots), "squad" a hole the whole squad has.
+    core_fills_holes: str = ""
 
 
 @dataclass(frozen=True)
@@ -361,11 +365,15 @@ def _sellable(listing: Listing, kickoff_at: datetime | None) -> bool:
     return kickoff_at is not None and listing.expires_at <= kickoff_at - SESSION_GAP
 
 
-def _open_bid_cover(world: World, state: SimState, day: date, kickoff_at: datetime | None) -> int:
-    """The p10 resale of the open bids that settle in time (M2-13)."""
+def _open_bid_cover(
+    world: World, state: SimState, day: date, kickoff_at: datetime | None, book: str | None = None
+) -> int:
+    """The p10 resale of the open bids that settle in time (M2-13); one book's with ``book``."""
     cover = 0
     for pending in state.pending:
         if not _sellable(pending.listing, kickoff_at):
+            continue
+        if book is not None and (pending.book or "flip") != book:
             continue
         pid = pending.listing.player_id
         value = value_at(world, pid, day) or 0
@@ -438,13 +446,27 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
                 holds_value=policy.core_holds_value,
                 capital_neutral=policy.core_capital_neutral,
                 surplus=max(0, cash) if policy.core_spends_surplus else 0,
+                fill_holes=bool(policy.core_fills_holes),
+                others=(
+                    [p for p in flips if p.player_id not in sold]
+                    if policy.core_fills_holes == "squad"
+                    else ()
+                ),
             )
             if up is not None:
                 new_bids, cash, slots = (up,), cash - up.bid, slots - 1
                 books[up.player.player_id] = "core"
                 candidates = [o for o in candidates if o is not up]
+        cover = None
+        if policy.flip_debt_covered:
+            cover = sum(
+                p.market_value * (1 + min(0.0, p.drift_low))
+                for p in flips
+                if p.player_id not in sold
+            )
+            cover += _open_bid_cover(world, state, day, kickoff_at, book="flip")
         flips_bought = flipbook.entries(
-            candidates, cash, slots, allowance, by_euros=policy.flip_by_euros
+            candidates, cash, slots, allowance, by_euros=policy.flip_by_euros, cover=cover
         )
         books |= {o.player.player_id: "flip" for o in flips_bought}
         new_bids += flips_bought
