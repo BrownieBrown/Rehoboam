@@ -28,6 +28,7 @@ from rehoboam.desk import bids, drift, planner
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
 from rehoboam.desk.exchange import points_per_euro
 from rehoboam.desk.model import Book, Offer, Player
+from rehoboam.desk.points import PriceBlend, fit_blend
 from rehoboam.sim import auction
 from rehoboam.sim.history import Listing, Prediction, Round, Transfer, ValuePaths, value_day
 
@@ -36,6 +37,7 @@ CEILING_LOOKBACK = timedelta(days=120)
 VALUE_FALLBACK_DAYS = 7
 FORECAST_MOMENTUM = 0.95  # services/mv_forecast's rule: 0.95 × the last move, capped at ±30%
 FORECAST_CAP = 0.30
+ROUND_SPAN = timedelta(days=4)  # a round's matches are over 4 days after its first whistle
 
 
 @dataclass(frozen=True)
@@ -55,12 +57,15 @@ class World:
     rival_buys: tuple[tuple[datetime, int, float], ...]  # (at, value, premium), ours excluded
     eur_per_point: float
     reset_at: datetime
+    # Walk-forward price blends: (usable from, fit). Empty: raw EP (spec §4.1).
+    blends: tuple[tuple[datetime, PriceBlend], ...] = ()
 
 
 @dataclass(frozen=True)
 class Policy:
     mu_scale: float = 1.0
     limits: planner.Limits = planner.Limits()
+    price_blend: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,7 @@ class Matchday:
     points: float
     cash_at_kickoff: int
     fielded: int
+    expected: float = 0.0  # the eleven's EP when it was picked: expected minus points is the curse
 
 
 @dataclass(frozen=True)
@@ -109,10 +115,38 @@ def value_at(world: World, player_id: str, day: date) -> int | None:
     return None
 
 
-def ep_at(world: World, player_id: str, at: datetime) -> float:
+def prediction_at(world: World, player_id: str, at: datetime) -> Prediction | None:
     preds = world.predictions.get(player_id, ())
     i = bisect_right([p.at for p in preds], at)
-    return preds[i - 1].ep if i else 0.0
+    return preds[i - 1] if i else None
+
+
+def ep_at(world: World, player_id: str, at: datetime) -> float:
+    pred = prediction_at(world, player_id, at)
+    return pred.ep if pred else 0.0
+
+
+def blend_at(world: World, at: datetime) -> PriceBlend | None:
+    usable = [fit for since, fit in world.blends if since <= at]
+    return usable[-1] if usable else None
+
+
+def fit_blends(world: World) -> tuple[tuple[datetime, PriceBlend], ...]:
+    """One fit per finished round, on every round up to it, usable once it has finished."""
+    rows: list[tuple[float, int, float]] = []
+    out: list[tuple[datetime, PriceBlend]] = []
+    for rnd in world.rounds:
+        day = value_day(rnd.kickoff)
+        for pid in world.predictions:
+            pred = prediction_at(world, pid, rnd.kickoff)
+            points = world.points.get((pid, rnd.day_number))
+            value = value_at(world, pid, day)
+            if pred and pred.day_number == rnd.day_number and points is not None and value:
+                rows.append((pred.ep, value, points))
+        fit = fit_blend(rows)
+        if fit is not None:
+            out.append((rnd.kickoff + ROUND_SPAN, fit))
+    return tuple(out)
 
 
 def _drift(world: World, table: drift.DriftTable, player_id: str, day: date) -> float:
@@ -213,15 +247,18 @@ def settle(world: World, state: SimState, pending: Pending) -> SimState:
 
 
 def kickoff(world: World, state: SimState, rnd: Round) -> SimState:
-    squad = [_player(world, pid, rnd.kickoff, 0, 0.0) for pid in state.held]
-    _, eleven = best_eleven(p for p in squad if p is not None)
+    day = value_day(rnd.kickoff)
+    squad = [
+        _player(world, pid, rnd.kickoff, value_at(world, pid, day) or 0, 0.0) for pid in state.held
+    ]
+    expected, eleven = best_eleven(p for p in squad if p is not None)
     points = sum(world.points.get((p.player_id, rnd.day_number), 0.0) for p in eleven)
     points += EMPTY_SLOT_POINTS * (ELEVEN - len(eleven))
     violations = state.violations
     if state.cash < 0:
         points = 0.0
         violations = (*violations, f"MD{rnd.day_number}: negative wallet {state.cash:,} at kickoff")
-    record = Matchday(rnd.day_number, points, state.cash, len(eleven))
+    record = Matchday(rnd.day_number, points, state.cash, len(eleven), expected)
     return replace(state, matchdays=(*state.matchdays, record), violations=violations)
 
 
@@ -231,7 +268,11 @@ def _player(
     position = world.positions.get(player_id)
     if position is None:
         return None
-    return Player(player_id, position, value, ep_at(world, player_id, at), drift_mean)
+    ep = ep_at(world, player_id, at)
+    blend = blend_at(world, at)
+    if blend is not None:
+        ep = blend.apply(ep, value)
+    return Player(player_id, position, value, ep, drift_mean)
 
 
 def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:

@@ -422,6 +422,19 @@ Every run that a decision rests on (§9). Command: `rehoboam desk-drift-report`.
 | **M2-1** | 2026-11-11 | same                              | `desk-backtest`, W1 = MD5–MD9 (MD4 kicked off 09-18, before go-live); μ×1 as registered                                     | +€54.1m (rivals' median +€29.3m, us real −€26.2m); **657.2 pts/MD** (rivals' median 864.3, us real 719.6). **B1 PASS, B2 FAIL, B3 PASS**. Sweep: ×2 +€74.1m/494, ×0.5 +€46.8m/718, ×0.25 +€16.0m/603, ×0 −€19.6m/644 |
 | M2-2     | 2026-11-11 | same + C1 fix                     | the planner had counted new bids as won when fielding, against spec C1; sold a starter, lost the auction, fielded 10 at MD5 | ×1 +€44.1m/577, ×0.5 +€31.7m/757, **×0.25 +€36.6m/795**, ×0 −€10.3m/681, ×2 +€57.7m/558. Best: B1 PASS, B2 FAIL (−69 pts/MD)                                                                                         |
 
+| M2-3 | 2026-11-11 | + μ by derivation | μ = (N−1)/(N·P): points and money over the same matchdays (`desk/exchange.py`) | ×1 +€13.1m/793 (B1 fail, B2 fail), ×0.5 −€8.5m/733, ×2 +€19.9m/810. The derivation undervalues money: drift profits compound into capital that buys better players later |
+| M0-3 | 2026-11-11 | same | the eleven's EP at kickoff against its real points | our real squads +46 a matchday over; the planner's +144 (derived μ×2) and +289 (μ×0). The optimizer's curse (§4.1), confirmed |
+| M2-4 | 2026-11-11 | + walk-forward price blend (`desk/points.py`) | refit after each finished round on all earlier rounds (EP ≥ 10); usable from kickoff + 4 days; μ×2 registered, ×1 and ×4 for B4 | ×2 +€13.4m/709 (both fail). **×1 +€9.9m/962.8 (B1 fail, B2 PASS; predicted 964, scored 963: the curse gone)**. ×4 +€45.5m/690 (B1 pass, B2 fail) |
+
+**The instrument is the next problem.** No setting passes B1 and B2 together. Neighbouring
+settings swing ±150–250 points a matchday; MD7 scores 831, 586 or 443 depending only on μ.
+With five matchdays, one replayed path is one draw. The noise between neighbouring settings is
+larger than the gaps the bar measures, and the MD10–MD14 holdout has the same problem. Before a
+configuration is frozen, the backtest has to judge the *expected* result of a configuration: an
+ensemble of paths started on different days and sessions, reported as a mean with its spread.
+The bar then applies to the mean. That is the next change. Named-sale debt waits until a
+configuration is chosen on the ensemble.
+
 **What M2 found.** At μ×1 the planner is a money machine. It went into kickoffs with €47–91m of
 idle cash, and cash scores nothing. The cause is a derivation error in §4.3: μ(N) = (N−1)/P values
 a euro as if it will buy quality for every remaining matchday, while each session credits a

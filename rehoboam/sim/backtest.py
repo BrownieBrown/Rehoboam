@@ -14,7 +14,7 @@ The bar, written before the first run:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
 
@@ -174,6 +174,8 @@ def _policy_line(world: World, name: str, start: SimState, final: SimState) -> L
 
 
 def run(world: World, league: League, policy: Policy) -> BacktestReport:
+    if policy.price_blend and not world.blends:
+        world = replace(world, blends=engine.fit_blends(world))
     rounds = window_rounds(world)
     start = start_state(league)
     final = engine.run(world, start, W1_START, W1_END, policy)
@@ -185,7 +187,12 @@ def run(world: World, league: League, policy: Policy) -> BacktestReport:
     for e in final.events:
         events[e.kind] = events.get(e.kind, 0) + 1
     return BacktestReport(
-        policy=_policy_line(world, f"v3 (mu x{policy.mu_scale:g})", start, final),
+        policy=_policy_line(
+            world,
+            f"v3 (mu x{policy.mu_scale:g}{', blend' if policy.price_blend else ''})",
+            start,
+            final,
+        ),
         do_nothing=_policy_line(world, "hold the go-live squad", start, held_only),
         actual=manager_line(world, league, _us(league), rounds),
         rivals=tuple(

@@ -31,6 +31,13 @@ def test_the_rate_scales_linearly_with_the_sweep():
     assert points_per_euro(6, P, scale=0.5) == pytest.approx(0.5 * base)
 
 
+def test_money_and_points_are_counted_over_the_same_matchdays():
+    # Ten matchdays left: the eleven scores ten times, money buys quality for
+    # the nine after the next one, and U is the per-matchday average.
+    assert points_per_euro(10, P) == pytest.approx(9 / (10 * P))
+    assert points_per_euro(10_000, P) == pytest.approx(1 / P, rel=1e-3)
+
+
 def test_dearer_points_make_a_euro_worth_fewer_of_them():
     assert points_per_euro(6, 2 * P) == pytest.approx(points_per_euro(6, P) / 2)
 
