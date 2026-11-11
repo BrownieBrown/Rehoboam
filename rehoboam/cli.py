@@ -1429,6 +1429,46 @@ def desk_validate_sim():
         console.print(line, highlight=False)
 
 
+@app.command("desk-holdout")
+def desk_holdout(
+    frozen_at: str = typer.Option(
+        ..., "--frozen-at", help="When the configuration was frozen (its tag's commit time, ISO)"
+    ),
+    mu_scale: float = typer.Option(1.0, "--mu-scale"),
+    blend: bool = typer.Option(True, "--blend/--no-blend"),
+    fit_cutoff: str = typer.Option("2026-07-01", "--fit-cutoff"),
+):
+    """The rolling freeze (ADR-0007): a frozen configuration on rounds after its freeze.
+
+    Run it from a worktree of the configuration's tag, so the code is the code
+    that was frozen: `git worktree add ../v3-frozen-N v3-frozen-N`. Paths start
+    from our real squad every two days, from the freeze to the first round after
+    it. Only rounds that have finished count. Read-only.
+    """
+    from datetime import date, datetime, timezone
+
+    from .sim import backtest
+    from .sim.engine import Policy
+    from .store import connect
+
+    frozen = datetime.fromisoformat(frozen_at)
+    if frozen.tzinfo is None:
+        raise typer.BadParameter("--frozen-at needs a timezone, e.g. 2026-11-11T18:00:00+00:00")
+    now = datetime.now(timezone.utc)
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff), until=now)
+    policy = Policy(mu_scale=mu_scale, price_blend=blend)
+    report = backtest.holdout(world, league, policy, frozen_at=frozen, now=now)
+    if report is None:
+        console.print(
+            f"No round that kicked off after {frozen:%Y-%m-%d %H:%M} UTC has finished yet."
+        )
+        return
+    console.print(backtest.format_ensemble(report), highlight=False)
+
+
 @app.command("desk-backtest")
 def desk_backtest(
     mu_scale: list[float] = typer.Option(

@@ -15,3 +15,7 @@ store. Every number a decision rests on goes in the spec's run log (§12).
   against real auctions and real points, beside every rival.
 - Paper trading is this backtest on a window that didn't exist when the configuration was
   committed. The commit's timestamp is the pre-registration.
+- The rolling freeze (ADR-0007): each frozen configuration is a tag `v3-frozen-N`. Score it
+  from a worktree of the tag, never from main, so the code is the code that was frozen:
+  `git worktree add ../v3-frozen-N v3-frozen-N && cd ../v3-frozen-N && uv run rehoboam desk-holdout --frozen-at <tag time> …`. The frozen configurations and their flags are listed
+  in the spec's run log.

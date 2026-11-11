@@ -1,14 +1,19 @@
-"""M2: the planner over window W1, against the league (spec v3 §8.4).
+"""The planner replayed against the league (spec v3 §8.4, ADR-0005, ADR-0007).
 
 Net worth is transfer-only for everyone: team value, plus sales, minus buys.
 Rivals' cash is never visible, but their transfers are. The bonuses (daily,
 points) are left out on both sides, so the comparison is like for like.
 
-The bar, written before the first run:
+The bar (ADR-0007):
 
-- B1: net-worth change ≥ the rivals' median;
-- B2: points per matchday ≥ the rivals' median;
-- B3: no invariant violated.
+- **Before the reset** (unequal starts): beat our own real record from the same
+  start, on money and on points.
+- **From the reset** (everyone starts from zero): beat the rivals' median on both.
+- **Always:** no invariant violated.
+
+A configuration is judged on an ensemble of paths, never on one draw. A frozen
+configuration is judged only on rounds that kicked off after its freeze
+(`holdout`).
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from statistics import median
 
 from rehoboam.desk import drift
 from rehoboam.sim import auction, engine, history, validate
-from rehoboam.sim.engine import Policy, SimState, World
+from rehoboam.sim.engine import ROUND_SPAN, SESSION_TIMES_UTC, Policy, SimState, World
 from rehoboam.sim.history import BUY, SELL, Round, SquadSnapshot, Transfer, value_day
 from rehoboam.store.transfer_study import eur_per_point
 
@@ -30,6 +35,16 @@ RESET_AT = datetime(2026, 12, 20, tzinfo=timezone.utc)  # after MD14, the last r
 SEASON = "2026/2027"
 HORIZON_DAYS = 7
 FALLBACK_EUR_PER_POINT = 255_008.0  # measured 2026-09-23, used only if the fit is too loose
+PATH_SPACING = timedelta(days=2)
+
+
+@dataclass(frozen=True)
+class Window:
+    start: datetime
+    end: datetime
+
+
+W1 = Window(W1_START, W1_END)
 
 
 @dataclass(frozen=True)
@@ -41,6 +56,7 @@ class Line:
 
 @dataclass(frozen=True)
 class BacktestReport:
+    window: Window
     policy: Line
     do_nothing: Line
     actual: Line
@@ -80,12 +96,12 @@ class League:
     wallet: tuple[history.WalletReading, ...]
 
 
-def load(conn, *, fit_cutoff: date) -> tuple[World, League]:
+def load(conn, *, fit_cutoff: date, until: datetime = W1_END) -> tuple[World, League]:
     paths = history.load_value_paths(conn)
     moves = drift.market_moves(paths)
     transfers = history.load_transfers(conn, since=datetime(2026, 7, 1, tzinfo=timezone.utc))
     self_ids = history.load_self_ids(conn)
-    listings = history.load_kickbase_listings(conn, expired_before=W1_END)
+    listings = history.load_kickbase_listings(conn, expired_before=until)
     buys = auction.buys_by_player(transfers)
     predictions, positions = history.load_predictions(conn, since=W1_START - timedelta(days=7))
     world = World(
@@ -146,8 +162,11 @@ def start_state(league: League, start: datetime = W1_START) -> SimState:
     return SimState(cash=cash, held=holdings_at(league, _us(league), start))
 
 
-def window_rounds(world: World, start: datetime = W1_START) -> tuple[Round, ...]:
-    return tuple(r for r in world.rounds if start < r.kickoff <= W1_END)
+def window_rounds(world: World, window: Window = W1) -> tuple[Round, ...]:
+    """Rounds that kicked off inside the window and were finished by its end."""
+    return tuple(
+        r for r in world.rounds if window.start < r.kickoff and r.kickoff + ROUND_SPAN <= window.end
+    )
 
 
 def _squad_value(world: World, held: frozenset[str], at: datetime) -> int:
@@ -155,28 +174,30 @@ def _squad_value(world: World, held: frozenset[str], at: datetime) -> int:
 
 
 def manager_line(
-    world: World,
-    league: League,
-    manager_id: str,
-    rounds: Sequence[Round],
-    start: datetime = W1_START,
+    world: World, league: League, manager_id: str, rounds: Sequence[Round], window: Window = W1
 ) -> Line:
-    held_start = holdings_at(league, manager_id, start)
-    held_end = holdings_at(league, manager_id, W1_END)
+    held_start = holdings_at(league, manager_id, window.start)
+    held_end = holdings_at(league, manager_id, window.end)
     cash = sum(
         (t.price if t.kind == SELL else -t.price if t.kind == BUY else 0)
         for t in league.transfers
-        if t.manager_id == manager_id and start < t.at <= W1_END
+        if t.manager_id == manager_id and window.start < t.at <= window.end
     )
-    change = _squad_value(world, held_end, W1_END) - _squad_value(world, held_start, start) + cash
+    change = (
+        _squad_value(world, held_end, window.end)
+        - _squad_value(world, held_start, window.start)
+        + cash
+    )
     points = [league.matchday_points.get((manager_id, r.day_number), 0.0) for r in rounds]
     return Line(league.names.get(manager_id, manager_id), change, sum(points) / len(points))
 
 
 def _policy_line(
-    world: World, name: str, first: SimState, final: SimState, start: datetime = W1_START
+    world: World, name: str, first: SimState, final: SimState, window: Window = W1
 ) -> Line:
-    change = engine.net_worth(world, final, W1_END) - engine.net_worth(world, first, start)
+    change = engine.net_worth(world, final, window.end) - engine.net_worth(
+        world, first, window.start
+    )
     points = [m.points for m in final.matchdays]
     return Line(name, change, sum(points) / len(points) if points else 0.0)
 
@@ -187,11 +208,18 @@ def _with_blends(world: World, policy: Policy) -> World:
     return world
 
 
-def run(world: World, league: League, policy: Policy, start: datetime = W1_START) -> BacktestReport:
+def _name(policy: Policy) -> str:
+    return f"v3 (mu x{policy.mu_scale:g}{', blend' if policy.price_blend else ''})"
+
+
+def run(world: World, league: League, policy: Policy, window: Window = W1) -> BacktestReport:
     world = _with_blends(world, policy)
-    rounds = window_rounds(world, start)
-    first = start_state(league, start)
-    final = engine.run(world, first, start, W1_END, policy)
+    rounds = window_rounds(world, window)
+    first = start_state(league, window.start)
+    final = engine.run(world, first, window.start, window.end, policy)
+    final = replace(
+        final, matchdays=tuple(m for m in final.matchdays if m.day_number in _days(rounds))
+    )
     held_only = SimState(cash=first.cash, held=first.held)
     for rnd in rounds:
         held_only = engine.kickoff(world, held_only, rnd)
@@ -200,17 +228,12 @@ def run(world: World, league: League, policy: Policy, start: datetime = W1_START
     for e in final.events:
         events[e.kind] = events.get(e.kind, 0) + 1
     return BacktestReport(
-        policy=_policy_line(
-            world,
-            f"v3 (mu x{policy.mu_scale:g}{', blend' if policy.price_blend else ''})",
-            first,
-            final,
-            start,
-        ),
-        do_nothing=_policy_line(world, "hold the starting squad", first, held_only, start),
-        actual=manager_line(world, league, _us(league), rounds, start),
+        window=window,
+        policy=_policy_line(world, _name(policy), first, final, window),
+        do_nothing=_policy_line(world, "hold the starting squad", first, held_only, window),
+        actual=manager_line(world, league, _us(league), rounds, window),
         rivals=tuple(
-            manager_line(world, league, m, rounds, start)
+            manager_line(world, league, m, rounds, window)
             for m in managers
             if m not in league.self_ids
         ),
@@ -220,22 +243,28 @@ def run(world: World, league: League, policy: Policy, start: datetime = W1_START
     )
 
 
+def _days(rounds: Sequence[Round]) -> frozenset[int]:
+    return frozenset(r.day_number for r in rounds)
+
+
 # ---------------------------------------------------------------------------
 # The ensemble: one configuration judged on many paths, not one draw
 # ---------------------------------------------------------------------------
 
-ENSEMBLE_STARTS = tuple(W1_START + timedelta(days=2 * i) for i in range(8))  # 09-22 → 10-06
+ENSEMBLE_STARTS = tuple(W1_START + PATH_SPACING * i for i in range(8))  # 09-22 → 10-06
 
 
 @dataclass(frozen=True)
 class EnsembleReport:
     name: str
+    matchdays: tuple[int, ...]
     money_excess: tuple[int, ...]  # per path: policy minus the rivals' median, same window
     points_excess: tuple[float, ...]
     violations: int
     # Against our real record from the same start: independent of the starting squad.
     money_vs_real: tuple[int, ...] = ()
     points_vs_real: tuple[float, ...] = ()
+    pre_reset: bool = True
 
     @property
     def mean_money(self) -> float:
@@ -246,6 +275,14 @@ class EnsembleReport:
         return sum(self.points_excess) / len(self.points_excess)
 
     @property
+    def mean_money_vs_real(self) -> float:
+        return sum(self.money_vs_real) / len(self.money_vs_real)
+
+    @property
+    def mean_points_vs_real(self) -> float:
+        return sum(self.points_vs_real) / len(self.points_vs_real)
+
+    @property
     def b1(self) -> bool:
         return self.mean_money >= 0
 
@@ -253,14 +290,28 @@ class EnsembleReport:
     def b2(self) -> bool:
         return self.mean_points >= 0
 
+    @property
+    def passes(self) -> bool:
+        """The bar of ADR-0007: our own record before the reset, the rivals' median from it."""
+        if self.violations:
+            return False
+        if self.pre_reset:
+            return self.mean_money_vs_real >= 0 and self.mean_points_vs_real >= 0
+        return self.b1 and self.b2
+
 
 def ensemble(
-    world: World, league: League, policy: Policy, starts: Sequence[datetime] = ENSEMBLE_STARTS
+    world: World,
+    league: League,
+    policy: Policy,
+    starts: Sequence[datetime] = ENSEMBLE_STARTS,
+    end: datetime = W1_END,
 ) -> EnsembleReport:
     world = _with_blends(world, policy)
-    reports = [run(world, league, policy, start) for start in starts]
+    reports = [run(world, league, policy, Window(start, end)) for start in starts]
     return EnsembleReport(
         name=reports[0].policy.name,
+        matchdays=reports[0].matchdays,
         money_excess=tuple(
             r.policy.net_worth_change - r.rival_median.net_worth_change for r in reports
         ),
@@ -272,6 +323,7 @@ def ensemble(
         points_vs_real=tuple(
             r.policy.points_per_matchday - r.actual.points_per_matchday for r in reports
         ),
+        pre_reset=starts[0] < RESET_AT,
     )
 
 
@@ -288,14 +340,53 @@ def choose(reports: Sequence[EnsembleReport]) -> EnsembleReport:
     return max(clean, key=lambda r: r.mean_points)
 
 
+# ---------------------------------------------------------------------------
+# The holdout: a frozen configuration on rounds that kicked off after its freeze
+# ---------------------------------------------------------------------------
+
+
+def holdout_starts(world: World, frozen_at: datetime) -> tuple[datetime, ...]:
+    """Session times every PATH_SPACING from the freeze until the first round after it."""
+    later = [r.kickoff for r in world.rounds if r.kickoff > frozen_at]
+    if not later:
+        return ()
+    first_kickoff = min(later)
+    day = frozen_at.date()
+    first = min(
+        datetime.combine(day + timedelta(days=d), t, tzinfo=timezone.utc)
+        for d in (0, 1)
+        for t in SESSION_TIMES_UTC
+        if datetime.combine(day + timedelta(days=d), t, tzinfo=timezone.utc) >= frozen_at
+    )
+    starts = []
+    at = first
+    while at < first_kickoff:
+        starts.append(at)
+        at += PATH_SPACING
+    return tuple(starts)
+
+
+def holdout(
+    world: World, league: League, policy: Policy, *, frozen_at: datetime, now: datetime
+) -> EnsembleReport | None:
+    """None until a round that kicked off after the freeze has finished."""
+    starts = holdout_starts(world, frozen_at)
+    if not starts or not window_rounds(world, Window(starts[0], now)):
+        return None
+    return ensemble(world, league, policy, starts, now)
+
+
 def format_ensemble(r: EnsembleReport) -> str:
+    bar = "PASS" if r.passes else "FAIL"
+    basis = "our real record" if r.pre_reset else "the rivals' median"
     return (
-        f"  {r.name[:24]:<24} money vs median {r.mean_money:>+13,.0f} "
-        f"[{min(r.money_excess):+,} .. {max(r.money_excess):+,}]  "
-        f"pts/MD vs median {r.mean_points:>+7.1f} "
-        f"[{min(r.points_excess):+.0f} .. {max(r.points_excess):+.0f}]  "
-        f"B1 {'PASS' if r.b1 else 'FAIL'} B2 {'PASS' if r.b2 else 'FAIL'} "
-        f"violations {r.violations}"
+        f"  {r.name[:24]:<24} MD{list(r.matchdays)} paths {len(r.money_excess)}\n"
+        f"    vs our real record: money {r.mean_money_vs_real:>+13,.0f} "
+        f"[{min(r.money_vs_real):+,} .. {max(r.money_vs_real):+,}]  "
+        f"pts/MD {r.mean_points_vs_real:>+7.1f} "
+        f"[{min(r.points_vs_real):+.0f} .. {max(r.points_vs_real):+.0f}]\n"
+        f"    vs the rivals' median: money {r.mean_money:>+13,.0f}  pts/MD {r.mean_points:>+7.1f}\n"
+        f"    violations {r.violations}; bar (ADR-0007, vs {basis}): {bar}"
     )
 
 
@@ -304,7 +395,8 @@ def format_report(r: BacktestReport) -> list[str]:
         return f"  {line.name[:26]:<26} {line.net_worth_change:>+14,}  {line.points_per_matchday:>8.1f}"
 
     return [
-        f"W1 {W1_START:%Y-%m-%d %H:%M} -> {W1_END:%Y-%m-%d %H:%M} UTC, matchdays {list(r.matchdays)}",
+        f"{r.window.start:%Y-%m-%d %H:%M} -> {r.window.end:%Y-%m-%d %H:%M} UTC, "
+        f"matchdays {list(r.matchdays)}",
         f"  {'':<26} {'net worth chg':>14}  {'pts/MD':>8}",
         row(r.policy),
         row(r.do_nothing),

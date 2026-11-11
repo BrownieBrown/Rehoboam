@@ -1,6 +1,6 @@
 # ADR-0005 — No live trading without a money-and-points verdict
 
-**Status:** Accepted, 2026-11-11
+**Status:** Accepted, 2026-11-11 · **Bar (B1, B2) amended by ADR-0007**
 
 ## Context
 

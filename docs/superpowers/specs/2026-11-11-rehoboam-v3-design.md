@@ -324,6 +324,16 @@ can't reproduce what happened can't be trusted on what didn't.
 
 ### 8.4 The bar, written before the first run
 
+> **Amended 2026-11-11 by ADR-0007, after M2-5.**
+>
+> - **Before the reset:** v3 must beat our own real record from the same start, on money and
+>   points, as an ensemble mean.
+> - **From the reset:** the rivals' median, as below.
+> - **Freezing:** configurations are frozen as git tags (`v3-frozen-N`) and judged only on
+>   rounds after their freeze (`rehoboam desk-holdout`).
+>
+> The original text follows. W1 scores MD5–MD9: MD4 kicked off on 09-18, before go-live.
+
 **Window W1.** 2026-09-22 20:00 UTC (go-live) → 2026-11-11, starting from our real squad and
 wallet at go-live, scoring MD4–MD9 on real points.
 
@@ -467,6 +477,13 @@ proposed amendment:
 Under the amended bar the frozen candidate still **fails**: +€22.3m money, −27 points a
 matchday. So the amendment does not move the goalposts to a pass. The points side is the open
 problem.
+
+**Frozen configurations (ADR-0007).** Each one is scored only on rounds after its freeze, from
+a worktree of its tag.
+
+| Tag           | Frozen at                 | `desk-holdout` flags                                         | Chosen by                      | Its own W1 ensemble (development, vs our real record)                |
+| ------------- | ------------------------- | ------------------------------------------------------------ | ------------------------------ | -------------------------------------------------------------------- |
+| `v3-frozen-1` | 2026-11-11T16:19:29+00:00 | `--frozen-at 2026-11-11T16:19:29+00:00 --mu-scale 1 --blend` | the pre-registered rule (M2-5) | money +€22.3m, points −27.1 per MD: fails the ADR-0007 bar on points |
 
 **What M2 found.** At μ×1 the planner is a money machine. It went into kickoffs with €47–91m of
 idle cash, and cash scores nothing. The cause is a derivation error in §4.3: μ(N) = (N−1)/P values
