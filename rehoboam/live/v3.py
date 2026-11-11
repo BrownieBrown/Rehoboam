@@ -5,8 +5,11 @@ module only translates. A `Snapshot` of the real league (squad, wallet, Kickbase
 open listings with their exact expiry, our open bids, each player's book) becomes
 the simulator's `World` and `SimState`; the store supplies the history.
 
-Read-only here. Executing a `Decision` (instant sales, bids through the safety
-gate) is a separate step behind `TRADING_MODE=v3`.
+`orders` turns a `Decision` into orders, sales first (they fund the bids), each
+sale's reason starting with the exit-rule prefix `services/flip_exit` tags;
+`execute` runs them one by one through the callables it is given, so a refused
+order never stops the rest. The live session (`AutoTrader._run_v3_session`,
+`TRADING_MODE=v3`) hands it the real instant sale and the gated buy.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from rehoboam.sim.history import BERLIN, Listing, in_update_window, value_day
 FROZEN = "v3-frozen-6"
 POLICY = backtest.NAMED_POLICIES["eleven + surplus"]
 FIT_CUTOFF = date(2026, 7, 1)  # the drift tables are fitted on 2025/26, as in every replay
+DRIFT_HORIZON_DAYS = backtest.HORIZON_DAYS  # reported on a flip's intent; v3 sells at the turn
 FLIP = "flip"
 CORE = "core"
 
@@ -169,3 +173,60 @@ def _name(snap: Snapshot, player_id: str) -> str:
 
 def _parse(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+# --- executing a decision ---------------------------------------------------------
+
+# Prefixes `services/flip_exit.exit_rule_tag` reads, so the outcome tables tag v3's sales.
+REASON_TURN = "Flip exit at the turn (v3): a night without a rise"
+REASON_REPAY = "Debt recovery (v3): the wallet back to zero before the kickoff"
+REASON_CORE = "v3 core: not in the eleven"
+
+
+@dataclass(frozen=True)
+class Order:
+    kind: str  # "sell" | "bid"
+    player_id: str
+    amount: int  # the sale's market value, or the bid
+    reason: str
+    book: str | None = None  # a bid's book: "core" | "flip"
+    drift: float = 0.0  # a bid's expected drift (reported on a flip's intent)
+
+
+@dataclass(frozen=True)
+class Result:
+    order: Order
+    ok: bool
+    error: str = ""
+
+
+def orders(decision: Decision, snap: Snapshot) -> list[Order]:
+    """The decision as orders: sales first, then the bids, in the planner's order."""
+    out: list[Order] = []
+    for p in decision.sells:
+        if decision.repaying:
+            reason = REASON_REPAY
+        elif snap.books.get(p.player_id) == FLIP:
+            reason = REASON_TURN
+        else:
+            reason = REASON_CORE
+        out.append(Order("sell", p.player_id, p.market_value, reason))
+    for o in decision.bids:
+        book = decision.books.get(o.player.player_id, CORE)
+        reason = (
+            f"v3 {book}: +{o.premium:.1%} on {o.player.market_value:,}, drift {o.player.drift:+.1%}"
+        )
+        out.append(Order("bid", o.player.player_id, o.bid, reason, book, o.player.drift))
+    return out
+
+
+def execute(orders_: Sequence[Order], *, sell, bid) -> list[Result]:
+    """Run every order; an order that fails or raises is reported, never fatal."""
+    results: list[Result] = []
+    for order in orders_:
+        try:
+            ok = bool((sell if order.kind == "sell" else bid)(order))
+            results.append(Result(order, ok))
+        except Exception as e:  # noqa: BLE001 - one refused order must not stop the rest
+            results.append(Result(order, False, f"{type(e).__name__}: {e}"))
+    return results

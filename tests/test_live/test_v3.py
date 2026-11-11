@@ -93,3 +93,75 @@ def test_the_live_decision_is_the_replays_decision():
     decision = v3.engine.decide(world, state, NOW, v3.POLICY)
 
     assert "bench" in {p.player_id for p in decision.sells}  # a core player the eleven does not use
+
+
+# --- executing a decision (TRADING_MODE=v3) --------------------------------------
+
+
+def _decision(repaying=False):
+    from rehoboam.desk.model import Offer, Player
+    from rehoboam.sim.engine import Decision
+    from rehoboam.sim.history import Listing
+
+    flip = Player("riser", "Forward", 1_800_000, 20.0, 0.36)
+    star = Player("star", "Midfielder", 5_000_000, 90.0, 0.05)
+    bench = Player("bench", "Midfielder", 2_000_000, 5.0, 0.0)
+    turned = Player("fresh", "Forward", 3_000_000, 30.0, -0.02)
+    lst = Listing("x", NOW, NOW + timedelta(hours=10), NOW, 0)
+    return Decision(
+        sells=(bench, turned),
+        bids=(Offer(star, 0.057), Offer(flip, 0.099)),
+        books={"star": "core", "riser": "flip"},
+        listings={"star": lst, "riser": lst},
+        repaying=repaying,
+    )
+
+
+def test_orders_sell_first_and_tag_each_sale_with_its_exit_rule():
+    from rehoboam.services.flip_exit import exit_rule_tag
+
+    snap = _snapshot(books={"fresh": "flip"})
+
+    orders = v3.orders(_decision(), snap)
+
+    assert [(o.kind, o.player_id) for o in orders] == [
+        ("sell", "bench"),
+        ("sell", "fresh"),
+        ("bid", "star"),
+        ("bid", "riser"),
+    ]
+    assert [exit_rule_tag(o.reason) for o in orders[:2]] == ["core", "turn"]
+    assert [(o.book, o.amount) for o in orders[2:]] == [("core", 5_285_000), ("flip", 1_978_200)]
+
+
+def test_a_repayment_is_tagged_as_debt_recovery():
+    from rehoboam.services.flip_exit import exit_rule_tag
+
+    orders = v3.orders(_decision(repaying=True), _snapshot())
+
+    assert {exit_rule_tag(o.reason) for o in orders if o.kind == "sell"} == {"debt_recovery"}
+
+
+def test_one_failed_order_does_not_stop_the_others():
+    done = []
+
+    def sell(order):
+        done.append(order.player_id)
+        return True
+
+    def bid(order):
+        if order.player_id == "star":
+            raise RuntimeError("refused by the gate")
+        done.append(order.player_id)
+        return True
+
+    results = v3.execute(v3.orders(_decision(), _snapshot()), sell=sell, bid=bid)
+
+    assert done == ["bench", "fresh", "riser"]
+    assert [(r.order.player_id, r.ok) for r in results] == [
+        ("bench", True),
+        ("fresh", True),
+        ("star", False),
+        ("riser", True),
+    ]
+    assert "refused by the gate" in results[2].error
