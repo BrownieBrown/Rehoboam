@@ -82,6 +82,19 @@ def test_a_starter_is_never_sold_into_a_hole_only_a_won_auction_would_fill():
     assert result.bids == ()
 
 
+def test_a_player_who_arrives_after_the_kickoff_earns_no_points_for_it():
+    # 120 points of EP, but his auction settles after the lock: for the coming
+    # eleven he is worth nothing, so with no drift he is not bought.
+    late = Offer(
+        _p("late", ep=120.0, value=3_000_000, drift=0.0), premium=0.05, arrives_before_kickoff=False
+    )
+    in_time = Offer(_p("late", ep=120.0, value=3_000_000, drift=0.0), premium=0.05)
+    book = Book(held=tuple(_eleven()), cash=10_000_000)
+
+    assert planner.plan(book, [late], MU).bids == ()
+    assert [o.player.player_id for o in planner.plan(book, [in_time], MU).bids] == ["late"]
+
+
 def test_open_bids_count_as_won_for_the_cash():
     # EP 0, so funding him by selling a 60-point starter is never worth it.
     riser = Offer(_p("riser", ep=0.0, value=3_000_000, drift=0.40), premium=0.094)

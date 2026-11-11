@@ -25,6 +25,9 @@ class Offer:
 
     player: Player
     premium: float
+    # Does the auction settle before the next kickoff? A player who arrives after
+    # the lock cannot play that matchday: his drift counts, his points don't.
+    arrives_before_kickoff: bool = True
 
     @property
     def bid(self) -> int:

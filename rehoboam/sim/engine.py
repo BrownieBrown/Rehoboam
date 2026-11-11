@@ -89,6 +89,8 @@ class Matchday:
     cash_at_kickoff: int
     fielded: int
     expected: float = 0.0  # the eleven's EP when it was picked: expected minus points is the curse
+    eleven: tuple[str, ...] = ()  # who was fielded
+    squad: tuple[str, ...] = ()  # everyone held at the kickoff
 
 
 @dataclass(frozen=True)
@@ -258,7 +260,15 @@ def kickoff(world: World, state: SimState, rnd: Round) -> SimState:
     if state.cash < 0:
         points = 0.0
         violations = (*violations, f"MD{rnd.day_number}: negative wallet {state.cash:,} at kickoff")
-    record = Matchday(rnd.day_number, points, state.cash, len(eleven), expected)
+    record = Matchday(
+        rnd.day_number,
+        points,
+        state.cash,
+        len(eleven),
+        expected,
+        eleven=tuple(p.player_id for p in eleven),
+        squad=tuple(sorted(state.held)),
+    )
     return replace(state, matchdays=(*state.matchdays, record), violations=violations)
 
 
@@ -303,8 +313,14 @@ def _held_players(world: World, state: SimState, at: datetime, day: date) -> lis
     return out
 
 
+def next_kickoff(world: World, at: datetime) -> datetime | None:
+    later = [r.kickoff for r in world.rounds if r.kickoff > at]
+    return min(later) if later else None
+
+
 def _offers(world: World, state: SimState, at: datetime, day: date) -> dict[Offer, Listing]:
     pending = {p.listing.player_id for p in state.pending}
+    kickoff_at = next_kickoff(world, at)
     out: dict[Offer, Listing] = {}
     for listing in world.listings:
         pid = listing.player_id
@@ -317,7 +333,8 @@ def _offers(world: World, state: SimState, at: datetime, day: date) -> dict[Offe
         player = _player(world, pid, at, base, _drift(world, world.buy_table, pid, day))
         if premium is None or player is None:
             continue
-        out[Offer(player, premium)] = listing
+        arrives = kickoff_at is None or listing.expires_at < kickoff_at
+        out[Offer(player, premium, arrives_before_kickoff=arrives)] = listing
     return out
 
 

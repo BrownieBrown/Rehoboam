@@ -33,9 +33,15 @@ class Limits:
     max_squad: int = MAX_SQUAD
 
 
-def utility(players: Sequence[Player], bids: Sequence[Offer], mu: float) -> float:
-    ep, _ = best_eleven(players)
-    drift_eur = sum(p.market_value * p.drift for p in players)
+def utility(held: Sequence[Player], bids: Sequence[Offer], mu: float) -> float:
+    """U of the squad after the plan.
+
+    Every bid earns its drift and costs its premium. Only a bid that settles
+    before the next kickoff can play in that eleven.
+    """
+    arriving = [o.player for o in bids if o.arrives_before_kickoff]
+    ep, _ = best_eleven([*held, *arriving])
+    drift_eur = sum(p.market_value * p.drift for p in [*held, *(o.player for o in bids)])
     premiums = sum(o.premium_eur for o in bids)
     return ep + mu * (drift_eur - premiums)
 
@@ -74,17 +80,13 @@ def _repair(book: Book, mu: float) -> tuple[Player, ...]:
     return sells
 
 
-def _squad(book: Book, sells: Sequence[Player], bids: Sequence[Offer]) -> list[Player]:
-    return _held_after(book, sells) + [o.player for o in bids]
-
-
 def _held_after(book: Book, sells: Sequence[Player]) -> list[Player]:
     sold = {p.player_id for p in sells}
     return [p for p in book.held if p.player_id not in sold]
 
 
 def _score(book: Book, sells: Sequence[Player], bids: Sequence[Offer], mu: float) -> float:
-    return utility(_squad(book, sells, bids), bids, mu)
+    return utility(_held_after(book, sells), bids, mu)
 
 
 def _best_move(

@@ -461,6 +461,7 @@ first ensemble run.
 
 | M2-5 | 2026-11-11 | + ensemble (`backtest.ensemble`) | 8 paths × blend μ ×0.5/1/2/4; vs the rivals' median over each path's window | mean money −€18.3m/−€14.4m/−€8.4m/+€1.8m; **mean points −194/−172/−182/−208 per MD**; 0 violations. The rule picks **blend μ×1**. M2-4's 962.8 was its luckiest path (+98; the others −98 to −268) |
 | M2-6 | 2026-11-11 | same | the same 8 paths against **our real record from each start** | blend μ×1: **money +€22.3m** (every path, +14.6 to +36.1m), **points −27 per MD** (−124 to +243), ahead on both in 2 of 8 paths. ×4: +€38.5m, −64 |
+| M2-7 | 2026-11-11 | + kickoff timing | the eleven's points diagnosed: v3 held 11.1 players and €15.3m of cash at kickoffs, €10.6m of it tied in bids that settle after the lock, whose points the planner had credited. Fix: a bid counts for the coming eleven only if it settles before the kickoff (`Offer.arrives_before_kickoff`) | blend μ×1, 8 paths vs our real record: **money +€26.9m** (+16.6 to +37.8m), **points +23.8 per MD** (−111 to +106), **ADR-0007 bar PASS**. Vs the rivals' median: −€9.7m, −120.9. Cash tied in open bids at kickoff 10.6m → 3.3m; free cash at kickoff 9.6m |
 
 **A flaw in the bar (B1/B2), found by M2-5 and pending Marco's decision.** B2 compares a level
 reached from unequal starts. We start W1 with the league's lowest team value (~130m against
@@ -481,9 +482,10 @@ problem.
 **Frozen configurations (ADR-0007).** Each one is scored only on rounds after its freeze, from
 a worktree of its tag.
 
-| Tag           | Frozen at                 | `desk-holdout` flags                                         | Chosen by                      | Its own W1 ensemble (development, vs our real record)                |
-| ------------- | ------------------------- | ------------------------------------------------------------ | ------------------------------ | -------------------------------------------------------------------- |
-| `v3-frozen-1` | 2026-11-11T16:19:29+00:00 | `--frozen-at 2026-11-11T16:19:29+00:00 --mu-scale 1 --blend` | the pre-registered rule (M2-5) | money +€22.3m, points −27.1 per MD: fails the ADR-0007 bar on points |
+| Tag           | Frozen at                 | `desk-holdout` flags                                         | Chosen by                                               | Its own W1 ensemble (development, vs our real record)                |
+| ------------- | ------------------------- | ------------------------------------------------------------ | ------------------------------------------------------- | -------------------------------------------------------------------- |
+| `v3-frozen-1` | 2026-11-11T16:19:29+00:00 | `--frozen-at 2026-11-11T16:19:29+00:00 --mu-scale 1 --blend` | the pre-registered rule (M2-5)                          | money +€22.3m, points −27.1 per MD: fails the ADR-0007 bar on points |
+| `v3-frozen-2` | 2026-11-11T16:28:59+00:00 | `--frozen-at 2026-11-11T16:28:59+00:00 --mu-scale 1 --blend` | frozen-1 plus the kickoff-timing correctness fix (M2-7) | money +€26.9m, points +23.8 per MD: passes the ADR-0007 bar          |
 
 **What M2 found.** At μ×1 the planner is a money machine. It went into kickoffs with €47–91m of
 idle cash, and cash scores nothing. The cause is a derivation error in §4.3: μ(N) = (N−1)/P values
