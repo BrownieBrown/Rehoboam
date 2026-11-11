@@ -1361,6 +1361,304 @@ def transfer_study(
     console.print("[dim]Read-only. Premiums from 2025-07-29; points and resales from 2021.[/dim]")
 
 
+@app.command("desk-drift-report")
+def desk_drift_report(
+    fit_cutoff: str = typer.Option(
+        "2026-07-01", "--fit-cutoff", help="Fit on value paths before this day"
+    ),
+    season: str = typer.Option(
+        "2026/2027", "--season", help="Season whose league premiums set the hurdle"
+    ),
+):
+    """M1 of the v3 spec: is 7-day drift predictable out of sample? Read-only.
+
+    Fits the drift table (`desk/drift.py`) on every value path before the
+    cutoff, predicts every Kickbase listing after it, and judges the
+    pre-registered hurdle: the top decile's median 7-day drift after settling
+    must beat the league's median premium for its band.
+    """
+    from datetime import date, datetime, timezone
+
+    from .sim.drift_report import format_report, run
+    from .store import connect
+
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        report = run(
+            conn,
+            fit_cutoff=date.fromisoformat(fit_cutoff),
+            season=season,
+            now=datetime.now(timezone.utc),
+        )
+    for line in format_report(report):
+        console.print(line, highlight=False)
+
+
+@app.command("desk-validate-sim")
+def desk_validate_sim():
+    """M0 of the v3 spec: does the simulator reproduce history? Read-only.
+
+    Replays every manager's transfers from his first stored squad against every
+    later squad snapshot, prices each snapshot from the value paths under the
+    22:00 Berlin rule, and explains our budget readings by our transfers.
+    """
+    from datetime import datetime, timezone
+
+    from .sim import history
+    from .sim.validate import format_validation, validate
+    from .store import connect
+
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        snapshots = history.load_squad_snapshots(conn)
+        since = min((s.at for s in snapshots), default=datetime.now(timezone.utc))
+        result = validate(
+            snapshots,
+            history.load_transfers(conn, since=since),
+            history.load_value_paths(conn),
+            history.load_wallet(conn),
+            history.load_self_ids(conn),
+        )
+        names = {
+            r["manager_id"]: r["name"]
+            for r in conn.execute("select manager_id, name from rehoboam.managers")
+        }
+    for line in format_validation(result, names):
+        console.print(line, highlight=False)
+
+
+@app.command("desk-holdout")
+def desk_holdout(
+    frozen_at: str = typer.Option(
+        ..., "--frozen-at", help="When the configuration was frozen (its tag's commit time, ISO)"
+    ),
+    mu_scale: float = typer.Option(1.0, "--mu-scale"),
+    blend: bool = typer.Option(True, "--blend/--no-blend"),
+    fit_cutoff: str = typer.Option("2026-07-01", "--fit-cutoff"),
+    flip_book: bool = typer.Option(False, "--flipbook/--planner", help="M2-17's flip book"),
+    debt: bool = typer.Option(False, "--debt/--no-debt", help="planned debt between rounds"),
+    core_upgrades: bool = typer.Option(False, "--core/--no-core", help="ADR-0008's core book"),
+    capital_neutral: bool = typer.Option(
+        False, "--capital-neutral/--core-first-claim", help="ADR-0010's capital-neutral core"
+    ),
+    spend_surplus: bool = typer.Option(
+        False, "--spend-surplus", help="ADR-0013: the core spends spare cash on upgrades"
+    ),
+    season_horizon: bool = typer.Option(
+        False, "--season-horizon", help="ADR-0013: money counts to the season's end"
+    ),
+    fill_holes: str = typer.Option(
+        "", "--fill-holes", help='ADR-0011: "squad" fills every empty slot; "core" also stand-ins'
+    ),
+):
+    """The rolling freeze (ADR-0007): a frozen configuration on rounds after its freeze.
+
+    Run it from a worktree of the configuration's tag, so the code is the code
+    that was frozen: `git worktree add ../v3-frozen-N v3-frozen-N`. Paths start
+    from our real squad every two days, from the freeze to the first round after
+    it. Only rounds that have finished count. Read-only.
+    """
+    from dataclasses import replace
+    from datetime import date, datetime, timezone
+
+    from .sim import backtest
+    from .sim.engine import Policy
+    from .store import connect
+
+    frozen = datetime.fromisoformat(frozen_at)
+    if frozen.tzinfo is None:
+        raise typer.BadParameter("--frozen-at needs a timezone, e.g. 2026-11-11T18:00:00+00:00")
+    now = datetime.now(timezone.utc)
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff), until=now)
+    policy = Policy(
+        mu_scale=mu_scale,
+        price_blend=blend,
+        flipbook=flip_book,
+        planned_debt=debt,
+        core_upgrades=core_upgrades,
+        core_capital_neutral=capital_neutral,
+        core_fills_holes=fill_holes,
+        core_spends_surplus=spend_surplus,
+    )
+    if season_horizon:
+        world = replace(world, reset_at=backtest.SEASON_END)
+    report = backtest.holdout(world, league, policy, frozen_at=frozen, now=now)
+    if report is None:
+        console.print(
+            f"No round that kicked off after {frozen:%Y-%m-%d %H:%M} UTC has finished yet."
+        )
+        return
+    console.print(backtest.format_ensemble(report), highlight=False)
+
+
+@app.command("desk-scorecard")
+def desk_scorecard(
+    policies: list[str] = typer.Option(
+        ["no empty slot"], "--policy", "-p", help="named configurations (backtest.NAMED_POLICIES)"
+    ),
+    baseline: str = typer.Option("", "--baseline", "-b", help="the configuration to beat"),
+    fit_cutoff: str = typer.Option("2026-07-01", "--fit-cutoff"),
+    day0: int = typer.Option(
+        0,
+        "--day0",
+        help="start every path like the reset: no squad, this much cash (e.g. 200000000)",
+    ),
+    season_horizon: bool = typer.Option(
+        False, "--season-horizon", help="money counts to the season's end, as after the reset"
+    ),
+):
+    """ADR-0012: money, missing players and points, against the league's top three.
+
+    Each configuration over the 15 daily windows of W1, beside the three managers
+    with the most profit over the same windows. With --baseline, says whether the
+    change is kept: no axis worse beyond noise, at least one better. Read-only.
+    """
+    from datetime import date
+
+    from .sim import backtest
+    from .store import connect
+
+    unknown = [p for p in [*policies, baseline] if p and p not in backtest.NAMED_POLICIES]
+    if unknown:
+        raise typer.BadParameter(f"unknown: {unknown}; known: {list(backtest.NAMED_POLICIES)}")
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff))
+    budget = day0 or None
+    horizon = backtest.SEASON_END if season_horizon else None
+    base = (
+        backtest.scorecard(
+            world, league, backtest.NAMED_POLICIES[baseline], day0_budget=budget, horizon=horizon
+        )
+        if baseline
+        else None
+    )
+    for name in policies:
+        card = backtest.scorecard(
+            world, league, backtest.NAMED_POLICIES[name], day0_budget=budget, horizon=horizon
+        )
+        console.print(f"[bold]{name}[/bold]", highlight=False)
+        console.print(backtest.format_scorecard(card, base), highlight=False)
+
+
+@app.command("v3-status")
+def v3_status(
+    league_index: int = typer.Option(0, "--league", "-l", help="League index (0 for first league)"),
+):
+    """Read-only: what v3 (the frozen configuration) would do with the real squad now.
+
+    GET calls to Kickbase and a read-only store transaction only. Never places,
+    cancels or sells, never writes a row, and never runs the legacy session (so it
+    cannot touch a Top-5 forced sale). The dry run of every new sell path.
+    """
+    from datetime import datetime, timezone
+
+    from .desk.eleven import ELEVEN, best_eleven
+    from .live import v3
+    from .sim import engine
+    from .sim.history import value_day
+    from .store import connect
+
+    api, _settings, league = _login_and_get_league(league_index)
+    now = datetime.now(timezone.utc)
+    squad = api.get_squad(league)
+    cash = int(api.get_team_info(league).get("budget", 0))
+    market = api.get_market(league)
+    items = (getattr(api, "last_market_payload", None) or {}).get("it", [])
+    listings = v3.listings_from_payload(items, now)
+    names = {p.id: f"{p.first_name} {p.last_name}".strip() for p in [*squad, *market]}
+    # No _ensure_store(): it applies pending migrations (DDL); this command never writes.
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        ids = [p.id for p in squad] + [lst.player_id for lst in listings if lst.our_bid]
+        books = v3.books_from_store(conn, ids)
+        snap = v3.Snapshot(
+            now=now,
+            cash=cash,
+            squad={p.id: p.market_value for p in squad},
+            listings=listings,
+            books=books,
+            names=names,
+        )
+        decision, world, at = v3.plan(conn, snap)
+    unseen = [names.get(p.id, p.id) for p in squad if p.id not in world.positions]
+    held = [
+        pl
+        for pid in snap.squad
+        if (pl := engine._player(world, pid, at, snap.squad[pid], 0.0)) is not None
+    ]
+    kickoff = engine.next_kickoff(world, at)
+    ep, eleven = best_eleven(held)
+    console.print(
+        (
+            f"[bold]v3 ({v3.FROZEN}) at {at:%Y-%m-%d %H:%M} UTC[/bold] (value day {value_day(at)}), "
+            f"next kickoff {kickoff:%a %Y-%m-%d %H:%M} UTC"
+            if kickoff
+            else "no kickoff ahead"
+        ),
+        highlight=False,
+    )
+    console.print(
+        f"wallet {cash:,}  squad {len(squad)}  eleven {len(eleven)}/{ELEVEN} (EP {ep:.0f})  "
+        f"open Kickbase listings {len(listings)}  our bids {sum(1 for x in listings if x.our_bid)}  "
+        f"flips held {sum(1 for b in books.values() if b == v3.FLIP)}",
+        highlight=False,
+    )
+    if unseen:
+        console.print(
+            f"[yellow]No stored prediction, invisible to v3: {', '.join(unseen)}[/yellow]",
+            highlight=False,
+        )
+    if decision.repaying:
+        console.print("[yellow]Last session before the kickoff: repay only, no bids[/yellow]")
+    for line in v3.describe(decision, snap, world):
+        console.print(f"  {line}", highlight=False)
+    after = cash + sum(p.market_value for p in decision.sells) - sum(o.bid for o in decision.bids)
+    committed = sum(x.our_bid or 0 for x in listings)
+    console.print(
+        f"wallet after, all bids won: {after - committed:,}. Nothing was placed or sold.",
+        highlight=False,
+    )
+
+
+@app.command("desk-backtest")
+def desk_backtest(
+    mu_scale: list[float] = typer.Option(
+        [1.0], "--mu-scale", help="Sweep of MU_SCALE; repeat the flag"
+    ),
+    fit_cutoff: str = typer.Option(
+        "2026-07-01", "--fit-cutoff", help="Fit drift tables before this day"
+    ),
+):
+    """M2 of the v3 spec: the planner over window W1 against the league. Read-only.
+
+    Replays the `desk` planner twice a day from our real go-live squad. Auctions
+    settle against the league's real buyers and kickoffs score real points. It
+    reports net worth and points per matchday beside holding still, our real
+    record and every rival, and the bar B1-B3.
+    """
+    from datetime import date
+
+    from .sim import backtest
+    from .sim.engine import Policy
+    from .store import connect
+
+    _ensure_store()
+    with connect() as conn:
+        conn.execute("set transaction read only")
+        world, league = backtest.load(conn, fit_cutoff=date.fromisoformat(fit_cutoff))
+    for scale in mu_scale:
+        for line in backtest.format_report(backtest.run(world, league, Policy(mu_scale=scale))):
+            console.print(line, highlight=False)
+        console.print()
+
+
 def _parse_day(text: str) -> float:
     from datetime import datetime
 

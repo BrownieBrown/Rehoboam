@@ -34,6 +34,12 @@ Since every matchup is won on that matchday's points, the winning strategy is:
 
 The bot started as a market value trader (buy low, sell high). It now runs a unified EP-first pipeline: scores players by expected matchday points, ranks buys by marginal EP gain (how much they improve the best-11), and uses budget-aware bidding with sell plans.
 
+**v3 redesign (2026-11-11, in progress; prod is `TRADING_MODE=lineup_only` until it ships).**
+The decision layer is being rebuilt from `docs/superpowers/specs/2026-11-11-rehoboam-v3-design.md`
+and `docs/adr/`, in `rehoboam/desk/` (pure planner) and `rehoboam/sim/` (backtest and paper).
+Rules for v3 live in the spec and the ADRs, not in this file. The bullets below describe the
+legacy layer that v3 replaces; spec §7 lists what is kept and what is deleted.
+
 Current state (post-foundation tier, May 2026):
 
 - **The store is live (2026-09-13)**: every learner writes to Supabase Postgres; `DATABASE_URL` is required at startup.
