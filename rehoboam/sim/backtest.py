@@ -544,14 +544,14 @@ def scorecard(
         kickoffs += len(played)
         for mid in {s.manager_id for s in league.snapshots} - league.self_ids:
             line = manager_line(world, league, mid, rounds, window)
-            mine = [t for t in league.transfers if t.manager_id == mid and start < t.at <= end]
+            theirs = [t for t in league.transfers if t.manager_id == mid and start < t.at <= end]
             row = managers.setdefault(mid, {"total": [], "trading": [], "points": []})
             row["total"].append(line.net_worth_change)
             row["points"].append(line.points_per_matchday)
             row["trading"].append(
                 trading_profit(
-                    [(t.at, t.player_id, t.price) for t in mine if t.kind == BUY],
-                    [(t.at, t.player_id, t.price) for t in mine if t.kind == SELL],
+                    [(t.at, t.player_id, t.price) for t in theirs if t.kind == BUY],
+                    [(t.at, t.player_id, t.price) for t in theirs if t.kind == SELL],
                     end_value,
                 )
             )
