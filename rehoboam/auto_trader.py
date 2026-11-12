@@ -3723,7 +3723,13 @@ class AutoTrader:
                     error=str(exc),
                 )
             buys.append(result)
-            self._report_v3_bid(order, player, result, ep=ep_of.get(order.player_id, 0.0))
+            self._report_v3_bid(
+                order,
+                player,
+                result,
+                ep=ep_of.get(order.player_id, 0.0),
+                score=(ctx.ep_result.get("market_scores") or {}).get(order.player_id),
+            )
             if result.success:
                 room = room.after_bid(order.amount)
                 slots -= 1
@@ -3747,12 +3753,16 @@ class AutoTrader:
         ctx.offers_refused += sum(1 for r in results if not r.ok and r.order.kind == "bid")
         return sells, buys
 
-    def _report_v3_bid(self, order, player, result: AutoTradeResult, *, ep: float) -> None:
+    def _report_v3_bid(
+        self, order, player, result: AutoTradeResult, *, ep: float, score=None
+    ) -> None:
         """One v3 bid on the session board and, live, in `trade_proposals`.
 
         v3 bypasses `_execute_buy`, the one place that did both for the legacy
         buys: without this a v3 session placed offers and sent no board, and the
-        daily summary, which reads the rows, saw none of them.
+        daily summary, which reads the rows, saw none of them. ``score`` is the
+        pipeline's `PlayerScore` for the listing, for the club (the market
+        payload has none) and the season average.
         """
         from .notify.overview import OfferLine
         from .services.bid_ceiling import Tier
@@ -3769,8 +3779,13 @@ class AutoTrader:
                 outcome=outcome,
                 detail=detail,
                 position=str(getattr(player, "position", "") or ""),
-                club=str(getattr(player, "team_name", "") or ""),
+                club=_club_name(player, score),
                 market_value=int(player.market_value),
+                season_avg=(
+                    float(score.average_points)
+                    if getattr(score, "average_points", None) is not None
+                    else None
+                ),
                 why=order.reason,
             )
         )

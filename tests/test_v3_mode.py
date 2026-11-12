@@ -98,6 +98,21 @@ class TestTheBoardIsTheRecord:
             ("F Pbench", 1_000_000, True)
         ]
 
+    def test_a_bid_names_the_club_and_the_season_average_from_the_pipeline(
+        self, tmp_path, monkeypatch
+    ):
+        """The market payload has no club name (`_club_name`); the score has it."""
+        from types import SimpleNamespace
+
+        score = SimpleNamespace(club="Freiburg", average_points=61.0)
+
+        *_, trader = _v3_session(
+            tmp_path, monkeypatch, with_trader=True, market_scores={"riser": score}
+        )
+
+        [line] = trader._session_board
+        assert (line.club, line.season_avg) == ("Freiburg", 61.0)
+
     def test_a_refused_bid_is_on_the_board_with_the_gates_reason(self, tmp_path, monkeypatch):
         earlier = {"i": "elsewhere", "mv": 45_000_000, "exs": 30 * 3600, "uop": 50_000_000}
 
@@ -137,7 +152,14 @@ class TestTheBoardIsTheRecord:
 
 
 def _v3_session(
-    tmp_path, monkeypatch, extra_items=(), base=4_790_000, *, with_trader=False, dry_run=True
+    tmp_path,
+    monkeypatch,
+    extra_items=(),
+    base=4_790_000,
+    *,
+    with_trader=False,
+    dry_run=True,
+    market_scores=None,
 ):
     """One real `_run_v3_session` on a stubbed API and decision.
 
@@ -219,6 +241,7 @@ def _v3_session(
 
     ctx = _context(squad)
     ctx.ep_result["market_players"] = {"riser": riser}
+    ctx.ep_result["market_scores"] = market_scores or {}
     with (
         patch.object(trader.learner, "connection", no_store),
         patch.object(v3, "books_from_store", return_value={}),
