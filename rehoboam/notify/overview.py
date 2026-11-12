@@ -57,6 +57,8 @@ class OfferLine:
     squad_at_position: int | None = None
     position_minimum: int | None = None
     risks: tuple[str, ...] = field(default_factory=tuple)
+    #: The decision's own reason, one line under the name (v3: book, premium, base).
+    why: str = ""
 
     @property
     def overbid_pct(self) -> float:
@@ -71,6 +73,34 @@ class OfferLine:
     @property
     def pos_short(self) -> str:
         return _POSITION_ABBR.get(self.position, self.position[:3].upper() or "???")
+
+
+@dataclass(frozen=True)
+class SaleLine:
+    """One sale and the decision's reason for it (v3: repay, the turn, not in the eleven)."""
+
+    name: str
+    price: int
+    reason: str
+    ok: bool = True
+    detail: str = ""
+
+
+def _sale_blocks(sold: list[SaleLine]) -> list[str]:
+    done = [s for s in sold if s.ok]
+    failed = [s for s in sold if not s.ok]
+    lines = [f"SOLD — {len(done)}" if done else "SOLD — none"]
+    for s in done:
+        lines += [f"  {s.name}  EUR {s.price:,}", f"      {s.reason}"]
+    if done:
+        lines.append(f"  total EUR {sum(s.price for s in done):,}")
+    if failed:
+        lines += ["", f"SALE FAILED — {len(failed)}"]
+        for s in failed:
+            lines += [f"  {s.name}  EUR {s.price:,}", f"      {s.reason}"]
+            if s.detail:
+                lines.append(f"      ! {s.detail}")
+    return [*lines, ""]
 
 
 def _availability(line: OfferLine) -> str:
@@ -106,7 +136,12 @@ def _line_block(line: OfferLine) -> list[str]:
         if line.is_falling:
             price += "  <-- FALLING"
 
-    out = [head, f"      {' · '.join(form)}", f"      {price}"]
+    out = [
+        head,
+        *([f"      {line.why}"] if line.why else []),
+        f"      {' · '.join(form)}",
+        f"      {price}",
+    ]
 
     availability = _availability(line)
     if availability:
@@ -135,6 +170,7 @@ def render_session_board(
     recovered: int = 0,
     placed: list[OfferLine],
     refused: list[OfferLine],
+    sold: list[SaleLine] | None = None,
 ) -> str:
     """What this session did with the wallet, in one message.
 
@@ -162,6 +198,8 @@ def render_session_board(
             f"DEBT RECOVERY SOLD EUR {recovered:,} before kickoff (counted in the wallet above)"
         )
     lines.append("")
+    if sold:
+        lines += _sale_blocks(sold)
 
     if placed:
         lines.append(f"OFFERS PLACED — {len(placed)}")

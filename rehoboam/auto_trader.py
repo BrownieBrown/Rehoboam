@@ -282,6 +282,22 @@ def _club_name(player, score=None) -> str:
     return f"club {tid}" if tid else "unknown club"
 
 
+_GATE_REFUSED = "safety gate refused: "
+
+
+def _offer_outcome(result: AutoTradeResult) -> tuple[str, str, str]:
+    """One attempted buy as (board outcome, `trade_proposals` status, detail).
+
+    "refused" is the safety gate's no; "failed" is Kickbase's or the lockout's.
+    """
+    error = result.error or ""
+    if result.success:
+        return "placed", "executed", ""
+    if error.startswith(_GATE_REFUSED):
+        return "refused", "refused", error[len(_GATE_REFUSED) :]
+    return "failed", "failed", error or "unknown error"
+
+
 def _offer_line(
     offer_id: str,
     rec,
@@ -544,6 +560,9 @@ class AutoTrader:
         # What the debt recovery sold for this session; the board's wallet
         # arithmetic adds it back, since it otherwise only knows offers.
         self._session_recovered: int = 0
+        # v3's sales, each with its own reason (repay, the turn, out of the
+        # eleven) — listed on the board, and added to its wallet arithmetic.
+        self._session_sales: list = []
         # Open offers already on the wallet before this session touched
         # anything — Kickbase counts them toward the squad cap but does not
         # deduct them from the budget it reports, so the board's header shows
@@ -1302,18 +1321,11 @@ class AutoTrader:
                 error=str(exc),
             )
 
-        gate_prefix = "safety gate refused: "
+        outcome, status, detail = _offer_outcome(result)
         if result.success:
-            outcome, status, detail = "placed", "executed", ""
             ctx.offers_placed += 1
             self._session_offer_ids.add(str(player.id))
-        elif (result.error or "").startswith(gate_prefix):
-            outcome, status = "refused", "refused"
-            detail = (result.error or "")[len(gate_prefix) :]
-            ctx.offers_refused += 1
         else:
-            outcome, status = "failed", "failed"
-            detail = result.error or "unknown error"
             ctx.offers_refused += 1
 
         # Collected before the dry-run exit so `status` shows the board Marco
@@ -1367,7 +1379,7 @@ class AutoTrader:
         `trade_proposals` are the durable record and the daily summary reads
         them.
         """
-        if not self._session_board:
+        if not self._session_board and not self._session_sales:
             return
 
         from .notify.overview import render_session_board
@@ -1387,15 +1399,18 @@ class AutoTrader:
             else int(getattr(ctx, "current_budget", 0) or 0) + spend
         )
         open_offers_before = int(self._session_open_offers_before or 0)
+        sold = sum(sale.price for sale in self._session_sales if sale.ok)
+        budget_after = budget_before + self._session_recovered + sold - spend
         text = render_session_board(
             squad_size=len(getattr(ctx, "squad", []) or []),
             squad_cap=SQUAD_CAP,
             budget_before=budget_before,
-            budget_after=budget_before + self._session_recovered - spend,
+            budget_after=budget_after,
             recovered=self._session_recovered,
             open_offers_before=open_offers_before,
             placed=placed,
             refused=refused,
+            sold=self._session_sales,
         )
         console.print(text)
         if self.dry_run:
@@ -1406,13 +1421,14 @@ class AutoTrader:
             self.settings.telegram_bot_token, self.settings.telegram_chat_id, text
         )
         logger.info(
-            "session-board batch=%s placed=%d refused=%d spend=%d budget_after=%d "
+            "session-board batch=%s placed=%d refused=%d sold=%d spend=%d budget_after=%d "
             "open_offers_before=%d delivered=%s",
             self._session_batch_id,
             len(placed),
             len(refused),
+            len(self._session_sales),
             spend,
-            budget_before + self._session_recovered - spend,
+            budget_after,
             open_offers_before,
             delivered,
         )
@@ -3077,6 +3093,7 @@ class AutoTrader:
         self._session_board = []
         self._session_budget_before = None
         self._session_recovered = 0
+        self._session_sales = []
         self._session_open_offers_before = None
         self._session_offer_ids = set()
         self._session_batch_id = uuid.uuid4().hex[:12]
@@ -3598,7 +3615,9 @@ class AutoTrader:
         """
         from .desk.model import MAX_SQUAD
         from .live import v3
+        from .notify.overview import SaleLine
         from .services.bid_ceiling import Tier
+        from .services.execution import BudgetSafetyError
 
         now = datetime.now(timezone.utc)
         squad = self.api.get_squad(league)
@@ -3638,11 +3657,22 @@ class AutoTrader:
         sells: list[AutoTradeResult] = []
         buys: list[AutoTradeResult] = []
 
+        ep_of = {o.player.player_id: o.player.ep_next for o in decision.bids}
+
         def sell(order) -> bool:
             nonlocal room, slots
             player = by_squad[order.player_id]
             result = self.execution.instant_sell(league, player, order.reason)
             sells.append(result)
+            self._session_sales.append(
+                SaleLine(
+                    names[order.player_id],
+                    int(player.market_value),
+                    order.reason,
+                    ok=result.success,
+                    detail=result.error or "",
+                )
+            )
             if result.success:
                 room = room.after_sale(player.market_value)
                 slots += 1
@@ -3671,17 +3701,29 @@ class AutoTrader:
                 if order.book == v3.FLIP
                 else None
             )
-            result = self.execution.buy(
-                league,
-                player,
-                order.amount,
-                order.reason,
-                current_budget=room.cash,
-                days_until_match=ctx.matchday_phase.days_until_match,
-                gate=gate,
-                flip=flip,
-            )
+            try:
+                result = self.execution.buy(
+                    league,
+                    player,
+                    order.amount,
+                    order.reason,
+                    current_budget=room.cash,
+                    days_until_match=ctx.matchday_phase.days_until_match,
+                    gate=gate,
+                    flip=flip,
+                )
+            except BudgetSafetyError as exc:  # the kickoff lockout, live only
+                result = AutoTradeResult(
+                    success=False,
+                    player_name=names[order.player_id],
+                    action="BUY",
+                    price=order.amount,
+                    reason=order.reason,
+                    timestamp=time.time(),
+                    error=str(exc),
+                )
             buys.append(result)
+            self._report_v3_bid(order, player, result, ep=ep_of.get(order.player_id, 0.0))
             if result.success:
                 room = room.after_bid(order.amount)
                 slots -= 1
@@ -3704,6 +3746,51 @@ class AutoTrader:
         ctx.offers_placed += sum(1 for r in results if r.ok and r.order.kind == "bid")
         ctx.offers_refused += sum(1 for r in results if not r.ok and r.order.kind == "bid")
         return sells, buys
+
+    def _report_v3_bid(self, order, player, result: AutoTradeResult, *, ep: float) -> None:
+        """One v3 bid on the session board and, live, in `trade_proposals`.
+
+        v3 bypasses `_execute_buy`, the one place that did both for the legacy
+        buys: without this a v3 session placed offers and sent no board, and the
+        daily summary, which reads the rows, saw none of them.
+        """
+        from .notify.overview import OfferLine
+        from .services.bid_ceiling import Tier
+
+        offer_id = uuid.uuid4().hex[:12]
+        outcome, status, detail = _offer_outcome(result)
+        self._session_board.append(
+            OfferLine(
+                offer_id=offer_id,
+                name=f"{player.first_name} {player.last_name}".strip() or player.last_name,
+                bid=int(order.amount),
+                ep=float(ep),
+                marginal_gain=0.0,  # v3 sizes on the eleven and the drift, not on a gain
+                outcome=outcome,
+                detail=detail,
+                position=str(getattr(player, "position", "") or ""),
+                club=str(getattr(player, "team_name", "") or ""),
+                market_value=int(player.market_value),
+                why=order.reason,
+            )
+        )
+        if self.dry_run:
+            return
+        message = order.reason if not detail else f"{order.reason}\n\n{outcome.upper()}\n  {detail}"
+        try:
+            self.learner.record_proposal(
+                proposal_id=offer_id,
+                player_id=str(player.id),
+                player_name=player.last_name,
+                bid=int(order.amount),
+                market_value=int(player.market_value),
+                message=message,
+                tier=Tier.SOLID.value,  # v3's ceiling (`tier_override`)
+                batch_id=self._session_batch_id,
+                status=status,
+            )
+        except Exception:
+            logger.exception("v3: could not record offer %s", offer_id)
 
     def _finish_lineup_only(
         self,

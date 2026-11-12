@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from rehoboam.notify.overview import OfferLine, render_session_board
+from rehoboam.notify.overview import OfferLine, SaleLine, render_session_board
 
 BUDGET_BEFORE = 45_201_758
 
@@ -180,3 +180,46 @@ class TestDebtRecoveryOnTheBoard:
             refused=[],
         )
         assert "DEBT RECOVERY" not in text
+
+
+class TestSalesOnTheBoard:
+    """v3 sells for three reasons (repay, the turn, out of the eleven); each sale
+    is listed with its own, not folded into the debt recovery's total."""
+
+    def _render(self, sold):
+        return render_session_board(
+            squad_size=9,
+            squad_cap=15,
+            budget_before=-17_938_514,
+            budget_after=1_583_478,
+            placed=[],
+            refused=[],
+            sold=sold,
+        )
+
+    def test_every_sale_is_named_with_its_price_and_reason(self):
+        text = self._render([SaleLine("Quansah", 19_521_992, "v3 repay before kickoff")])
+
+        assert "SOLD — 1" in text
+        assert "Quansah  EUR 19,521,992" in text
+        assert "v3 repay before kickoff" in text
+        assert "DEBT RECOVERY" not in text
+
+    def test_a_failed_sale_says_why(self):
+        failed = SaleLine(
+            "Daghim", 16_724_793, "v3 core: not in the eleven", ok=False, detail="500"
+        )
+
+        text = self._render([failed])
+
+        assert "SOLD — none" in text
+        assert "SALE FAILED — 1" in text
+        assert "! 500" in text
+
+    def test_no_sales_no_section(self):
+        assert "SOLD" not in self._render([])
+
+    def test_an_offer_shows_why_it_was_made(self):
+        line = _line("Chuki", 11_290_628, 69.1, why="v3 core: +6.0% on 10,651,782")
+
+        assert "v3 core: +6.0% on 10,651,782" in _render(placed=[line], refused=[])
