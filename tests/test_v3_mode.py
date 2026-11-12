@@ -83,10 +83,93 @@ def test_a_riser_is_judged_on_the_value_his_bid_was_priced_on(tmp_path, monkeypa
     assert ctx.offers_placed == 1 and ctx.offers_refused == 0
 
 
-def _v3_session(tmp_path, monkeypatch, extra_items=(), base=4_790_000):
+class TestTheBoardIsTheRecord:
+    """v3 bypasses `_execute_buy`, the one place that fed the session board and
+    `trade_proposals`; without this a v3 session traded and told Marco nothing."""
+
+    def test_every_bid_and_sale_is_on_the_board(self, tmp_path, monkeypatch):
+        *_, trader = _v3_session(tmp_path, monkeypatch, with_trader=True)
+
+        [line] = trader._session_board
+        assert (line.name, line.bid, line.outcome) == ("R Iser", 5_264_210, "placed")
+        assert line.why.startswith("v3 flip: +9.9% on 4,790,000")
+        assert line.position == "Forward"
+        assert [(s.name, s.price, s.ok) for s in trader._session_sales] == [
+            ("F Pbench", 1_000_000, True)
+        ]
+
+    def test_a_bid_names_the_club_and_the_season_average_from_the_pipeline(
+        self, tmp_path, monkeypatch
+    ):
+        """The market payload has no club name (`_club_name`); the score has it."""
+        from types import SimpleNamespace
+
+        score = SimpleNamespace(club="Freiburg", average_points=61.0)
+
+        *_, trader = _v3_session(
+            tmp_path, monkeypatch, with_trader=True, market_scores={"riser": score}
+        )
+
+        [line] = trader._session_board
+        assert (line.club, line.season_avg) == ("Freiburg", 61.0)
+
+    def test_a_refused_bid_is_on_the_board_with_the_gates_reason(self, tmp_path, monkeypatch):
+        earlier = {"i": "elsewhere", "mv": 45_000_000, "exs": 30 * 3600, "uop": 50_000_000}
+
+        *_, trader = _v3_session(tmp_path, monkeypatch, extra_items=[earlier], with_trader=True)
+
+        [line] = trader._session_board
+        assert line.outcome == "refused"
+        assert "budget" in line.detail.lower()
+
+    def test_a_live_bid_is_written_to_trade_proposals(self, tmp_path, monkeypatch):
+        *_, trader = _v3_session(tmp_path, monkeypatch, with_trader=True, dry_run=False)
+
+        [call] = trader.learner.record_proposal.call_args_list
+        assert call.kwargs["player_id"] == "riser"
+        assert call.kwargs["bid"] == 5_264_210
+        assert call.kwargs["status"] == "executed"
+        assert call.kwargs["tier"] == "solid_upgrade"
+        assert call.kwargs["batch_id"] == trader._session_batch_id
+        assert call.kwargs["message"].startswith("v3 flip: +9.9%")
+
+    def test_a_session_that_only_sold_still_sends_the_board(self, tmp_path, monkeypatch):
+        from rehoboam.notify.overview import SaleLine
+        from tests.test_trading_mode import _context
+
+        monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
+        monkeypatch.setenv("KICKBASE_PASSWORD", "test")
+        trader = AutoTrader(api=object(), settings=Settings(), dry_run=False)
+        trader._session_budget_before = -17_938_514
+        trader._session_sales = [SaleLine("Quansah", 19_521_992, "v3 repay before kickoff")]
+
+        with patch("rehoboam.notify.telegram.send_message", return_value=True) as send:
+            trader._send_session_board(None, _context(_legal_squad()))
+
+        [args] = [c.args for c in send.call_args_list]
+        assert "Quansah  EUR 19,521,992" in args[2]
+        assert "BUDGET EUR -17,938,514 -> EUR 1,583,478" in args[2]
+
+
+def _v3_session(
+    tmp_path,
+    monkeypatch,
+    extra_items=(),
+    base=4_790_000,
+    *,
+    with_trader=False,
+    dry_run=True,
+    market_scores=None,
+):
+    """One real `_run_v3_session` on a stubbed API and decision.
+
+    `dry_run=False` reaches Kickbase's stubbed buy and sale and the (mocked)
+    store writes; `with_trader` appends the trader for its board and recorder.
+    """
     from contextlib import contextmanager
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
+    from unittest.mock import MagicMock
 
     from rehoboam.desk.model import Offer, Player
     from rehoboam.kickbase_client import MarketPlayer
@@ -132,6 +215,12 @@ def _v3_session(tmp_path, monkeypatch, extra_items=(), base=4_790_000):
         def get_my_bids(self, league):
             return []
 
+        def buy_player(self, league, player, price):
+            return {}
+
+        def sell_player_instant(self, league, player):
+            return {}
+
     now = datetime.now(timezone.utc)
     listing = Listing("riser", now, now + timedelta(hours=20), now, 4_790_000)
     decision = Decision(
@@ -141,7 +230,10 @@ def _v3_session(tmp_path, monkeypatch, extra_items=(), base=4_790_000):
         listings={"riser": listing},
         repaying=False,
     )
-    trader = AutoTrader(api=Api(), settings=Settings(), dry_run=True)
+    trader = AutoTrader(api=Api(), settings=Settings(), dry_run=dry_run)
+    trader.learner.record_proposal = MagicMock()
+    trader.tracker.record_bid_placed = MagicMock()
+    trader.tracker.record_flip_outcome = MagicMock()
 
     @contextmanager
     def no_store():
@@ -149,6 +241,7 @@ def _v3_session(tmp_path, monkeypatch, extra_items=(), base=4_790_000):
 
     ctx = _context(squad)
     ctx.ep_result["market_players"] = {"riser": riser}
+    ctx.ep_result["market_scores"] = market_scores or {}
     with (
         patch.object(trader.learner, "connection", no_store),
         patch.object(v3, "books_from_store", return_value={}),
@@ -156,4 +249,4 @@ def _v3_session(tmp_path, monkeypatch, extra_items=(), base=4_790_000):
         patch.object(v3, "describe", return_value=[]),
     ):
         sells, buys = trader._run_v3_session(SimpleNamespace(id="1", name="L"), ctx)
-    return sells, buys, ctx
+    return (sells, buys, ctx, trader) if with_trader else (sells, buys, ctx)
