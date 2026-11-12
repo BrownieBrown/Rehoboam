@@ -46,7 +46,7 @@ def _snapshot(**changes):
     base = {
         "now": NOW,
         "cash": 1_000_000,
-        "squad": {**{pid: 5_000_000 for pid in CORE}, "bench": 2_000_000},
+        "squad": {**dict.fromkeys(CORE, 5000000), "bench": 2_000_000},
         "listings": (
             v3.OpenListing(
                 "riser",
@@ -62,7 +62,7 @@ def _snapshot(**changes):
 
 def test_the_snapshot_becomes_the_simulators_state():
     snap = _snapshot(
-        squad={**{pid: 5_000_000 for pid in CORE}, "bench": 2_000_000, "fresh": 3_000_000},
+        squad={**dict.fromkeys(CORE, 5000000), "bench": 2_000_000, "fresh": 3_000_000},
         listings=(
             v3.OpenListing(
                 "riser",
@@ -165,3 +165,92 @@ def test_one_failed_order_does_not_stop_the_others():
         ("riser", True),
     ]
     assert "refused by the gate" in results[2].error
+
+
+# --- Kickbase's debt cap, as the executor's gate holds it ---------------------------
+
+# Every offer Kickbase saw in the two sessions that hit `err 5050
+# ThirtyThreePercentRuleExceeded`, in the order placed: (bid, accepted). The
+# wallet and team value are the `team_value_history` readings of the session.
+SESSION_2026_09_22 = (
+    8_767_588,
+    132_909_449,
+    [
+        (24_526_411, True),  # Burger
+        (15_507_334, True),  # Querfeld
+        (8_752_708, True),  # Itakura
+        (11_070_729, False),  # Kosugi
+        (11_074_126, False),  # Mensah
+        (8_762_614, False),  # Capaldo
+        (6_894_694, False),  # Ulrich
+        (16_516_650, False),  # Fernández
+    ],
+)
+SESSION_2026_10_04 = (
+    -29_173_555,
+    150_193_376,
+    [
+        (6_722_770, True),  # Poreba
+        (7_212_762, True),  # Moore: past 33% of worth (team value + wallet), accepted
+        (7_436_682, False),  # Massengo
+        (4_150_783, True),  # Scally: past 33% of worth, accepted
+        (3_511_693, False),  # Van den Bosch
+        (10_771_780, False),  # Collins
+        (4_181_366, False),  # Gyamerah
+    ],
+)
+
+
+def test_the_headroom_reproduces_every_offer_kickbase_accepted_or_refused():
+    """The cap is a third of team value with every open offer counted as won. A third
+    of worth (`services/budget.max_debt`) refuses Moore and Scally, whom Kickbase took."""
+    for cash, team_value, offers in (SESSION_2026_09_22, SESSION_2026_10_04):
+        room = v3.Headroom.of(cash=cash, squad_value=team_value, open_bids=0)
+        seen = []
+        for bid, _ in offers:
+            accepted = bid <= room.spendable
+            seen.append((bid, accepted))
+            if accepted:
+                room = room.after_bid(bid)
+
+        assert seen == offers
+
+
+def test_an_open_offer_from_an_earlier_session_counts_as_won():
+    room = v3.Headroom.of(cash=10_000_000, squad_value=100_000_000, open_bids=4_000_000)
+
+    assert room.spendable == 10_000_000 - 4_000_000 + 33_000_000
+
+
+def test_a_sale_raises_the_headroom_by_two_thirds_of_its_value():
+    """Selling moves value out of the team value the cap is a third of."""
+    room = v3.Headroom.of(cash=0, squad_value=100_000_000, open_bids=0)
+
+    assert room.after_sale(30_000_000).spendable - room.spendable == 30_000_000 - 9_900_000
+
+
+# --- the value a v3 bid is judged against --------------------------------------------
+
+
+def test_a_bid_order_carries_the_value_it_was_priced_on():
+    orders = v3.orders(_decision(), _snapshot())
+
+    assert [(o.player_id, o.reference) for o in orders if o.kind == "bid"] == [
+        ("star", 5_000_000),
+        ("riser", 1_800_000),
+    ]
+
+
+def test_the_gate_judges_a_v3_bid_against_the_value_at_expiry_it_was_priced_on():
+    """Adeline, 2026-11-12: v3 bid +5.9% over 5,231,331, his value after the update
+    before the listing expires (Kickbase declines a bid below it); on today's 4,813,563
+    the same bid read +15.1% and the solid ceiling refused it."""
+    assert v3.gate_reference(5_231_331, live_value=4_813_563) == 5_231_331
+
+
+def test_a_value_the_nightly_forecast_cannot_reach_is_judged_on_the_live_value():
+    """The forecast moves at most 0.95 × 30% a night: a base past that is a stale or
+    broken value, and the bid is judged as any other buy, on today's value."""
+    assert v3.gate_reference(7_000_000, live_value=4_813_563) == 4_813_563  # +45%
+    assert v3.gate_reference(3_000_000, live_value=4_813_563) == 4_813_563  # −38%
+    assert v3.gate_reference(5_000_000, live_value=0) == 0

@@ -23,8 +23,12 @@ from collections.abc import Iterable, Sequence
 from rehoboam.desk.eleven import best_eleven
 from rehoboam.desk.model import Book, Offer, Player
 
-# Kickbase refuses offers past a third of the team's worth
-# (ThirtyThreePercentRuleExceeded, CLAUDE.md 2026-10-07).
+# Kickbase refuses an offer (err 5050 ThirtyThreePercentRuleExceeded) once the wallet,
+# every open offer counted as won, would sit more than a third of TEAM VALUE below zero.
+# Not a third of worth (team value plus wallet), as `services/budget.max_debt` reads it:
+# on 2026-10-04, at a −€29.2m wallet, Kickbase accepted Moore and Scally past that line.
+# The 15 offers of 2026-09-22 and 10-04 bracket the cap at 31.5–33.7% of team value
+# (`tests/test_live/test_v3.py`, spec §12 M4-4).
 DEBT_CAP_OF_SQUAD_VALUE = 0.33
 
 

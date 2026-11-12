@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 
+from rehoboam.desk.solvency import DEBT_CAP_OF_SQUAD_VALUE
 from rehoboam.sim import backtest, engine
 from rehoboam.sim.engine import Decision, Event, Pending, SimState, World
 from rehoboam.sim.history import BERLIN, Listing, in_update_window, value_day
@@ -184,6 +185,37 @@ REASON_CORE = "v3 core: not in the eleven"
 
 
 @dataclass(frozen=True)
+class Headroom:
+    """What Kickbase still lets the session commit: the gate's copy of `engine.decide`'s
+    debt rule (cash net of open bids, `engine.py`; a third of the unsold squad).
+
+    Kickbase refuses an offer (`err 5050 ThirtyThreePercentRuleExceeded`) once the
+    wallet, every open offer counted as won, would sit more than
+    `DEBT_CAP_OF_SQUAD_VALUE` of team value below zero. Team value is what we hold: a
+    sale moves its value into cash, a bid's player joins only when the auction
+    settles. This reproduces all 15 offers of the two sessions that hit the error
+    (`tests/test_live/test_v3.py`); a third of worth, team value plus wallet, does not.
+    """
+
+    cash: int  # the wallet net of every open offer
+    squad_value: int
+
+    @classmethod
+    def of(cls, *, cash: int, squad_value: int, open_bids: int) -> Headroom:
+        return cls(cash=cash - open_bids, squad_value=squad_value)
+
+    @property
+    def spendable(self) -> int:
+        return self.cash + int(DEBT_CAP_OF_SQUAD_VALUE * self.squad_value)
+
+    def after_sale(self, value: int) -> Headroom:
+        return replace(self, cash=self.cash + value, squad_value=self.squad_value - value)
+
+    def after_bid(self, bid: int) -> Headroom:
+        return replace(self, cash=self.cash - bid)
+
+
+@dataclass(frozen=True)
 class Order:
     kind: str  # "sell" | "bid"
     player_id: str
@@ -191,6 +223,29 @@ class Order:
     reason: str
     book: str | None = None  # a bid's book: "core" | "flip"
     drift: float = 0.0  # a bid's expected drift (reported on a flip's intent)
+    reference: int = 0  # a bid's base: the value expected when the listing expires
+
+
+# The furthest one nightly update can move the engine's forecast (`_forecast_at_expiry`).
+FORECAST_REACH = engine.FORECAST_MOMENTUM * engine.FORECAST_CAP
+
+
+def gate_reference(base: int, *, live_value: int) -> int:
+    """The value the safety gate measures a v3 bid's premium against.
+
+    The engine prices a bid on the value expected when the listing expires, because
+    Kickbase declines a bid below the value then (spec §5, the 2026-10-07 break review);
+    for a riser whose listing outlives tonight's update that is above today's value, and
+    against today's value the same bid reads as an overpay. The gate therefore judges the
+    premium over the engine's base, as long as the base is one tonight's forecast can
+    reach from the live value. A base further away is a stale or broken value, and the
+    bid is judged on the live value like any other buy.
+    """
+    if live_value <= 0:
+        return live_value
+    if abs(base / live_value - 1) <= FORECAST_REACH + 1e-3:
+        return base
+    return live_value
 
 
 @dataclass(frozen=True)
@@ -216,7 +271,17 @@ def orders(decision: Decision, snap: Snapshot) -> list[Order]:
         reason = (
             f"v3 {book}: +{o.premium:.1%} on {o.player.market_value:,}, drift {o.player.drift:+.1%}"
         )
-        out.append(Order("bid", o.player.player_id, o.bid, reason, book, o.player.drift))
+        out.append(
+            Order(
+                "bid",
+                o.player.player_id,
+                o.bid,
+                reason,
+                book,
+                o.player.drift,
+                reference=o.player.market_value,
+            )
+        )
     return out
 
 

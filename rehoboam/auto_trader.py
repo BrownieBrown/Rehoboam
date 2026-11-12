@@ -3597,7 +3597,6 @@ class AutoTrader:
         reported and never stops the rest.
         """
         from .desk.model import MAX_SQUAD
-        from .desk.solvency import DEBT_CAP_OF_SQUAD_VALUE
         from .live import v3
         from .services.bid_ceiling import Tier
 
@@ -3626,33 +3625,44 @@ class AutoTrader:
             decision, world, _ = v3.plan(conn, snap)
         console.print(f"[bold]v3 ({v3.FROZEN})[/bold]")
         for line in v3.describe(decision, snap, world):
-            console.print(f"  {line}", highlight=False)
+            console.print(f"  {line}", highlight=False, soft_wrap=True)
+            logger.info("v3 plan %s", line)
 
-        allowance = int(DEBT_CAP_OF_SQUAD_VALUE * sum(p.market_value for p in squad))
-        open_bids = sum(1 for x in listings if x.our_bid)
-        state = {"cash": cash, "slots": MAX_SQUAD - len(squad) - open_bids}
+        open_bids = [x for x in listings if x.our_bid]
+        room = v3.Headroom.of(
+            cash=cash,
+            squad_value=sum(p.market_value for p in squad),
+            open_bids=sum(x.our_bid or 0 for x in open_bids),
+        )
+        slots = MAX_SQUAD - len(squad) - len(open_bids)
         sells: list[AutoTradeResult] = []
         buys: list[AutoTradeResult] = []
 
         def sell(order) -> bool:
-            result = self.execution.instant_sell(league, by_squad[order.player_id], order.reason)
+            nonlocal room, slots
+            player = by_squad[order.player_id]
+            result = self.execution.instant_sell(league, player, order.reason)
             sells.append(result)
             if result.success:
-                state["cash"] += order.amount
-                state["slots"] += 1
+                room = room.after_sale(player.market_value)
+                slots += 1
             return result.success
 
         def bid(order) -> bool:
+            nonlocal room, slots
             player = by_market[order.player_id]
             gate = _build_buy_gate(
                 settings=self.settings,
                 ctx=ctx,
                 player=player,
-                spendable_budget=state["cash"] + allowance,
-                free_slots=state["slots"],
+                spendable_budget=room.spendable,
+                free_slots=slots,
                 marginal_ep_gain=None,
                 core_book=False,
                 tier_override=Tier.SOLID,
+            )
+            gate = replace(
+                gate, market_value=v3.gate_reference(order.reference, live_value=gate.market_value)
             )
             flip = (
                 FlipIntent(
@@ -3666,20 +3676,28 @@ class AutoTrader:
                 player,
                 order.amount,
                 order.reason,
-                current_budget=state["cash"],
+                current_budget=room.cash,
                 days_until_match=ctx.matchday_phase.days_until_match,
                 gate=gate,
                 flip=flip,
             )
             buys.append(result)
             if result.success:
-                state["cash"] -= order.amount
-                state["slots"] -= 1
+                room = room.after_bid(order.amount)
+                slots -= 1
             return result.success
 
         results = v3.execute(v3.orders(decision, snap), sell=sell, bid=bid)
         for r in results:
-            if not r.ok:
+            if r.ok:
+                logger.info(
+                    "v3 order %s %s %s | %s",
+                    r.order.kind,
+                    r.order.player_id,
+                    f"{r.order.amount:,}",
+                    r.order.reason,
+                )
+            else:
                 logger.warning(
                     "v3 order not executed: %s %s %s", r.order.kind, r.order.player_id, r.error
                 )
