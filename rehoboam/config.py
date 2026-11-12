@@ -849,13 +849,16 @@ class Settings(BaseSettings):
         default=True,
         description="If True, simulate trades without executing them",
     )
-    trading_mode: Literal["full", "lineup_only"] = Field(
+    trading_mode: Literal["full", "lineup_only", "v3"] = Field(
         default="full",
         description=(
             "What a session may do. 'full' trades. 'lineup_only' sets the lineup, "
             "runs the emergency fill and the league's Top-5 forced sale, records "
             "learning, and skips every other sell and buy phase — the mode prod "
             "runs while the data foundation is rebuilt (spec 2026-09-11 §5). "
+            "'v3' lets the frozen v3 configuration decide and trade "
+            "(rehoboam/live/v3.py, ADR-0008..0013) in place of every legacy "
+            "sell and buy phase, the debt recovery and the emergency fill. "
             "Env: TRADING_MODE."
         ),
     )

@@ -189,6 +189,7 @@ class Prediction:
     at: datetime
     ep: float
     day_number: int
+    p_appear: float | None = None  # the scorer's chance he starts or comes on (status 5 or 4)
 
 
 @dataclass(frozen=True)
@@ -203,7 +204,7 @@ def load_predictions(
     """The live sessions' predictions per player, oldest first, and each player's position."""
     rows = conn.execute(
         """
-        select player_id, predicted_at, predicted_ep, position, day_number
+        select player_id, predicted_at, predicted_ep, position, day_number, p_status
         from rehoboam.predictions
         where app = 'function' and not backfill and predicted_at >= %(since)s
           and predicted_ep is not null
@@ -215,11 +216,26 @@ def load_predictions(
     positions: dict[str, str] = {}
     for r in rows:
         by_player[r["player_id"]].append(
-            Prediction(_utc(r["predicted_at"]), float(r["predicted_ep"]), int(r["day_number"]))
+            Prediction(
+                _utc(r["predicted_at"]),
+                float(r["predicted_ep"]),
+                int(r["day_number"]),
+                appearance_probability(r["p_status"]),
+            )
         )
         if r["position"]:
             positions[r["player_id"]] = r["position"]
     return {pid: tuple(ps) for pid, ps in by_player.items()}, positions
+
+
+STARTED, CAME_ON = "5", "4"  # the scorer's played statuses (p_status keys)
+
+
+def appearance_probability(p_status: Mapping[str, float] | None) -> float | None:
+    """P(he starts or comes on) from the scorer's status distribution; None if unknown."""
+    if not p_status:
+        return None
+    return float(p_status.get(STARTED, 0.0)) + float(p_status.get(CAME_ON, 0.0))
 
 
 def load_points(conn, *, season: str) -> dict[tuple[str, int], float]:
@@ -252,6 +268,20 @@ def load_match_points(conn) -> dict[str, tuple[tuple[date, int], ...]]:
         kickoff = datetime.fromisoformat(r["match_date"].replace("Z", "+00:00"))
         out[r["player_id"]].append((value_day(kickoff + MATCH_LENGTH), int(r["points"] or 0)))
     return {pid: tuple(sorted(matches)) for pid, matches in out.items()}
+
+
+def load_appearances(conn, *, season: str) -> dict[str, tuple[tuple[date, int], ...]]:
+    """Per player, this season's appearances (minutes > 0): (value day known, points)."""
+    rows = conn.execute(
+        "select player_id, match_date, points from rehoboam.player_match_history "
+        "where season = %(season)s and match_date is not null and minutes > 0",
+        {"season": season},
+    ).fetchall()
+    out: dict[str, list[tuple[date, int]]] = defaultdict(list)
+    for r in rows:
+        kickoff = datetime.fromisoformat(r["match_date"].replace("Z", "+00:00"))
+        out[r["player_id"]].append((value_day(kickoff + MATCH_LENGTH), int(r["points"] or 0)))
+    return {pid: tuple(sorted(apps)) for pid, apps in out.items()}
 
 
 def load_rounds(conn, *, season: str) -> tuple[Round, ...]:

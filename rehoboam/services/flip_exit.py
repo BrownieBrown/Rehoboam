@@ -49,6 +49,8 @@ _RULE_PREFIXES = (
     ("Rank sell", "rank"),
     ("Outside the top", "rank"),
     ("Out for weeks", "rank"),
+    # v3 (rehoboam/live/v3.py): a core player the eleven no longer uses.
+    ("v3 core", "core"),
 )
 
 

@@ -118,6 +118,19 @@ EP_FLOOR_PCT_PER_POINT = 0.3
 MIN_LEARNED_OVERBID_PCT = 8.0
 
 
+# One static query per allowed filter column (no identifier is ever interpolated).
+_EP_ACCURACY_QUERIES = {
+    "player_id": (
+        "SELECT predicted_ep, actual_points, timestamp FROM rehoboam.matchday_outcomes "
+        "WHERE player_id = %s AND predicted_ep > 0"
+    ),
+    "player_position": (
+        "SELECT predicted_ep, actual_points, timestamp FROM rehoboam.matchday_outcomes "
+        "WHERE player_position = %s AND predicted_ep > 0"
+    ),
+}
+
+
 class BidLearner:
     """Learn from auction outcomes to improve bidding strategy"""
 
@@ -1347,23 +1360,17 @@ class BidLearner:
         ``weighted_actual / weighted_predicted`` clamped to [0.5, 1.0]. Returns
         None when there are fewer than *min_matchdays* qualifying records.
 
-        Only ``filter_col`` values listed above are accepted — the column name
-        is interpolated directly into the SQL, so callers must not pass
-        user-controlled input. The validation is a ValueError (not assert)
-        so it survives Python's -O optimization mode.
+        Only ``filter_col`` values listed above are accepted, each mapped to
+        its own static query, so no column name is ever interpolated into SQL.
+        The validation is a ValueError (not assert) so it survives Python's -O
+        optimization mode.
         """
-        if filter_col not in ("player_id", "player_position"):
+        query = _EP_ACCURACY_QUERIES.get(filter_col)
+        if query is None:
             raise ValueError(f"invalid filter_col: {filter_col}")
 
         with self.connection() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT predicted_ep, actual_points, timestamp
-                FROM rehoboam.matchday_outcomes
-                WHERE {filter_col} = %s AND predicted_ep > 0
-                """,
-                (filter_val,),
-            ).fetchall()
+            rows = conn.execute(query, (filter_val,)).fetchall()
 
         if len(rows) < min_matchdays:
             return None
@@ -1663,14 +1670,20 @@ class BidLearner:
         The matchday is the primary key, so a second call for the same one is
         refused rather than selling a second player — the rule takes exactly
         one player per matchday, and a re-run of the session must not compound
-        it.
+        it. Only an executed row is final: a dry run or a failed sale
+        (``executed=False``) leaves a row a real sale may replace, so a preview
+        can never cancel the live obligation (2026-11-11).
         """
         with self.connection() as conn:
             cur = conn.execute(
                 "INSERT INTO rehoboam.forced_sales "
                 "(matchday, place, player_id, player_name, pool, reason, executed, settled_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT DO NOTHING",
+                "ON CONFLICT (matchday) DO UPDATE SET place = excluded.place, "
+                "player_id = excluded.player_id, player_name = excluded.player_name, "
+                "pool = excluded.pool, reason = excluded.reason, "
+                "executed = excluded.executed, settled_at = excluded.settled_at "
+                "WHERE rehoboam.forced_sales.executed = 0",
                 (
                     int(matchday),
                     int(place),
@@ -1685,10 +1698,14 @@ class BidLearner:
             return cur.rowcount > 0
 
     def forced_sale_settled(self, matchday: int) -> bool:
-        """Has the Top-5 obligation for this matchday already been discharged?"""
+        """Has the Top-5 obligation for this matchday already been discharged?
+
+        Only by a sale that happened: a dry-run or failed row does not count.
+        """
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT 1 FROM rehoboam.forced_sales WHERE matchday = %s", (int(matchday),)
+                "SELECT 1 FROM rehoboam.forced_sales WHERE matchday = %s AND executed = 1",
+                (int(matchday),),
             ).fetchone()
         return row is not None
 

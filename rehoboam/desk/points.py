@@ -11,6 +11,19 @@ scorer misses, so the planner reads
 
 refitted by least squares on the matchdays that have kicked off before the
 moment it is used, never later ones.
+
+**The form term (2026-11-11).** The scorer's per-player quality is fitted on past
+seasons, so in-season it misses: Tietz scored 116.9 a game against an EP of 76.5,
+Diks 33.3 against 103.9. With form (the player's points per appearance this
+season, from `FORM_MIN_APPS` appearances, only matches finished before the moment
+of use) the blend adds
+
+    + d · (form × P(appears) − EP)
+
+and the walk-forward fit learns d: how far real form should move the model. Form
+is taken at the scorer's own chance of playing, because points per appearance
+alone would make every rotation player look underrated. Without form the term
+is zero.
 """
 
 from __future__ import annotations
@@ -23,19 +36,25 @@ FIT_MIN_EP = 10.0  # the fit population: players the scorer expects to play at a
 MIN_ROWS = 100
 
 
+FORM_MIN_APPS = 3  # appearances before a season's form counts
+
+
 @dataclass(frozen=True)
 class PriceBlend:
     intercept: float
     ep_weight: float
     log_value_weight: float
     rows: int
+    form_weight: float = 0.0
 
-    def apply(self, ep: float, market_value: int) -> float:
+    def apply(self, ep: float, market_value: int, form: float | None = None) -> float:
         if market_value <= 0:
             return ep
         blended = (
             self.intercept + self.ep_weight * ep + self.log_value_weight * math.log(market_value)
         )
+        if form is not None:
+            blended += self.form_weight * (form - ep)
         return max(0.0, blended)
 
 
@@ -56,6 +75,27 @@ def fit_blend(rows: Iterable[tuple[float, int, float]]) -> PriceBlend | None:
     if coef is None:
         return None
     return PriceBlend(coef[0], coef[1], coef[2], len(xs))
+
+
+def fit_form_blend(rows: Iterable[tuple[float, int, float | None, float]]) -> PriceBlend | None:
+    """Least squares of points on (EP, ln value, form − EP) over (EP, value, form, points);
+    a row without form contributes a gap of zero."""
+    xs: list[tuple[float, ...]] = []
+    ys: list[float] = []
+    for ep, value, form, points in rows:
+        if ep >= FIT_MIN_EP and value > 0:
+            xs.append((1.0, ep, math.log(value), (form - ep) if form is not None else 0.0))
+            ys.append(points)
+    if len(xs) < MIN_ROWS:
+        return None
+    n = 4
+    coef = _solve(
+        [[sum(x[i] * x[j] for x in xs) for j in range(n)] for i in range(n)],
+        [sum(x[i] * y for x, y in zip(xs, ys, strict=True)) for i in range(n)],
+    )
+    if coef is None:
+        return None
+    return PriceBlend(coef[0], coef[1], coef[2], len(xs), form_weight=coef[3])
 
 
 def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:

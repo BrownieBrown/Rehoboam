@@ -96,6 +96,7 @@ def _build_buy_gate(
     session_refusal: str | None = None,
     released_proceeds: int = 0,
     core_book: bool = True,
+    tier_override=None,
 ) -> BuyGate:
     """The safety gate for one autonomous candidate (REH-100).
 
@@ -117,6 +118,9 @@ def _build_buy_gate(
     leave the squad, so counting him toward the club limit would block the
     legal case of selling a club-mate to buy a better one from the same club.
 
+    ``tier_override`` sets the ceiling's tier directly: v3 bids the band
+    median (ADR-0004) and is capped at the solid tier, not at the flip tier.
+
     ``session_refusal`` is PR D's I3 (deficit not covered), set once for the
     whole session on `ctx` rather than measured per candidate. Callers pass
     it through except the emergency fill, which never does — an empty
@@ -124,8 +128,8 @@ def _build_buy_gate(
     """
     from .services.bid_ceiling import tier_for_marginal_gain
 
-    tier = None
-    if marginal_ep_gain is not None:
+    tier = tier_override
+    if tier is None and marginal_ep_gain is not None:
         tier = tier_for_marginal_gain(
             float(marginal_ep_gain),
             must_have=settings.bid_tier_must_have,
@@ -3306,6 +3310,25 @@ class AutoTrader:
         except Exception:
             logger.exception("record_team_value_snapshot failed (non-fatal)")
 
+        # TRADING_MODE=v3 (ADR-0008..0013): the frozen v3 configuration decides
+        # and trades. It repays its own debt in the last session before a
+        # kickoff and fills its own empty slots, so the legacy debt recovery,
+        # emergency fill, locked stop and trading phases below never run here;
+        # the Top-5 rule above has. Before step 2b, so the locked window reaches it.
+        if self.settings.trading_mode == "v3":
+            try:
+                v3_sells, v3_buys = self._run_v3_session(league, ctx)
+                sell_results.extend(v3_sells)
+                trade_results.extend(v3_buys)
+            except Exception as e:
+                error_msg = f"v3 session failed: {e!s}"
+                console.print(f"[red]{error_msg}[/red]")
+                errors.append(error_msg)
+                logger.exception("v3 session failed")
+            return self._finish_lineup_only(
+                league, ctx, trade_results, sell_results, errors, start_time, "Mode v3"
+            )
+
         # Step 2b: in the locked window a negative wallet is zero points for
         # the entire matchday — worse than anything the fill below can fix.
         # Sell back to zero FIRST, so the fill can refill any slot this frees
@@ -3560,6 +3583,128 @@ class AutoTrader:
             offers_refused=ctx.offers_refused,
         )
 
+    def _run_v3_session(
+        self, league, ctx: EPSessionContext
+    ) -> tuple[list[AutoTradeResult], list[AutoTradeResult]]:
+        """TRADING_MODE=v3: the frozen configuration decides, this executes it.
+
+        `live.v3.plan` runs the replay's own `engine.decide` on a fresh snapshot
+        (the squad after the Top-5 sale, the wallet, Kickbase's open listings
+        with their expiries, our bids, each player's book). Sales go first, as
+        instant sales; every bid passes the safety gate, capped at the solid
+        tier (v3 bids the band median, ADR-0004), without the legacy core-book
+        rule (v3's debt allowance and repayment replace it). A refused order is
+        reported and never stops the rest.
+        """
+        from .desk.model import MAX_SQUAD
+        from .live import v3
+        from .services.bid_ceiling import Tier
+
+        now = datetime.now(timezone.utc)
+        squad = self.api.get_squad(league)
+        cash = int(self.api.get_team_info(league).get("budget", 0))
+        market = self.api.get_market(league)
+        payload = getattr(self.api, "last_market_payload", None) or {}
+        listings = v3.listings_from_payload(payload.get("it", []), now)
+        by_squad = {str(p.id): p for p in squad}
+        by_market = {str(p.id): p for p in market}
+        names = {
+            pid: f"{p.first_name} {p.last_name}".strip()
+            for pid, p in {**by_market, **by_squad}.items()
+        }
+        with self.learner.connection() as conn:
+            ids = [*by_squad, *(x.player_id for x in listings if x.our_bid)]
+            snap = v3.Snapshot(
+                now=now,
+                cash=cash,
+                squad={pid: p.market_value for pid, p in by_squad.items()},
+                listings=listings,
+                books=v3.books_from_store(conn, ids),
+                names=names,
+            )
+            decision, world, _ = v3.plan(conn, snap)
+        console.print(f"[bold]v3 ({v3.FROZEN})[/bold]")
+        for line in v3.describe(decision, snap, world):
+            console.print(f"  {line}", highlight=False, soft_wrap=True)
+            logger.info("v3 plan %s", line)
+
+        open_bids = [x for x in listings if x.our_bid]
+        room = v3.Headroom.of(
+            cash=cash,
+            squad_value=sum(p.market_value for p in squad),
+            open_bids=sum(x.our_bid or 0 for x in open_bids),
+        )
+        slots = MAX_SQUAD - len(squad) - len(open_bids)
+        sells: list[AutoTradeResult] = []
+        buys: list[AutoTradeResult] = []
+
+        def sell(order) -> bool:
+            nonlocal room, slots
+            player = by_squad[order.player_id]
+            result = self.execution.instant_sell(league, player, order.reason)
+            sells.append(result)
+            if result.success:
+                room = room.after_sale(player.market_value)
+                slots += 1
+            return result.success
+
+        def bid(order) -> bool:
+            nonlocal room, slots
+            player = by_market[order.player_id]
+            gate = _build_buy_gate(
+                settings=self.settings,
+                ctx=ctx,
+                player=player,
+                spendable_budget=room.spendable,
+                free_slots=slots,
+                marginal_ep_gain=None,
+                core_book=False,
+                tier_override=Tier.SOLID,
+            )
+            gate = replace(
+                gate, market_value=v3.gate_reference(order.reference, live_value=gate.market_value)
+            )
+            flip = (
+                FlipIntent(
+                    target_pct=round(order.drift * 100, 1), max_hold_days=v3.DRIFT_HORIZON_DAYS
+                )
+                if order.book == v3.FLIP
+                else None
+            )
+            result = self.execution.buy(
+                league,
+                player,
+                order.amount,
+                order.reason,
+                current_budget=room.cash,
+                days_until_match=ctx.matchday_phase.days_until_match,
+                gate=gate,
+                flip=flip,
+            )
+            buys.append(result)
+            if result.success:
+                room = room.after_bid(order.amount)
+                slots -= 1
+            return result.success
+
+        results = v3.execute(v3.orders(decision, snap), sell=sell, bid=bid)
+        for r in results:
+            if r.ok:
+                logger.info(
+                    "v3 order %s %s %s | %s",
+                    r.order.kind,
+                    r.order.player_id,
+                    f"{r.order.amount:,}",
+                    r.order.reason,
+                )
+            else:
+                logger.warning(
+                    "v3 order not executed: %s %s %s", r.order.kind, r.order.player_id, r.error
+                )
+        ctx.offers_placed += sum(1 for r in results if r.ok and r.order.kind == "bid")
+        ctx.offers_refused += sum(1 for r in results if not r.ok and r.order.kind == "bid")
+        return sells, buys
+
     def _finish_lineup_only(
         self,
         league,
@@ -3584,7 +3729,7 @@ class AutoTrader:
         as none — the one number a telemetry reader would use to conclude the
         locked path spends nothing.
         """
-        console.print(f"[yellow]{reason} — setting lineup only, no trading[/yellow]")
+        console.print(f"[yellow]{reason} — setting the lineup[/yellow]")
         self._send_session_board(league, ctx)
         lineup = (
             self._set_optimal_lineup(league, errors, squad_scores=ctx.ep_result.get("squad_scores"))
