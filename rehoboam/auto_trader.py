@@ -18,7 +18,6 @@ from .services import budget as budget_rules
 from .services.books import CoreBookCheck
 from .services.books import Holding as CoreHolding
 from .services.emergency_window import emergency_fill_due
-from .services.execution import LOCKOUT_DAYS
 from .services.flip_exit import flip_exit_reason
 from .services.flip_sizing import flip_size_reason
 from .services.integrity import check_integrity, i3_budget_covered
@@ -2134,10 +2133,46 @@ class AutoTrader:
             size=int(getattr(self.settings, "core_book_size", 6)),
         )
 
+    def _debt_recovery_due(self, ctx: EPSessionContext, *, now: datetime | None = None) -> bool:
+        """Is this the session that repays the wallet? (`services/repay_window`)
+
+        The last session before the kickoff, or earlier only when the squad
+        cannot field eleven and the emergency fill is due (the fill needs the
+        cash while its auction can still settle). A deferral is logged with
+        what is owed, so a missed last session is visible in the log.
+        """
+        from .services.repay_window import repayment_due
+
+        now = now or datetime.now(tz=timezone.utc)
+        kickoff_at = self._next_kickoff.at if self._next_kickoff is not None else None
+        days = ctx.matchday_phase.days_until_match
+        due = repayment_due(
+            now=now,
+            kickoff_at=kickoff_at,
+            squad_short=_emergency_slots_short(ctx.squad) > 0,
+            fill_due=emergency_fill_due(days, window_days=self.settings.emergency_fill_days),
+        )
+        owed = sum(int(v or 0) for v in (ctx.my_bid_amounts or {}).values()) - int(
+            ctx.current_budget
+        )
+        if not due and owed > 0 and kickoff_at is not None:
+            console.print(
+                f"[yellow]Debt recovery deferred: EUR {owed:,} owed net of open offers; "
+                f"repaid in the last session before the kickoff "
+                f"({kickoff_at:%a %H:%M} UTC)[/yellow]"
+            )
+            logger.info(
+                "debt-recovery deferred owed=%d kickoff_at=%s days_to_match=%s",
+                owed,
+                kickoff_at.isoformat(),
+                days,
+            )
+        return due
+
     def _run_debt_recovery(self, league, ctx: EPSessionContext) -> list[AutoTradeResult]:
         """Sell until the wallet, net of open offers, is back at zero.
 
-        Runs only in the locked window (the last two days before kickoff),
+        Runs in the last session before the kickoff (`_debt_recovery_due`),
         because a negative budget at kickoff is zero points for the whole
         matchday while a negative budget between rounds is how the bot buys
         players it cannot yet afford. Open offers count as spent: one that is
@@ -3346,17 +3381,16 @@ class AutoTrader:
                 league, ctx, trade_results, sell_results, errors, start_time, "Mode v3"
             )
 
-        # Step 2b: in the locked window a negative wallet is zero points for
-        # the entire matchday — worse than anything the fill below can fix.
-        # Sell back to zero FIRST, so the fill can refill any slot this frees
-        # with money that is actually there. Every phase before this one may
-        # run a debt (`_compute_flip_budget`); this is where it is repaid.
-        # Gated on the DAY COUNT like `ExecutionService.buy`'s lockout guard,
-        # not on the phase label: `matchday_in_progress` can also sit within a
-        # day of the next kickoff, and an unknown schedule (None) must not
-        # pretend to be either.
-        days_left = ctx.matchday_phase.days_until_match
-        if days_left is not None and days_left <= LOCKOUT_DAYS:
+        # Step 2b: a negative wallet at the kickoff is zero points for the
+        # entire matchday — worse than anything the fill below can fix. Sell
+        # back to zero FIRST, so the fill can refill any slot this frees with
+        # money that is actually there. Every phase before this one may run a
+        # debt (`_compute_flip_budget`); this is where it is repaid — in the
+        # LAST session before the kickoff (`services/repay_window`, 2026-11-18),
+        # so open auctions settle and rising players take their nightly moves
+        # first. Read off the kickoff time, not the phase label, and an unknown
+        # schedule (None) never sells here (step 5's forced sell owns it).
+        if self._debt_recovery_due(ctx):
             try:
                 sell_results.extend(self._run_debt_recovery(league, ctx))
             except Exception as e:
