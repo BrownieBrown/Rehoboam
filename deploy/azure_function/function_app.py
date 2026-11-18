@@ -15,7 +15,7 @@ app = func.FunctionApp()
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Azure Functions writable directory
-TEMP_DIR = "/tmp"
+TEMP_DIR = "/tmp"  # nosec B108 - the only writable directory on Azure Functions
 
 
 def _send_daily_summary(api, league, settings, session):
@@ -172,20 +172,51 @@ def _send_daily_summary(api, league, settings, session):
     )
 
 
-# Timer trigger: runs 2x daily at 08:00 and 20:00 UTC
-# (10:00 and 22:00 Europe/Berlin in summer, 09:00 and 21:00 in winter)
+# Timer trigger: 2x daily at 08:00 and 22:00 UTC -- the evening run comes after the
+# nightly market-value update (~22:00 Berlin). The hours are `desk/schedule.py`'s
+# SESSION_TIMES_UTC; tests/test_desk/test_schedule.py pins this string to them.
 @app.timer_trigger(
-    schedule="0 0 8,20 * * *",
+    schedule="0 0 8,22 * * *",
     arg_name="timer",
     run_on_startup=False,
 )
 def trading_session(timer: func.TimerRequest):
     """Run automated trading session on schedule"""
+    _run_trading_session("timer")
+
+
+# Hourly tick: one extra session BACKSTOP_LEAD before each round's first kickoff
+# (`desk/schedule.backstop_due`), so the repayment and the lineup do not rest on the
+# single regular session before the lock. Every other tick reads one row and returns.
+@app.timer_trigger(
+    schedule="0 0 * * * *",
+    arg_name="timer",
+    run_on_startup=False,
+)
+def kickoff_backstop(timer: func.TimerRequest):
+    """Run the extra session before a kickoff, when this tick is the one."""
+    from rehoboam.desk.schedule import backstop_due
+    from rehoboam.store.session_store import SessionStore
+
+    try:
+        stamp = SessionStore().latest_next_kickoff()
+    except Exception:
+        logging.warning("kickoff backstop: next kickoff unreadable", exc_info=True)
+        return
+    kickoff = datetime.fromtimestamp(stamp, tz=timezone.utc) if stamp is not None else None
+    if kickoff is None or not backstop_due(datetime.now(tz=timezone.utc), kickoff):
+        return
+    logging.info(f"Kickoff backstop: kickoff {kickoff:%a %H:%M} UTC, running the extra session")
+    _run_trading_session("backstop")
+
+
+def _run_trading_session(trigger: str) -> None:
+    """One trading session: the regular timer's, or the kickoff backstop's."""
     from rehoboam.api import KickbaseAPI
     from rehoboam.auto_trader import AutoTrader
     from rehoboam.config import get_settings
 
-    logging.info("Starting Rehoboam trading session...")
+    logging.info(f"Starting Rehoboam trading session ({trigger})...")
 
     # Work in /tmp (writable on Azure Functions)
     os.chdir(TEMP_DIR)
@@ -249,8 +280,8 @@ def trading_session(timer: func.TimerRequest):
         session = trader.run_full_session(league)
 
         # Once-a-day owner summary — only the morning run emails, so the
-        # inbox gets one message per day instead of two.
-        if datetime.now(tz=timezone.utc).hour < 12:
+        # inbox gets one message per day instead of two (never the backstop).
+        if trigger == "timer" and datetime.now(tz=timezone.utc).hour < 12:
             try:
                 _send_daily_summary(api, league, settings, session)
             except Exception:

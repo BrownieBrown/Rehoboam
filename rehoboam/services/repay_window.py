@@ -22,10 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-# The trading timer runs at 08:00 and 20:00 UTC (`schedule="0 0 8,20 * * *"` in
-# deploy/azure_function/function_app.py). Must equal `rehoboam.sim.engine.SESSION_GAP`
-# (a test pins it): the replay and the live session agree on what "the next session" is.
-SESSION_GAP = timedelta(hours=12)
+from rehoboam.desk.schedule import next_session
 
 # A session due less than this before the kickoff is not trusted to be the one that repays:
 # a late timer, a slow run or a Kickbase hiccup would leave the wallet negative at the lock.
@@ -41,10 +38,13 @@ def repayment_due(
 ) -> bool:
     """Should this session repay the wallet (net of open offers) back to zero?
 
-    True when no later session can be trusted to run before the kickoff: the next one would
-    start at or after ``kickoff_at - SAFETY_MARGIN``. Also True when the squad cannot field a
-    legal eleven and the emergency fill is due: the fill must spend now, while its auction
-    can still settle before the lock, and it cannot spend a negative wallet in the lockout.
+    True when no later regular session can be trusted to run before the kickoff: the next
+    one (`desk.schedule.next_session`) would start at or after ``kickoff_at -
+    SAFETY_MARGIN``. The kickoff backstop is not a regular session, so the regular session
+    before it still repays and the backstop finds this True again for whatever is left.
+    Also True when the squad cannot field a legal eleven and the emergency fill is due: the
+    fill must spend now, while its auction can still settle before the lock, and it cannot
+    spend a negative wallet in the lockout.
 
     An unknown kickoff is False: step 5's forced sell (`budget.forced_sell_due`) owns that
     case, as it did before.
@@ -53,4 +53,4 @@ def repayment_due(
         return False
     if squad_short and fill_due:
         return True
-    return now + SESSION_GAP + SAFETY_MARGIN >= kickoff_at
+    return next_session(now) >= kickoff_at - SAFETY_MARGIN

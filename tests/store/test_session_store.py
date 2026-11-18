@@ -96,6 +96,22 @@ def test_last_ingest_completed_at_ignores_failed_runs_and_other_modes(store_dsn)
     assert store.last_ingest_completed_at() == 3_400.0
 
 
+def test_latest_next_kickoff_is_the_newest_trading_sessions(store_dsn):
+    """The kickoff backstop's one read: the newest timer session's kickoff; an ingest
+    run (no kickoff) and a CLI dry run do not count."""
+    store = SessionStore(dsn=store_dsn)
+    assert store.latest_next_kickoff() is None
+    store.record(_facts(session_id="old", started_at=1_000.0, next_kickoff=50_000.0))
+    store.record(_facts(session_id="new", started_at=2_000.0, next_kickoff=90_000.0))
+    store.record(
+        _facts(
+            session_id="ing", app="external", mode="ingest", started_at=3_000.0, next_kickoff=None
+        )
+    )
+    store.record(_facts(session_id="cli", app="cli", started_at=4_000.0, next_kickoff=1.0))
+    assert store.latest_next_kickoff() == 90_000.0
+
+
 def test_last_ingest_completed_at_is_none_when_nothing_ran(store_dsn):
     assert SessionStore(dsn=store_dsn).last_ingest_completed_at() is None
 

@@ -22,10 +22,10 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from rehoboam.desk import bids, core, drift, flipbook, planner, solvency
+from rehoboam.desk import bids, core, drift, flipbook, planner, schedule, solvency
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
 from rehoboam.desk.exchange import points_per_euro
 from rehoboam.desk.model import MAX_SQUAD, Book, Offer, Player
@@ -33,7 +33,7 @@ from rehoboam.desk.points import FORM_MIN_APPS, PriceBlend, fit_blend, fit_form_
 from rehoboam.sim import auction
 from rehoboam.sim.history import Listing, Prediction, Round, Transfer, ValuePaths, value_day
 
-SESSION_TIMES_UTC = (time(8, 0), time(20, 0))
+SESSION_TIMES_UTC = schedule.SESSION_TIMES_UTC  # the live timer's (desk/schedule.py)
 CEILING_LOOKBACK = timedelta(days=120)
 VALUE_FALLBACK_DAYS = 7
 FORECAST_MOMENTUM = 0.95  # services/mv_forecast's rule: 0.95 × the last move, capped at ±30%
