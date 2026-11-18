@@ -14,6 +14,7 @@ locked window only.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,27 @@ from rehoboam.config import Settings
 from rehoboam.kickbase_client import Player
 
 LEAGUE = SimpleNamespace(id="1933872", name="PUMARUDEL")
+
+# Since 2026-11-18 the recovery runs in the last session before the kickoff
+# (`services/repay_window`). For a Friday 19:30 UTC kickoff that is Friday 08:00,
+# 11.5 hours out; Wednesday 20:00 floors to "1 day" too but two sessions follow it.
+LAST_SESSION = timedelta(hours=11, minutes=30)
+FIRST_LOCKED_SESSION = timedelta(days=1, hours=23, minutes=30)
+
+
+def _kickoff(kickoff_in: timedelta | None) -> SimpleNamespace | None:
+    if kickoff_in is None:
+        return None
+    return SimpleNamespace(at=datetime.now(tz=timezone.utc) + kickoff_in)
+
+
+def _default_kickoff_in(days: int | None) -> timedelta | None:
+    """A kickoff consistent with the day count: the last session when locked."""
+    if days is None:
+        return None
+    if days <= 1:
+        return LAST_SESSION
+    return timedelta(days=days) + LAST_SESSION
 
 
 def _player(pid: str, position: str, mv: int = 5_000_000, buy: int = 5_000_000) -> Player:
@@ -95,7 +117,18 @@ def _context(phase: str, days: int | None, squad, budget: int, offers: dict | No
     )
 
 
-def _run(phase, days, budget, tmp_path, monkeypatch, *, offers=None, mode="full", dry_run=False):
+def _run(
+    phase,
+    days,
+    budget,
+    tmp_path,
+    monkeypatch,
+    *,
+    offers=None,
+    mode="full",
+    dry_run=False,
+    kickoff_in: timedelta | None | str = "default",
+):
     monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
     monkeypatch.setenv("KICKBASE_PASSWORD", "test")
     monkeypatch.setenv("TRADING_MODE", mode)
@@ -104,6 +137,9 @@ def _run(phase, days, budget, tmp_path, monkeypatch, *, offers=None, mode="full"
     squad = _squad()
     api = _api(squad)
     trader = AutoTrader(api=api, settings=Settings(), dry_run=dry_run)
+    trader._next_kickoff = _kickoff(
+        _default_kickoff_in(days) if kickoff_in == "default" else kickoff_in
+    )
     ctx = _context(phase, days, squad, budget, offers)
 
     sold_before_fill: list[int] = []
@@ -215,7 +251,9 @@ class TestOpenBidsAreWithdrawnBeforeAnyoneIsSold:
             market_value=amount,
         )
 
-    def _run_with_bids(self, tmp_path, monkeypatch, *, budget, bids, pending_rows):
+    def _run_with_bids(
+        self, tmp_path, monkeypatch, *, budget, bids, pending_rows, kickoff_in=LAST_SESSION
+    ):
         monkeypatch.setenv("KICKBASE_EMAIL", "test@example.com")
         monkeypatch.setenv("KICKBASE_PASSWORD", "test")
         monkeypatch.setenv("TRADING_MODE", "full")
@@ -224,6 +262,7 @@ class TestOpenBidsAreWithdrawnBeforeAnyoneIsSold:
         api = _api(squad)
         api.cancel_bid.return_value = True
         trader = AutoTrader(api=api, settings=Settings())
+        trader._next_kickoff = _kickoff(kickoff_in)
         learner = MagicMock()
         learner.get_pending_bids.return_value = pending_rows
         trader.learner = learner
@@ -287,6 +326,52 @@ class TestOpenBidsAreWithdrawnBeforeAnyoneIsSold:
             pending_rows=[],
         )
         assert api.cancel_bid.call_count == 0
+        assert api.sell_player_instant.call_count == 1
+
+    def test_a_bot_bid_survives_a_session_that_is_not_the_last(self, tmp_path, monkeypatch):
+        """2026-11-18: a bid on Mwene open with the wallet at -22.9m on Wednesday
+        evening. Withdrawing it then would cancel the buy the debt was run up for;
+        the auction settles Thursday and the wallet is repaid on Friday morning."""
+        api, ctx, learner = self._run_with_bids(
+            tmp_path,
+            monkeypatch,
+            budget=-5_000_000,
+            bids=[self._bid("mwene", 5_000_000)],
+            pending_rows=[{"player_id": "mwene", "intent": "points", "tier": None}],
+            kickoff_in=FIRST_LOCKED_SESSION,
+        )
+        assert api.cancel_bid.call_count == 0
+        assert api.sell_player_instant.call_count == 0
+        learner.delete_pending_bid.assert_not_called()
+        assert ctx.my_bid_amounts == {"mwene": 5_000_000}
+
+
+class TestItWaitsForTheLastSessionBeforeTheKickoff:
+    """The first locked session (Wednesday 20:00 for a Friday 19:30 kickoff)
+    floors to "1 day" but is not the last chance: two nightly moves and any
+    auction still open come first (Marco, 2026-11-18)."""
+
+    def test_wednesday_evening_sells_nobody(self, tmp_path, monkeypatch):
+        api, ctx, _, _ = _run(
+            "locked", 1, -5_000_000, tmp_path, monkeypatch, kickoff_in=FIRST_LOCKED_SESSION
+        )
+        assert api.sell_player_instant.call_count == 0
+        assert ctx.current_budget == -5_000_000
+
+    def test_the_last_session_repays(self, tmp_path, monkeypatch):
+        api, ctx, _, _ = _run(
+            "locked", 0, -5_000_000, tmp_path, monkeypatch, kickoff_in=LAST_SESSION
+        )
+        assert api.sell_player_instant.call_count == 1
+        assert ctx.current_budget >= 0
+
+    def test_a_short_squad_repays_early_so_the_fill_can_spend(self, tmp_path, monkeypatch):
+        """Ten bodies on Wednesday evening: the fill needs real money while
+        its auction can still settle before the lock, so the sale comes now."""
+        with patch("rehoboam.auto_trader._emergency_slots_short", return_value=1):
+            api, _, _, _ = _run(
+                "locked", 1, -5_000_000, tmp_path, monkeypatch, kickoff_in=FIRST_LOCKED_SESSION
+            )
         assert api.sell_player_instant.call_count == 1
 
 
