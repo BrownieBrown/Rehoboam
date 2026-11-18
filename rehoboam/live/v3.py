@@ -23,7 +23,7 @@ from rehoboam.sim import backtest, engine
 from rehoboam.sim.engine import Decision, Event, Pending, SimState, World
 from rehoboam.sim.history import BERLIN, Listing, in_update_window, value_day
 
-FROZEN = "v3-frozen-6"
+FROZEN = "v3-frozen-7"  # frozen-6's policy on ADR-0014's clock (spec §12, M4-5)
 POLICY = backtest.NAMED_POLICIES["eleven + surplus"]
 FIT_CUTOFF = date(2026, 7, 1)  # the drift tables are fitted on 2025/26, as in every replay
 DRIFT_HORIZON_DAYS = backtest.HORIZON_DAYS  # reported on a flip's intent; v3 sells at the turn
