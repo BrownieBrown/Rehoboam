@@ -100,6 +100,21 @@ class SessionStore:
             ).fetchone()
         return float(row["at"]) if row and row["at"] is not None else None
 
+    def latest_next_kickoff(self) -> float | None:
+        """The next kickoff (epoch seconds) as the newest trading session saw it.
+
+        The kickoff backstop reads this every hour instead of logging in to
+        Kickbase: every timer session writes its kickoff, so the newest row is at
+        most one session old, and a round's kickoff does not move within a day.
+        """
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT next_kickoff FROM rehoboam.session_facts "
+                "WHERE app = 'function' AND next_kickoff IS NOT NULL "
+                "ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        return float(row["next_kickoff"]) if row else None
+
     def facts(self, session_id: str) -> dict[str, Any] | None:
         with self.connection() as conn:
             row = conn.execute(

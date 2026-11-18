@@ -11,7 +11,7 @@ from rehoboam.sim.history import Listing, Prediction, Round
 
 UTC = timezone.utc
 D0 = date(2026, 10, 1)
-START = datetime(2026, 10, 1, 20, 0, tzinfo=UTC)
+START = datetime(2026, 10, 1, 22, 0, tzinfo=UTC)  # an evening session (desk/schedule.py)
 KICKOFF = datetime(2026, 10, 9, 18, 30, tzinfo=UTC)
 END = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 CORE = {"g": "Goalkeeper", **{f"d{i}": "Defender" for i in range(4)}}
@@ -33,8 +33,8 @@ def _star(day: date) -> int:
 
 
 def _world(with_star: bool = False) -> World:
-    paths = {pid: {d: 5_000_000 for d in DAYS} for pid in CORE}
-    paths["bench"] = {d: 2_000_000 for d in DAYS}
+    paths = {pid: dict.fromkeys(DAYS, 5_000_000) for pid in CORE}
+    paths["bench"] = dict.fromkeys(DAYS, 2_000_000)
     paths["riser"] = {d: _riser(d) for d in DAYS}
     if with_star:
         paths["star"] = {d: _star(d) for d in DAYS}
@@ -61,7 +61,7 @@ def _world(with_star: bool = False) -> World:
         last_seen=seen,
         market_value=4_000_000,
     )
-    eps = {pid: 60.0 for pid in CORE} | {"bench": 5.0, "riser": 20.0, "star": 140.0}
+    eps = dict.fromkeys(CORE, 60.0) | {"bench": 5.0, "riser": 20.0, "star": 140.0}
     before = START - timedelta(days=1)
     return World(
         paths=paths,
@@ -94,10 +94,10 @@ def test_the_bench_is_sold_and_the_riser_is_bought_on_debt():
 
 
 def test_the_riser_is_sold_by_the_first_session_that_sees_his_turn():
-    # 20:00 UTC is 22:00 Berlin in October: the new values are in force.
+    # 22:00 UTC is midnight Berlin in October: the 22:00 Berlin values are in force.
     sale = next(e for e in _run().events if e.kind == "sell" and e.player_id == "riser")
 
-    assert sale.at == datetime(2026, 10, 7, 20, 0, tzinfo=UTC)
+    assert sale.at == datetime(2026, 10, 7, 22, 0, tzinfo=UTC)
     assert sale.amount == _riser(date(2026, 10, 7))
 
 

@@ -38,7 +38,7 @@ def test_holdout_paths_run_from_the_freeze_to_the_first_round_after_it():
 
     starts = backtest.holdout_starts(_World([MD10]), frozen)
 
-    assert starts[0] == datetime(2026, 11, 11, 20, 0, tzinfo=UTC)  # the first session after it
+    assert starts[0] == datetime(2026, 11, 11, 22, 0, tzinfo=UTC)  # the first session after it
     assert all(b - a == backtest.PATH_SPACING for a, b in zip(starts, starts[1:], strict=False))
     assert starts[-1] < MD10 <= starts[-1] + backtest.PATH_SPACING
 

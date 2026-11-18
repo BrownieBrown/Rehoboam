@@ -19,8 +19,8 @@ import pytest
 
 from rehoboam.auto_trader import AutoTrader
 from rehoboam.config import Settings
-from rehoboam.services.repay_window import SAFETY_MARGIN, SESSION_GAP, repayment_due
-from rehoboam.sim import engine
+from rehoboam.desk.schedule import SESSION_TIMES_UTC
+from rehoboam.services.repay_window import SAFETY_MARGIN, repayment_due
 
 UTC = timezone.utc
 MD10 = datetime(2026, 11, 20, 19, 30, tzinfo=UTC)  # Friday 20:30 Berlin
@@ -36,19 +36,19 @@ class TestRepaymentDue:
         [
             (_at(18, 8), MD10, False),  # moderate phase, two days out
             (_at(18, 20), MD10, False),  # floors to "1 day": the old trigger fired here
+            (_at(18, 22), MD10, False),  # Wednesday evening session
             (_at(19, 8), MD10, False),  # Thursday morning: an auction may still settle
-            (_at(19, 20), MD10, False),  # Friday 08:00 still runs before the lock
-            (_at(20, 8), MD10, True),  # the last session before the kickoff
+            (_at(19, 22), MD10, False),  # Friday 08:00 still runs before the lock
+            (_at(20, 8), MD10, True),  # the last regular session before the kickoff
+            (_at(20, 16), MD10, True),  # the kickoff backstop catches what is left
             (_at(20, 19, 45), MD10, True),  # past the kickoff (late run): repay at once
             (_at(14, 8), MD10, False),  # six days out: debt until gameday
-            # A Friday 21:30 UTC kickoff: Friday 20:00 is the last session, 90 min before.
-            (_at(20, 8), _at(20, 21, 30), False),
-            (_at(20, 20), _at(20, 21, 30), True),
-            # A Friday 20:30 UTC kickoff: the 20:00 session would sit inside the margin,
-            # so the morning session repays.
-            (_at(20, 8), _at(20, 20, 30), True),
+            # A Friday 21:30 UTC kickoff: the 22:00 session is after it, so 08:00 repays.
+            (_at(20, 8), _at(20, 21, 30), True),
+            # A Friday 22:30 UTC kickoff: 22:00 would sit inside the margin, 08:00 repays.
+            (_at(20, 8), _at(20, 22, 30), True),
             # A Saturday 14:30 UTC kickoff (no Friday game): Saturday 08:00 repays.
-            (_at(20, 20), _at(21, 14, 30), False),
+            (_at(20, 22), _at(21, 14, 30), False),
             (_at(21, 8), _at(21, 14, 30), True),
         ],
     )
@@ -72,10 +72,11 @@ class TestRepaymentDue:
         )
         assert got is due
 
-    def test_the_session_gap_is_the_engines(self):
-        """One rule: the timer runs at 08:00 and 20:00 UTC, and v3 plans on the same gap."""
-        assert SESSION_GAP == engine.SESSION_GAP == timedelta(hours=12)
-        assert timedelta(0) < SAFETY_MARGIN < SESSION_GAP
+    def test_the_margin_is_shorter_than_any_gap_between_sessions(self):
+        """The rule reads the live clock (`desk/schedule.py`, pinned to the Azure timer)."""
+        hours = sorted(t.hour for t in SESSION_TIMES_UTC)
+        gaps = [b - a for a, b in zip(hours, [*hours[1:], hours[0] + 24], strict=True)]
+        assert timedelta(0) < SAFETY_MARGIN < timedelta(hours=min(gaps))
 
 
 def _trader(tmp_path, monkeypatch, *, kickoff_at) -> AutoTrader:
