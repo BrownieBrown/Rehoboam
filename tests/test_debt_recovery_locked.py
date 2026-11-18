@@ -22,30 +22,38 @@ import pytest
 
 from rehoboam.auto_trader import AutoTrader, EPSessionContext, MatchdayPhase
 from rehoboam.config import Settings
+from rehoboam.desk.schedule import next_session
 from rehoboam.kickbase_client import Player
 
 LEAGUE = SimpleNamespace(id="1933872", name="PUMARUDEL")
 
-# Since 2026-11-18 the recovery runs in the last session before the kickoff
-# (`services/repay_window`). For a Friday 19:30 UTC kickoff that is Friday 08:00,
-# 11.5 hours out; Wednesday 20:00 floors to "1 day" too but two sessions follow it.
-LAST_SESSION = timedelta(hours=11, minutes=30)
+# Since 2026-11-18 the recovery runs in the last regular session before the kickoff
+# (`services/repay_window`, `desk/schedule.py`): Friday 08:00 for a Friday 19:30 UTC
+# kickoff; Wednesday evening floors to "1 day" too, but two sessions follow it.
+# "The last session" is a fact about the wall clock and the timetable, so it is built
+# from the timetable: a kickoff 30 minutes after the next regular session makes the
+# running session the last one at any hour (a fixed 11.5 h failed at 12:27 UTC).
+LAST_SESSION = "last"
 FIRST_LOCKED_SESSION = timedelta(days=1, hours=23, minutes=30)
+DAYS_OUT = timedelta(hours=11, minutes=30)  # added to a day count two or more out
 
 
-def _kickoff(kickoff_in: timedelta | None) -> SimpleNamespace | None:
+def _kickoff(kickoff_in: timedelta | str | None) -> SimpleNamespace | None:
     if kickoff_in is None:
         return None
-    return SimpleNamespace(at=datetime.now(tz=timezone.utc) + kickoff_in)
+    now = datetime.now(tz=timezone.utc)
+    if kickoff_in == LAST_SESSION:
+        return SimpleNamespace(at=next_session(now) + timedelta(minutes=30))
+    return SimpleNamespace(at=now + kickoff_in)
 
 
-def _default_kickoff_in(days: int | None) -> timedelta | None:
+def _default_kickoff_in(days: int | None) -> timedelta | str | None:
     """A kickoff consistent with the day count: the last session when locked."""
     if days is None:
         return None
     if days <= 1:
         return LAST_SESSION
-    return timedelta(days=days) + LAST_SESSION
+    return timedelta(days=days) + DAYS_OUT
 
 
 def _player(pid: str, position: str, mv: int = 5_000_000, buy: int = 5_000_000) -> Player:
