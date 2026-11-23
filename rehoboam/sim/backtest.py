@@ -218,9 +218,13 @@ def _policy_line(
 
 
 def _with_blends(world: World, policy: Policy) -> World:
+    """The policy's EP estimator, carried by the world: its blends, and whether every
+    player's EP is floored at his real form (`Policy.pessimistic_all`)."""
     if policy.price_blend and (not world.blends or world.blends_form != policy.form_blend):
         blends = engine.fit_blends(world, form=policy.form_blend)
-        return replace(world, blends=blends, blends_form=policy.form_blend)
+        world = replace(world, blends=blends, blends_form=policy.form_blend)
+    if world.pessimistic != policy.pessimistic_all:
+        world = replace(world, pessimistic=policy.pessimistic_all)
     return world
 
 
@@ -656,6 +660,42 @@ NAMED_POLICIES: dict[str, Policy] = {
         core_capital_neutral=True,
         core_fills_holes="core",
         core_spends_surplus=True,
+    ),
+    # 2026-11-13: one kickoff plan replaces the core's rules and the repayment after the fact.
+    "kickoff plan": Policy(price_blend=True, kickoff_plan=True),
+    "kickoff plan, 1 upgrade": Policy(price_blend=True, kickoff_plan=True, kickoff_max_upgrades=1),
+    "kickoff plan, 1 upgrade, +25": Policy(
+        price_blend=True, kickoff_plan=True, kickoff_max_upgrades=1, kickoff_min_gain=25.0
+    ),
+    "kickoff plan, holes only": Policy(price_blend=True, kickoff_plan=True, kickoff_max_upgrades=0),
+    "kickoff plan, neutral": Policy(
+        price_blend=True, kickoff_plan=True, kickoff_capital_neutral=True, kickoff_max_upgrades=1
+    ),
+    "kickoff plan, neutral, at value": Policy(
+        price_blend=True,
+        kickoff_plan=True,
+        kickoff_capital_neutral=True,
+        kickoff_max_upgrades=1,
+        kickoff_exit_p10=False,
+    ),
+    "kickoff plan, neutral, deadline": Policy(
+        price_blend=True,
+        kickoff_plan=True,
+        kickoff_capital_neutral=True,
+        kickoff_max_upgrades=1,
+        kickoff_named_at_deadline=True,
+    ),
+    "kickoff plan, neutral, deadline, at value": Policy(
+        price_blend=True,
+        kickoff_plan=True,
+        kickoff_capital_neutral=True,
+        kickoff_max_upgrades=1,
+        kickoff_named_at_deadline=True,
+        kickoff_exit_p10=False,
+    ),
+    "kickoff plan at value": Policy(price_blend=True, kickoff_plan=True, kickoff_exit_p10=False),
+    "kickoff plan at value, 1 upgrade": Policy(
+        price_blend=True, kickoff_plan=True, kickoff_exit_p10=False, kickoff_max_upgrades=1
     ),
     "eleven + surplus + form": Policy(
         price_blend=True,

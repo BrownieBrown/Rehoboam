@@ -26,6 +26,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from rehoboam.desk import bids, core, drift, flipbook, planner, solvency
+from rehoboam.desk import kickoff as kickoff_plan
 from rehoboam.desk.eleven import ELEVEN, EMPTY_SLOT_POINTS, best_eleven
 from rehoboam.desk.exchange import points_per_euro
 from rehoboam.desk.model import MAX_SQUAD, Book, Offer, Player
@@ -68,6 +69,9 @@ class World:
     # Per player, this season's appearances (minutes > 0): (value day known, points).
     appearances: Mapping[str, drift.Matches] = field(default_factory=dict)
     blends_form: bool = False  # the blends carry the form term (desk/points.py)
+    # Every player's EP is min(blended EP, real form x P(appear)) -- held, bid on, listed and
+    # at the kickoff alike (`Policy.pessimistic_all`, set by backtest._with_blends).
+    pessimistic: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,23 @@ class Policy:
     cheap_fill: bool = False  # M2-25: fill a hole with the most points per euro
     # 2026-11-11: the price blend also reads real form (points per appearance) against EP
     form_blend: bool = False
+    # 2026-11-13: one kickoff plan (desk/kickoff.py) instead of the two books' core rules
+    # and the repayment after the fact; everything outside it exits at the turn.
+    kickoff_plan: bool = False
+    kickoff_max_upgrades: int | None = None  # buys that fill no hole, a session (None: any)
+    kickoff_min_gain: float = 10.0  # EP an upgrade must add (desk/kickoff.MIN_GAIN)
+    kickoff_exit_p10: bool = True  # stock counts at its p10 in the kickoff budget, else at value
+    kickoff_capital_neutral: bool = False  # an upgrade costs at most what it moves out of T
+    kickoff_named_at_deadline: bool = (
+        False  # a sale named for the budget waits for the last session
+    )
+    # 2026-11-18: a listing is judged on min(blended EP, real form x P(appear)). Picking the
+    # highest of noisy estimates picks the overestimated ones (the optimizer's curse): on day 0
+    # the eleven scored 97-135 points a matchday below its EP, on W1 (held players) about 0.
+    pessimistic_buys: bool = False
+    # The same estimate for every player, so a listing and the player it would replace are
+    # judged alike (`World.pessimistic`); `pessimistic_buys` alone discounts only listings.
+    pessimistic_all: bool = False
 
 
 @dataclass(frozen=True)
@@ -370,15 +391,27 @@ def _player(
         pred = prediction_at(world, player_id, at) if blend.form_weight else None
         form = _expected_form(world, player_id, value_day(at), pred) if pred else None
         ep = blend.apply(ep, value, form)
+    if world.pessimistic:
+        ep = _form_floor(world, player_id, at, ep)
     return Player(player_id, position, value, ep, drift_mean, drift_low)
 
 
+def _form_floor(world: World, player_id: str, at: datetime, ep: float) -> float:
+    """The lower of ``ep`` and real form at the scorer's chance of appearing; ``ep``
+    while the player has too few appearances for a form."""
+    pred = prediction_at(world, player_id, at)
+    form = _expected_form(world, player_id, value_day(at), pred) if pred else None
+    return ep if form is None else min(ep, form)
+
+
 def session(world: World, state: SimState, at: datetime, policy: Policy) -> SimState:
-    if policy.flipbook:
+    if policy.flipbook or policy.kickoff_plan:
         return _flipbook_session(world, state, at, policy)
     day = value_day(at)
     held = _held_players(world, state, at, day, commit=policy.commit_hold)
-    offers = _offers(world, state, at, day, value_bid=policy.value_bid)
+    offers = _offers(
+        world, state, at, day, value_bid=policy.value_bid, pessimistic=policy.pessimistic_buys
+    )
     kickoff_at = next_kickoff(world, at)
     book = Book(
         held=tuple(held),
@@ -443,6 +476,8 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
     exits at the turn, buys into what is left, and repays before the kickoff.
 
     Pure over (world, state): the replay and the live session call the same code."""
+    if policy.kickoff_plan:
+        return _decide_kickoff(world, state, at, policy)
     day = value_day(at)
     held = _held_players(world, state, at, day)
     book_of: dict[str, str] = {}
@@ -465,7 +500,9 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
         keep = [p for p in flips if p.player_id not in sold]
         sells += flipbook.repay(keep, core_players, cash=cash, last_moves=moves)
     else:
-        offers = _offers(world, state, at, day, value_bid=policy.value_bid)
+        offers = _offers(
+            world, state, at, day, value_bid=policy.value_bid, pessimistic=policy.pessimistic_buys
+        )
         sold = {p.player_id for p in sells}
         squad_value = sum(p.market_value for p in held if p.player_id not in sold)
         allowance = solvency.DEBT_CAP_OF_SQUAD_VALUE * squad_value if policy.planned_debt else 0
@@ -537,6 +574,174 @@ def decide(world: World, state: SimState, at: datetime, policy: Policy) -> Decis
     )
 
 
+def _decide_kickoff(world: World, state: SimState, at: datetime, policy: Policy) -> Decision:
+    """One session of the kickoff plan (desk/kickoff.py).
+
+    T, the eleven for the next kickoff, is planned with its sales named against the
+    kickoff budget; everything outside T is stock and exits by one rule: at the
+    first session that sees a night without a rise, or in the last session before
+    the kickoff as far as the wallet needs. The flip entries spend what the budget
+    has left after T. Open bids count as won for money, as lost for fielding."""
+    day = value_day(at)
+    held = _held_players(world, state, at, day)
+    held_ids = {p.player_id for p in held}
+    kickoff_at = next_kickoff(world, at)
+    repaying = kickoff_at is None or kickoff_at <= at + SESSION_GAP
+    moves = {p.player_id: _last_move(world, p.player_id, day) for p in held}
+    cash = state.cash - sum(x.bid for x in state.pending)
+    mu = points_per_euro(
+        max(1, matchdays_left(world, at)), world.eur_per_point, scale=policy.mu_scale
+    )
+    allowance = solvency.DEBT_CAP_OF_SQUAD_VALUE * sum(p.market_value for p in held)
+    pending, pending_exit, arriving = _pending_squad(world, state, at, day, kickoff_at)
+    squad = [*held, *pending]
+    # Selling now raises the value in force; a sale left for later is counted at its p10.
+    exit_value = {
+        p.player_id: (
+            p.market_value
+            if repaying or not policy.kickoff_exit_p10
+            else p.market_value * (1 + min(0.0, p.drift_low))
+        )
+        for p in held
+    } | ({} if repaying else pending_exit)
+
+    def fieldable(p: Player) -> bool:
+        return p.player_id in held_ids or p.player_id in arriving
+
+    if repaying:
+        k = kickoff_plan.plan(
+            squad,
+            (),
+            mu,
+            cash=cash,
+            exit_value=exit_value,
+            fieldable=fieldable,
+            slots=0,
+            allowance=allowance,
+        )
+        sells = _repay_from_stock(k, held_ids, moves, cash)
+        return Decision(sells=sells, bids=(), books={}, listings={}, repaying=True)
+
+    offers = _offers(
+        world, state, at, day, value_bid=policy.value_bid, pessimistic=policy.pessimistic_buys
+    )
+    free = MAX_SQUAD - len(held) - len(state.pending)
+    k = kickoff_plan.plan(
+        squad,
+        [o for o in offers if o.arrives_before_kickoff],
+        mu,
+        cash=cash,
+        exit_value=exit_value,
+        fieldable=fieldable,
+        slots=max(0, MAX_SQUAD - len(state.pending) - min(len(held), ELEVEN)),
+        allowance=allowance,
+        max_upgrades=policy.kickoff_max_upgrades,
+        min_gain=policy.kickoff_min_gain,
+        capital_neutral=policy.kickoff_capital_neutral,
+    )
+    stock = [p for p in k.stock if p.player_id in held_ids]
+    named = {p.player_id for p in k.named} if policy.kickoff_named_at_deadline else set()
+    sells = _turn_exits(held, [p for p in stock if p.player_id not in named], moves)
+    short = len(k.buys) - (free + len(sells))  # T's buys need room: the weakest stock goes
+    if short > 0:
+        sold = {p.player_id for p in sells}
+        rest = sorted(
+            (p for p in stock if p.player_id not in sold and p.player_id not in named),
+            key=lambda p: (moves.get(p.player_id) or 0.0, p.drift, p.player_id),
+        )
+        sells = (*sells, *rest[:short])
+    sold = {p.player_id for p in sells}
+    cash_after = cash + sum(p.market_value for p in sells) - sum(o.bid for o in k.buys)
+    bought = {o.player.player_id for o in k.buys}
+    cover = sum(exit_value[p.player_id] for p in stock if p.player_id not in sold)
+    cover += sum(v for pid, v in pending_exit.items() if pid not in {p.player_id for p in k.keep})
+    slots = MAX_SQUAD - (len(held) - len(sells)) - len(state.pending) - len(k.buys)
+    flips = flipbook.entries(
+        [o for o in offers if o.player.player_id not in bought],
+        cash_after,
+        max(0, slots),
+        allowance,
+        by_euros=policy.flip_by_euros,
+        cover=cover,
+    )
+    new_bids = (*k.buys, *flips)
+    chosen = {o.player.player_id for o in new_bids}
+    return Decision(
+        sells=tuple(sells),
+        bids=new_bids,
+        books={**dict.fromkeys(bought, "core"), **{o.player.player_id: "flip" for o in flips}},
+        listings={
+            o.player.player_id: lst for o, lst in offers.items() if o.player.player_id in chosen
+        },
+        repaying=False,
+    )
+
+
+def _pending_squad(
+    world: World, state: SimState, at: datetime, day: date, kickoff_at: datetime | None
+) -> tuple[list[Player], dict[str, float], set[str]]:
+    """Our open bids' players counted as won: (players, exit value, those who can play
+    the kickoff). One that settles too late to be sold raises nothing before it."""
+    players: list[Player] = []
+    exits: dict[str, float] = {}
+    arriving: set[str] = set()
+    for pending in state.pending:
+        pid = pending.listing.player_id
+        mean, low = _drift_estimate(world, world.buy_table, pid, day)
+        player = _player(world, pid, at, value_at(world, pid, day) or pending.bid, mean, low)
+        if player is None:
+            continue
+        players.append(player)
+        sellable = _sellable(pending.listing, kickoff_at)
+        exits[pid] = player.market_value * (1 + min(0.0, low)) if sellable else 0.0
+        if kickoff_at is None or pending.listing.expires_at < kickoff_at:
+            arriving.add(pid)
+    return players, exits, arriving
+
+
+def _turn_exits(
+    held: Sequence[Player], stock: Sequence[Player], moves: Mapping[str, float | None]
+) -> tuple[Player, ...]:
+    """Stock whose last night was not a rise, unless selling him leaves a slot empty
+    in the eleven we hold now (an open bid may yet be lost: ADR-0003)."""
+    out: list[Player] = []
+    remaining = list(held)
+    for p in sorted(stock, key=lambda p: p.player_id):
+        move = moves.get(p.player_id)
+        if move is None or move > 0:
+            continue
+        without = [q for q in remaining if q.player_id != p.player_id]
+        if len(best_eleven(without)[1]) < len(best_eleven(remaining)[1]):
+            continue
+        out.append(p)
+        remaining = without
+    return tuple(out)
+
+
+def _repay_from_stock(
+    k: kickoff_plan.KickoffPlan,
+    held_ids: set[str],
+    moves: Mapping[str, float | None],
+    cash: int,
+) -> tuple[Player, ...]:
+    """The last session: stock that turned goes; then stock by the least drift until
+    the wallet is at zero; T only if all the stock cannot cover it."""
+    stock = [p for p in k.stock if p.player_id in held_ids]
+    turned = [p for p in stock if (m := moves.get(p.player_id)) is not None and m <= 0]
+    sells = list(turned)
+    cash += sum(p.market_value for p in turned)
+    for p in sorted((p for p in stock if p not in turned), key=lambda p: (p.drift, p.player_id)):
+        if cash >= 0:
+            break
+        sells.append(p)
+        cash += p.market_value
+    if cash < 0:
+        sells += flipbook.repay(
+            (), [p for p in k.keep if p.player_id in held_ids], cash=cash, last_moves=moves
+        )
+    return tuple(sells)
+
+
 def _pending_players(
     world: World, state: SimState, at: datetime, day: date
 ) -> tuple[list[Player], list[Player]]:
@@ -580,8 +785,21 @@ def next_kickoff(world: World, at: datetime) -> datetime | None:
     return min(later) if later else None
 
 
+def _pessimistic(world: World, player: Player, at: datetime) -> Player:
+    """A listing judged on the lower of its blended EP and its real form at the scorer's
+    chance of appearing (`Policy.pessimistic_buys`). No form yet keeps the EP."""
+    floor = _form_floor(world, player.player_id, at, player.ep_next)
+    return player if floor >= player.ep_next else replace(player, ep_next=floor)
+
+
 def _offers(
-    world: World, state: SimState, at: datetime, day: date, *, value_bid: bool = False
+    world: World,
+    state: SimState,
+    at: datetime,
+    day: date,
+    *,
+    value_bid: bool = False,
+    pessimistic: bool = False,
 ) -> dict[Offer, Listing]:
     pending = {p.listing.player_id for p in state.pending}
     kickoff_at = next_kickoff(world, at)
@@ -602,6 +820,8 @@ def _offers(
         player = _player(world, pid, at, base, expected)
         if premium is None or player is None:
             continue
+        if pessimistic:
+            player = _pessimistic(world, player, at)
         arrives = kickoff_at is None or listing.expires_at < kickoff_at
         out[
             Offer(
